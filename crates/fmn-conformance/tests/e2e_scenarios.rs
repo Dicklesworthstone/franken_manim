@@ -8932,6 +8932,126 @@ fn cli_compiled_bundle_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
         .with_counter("cli_compiled_png_signature", 1))
 }
 
+/// Select an interior authored segment without replaying its prefix or
+/// shifting its captured state, while rebasing the published PNG sequence.
+fn cli_compiled_range_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_compiled_range_render")?;
+    let source = dir.join("compiled_range.fmtl");
+    let mut stage = Stage::new();
+    let circle = stage.add(Circle::new().radius(0.75).color(BLUE_C));
+    stage
+        .add_to_scene(circle)
+        .map_err(|error| fail(format!("add compiled range circle: {error}")))?;
+    stage
+        .add_dt_updater(
+            circle,
+            |stage, circle, dt| {
+                stage.shift(circle, [dt, dt * 0.25, 0.0]);
+            },
+            false,
+        )
+        .map_err(|error| fail(format!("add compiled range updater: {error}")))?;
+    let mut timeline =
+        Timeline::new(8).map_err(|error| fail(format!("create compiled timeline: {error}")))?;
+    for duration in [0.5, 0.25, 0.25] {
+        timeline
+            .wait(duration)
+            .map_err(|error| fail(format!("author compiled range segment: {error}")))?;
+    }
+    let bytes = fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(0))
+        .map_err(|error| fail(format!("export compiled range timeline: {error}")))?;
+    std::fs::write(&source, bytes)
+        .map_err(|error| fail(format!("write compiled range artifact: {error}")))?;
+    let full_output = dir.join("full");
+    let range_output = dir.join("selected");
+    for (output, threads, selected) in [(&full_output, "1", false), (&range_output, "4", true)] {
+        let mut args = vec![
+            "--robot",
+            "--format",
+            "png_sequence",
+            "--resolution",
+            "32x24",
+            "--threads",
+            threads,
+            "--video_dir",
+            output
+                .to_str()
+                .ok_or_else(|| fail("compiled range output path is not UTF-8"))?,
+        ];
+        if selected {
+            args.extend(["-n", "1,2", "--prerun"]);
+        }
+        args.extend([
+            source
+                .to_str()
+                .ok_or_else(|| fail("compiled range source path is not UTF-8"))?,
+            "CompiledRange",
+        ]);
+        let result = fmn_cli::run(args);
+        if result.code != 0 || !result.stderr.is_empty() {
+            return Err(fail(format!(
+                "compiled range CLI failed: code={} stdout={:?} stderr={:?}",
+                result.code, result.stdout, result.stderr
+            )));
+        }
+        if selected
+            && !(result.stdout.contains("\"frames\":2,\"segments\":1")
+                && result.stdout.contains("\"source_frames\":[4,6]")
+                && result.stdout.contains("\"source_segments\":[1,2]")
+                && result.stdout.contains("\"submitted\":2,\"emitted\":2"))
+        {
+            return Err(fail(format!(
+                "compiled range receipt lost its source interval: {:?}",
+                result.stdout
+            )));
+        }
+    }
+    let full = full_output.join("CompiledRange");
+    let selected = fmn_scene::OutputNaming {
+        output_directory: range_output,
+        start_at_play: Some(1),
+        end_at_play: Some(2),
+        ..Default::default()
+    }
+    .root("CompiledRange");
+    let read_frame = |directory: &std::path::Path, frame| {
+        std::fs::read(directory.join(format!("frame_{frame:06}.png")))
+            .map_err(|error| fail(format!("read compiled range PNG: {error}")))
+    };
+    let matches_source = read_frame(&selected, 0)? == read_frame(&full, 4)?
+        && read_frame(&selected, 1)? == read_frame(&full, 5)?
+        && read_frame(&selected, 0)? != read_frame(&full, 0)?;
+    let exact_stop =
+        selected.join("FMN_COMPLETE").is_file() && !selected.join("frame_000002.png").exists();
+    ctx.event(
+        LogEvent::new("e2e.cli.compiled_range")
+            .field("source_start", 4_u64)
+            .field("source_end", 6_u64)
+            .field("source_samples_match", truth(matches_source))
+            .field("exact_stop", truth(exact_stop)),
+    );
+    if !matches_source || !exact_stop {
+        return Err(fail(format!(
+            "compiled range changed source samples or stop boundary: source_samples_match={matches_source} exact_stop={exact_stop}"
+        )));
+    }
+    ctx.counter("cli_compiled_range_frames", 2);
+    ctx.counter("cli_compiled_range_prefix_omitted", 4);
+    Ok(RunOutcome::ok()
+        .with_counter("cli_compiled_range_frames", 2)
+        .with_counter("cli_compiled_range_prefix_omitted", 4))
+}
+
+#[test]
+fn cli_compiled_range_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.cli_compiled_fmtl_range.v1")
+        .expect("compiled CLI range scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 // ---------------------------------------------------------------------------
 // Lifecycle drill
 // ---------------------------------------------------------------------------
@@ -17258,6 +17378,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("complete", "true"),
                 FieldPred::str_eq("png_signature", "true"),
                 FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_compiled_fmtl_range.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_compiled_range_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_compiled_range_frames", 2),
+            counter_eq("cli_compiled_range_prefix_omitted", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.compiled_range",
+            vec![
+                FieldPred::u64_eq("source_start", 4),
+                FieldPred::u64_eq("source_end", 6),
+                FieldPred::str_eq("source_samples_match", "true"),
+                FieldPred::str_eq("exact_stop", "true"),
             ],
         )],
     ));

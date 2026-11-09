@@ -122,6 +122,30 @@ claiming support.
 Minor-0/minor-1 pictures contain no audio. Minor 2 below packages final PCM
 with these pictures; arbitrary external effects remain unrepresented.
 
+### Offline selection of recorded segments
+
+The CLI accepts `-n START,END` for picture-only and camera-bearing recordings,
+using zero-based authored play/wait ordinals and an exclusive end. `-n START`
+selects the remaining segments. For example, `fmn --format png_sequence -n 2,5
+lesson.fmtl Lesson` exports segments 2, 3 and 4. Native render and `fmn batch`
+use the same selection contract as narrated FMTL export.
+
+Selection uses the stored segment frame boundaries. Original frame indices
+continue to select geometry, camera, background and lighting; output frame
+numbers restart at zero. The recording's FPS is unchanged, and the CLI neither
+executes the skipped prefix nor resamples the selected interval. PNG and SVG
+stills capture the last recorded frame inside the selection. `--subdivide`
+keeps the original segment ordinals in its output names, and `--prerun` counts
+only selected frames and segments. Robot render receipts expose the original
+half-open `source_frames` and `source_segments` intervals; the manifest's C10
+configuration digest binds the requested start and exclusive end.
+
+Empty or out-of-bounds selections fail before publication. Zero-frame segments
+may border a nonempty selection; selecting only zero-frame segments fails.
+Subdivision refuses a zero-frame segment inside its selected interval before
+publishing any selected generation. The output frame budget applies to selected
+work. Studio continues to preview the complete recording.
+
 Regression coverage lives in `crates/fmn-conformance/tests/camera_bundle.rs`:
 actual camera-rig captures versus decoded native frames at 1/4/16 threads,
 random-order shared-worker reconstruction, changed backgrounds, old-reader

@@ -160,47 +160,8 @@ fn selected_ranges(
     selection: Option<AnimationRange>,
     max_frames: u64,
 ) -> Result<(Range<usize>, Range<u32>), Failure> {
-    let total = bundle.segment_count();
-    let (start, end) = match selection {
-        Some(range) => {
-            let start = usize::try_from(range.start)
-                .map_err(|_| Failure::new("usage", "play-range start exceeds this recording"))?;
-            let end = range
-                .end
-                .map_or(Ok(total), usize::try_from)
-                .map_err(|_| Failure::new("usage", "play-range end exceeds this recording"))?;
-            (start, end)
-        }
-        None => (0, total),
-    };
-    if start >= end || end > total {
-        return Err(Failure::new(
-            "usage",
-            format!(
-                "compiled play range must be nonempty and lie inside 0..{total}; END is exclusive"
-            ),
-        ));
-    }
-    let first = bundle
-        .segment_frame_range(start)
-        .ok_or_else(|| Failure::new("scene", "missing compiled start segment"))?;
-    let last = bundle
-        .segment_frame_range(end - 1)
-        .ok_or_else(|| Failure::new("scene", "missing compiled end segment"))?;
-    let frames = first.start..last.end;
-    if frames.is_empty() {
-        return Err(Failure::new(
-            "scene",
-            "selected compiled segments contain no captured frames",
-        ));
-    }
-    if u64::from(frames.end - frames.start) > max_frames {
-        return Err(Failure::new(
-            "budget",
-            "selected compiled schedule exceeds the output frame budget",
-        ));
-    }
-    Ok((start..end, frames))
+    let selected = fmn_cli::select_compiled_segments(bundle, selection, max_frames)?;
+    Ok((selected.segments, selected.frames))
 }
 
 fn prepare(

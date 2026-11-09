@@ -28,6 +28,7 @@ pub use generated::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(feature = "batch")]
@@ -166,6 +167,18 @@ pub struct AnimationRange {
     pub start: u64,
     /// Exclusive final play index, when bounded.
     pub end: Option<u64>,
+}
+
+/// A compiled scene selection on its original, unmodified capture grid.
+///
+/// Segment ordinals and frame indices are zero-based, half-open intervals.
+/// Output numbering starts at zero independently of these source indices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledSelection {
+    /// Authored play/wait ordinals, including any zero-frame segments.
+    pub segments: Range<usize>,
+    /// Contiguous captured frames belonging to the selected segments.
+    pub frames: Range<u32>,
 }
 
 /// Quality preset or exact output dimensions.
@@ -2977,21 +2990,37 @@ enum ManifestPublication {
 
 enum RenderSourceReport {
     Builtin,
-    Compiled(PathBuf),
+    Compiled {
+        path: PathBuf,
+        selection: CompiledSelection,
+    },
 }
 
 impl RenderSourceReport {
     const fn kind(&self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
-            Self::Compiled(_) => "compiled",
+            Self::Compiled { .. } => "compiled",
         }
     }
 
     fn artifact(&self) -> Option<&Path> {
         match self {
             Self::Builtin => None,
-            Self::Compiled(path) => Some(path),
+            Self::Compiled { path, .. } => Some(path),
+        }
+    }
+
+    fn selection_json(&self) -> String {
+        match self {
+            Self::Builtin => String::new(),
+            Self::Compiled { selection, .. } => format!(
+                ",\"source_frames\":[{},{}],\"source_segments\":[{},{}]",
+                selection.frames.start,
+                selection.frames.end,
+                selection.segments.start,
+                selection.segments.end,
+            ),
         }
     }
 }
@@ -3159,6 +3188,7 @@ enum NativeRenderInput {
         source_item: ClosureItem,
         name: String,
         bundle: Box<TimelineBundle>,
+        selection: CompiledSelection,
     },
 }
 
@@ -3505,6 +3535,7 @@ impl NativeStudioWorker {
                 source_item,
                 ..
             } => {
+                require_full_compiled_preview(&command.render)?;
                 let mut compiled_command = command.render.clone();
                 if let Some(requested_fps) = compiled_command.fps
                     && requested_fps != bundle.fps()
@@ -6171,6 +6202,75 @@ fn compiled_scene_name(command: &RenderCommand, source: &Path) -> Result<String,
     Ok(name)
 }
 
+/// Resolve a CLI play range against a compiled recording's stored boundaries.
+///
+/// This is shared by picture-only and narrated FMTL replay. `-n START,END`
+/// selects authored segment ordinals with an exclusive end; `-n START`
+/// selects the remaining segments. The artifact owns every frame boundary,
+/// so selection never rounds durations, evaluates callbacks, or resamples.
+/// `max_frames` bounds only the selected work, not its unrendered prefix.
+///
+/// # Errors
+/// Refuses empty, reversed or out-of-bounds segment ranges, selections without
+/// captured frames, and selected work above the caller's frame budget.
+pub fn select_compiled_segments(
+    bundle: &TimelineBundle,
+    selection: Option<AnimationRange>,
+    max_frames: u64,
+) -> Result<CompiledSelection, CliError> {
+    let total = bundle.segment_count();
+    let (start, end) = match selection {
+        Some(range) => {
+            let start = usize::try_from(range.start)
+                .map_err(|_| usage("play-range start exceeds this recording"))?;
+            let end = range
+                .end
+                .map_or(Ok(total), usize::try_from)
+                .map_err(|_| usage("play-range end exceeds this recording"))?;
+            (start, end)
+        }
+        None => (0, total),
+    };
+    if start >= end || end > total {
+        return Err(usage(format!(
+            "compiled play range must be nonempty and lie inside 0..{total}; END is exclusive"
+        )));
+    }
+    let first = bundle
+        .segment_frame_range(start)
+        .ok_or_else(|| CliError::new("scene", "missing compiled start segment"))?;
+    let last = bundle
+        .segment_frame_range(end - 1)
+        .ok_or_else(|| CliError::new("scene", "missing compiled end segment"))?;
+    let frames = first.start..last.end;
+    if frames.is_empty() {
+        return Err(CliError::new(
+            "scene",
+            "selected compiled segments contain no captured frames",
+        ));
+    }
+    if u64::from(frames.end - frames.start) > max_frames {
+        return Err(CliError::new(
+            "budget",
+            "selected compiled schedule exceeds the output frame budget",
+        ));
+    }
+    Ok(CompiledSelection {
+        segments: start..end,
+        frames,
+    })
+}
+
+fn require_full_compiled_preview(command: &RenderCommand) -> Result<(), CliError> {
+    if command.animation_range.is_some() {
+        return Err(CliError::new(
+            "capability",
+            "compiled Studio previews the complete recording; use offline render or batch with -n to export selected segments",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_native_render_input(
     fs: &dyn FileSystem,
     command: &RenderCommand,
@@ -6251,7 +6351,6 @@ fn resolve_native_render_input(
         ));
     }
     if command.skip_animations
-        || command.animation_range.is_some()
         || command.presenter_mode
         || command.full_screen
         || command.autoreload
@@ -6259,7 +6358,7 @@ fn resolve_native_render_input(
     {
         return Err(CliError::new(
             "capability",
-            "an FMTL artifact has a fixed compiled schedule; skip, range, presenter, fullscreen, reload, and embed controls require an authored scene source",
+            "an FMTL artifact has a fixed compiled schedule; skip, presenter, fullscreen, reload, and embed controls require an authored scene source; -n selects recorded segments",
         ));
     }
     let name = compiled_scene_name(command, source)?;
@@ -6284,21 +6383,17 @@ fn resolve_native_render_input(
     )
     .map_err(|error| internal(error.to_string()))?;
     let bundle = TimelineBundle::from_bytes(&bytes).map_err(bundle_read_error)?;
-    if u64::from(bundle.frame_count()) > fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES {
-        return Err(CliError::new(
-            "budget",
-            format!(
-                "compiled artifact schedules {} frames, exceeding the {}-frame CLI output budget",
-                bundle.frame_count(),
-                fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES
-            ),
-        ));
-    }
+    let selection = select_compiled_segments(
+        &bundle,
+        command.animation_range,
+        fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES,
+    )?;
     Ok(NativeRenderInput::Compiled {
         source: source.to_owned(),
         source_item,
         name,
         bundle: Box::new(bundle),
+        selection,
     })
 }
 
@@ -6895,6 +6990,7 @@ fn execute_native_render_with_cancellation(
             source_item,
             name,
             bundle,
+            selection,
         } => {
             // A compiled artifact replays recorded stages and carries no
             // sound-cue requests, so a WAV soundtrack has no input model.
@@ -6904,6 +7000,18 @@ fn execute_native_render_with_cancellation(
                     "compiled FMTL artifacts do not carry scene sound cues; --format wav requires a live native scene (@builtin)",
                 ));
             }
+            let summary = PreRunSummary {
+                frames: u64::from(selection.frames.end - selection.frames.start),
+                play_indices: selection
+                    .segments
+                    .clone()
+                    .map(|index| {
+                        u64::try_from(index).map_err(|_| {
+                            CliError::new("budget", "compiled subdivision index exceeds u64")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
             if matches!(target, RenderTarget::Svg) {
                 let artifact_destination = destination(&name);
                 preflight_render_generation(fs.as_ref(), &artifact_destination)?;
@@ -6913,7 +7021,7 @@ fn execute_native_render_with_cancellation(
                         &adjacent_manifest_destination(&artifact_destination)?,
                     )?;
                 }
-                let final_frame = bundle.frame_count().checked_sub(1).ok_or_else(|| {
+                let final_frame = selection.frames.end.checked_sub(1).ok_or_else(|| {
                     CliError::new(
                         "scene",
                         "the compiled timeline has no frame to publish as a final-state SVG",
@@ -6934,18 +7042,14 @@ fn execute_native_render_with_cancellation(
                     &stage,
                     &svg_camera,
                 )?;
-                let summary = PreRunSummary {
-                    frames: u64::from(bundle.frame_count()),
-                    play_indices: (0..bundle.segment_count())
-                        .map(|index| {
-                            u64::try_from(index).map_err(|_| {
-                                CliError::new("budget", "compiled subdivision index exceeds u64")
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                };
                 reports.push(complete(
-                    RenderSourceReport::Compiled(source),
+                    RenderSourceReport::Compiled {
+                        path: source,
+                        selection: CompiledSelection {
+                            segments: selection.segments,
+                            frames: final_frame..selection.frames.end,
+                        },
+                    },
                     source_item,
                     name,
                     FinishedRender {
@@ -6960,19 +7064,15 @@ fn execute_native_render_with_cancellation(
             }
             // Keep only immutable frame inputs in the producer. Source clock
             // indices survive output rebasing for stills and subdivisions.
-            let segment_ranges = (0..bundle.segment_count())
+            let segment_ranges = selection
+                .segments
+                .clone()
                 .map(|index| {
                     bundle.segment_frame_range(index).ok_or_else(|| {
                         CliError::new("internal", "validated bundle omitted a segment frame range")
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if bundle.frame_count() == 0 {
-                return Err(CliError::new(
-                    "scene",
-                    "the compiled timeline has no frames to render",
-                ));
-            }
             if command.subdivide && segment_ranges.iter().any(std::ops::Range::is_empty) {
                 return Err(CliError::new(
                     "scene",
@@ -6980,17 +7080,6 @@ fn execute_native_render_with_cancellation(
                 ));
             }
             let bundle = (*bundle).into_shared().map_err(bundle_read_error)?;
-            let play_indices = (0..bundle.segment_count())
-                .map(|index| {
-                    u64::try_from(index).map_err(|_| {
-                        CliError::new("budget", "compiled subdivision index exceeds u64")
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let summary = PreRunSummary {
-                frames: u64::from(bundle.frame_count()),
-                play_indices,
-            };
             if command.subdivide {
                 for &play_index in &summary.play_indices {
                     let artifact_destination =
@@ -7048,7 +7137,7 @@ fn execute_native_render_with_cancellation(
                     } else {
                         segment_frames
                     };
-                    for index in frames {
+                    for index in frames.clone() {
                         if let Some(cancellation) = cancellation {
                             cancellation.cli_checkpoint()?;
                         }
@@ -7058,7 +7147,14 @@ fn execute_native_render_with_cancellation(
                     }
                     let artifact = sink.finish(None)?;
                     reports.push(complete(
-                        RenderSourceReport::Compiled(source.clone()),
+                        RenderSourceReport::Compiled {
+                            path: source.clone(),
+                            selection: CompiledSelection {
+                                segments: selection.segments.start + segment_index
+                                    ..selection.segments.start + segment_index + 1,
+                                frames,
+                            },
+                        },
                         source_item.clone(),
                         name.clone(),
                         artifact,
@@ -7091,17 +7187,17 @@ fn execute_native_render_with_cancellation(
                 cancellation.cli_checkpoint()?;
             }
             let frames = if matches!(target, RenderTarget::Native(NativeFrameFormat::Png)) {
-                let final_frame = bundle.frame_count().checked_sub(1).ok_or_else(|| {
+                let final_frame = selection.frames.end.checked_sub(1).ok_or_else(|| {
                     CliError::new(
                         "scene",
                         "the compiled timeline has no frame to publish as a final-state PNG",
                     )
                 })?;
-                final_frame..bundle.frame_count()
+                final_frame..selection.frames.end
             } else {
-                0..bundle.frame_count()
+                selection.frames
             };
-            for index in frames {
+            for index in frames.clone() {
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
@@ -7113,7 +7209,13 @@ fn execute_native_render_with_cancellation(
                 cancellation.cli_checkpoint()?;
             }
             reports.push(complete(
-                RenderSourceReport::Compiled(source),
+                RenderSourceReport::Compiled {
+                    path: source,
+                    selection: CompiledSelection {
+                        segments: selection.segments,
+                        frames,
+                    },
+                },
                 source_item,
                 name,
                 sink.finish(None)?,
@@ -7313,7 +7415,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         typesetting,
     } in reports
     {
-        let source_artifact = source.artifact().map_or_else(String::new, |path| {
+        let mut source_artifact = source.artifact().map_or_else(String::new, |path| {
             format!(
                 ",\"source_artifact\":{}",
                 json_string(&path.to_string_lossy())
@@ -7343,6 +7445,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 );
             }
         }
+        source_artifact.push_str(&source.selection_json());
         let subdivision_json =
             subdivision.map_or_else(String::new, |index| format!(",\"subdivision\":{index}"));
         let human_subdivision =
@@ -8489,7 +8592,10 @@ fn studio_scene_name(fs: &dyn FileSystem, command: &RenderCommand) -> Result<Str
                 .pop()
                 .ok_or_else(|| CliError::new("scene", "Studio requires exactly one scene name"))
         }
-        NativeRenderInput::Compiled { name, .. } => Ok(name),
+        NativeRenderInput::Compiled { name, .. } => {
+            require_full_compiled_preview(command)?;
+            Ok(name)
+        }
     }
 }
 
