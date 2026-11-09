@@ -3598,6 +3598,72 @@ fn append_clipped_triangle(
     output: &mut Vec<RasterTriangle>,
     budget: &mut PreparationBudget,
 ) -> Result<(), ThreeDError> {
+    // A clipping pass over a polygon whose every vertex is inside its plane
+    // returns that polygon unchanged and in order, so a triangle inside every
+    // active plane leaves the clipper as itself. Skip the clipper for those
+    // (most of a mesh): the bytes are the clipper's.
+    if let Some(projected) = unclipped(camera, triangle, fixed, clip_planes) {
+        if let Some(triangle) = raster_triangle(projected, camera.pixel_shape()) {
+            budget.reserve_rows(output, PreparationRows::RasterTriangles, 1)?;
+            output.push(triangle);
+        }
+        return Ok(());
+    }
+    append_clipped_polygon(camera, triangle, fixed, clip_planes, output, budget)
+}
+
+/// `distance`'s side as the clippers decide it: on the plane is inside, and
+/// NaN is outside.
+fn inside(distance: f64) -> bool {
+    distance >= 0.0
+}
+
+/// `triangle` projected, if every vertex is inside every active world plane
+/// (by the world clipper's own distance) and inside the whole homogeneous clip
+/// volume (by the projected clipper's); otherwise `None`.
+fn unclipped(
+    camera: &Camera,
+    triangle: &[WorldVertex; 3],
+    fixed: f64,
+    clip_planes: [[f64; 4]; 4],
+) -> Option<[ProjectedVertex; 3]> {
+    for plane in clip_planes {
+        if plane[..3].iter().all(|value| *value == 0.0) {
+            continue;
+        }
+        for vertex in triangle {
+            let point = vertex.attributes.world;
+            if !inside(point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]) {
+                return None;
+            }
+        }
+    }
+    let projected = triangle.map(|vertex| ProjectedVertex {
+        clip: camera.project(vertex.attributes.world, fixed).clip,
+        attributes: vertex.attributes,
+    });
+    for vertex in &projected {
+        let [x, y, z, w] = vertex.clip;
+        if ![x + w, w - x, y + w, w - y, z + w, w - z]
+            .into_iter()
+            .all(inside)
+        {
+            return None;
+        }
+    }
+    Some(projected)
+}
+
+/// The general path: clip against every active world plane, project, clip
+/// against the six homogeneous planes, and fan the polygon into triangles.
+fn append_clipped_polygon(
+    camera: &Camera,
+    triangle: &[WorldVertex; 3],
+    fixed: f64,
+    clip_planes: [[f64; 4]; 4],
+    output: &mut Vec<RasterTriangle>,
+    budget: &mut PreparationBudget,
+) -> Result<(), ThreeDError> {
     const MAX_CLIPPED_POLYGON_VERTICES: usize = 3 + 4 + 6;
 
     let mut polygon = [triangle[0]; MAX_CLIPPED_POLYGON_VERTICES];
@@ -8247,6 +8313,149 @@ mod tests {
             .expect_err("a nonplanar fill has no silent lighting surface"),
             ThreeDError::NonPlanarVectorShading
         );
+    }
+
+    /// Every row of a raster triangle, as bits.
+    fn raster_bits(triangles: &[RasterTriangle]) -> Vec<u64> {
+        let mut bits = Vec::new();
+        for triangle in triangles {
+            for vertex in &triangle.vertices {
+                let a = vertex.attributes;
+                bits.extend(
+                    a.world
+                        .iter()
+                        .chain(&a.normal)
+                        .chain(&a.color)
+                        .chain(&a.uv)
+                        .map(|v| v.to_bits()),
+                );
+                bits.push(a.opacity.to_bits());
+                bits.extend(vertex.screen.iter().map(|v| v.to_bits()));
+                bits.push(vertex.inverse_w.to_bits());
+                bits.push(vertex.ndc_z.to_bits());
+            }
+            bits.extend(triangle.bounds.iter().map(|v| v.to_bits()));
+        }
+        bits
+    }
+
+    #[test]
+    fn unclipped_triangles_skip_the_clipper_with_its_exact_output() {
+        // Random triangles from well inside the view to far outside and
+        // behind the camera, with and without user planes, a few vertices
+        // exactly on a user plane, and non-finite coordinates; and, one case
+        // in five, triangles near the eye that cross only the near plane
+        // (`z + w`, which binds only there). The fast path must equal the
+        // general clipper bit for bit, result for result, and budget for
+        // budget, and every path must be exercised.
+        let camera = camera();
+        let eye = camera.location();
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let none = [[0.0; 4]; 4];
+        let mut one = none;
+        one[0] = [1.0, 0.0, 0.0, 0.0];
+        let mut two = none;
+        two[1] = [0.3, -0.7, 0.2, 1.5];
+        two[3] = [0.0, 1.0, 0.0, 2.0];
+        let plane_sets = [none, one, two];
+        let (mut fast, mut general, mut empty, mut split, mut near) = (0, 0, 0, 0, 0);
+        for case in 0..60_000_usize {
+            let scale = [0.5, 3.0, 9.0, 40.0][case % 4];
+            let center: [f64; 3] = std::array::from_fn(|_| (unit() - 0.5) * scale);
+            let mut corners: [[f64; 3]; 3] = if case % 5 == 4 {
+                std::array::from_fn(|_| {
+                    let t = 0.02 + 0.2 * unit();
+                    let lateral = [8.0 * t * (unit() - 0.5), 5.0 * t * (unit() - 0.5), 0.0];
+                    std::array::from_fn(|axis| eye[axis] * (1.0 - t) + lateral[axis])
+                })
+            } else {
+                std::array::from_fn(|_| {
+                    std::array::from_fn(|axis| center[axis] + (unit() - 0.5) * scale * 0.5)
+                })
+            };
+            match case % 97 {
+                0 => corners[1][0] = 0.0,
+                1 => corners[2][0] = -0.0,
+                2 => corners[0][2] = f64::NAN,
+                3 => corners[1][1] = f64::INFINITY,
+                _ => {}
+            }
+            let triangle = corners.map(|world| WorldVertex {
+                attributes: Attributes {
+                    world,
+                    normal: [unit(), unit(), 1.0],
+                    color: [unit(), unit(), unit(), 1.0],
+                    uv: [unit(), unit()],
+                    opacity: unit(),
+                },
+            });
+            let planes = plane_sets[case % 3];
+            let fixed = if case % 11 == 0 { 1.0 } else { 0.0 };
+            let mut quick = Vec::new();
+            let mut quick_budget = PreparationBudget::new(ThreeDPreparationLimits::default());
+            let quick_result = append_clipped_triangle(
+                &camera,
+                &triangle,
+                fixed,
+                planes,
+                &mut quick,
+                &mut quick_budget,
+            );
+            let mut slow = Vec::new();
+            let mut slow_budget = PreparationBudget::new(ThreeDPreparationLimits::default());
+            let slow_result = append_clipped_polygon(
+                &camera,
+                &triangle,
+                fixed,
+                planes,
+                &mut slow,
+                &mut slow_budget,
+            );
+            assert_eq!(
+                format!("{quick_result:?}"),
+                format!("{slow_result:?}"),
+                "case {case}"
+            );
+            assert_eq!(raster_bits(&quick), raster_bits(&slow), "case {case}");
+            assert_eq!(
+                quick_budget.rows(PreparationRows::RasterTriangles),
+                slow_budget.rows(PreparationRows::RasterTriangles),
+                "case {case}"
+            );
+            let clips = triangle.map(|vertex| camera.project(vertex.attributes.world, fixed).clip);
+            if planes == none
+                && clips
+                    .iter()
+                    .all(|&[x, y, _, w]| [x + w, w - x, y + w, w - y].into_iter().all(inside))
+                && clips.iter().any(|&[_, _, z, w]| !inside(z + w))
+            {
+                near += 1;
+            }
+            if unclipped(&camera, &triangle, fixed, planes).is_some() {
+                fast += 1;
+            } else {
+                general += 1;
+                match slow.len() {
+                    0 => empty += 1,
+                    1 => {}
+                    _ => split += 1,
+                }
+            }
+        }
+        assert!(fast > 5_000, "fast path taken {fast} times");
+        assert!(general > 5_000, "general path taken {general} times");
+        assert!(empty > 1_000, "clipped away {empty} times");
+        assert!(
+            split > 1_000,
+            "clipped into several triangles {split} times"
+        );
+        assert!(near > 1_000, "crossed only the near plane {near} times");
     }
 
     #[test]
