@@ -327,6 +327,14 @@ Forward journal suffixes continue from the restored cursor and charge only the
 new frame work. Every requested state hash is still checked before the candidate
 is installed. A later divergence installs no earlier prefix.
 
+Static wait continuations also recover the proof used by
+`Scene::try_advance_pure_wait`. One call can advance across unobserved remaining
+samples in time independent of their count, while keeping the original global
+clock, alpha grid and pending epilogue. The proof belongs to the current scene
+owner and rechecks updater, input and live-view activity before advancing.
+It does not require inventing a historical begin snapshot; when current effects
+prevent the jump, normal per-frame stepping remains available.
+
 Run the complete portable example:
 
 ```sh

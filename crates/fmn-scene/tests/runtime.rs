@@ -1006,6 +1006,229 @@ fn durable_wait_continuation_restores_updates_rng_and_pending_lifecycle_without_
 }
 
 #[test]
+fn pure_wait_continuation_jumps_match_serial_grids_and_pending_lifecycle() {
+    for (seconds, targets) in [
+        (None, [7_i64, 8, 16, 17]),
+        (Some(43.0 / 24.0), [7, 8, 43, 44]),
+    ] {
+        let config = RuntimeConfig {
+            fps: 24,
+            ..RuntimeConfig::default()
+        };
+        let mut source = Scene::new(config.clone(), 19).unwrap();
+        let mob = source.add_mobject(point()).unwrap();
+        source.stage_mut().shift(mob, [0.125, -0.5, 0.0]);
+        source.wait_frames(3, &mut NullSceneSink).unwrap();
+        source.rng_mut().next_u64();
+        let mut original = if let Some(duration) = seconds {
+            source
+                .begin_stepped_wait(Some(duration), &mut NullSceneSink)
+                .unwrap()
+        } else {
+            source
+                .begin_stepped_wait_frames(17, &mut NullSceneSink)
+                .unwrap()
+        };
+        for _ in 0..4 {
+            source
+                .prepare_stepped_wait_frame(&mut original)
+                .unwrap()
+                .unwrap();
+            source
+                .complete_stepped_wait_frame(&mut original, &mut NullSceneSink)
+                .unwrap();
+        }
+        let cursor = source.checkpoint_stepped_wait(&original).unwrap();
+        let bytes = source.state_bytes().unwrap();
+        let mut restored = Scene::new(config, 19).unwrap();
+        restored.restore_state_bytes(&bytes).unwrap();
+        let mut resumed = restored.resume_stepped_wait(cursor).unwrap();
+        assert_eq!(restored.state_bytes().unwrap(), bytes);
+
+        for (index, target) in targets.into_iter().enumerate() {
+            let mut expected = PacketSink::default();
+            while source.time().frames() < 3 + target {
+                source
+                    .prepare_stepped_wait_frame(&mut original)
+                    .unwrap()
+                    .unwrap();
+                source
+                    .complete_stepped_wait_frame(&mut original, &mut expected)
+                    .unwrap();
+            }
+            let actual = if index == 1 {
+                // Ordinary capture must still work between two fast jumps.
+                let mut sink = PacketSink::default();
+                restored
+                    .prepare_stepped_wait_frame(&mut resumed)
+                    .unwrap()
+                    .unwrap();
+                restored
+                    .complete_stepped_wait_frame(&mut resumed, &mut sink)
+                    .unwrap();
+                sink.packet.unwrap().metadata()
+            } else {
+                let count = if index == 3 {
+                    u64::MAX
+                } else {
+                    (3 + target - restored.time().frames()).cast_unsigned()
+                };
+                restored
+                    .try_advance_pure_wait(&mut resumed, count)
+                    .unwrap()
+                    .unwrap()
+            };
+            let expected = expected.packet.unwrap();
+            assert_eq!(actual, expected.metadata());
+            assert_eq!(actual.alpha().to_bits(), expected.alpha().to_bits());
+            assert_eq!(
+                actual.rng_fork("continued-wait").next_u64(),
+                expected.rng_fork("continued-wait").next_u64(),
+            );
+            assert_eq!(restored.play_count(), 1);
+            assert_eq!(
+                restored.state_bytes().unwrap(),
+                source.state_bytes().unwrap()
+            );
+        }
+        assert!(resumed.frames_complete());
+        assert!(
+            restored
+                .try_advance_pure_wait(&mut resumed, 1)
+                .unwrap()
+                .is_none()
+        );
+        let mut expected_events = RecordingSink::default();
+        let mut actual_events = RecordingSink::default();
+        let expected_report = source
+            .finish_stepped_wait(original, &mut expected_events)
+            .unwrap();
+        let actual_report = restored
+            .finish_stepped_wait(resumed, &mut actual_events)
+            .unwrap();
+        assert_eq!(actual_report.purity, expected_report.purity);
+        assert!(actual_report.begin_state.is_none());
+        assert_eq!(actual_events.events, expected_events.events);
+        assert_eq!(restored.play_count(), 2);
+        assert_eq!(
+            restored.state_bytes().unwrap(),
+            source.state_bytes().unwrap()
+        );
+    }
+}
+
+#[test]
+fn pure_wait_continuation_refuses_late_observers_and_stateful_history() {
+    use std::cell::Cell;
+
+    use fmn_anim::{ImpureEffect, Purity};
+    use fmn_scene::{
+        EventListener, EventPayload, EventPropagation, EventTarget, EventType, Modifiers,
+        MouseButton,
+    };
+
+    for effect in 0..5 {
+        let config = RuntimeConfig {
+            fps: 24,
+            ..RuntimeConfig::default()
+        };
+        let mut source = Scene::new(config.clone(), 19).unwrap();
+        source.add_mobject(point()).unwrap();
+        let mut original = source
+            .begin_stepped_wait_frames(12, &mut NullSceneSink)
+            .unwrap();
+        source
+            .prepare_stepped_wait_frame(&mut original)
+            .unwrap()
+            .unwrap();
+        source
+            .complete_stepped_wait_frame(&mut original, &mut NullSceneSink)
+            .unwrap();
+        let mut cursor = source.checkpoint_stepped_wait(&original).unwrap();
+        if effect == 4 {
+            // No live callback remains, but a historical host-updater phase
+            // must never acquire a pure continuation proof.
+            cursor.purity = Purity::Stateful(vec![ImpureEffect::SceneUpdater]);
+        }
+        let bytes = source.state_bytes().unwrap();
+        let mut restored = Scene::new(config, 19).unwrap();
+        restored.restore_state_bytes(&bytes).unwrap();
+        let mut resumed = restored.resume_stepped_wait(cursor.clone()).unwrap();
+        let mob = restored.stage().roots()[0];
+        let updates = Rc::new(Cell::new(0));
+        let events = Rc::new(Cell::new(0));
+        let observed_events = Rc::clone(&events);
+        restored
+            .event_dispatcher_mut()
+            .add_listener(EventListener::new(
+                EventType::MousePress,
+                EventTarget::Global,
+                move |_, _, _, _| {
+                    observed_events.set(observed_events.get() + 1);
+                    EventPropagation::Continue
+                },
+            ))
+            .unwrap();
+        let mut view = None;
+        let mut inbox = None;
+        match effect {
+            0 => {
+                let observed = Rc::clone(&updates);
+                restored
+                    .stage_mut()
+                    .add_dt_updater(mob, move |_, _, _| observed.set(observed.get() + 1), false)
+                    .unwrap();
+            }
+            1 => {
+                view = Some(
+                    restored
+                        .stage_mut()
+                        .get_mut(mob)
+                        .unwrap()
+                        .buffer
+                        .export_view(false),
+                );
+            }
+            2 => inbox = Some(restored.event_inbox()),
+            3 => {
+                restored
+                    .queue_event(EventPayload::MousePress {
+                        point: [0.0; 3],
+                        button: MouseButton::Left,
+                        modifiers: Modifiers::NONE,
+                    })
+                    .unwrap();
+            }
+            _ => {}
+        }
+        let before = restored.state_bytes().unwrap();
+        assert!(
+            restored
+                .try_advance_pure_wait(&mut resumed, 10)
+                .unwrap()
+                .is_none(),
+            "effect {effect}",
+        );
+        assert_eq!(restored.state_bytes().unwrap(), before, "effect {effect}");
+        assert_eq!(restored.checkpoint_stepped_wait(&resumed).unwrap(), cursor);
+        assert_eq!(updates.get(), 0);
+        assert_eq!(events.get(), 0);
+        restored
+            .prepare_stepped_wait_frame(&mut resumed)
+            .unwrap()
+            .unwrap();
+        restored
+            .complete_stepped_wait_frame(&mut resumed, &mut NullSceneSink)
+            .unwrap();
+        assert_eq!(restored.time().frames(), 2);
+        assert_eq!(updates.get(), usize::from(effect == 0));
+        assert_eq!(events.get(), usize::from(effect == 3));
+        drop(view);
+        drop(inbox);
+    }
+}
+
+#[test]
 fn frame_rng_root_identity_survives_equal_serial_streams() {
     let mut first = Scene::new(RuntimeConfig::default(), 7).unwrap();
     let mut second = Scene::new(RuntimeConfig::default(), 11).unwrap();

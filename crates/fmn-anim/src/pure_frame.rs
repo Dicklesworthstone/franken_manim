@@ -7,11 +7,12 @@
 //! unknown rate functions, aliased endpoints and live views remain serial.
 
 use std::collections::HashSet;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use fmn_core::rate::CatalogRate;
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
-use fmn_mobject::{FrozenRenderState, Mob, Stage};
+use fmn_mobject::{FrozenRenderState, Mob, Snapshot, Stage};
 
 use crate::animation::check_updater_error;
 use crate::{
@@ -375,6 +376,8 @@ impl FrozenAnimation {
 pub enum PureFrameRefusal {
     /// No unskipped pure begin snapshot, or the segment has already been stepped.
     NotAtPureBegin,
+    /// A static wait is not at a completed pure boundary, or has no samples.
+    NotAtPureWaitBoundary,
     /// The Stage/clock does not belong to the opened segment.
     DifferentBegin,
     /// This animation has no closed native interpolation carrier.
@@ -391,6 +394,7 @@ impl std::fmt::Display for PureFrameRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotAtPureBegin => f.write_str("no unstepped pure begin state"),
+            Self::NotAtPureWaitBoundary => f.write_str("no completed pure wait boundary"),
             Self::DifferentBegin => f.write_str("pure segment Stage or clock changed"),
             Self::UnsupportedAnimation(index) => {
                 write!(f, "animation {index} has no callback-free native evaluator")
@@ -450,6 +454,185 @@ fn freeze_animations(
         }
     }
     Ok(frozen)
+}
+
+fn check_wait_live_views(stage: &Stage) -> Result<(), PureFrameRefusal> {
+    for &root in stage.roots() {
+        for mob in stage.family(root) {
+            let entry = stage.get(mob).ok_or(PureFrameRefusal::DifferentBegin)?;
+            if entry.buffer.live_view_count() != 0 {
+                return Err(PureFrameRefusal::LiveView(mob));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OwnerAdvancePlan {
+    grid: FrameSegment,
+    base_frame: i64,
+    rng_seed: u64,
+}
+
+impl OwnerAdvancePlan {
+    fn sample(
+        &self,
+        clock: &RationalFrameClock,
+        rng: &RngRoot,
+        report: &SegmentReport,
+        stepped: i64,
+        max_frames: u64,
+    ) -> Result<Option<(FrameSample, RationalFrameClock)>, AnimError> {
+        if !report.purity.is_pure() {
+            return Ok(None);
+        }
+        let frames = self.grid.n_frames();
+        let expected_frame = self.base_frame.checked_add(stepped);
+        if report.base_frame != self.base_frame
+            || report.n_frames != frames
+            || expected_frame != Some(clock.now().frames())
+            || clock.fps() != self.grid.end_time().fps()
+            || rng.seed() != self.rng_seed
+            || stepped < 0
+            || stepped > frames
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "pure advance owner, clock or sampling plan changed",
+            ));
+        }
+        let count = max_frames.min((frames - stepped).cast_unsigned());
+        if count == 0 {
+            return Ok(None);
+        }
+        let frame = stepped + count.cast_signed();
+        let sample = self.grid.sample(frame).ok_or(AnimError::SeekOutOfRange {
+            frame,
+            total: frames,
+        })?;
+        // Check the whole clock advance before any owner mutation.
+        let mut advanced_clock = *clock;
+        advanced_clock
+            .advance_frames(count.cast_signed())
+            .map_err(AnimError::Clock)?;
+        Ok(Some((sample, advanced_clock)))
+    }
+}
+
+/// Forward advancement of a static wait on its already restored owner.
+///
+/// Unlike [`PureSegment`], this token cannot produce historical frame jobs.
+/// Its snapshot binds only the logical Stage identity; it is never restored,
+/// interpreted as the original begin state, or sent to a frame worker. The
+/// existing report, original sampling grid and pending epilogue stay intact.
+/// The caller must independently exclude stop conditions, external event
+/// producers, per-frame captures and host-updater hooks from the skipped range.
+pub struct PureWaitAdvance {
+    plan: OwnerAdvancePlan,
+    owner_anchor: Rc<Snapshot>,
+    admitted_step: i64,
+}
+
+impl std::fmt::Debug for PureWaitAdvance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PureWaitAdvance")
+            .field("plan", &self.plan)
+            .field("admitted_step", &self.admitted_step)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PureWaitAdvance {
+    /// Admit an open static wait at its current completed-frame boundary.
+    /// A restored wait's matching Stage and clock must already be installed.
+    /// This neither invokes callbacks nor supplies a missing begin snapshot.
+    ///
+    /// # Errors
+    /// Historical/current impurity, live views, incomplete frame phases, an
+    /// invalid clock/grid or an original begin owned by a different Stage.
+    pub fn admit(
+        stage: &Stage,
+        clock: &RationalFrameClock,
+        rng: &RngRoot,
+        open: &OpenWait,
+    ) -> Result<Self, PureFrameRefusal> {
+        let report = open.report();
+        if !open.is_at_frame_boundary()
+            || stage.updater_error().is_some()
+            || !report.purity.is_pure()
+            || report.n_frames <= 0
+            || !crate::classify_wait(stage, false).is_pure()
+        {
+            return Err(PureFrameRefusal::NotAtPureWaitBoundary);
+        }
+        open.checkpoint()
+            .and_then(|checkpoint| checkpoint.validate_clock(clock))
+            .map_err(|_| PureFrameRefusal::DifferentBegin)?;
+        if report
+            .begin_state
+            .as_ref()
+            .is_some_and(|begin| !stage.can_restore(begin))
+        {
+            return Err(PureFrameRefusal::DifferentBegin);
+        }
+        check_wait_live_views(stage)?;
+        Ok(Self {
+            plan: OwnerAdvancePlan {
+                grid: open.segment(),
+                base_frame: report.base_frame,
+                rng_seed: rng.seed(),
+            },
+            owner_anchor: report
+                .begin_state
+                .as_ref()
+                .map_or_else(|| Rc::new(stage.snapshot()), Rc::clone),
+            admitted_step: open.stepped(),
+        })
+    }
+
+    /// Advance only future unobserved samples, leaving the wait open.
+    /// Current purity, views, exact clock, root RNG and owner identity are
+    /// rechecked before mutation. Stateful history always retains serial work.
+    ///
+    /// # Errors
+    /// A changed owner/grid/clock, a cursor before admission, an incomplete
+    /// frame or an unacknowledged updater failure. A serial fallback is `None`.
+    pub fn try_advance(
+        &self,
+        stage: &mut Stage,
+        clock: &mut RationalFrameClock,
+        rng: &RngRoot,
+        open: &mut OpenWait,
+        max_frames: u64,
+    ) -> Result<Option<FrameMetadata>, AnimError> {
+        check_updater_error(stage)?;
+        if open.segment() != self.plan.grid || !open.is_at_frame_boundary() {
+            return Err(AnimError::InvalidFramePhase(
+                "pure advance requires the admitted wait at a completed frame boundary",
+            ));
+        }
+        if !open.report().purity.is_pure() {
+            return Ok(None);
+        }
+        if !stage.can_restore(&self.owner_anchor) || open.stepped() < self.admitted_step {
+            return Err(AnimError::InvalidFramePhase(
+                "pure wait owner or admission boundary changed",
+            ));
+        }
+        let Some((sample, advanced_clock)) =
+            self.plan
+                .sample(clock, rng, open.report(), open.stepped(), max_frames)?
+        else {
+            return Ok(None);
+        };
+        if !crate::classify_wait(stage, false).is_pure() || check_wait_live_views(stage).is_err() {
+            return Ok(None);
+        }
+        *clock = advanced_clock;
+        stage.set_time_from_clock(clock.now().to_f64());
+        open.advance_pure_cursor(sample.frame);
+        Ok(Some(FrameMetadata::capture(clock, rng, &sample)))
+    }
 }
 
 struct SegmentData {
@@ -564,14 +747,7 @@ impl PureSegment {
         {
             return Err(PureFrameRefusal::DifferentBegin);
         }
-        for &root in stage.roots() {
-            for mob in stage.family(root) {
-                let entry = stage.get(mob).ok_or(PureFrameRefusal::DifferentBegin)?;
-                if entry.buffer.live_view_count() != 0 {
-                    return Err(PureFrameRefusal::LiveView(mob));
-                }
-            }
-        }
+        check_wait_live_views(stage)?;
         Ok(Self {
             data: Arc::new(SegmentData {
                 kind: SegmentKind::Wait,
@@ -701,15 +877,7 @@ impl PureSegment {
         else {
             return Ok(None);
         };
-        if !crate::classify_wait(stage, false).is_pure()
-            || stage.roots().iter().any(|&root| {
-                stage.family(root).into_iter().any(|mob| {
-                    stage
-                        .get(mob)
-                        .is_none_or(|entry| entry.buffer.live_view_count() != 0)
-                })
-            })
-        {
+        if !crate::classify_wait(stage, false).is_pure() || check_wait_live_views(stage).is_err() {
             return Ok(None);
         }
         *clock = advanced_clock;
@@ -733,42 +901,21 @@ impl PureSegment {
         if !report.purity.is_pure() {
             return Ok(None);
         }
-        let expected_frame = self.data.base_frame.checked_add(stepped);
-        if report.base_frame != self.data.base_frame
-            || report.n_frames != self.frame_count()
-            || expected_frame != Some(clock.now().frames())
-            || clock.fps() != self.data.grid.end_time().fps()
-            || rng.seed() != self.data.rng_seed
-            || report
-                .begin_state
-                .as_ref()
-                .is_none_or(|begin| !stage.can_restore(begin))
-            || stepped < 0
-            || stepped > self.frame_count()
+        if report
+            .begin_state
+            .as_ref()
+            .is_none_or(|begin| !stage.can_restore(begin))
         {
             return Err(AnimError::InvalidFramePhase(
                 "pure advance owner, clock or sampling plan changed",
             ));
         }
-        let count = max_frames.min((self.frame_count() - stepped).cast_unsigned());
-        if count == 0 {
-            return Ok(None);
+        OwnerAdvancePlan {
+            grid: self.data.grid,
+            base_frame: self.data.base_frame,
+            rng_seed: self.data.rng_seed,
         }
-        let frame = stepped + count.cast_signed();
-        let sample = self
-            .data
-            .grid
-            .sample(frame)
-            .ok_or(AnimError::SeekOutOfRange {
-                frame,
-                total: self.frame_count(),
-            })?;
-        // Check the whole clock advance before interpolation mutates geometry.
-        let mut advanced_clock = *clock;
-        advanced_clock
-            .advance_frames(count.cast_signed())
-            .map_err(AnimError::Clock)?;
-        Ok(Some((sample, advanced_clock)))
+        .sample(clock, rng, report, stepped, max_frames)
     }
 
     /// Advance the original wait owner once after consuming its immutable jobs.
@@ -1057,4 +1204,153 @@ pub fn wait_segment_with_pure_dispatch(
         )?;
     }
     crate::finish_open_wait(open)
+}
+
+#[cfg(test)]
+mod wait_advance_tests {
+    use super::*;
+    use crate::{Duration, OpenWaitCheckpoint, Purity, finish_open_wait, resume_open_wait};
+    use fmn_mobject::Mobject;
+
+    #[test]
+    fn resumed_wait_advance_preserves_exact_large_and_seconds_grids_without_begin_state() {
+        let large = 1_i64 << 53;
+        for (duration, base, stepped, target, alpha) in [
+            (
+                Duration::Frames((large + 1).cast_unsigned()),
+                0,
+                7,
+                large,
+                1.0_f64.next_down(),
+            ),
+            (
+                Duration::Frames(i64::MAX.cast_unsigned()),
+                0,
+                i64::MAX - 3,
+                i64::MAX - 1,
+                1.0_f64.next_down(),
+            ),
+            (Duration::Seconds(43.0 / 24.0), 3, 4, 43, 1.0),
+        ] {
+            let mut stage = Stage::new();
+            let mob = stage.add(Mobject::from_points(&[[0.0; 3]]));
+            stage.add_to_scene(mob).unwrap();
+            let mut clock = RationalFrameClock::new(24).unwrap();
+            let segment = clock.segment(duration).unwrap();
+            clock.advance_frames(base + stepped).unwrap();
+            let rng = RngRoot::from_seed(42);
+            let mut open = resume_open_wait(
+                &stage,
+                &clock,
+                OpenWaitCheckpoint {
+                    segment,
+                    base_frame: base,
+                    stepped,
+                    purity: Purity::Pure,
+                },
+            )
+            .unwrap();
+            let advance = PureWaitAdvance::admit(&stage, &clock, &rng, &open).unwrap();
+            assert_eq!(
+                PureSegment::freeze_wait(&stage, &clock, &rng, &open).unwrap_err(),
+                PureFrameRefusal::NotAtPureBegin,
+                "a forward token must not invent a full-history frame program",
+            );
+            let metadata = advance
+                .try_advance(
+                    &mut stage,
+                    &mut clock,
+                    &rng,
+                    &mut open,
+                    (target - stepped).cast_unsigned(),
+                )
+                .unwrap()
+                .unwrap();
+            assert_eq!(metadata.segment_frame(), target);
+            assert_eq!(metadata.frame_index(), base + target);
+            assert_eq!(metadata.alpha().to_bits(), alpha.to_bits());
+            assert_eq!(
+                metadata.rng_fork("resume").next_u64(),
+                rng.substream("resume")
+                    .fork_frame((base + target).cast_unsigned())
+                    .next_u64(),
+            );
+            assert!(open.report().begin_state.is_none());
+            assert!(!open.frames_complete());
+            advance
+                .try_advance(&mut stage, &mut clock, &rng, &mut open, u64::MAX)
+                .unwrap()
+                .unwrap();
+            assert!(open.frames_complete());
+            assert_eq!(clock.now().frames(), base + segment.n_frames());
+            let report = finish_open_wait(open).unwrap();
+            assert!(report.begin_state.is_none());
+            assert!(report.purity.is_pure());
+        }
+    }
+
+    #[test]
+    fn resumed_wait_advance_refuses_foreign_owner_rng_clock_and_rewound_cursor() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_points(&[[0.0; 3]]));
+        stage.add_to_scene(mob).unwrap();
+        let mut clock = RationalFrameClock::new(24).unwrap();
+        clock.advance_frames(7).unwrap();
+        let checkpoint = OpenWaitCheckpoint {
+            segment: clock.segment(Duration::Frames(24)).unwrap(),
+            base_frame: 0,
+            stepped: 7,
+            purity: Purity::Pure,
+        };
+        let rng = RngRoot::from_seed(42);
+        let mut open = resume_open_wait(&stage, &clock, checkpoint.clone()).unwrap();
+        let advance = PureWaitAdvance::admit(&stage, &clock, &rng, &open).unwrap();
+        let before = stage.snapshot_bytes().unwrap();
+        let mut foreign = Stage::new();
+        let mut foreign_clock = clock;
+        assert!(
+            advance
+                .try_advance(&mut foreign, &mut foreign_clock, &rng, &mut open, 3)
+                .is_err()
+        );
+        assert_eq!(foreign_clock.now(), clock.now());
+        assert_eq!(open.checkpoint().unwrap(), checkpoint);
+
+        let different_rng = RngRoot::from_seed(43);
+        assert!(
+            advance
+                .try_advance(&mut stage, &mut clock, &different_rng, &mut open, 3)
+                .is_err()
+        );
+        let mut wrong_clock = clock;
+        wrong_clock.advance_frames(1).unwrap();
+        assert!(
+            advance
+                .try_advance(&mut stage, &mut wrong_clock, &rng, &mut open, 3)
+                .is_err()
+        );
+        assert_eq!(wrong_clock.now().frames(), 8);
+
+        let mut rewound_clock = RationalFrameClock::new(24).unwrap();
+        rewound_clock.advance_frames(6).unwrap();
+        let mut rewound = resume_open_wait(
+            &stage,
+            &rewound_clock,
+            OpenWaitCheckpoint {
+                stepped: 6,
+                ..checkpoint.clone()
+            },
+        )
+        .unwrap();
+        assert!(
+            advance
+                .try_advance(&mut stage, &mut rewound_clock, &rng, &mut rewound, 3)
+                .is_err()
+        );
+        assert_eq!(rewound_clock.now().frames(), 6);
+        assert_eq!(rewound.checkpoint().unwrap().stepped, 6);
+        assert_eq!(clock.now().frames(), 7);
+        assert_eq!(open.checkpoint().unwrap(), checkpoint);
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    }
 }

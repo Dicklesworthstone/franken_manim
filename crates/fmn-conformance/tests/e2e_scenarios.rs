@@ -4219,6 +4219,32 @@ fn studio_contains(bytes: &[u8], expected: &str) -> Result<(), ScenarioError> {
     Ok(())
 }
 
+fn studio_restored_inspector_matches(
+    before: &[u8],
+    after: &[u8],
+    mode: &str,
+    frame: u64,
+    fallback: Option<&str>,
+) -> Result<(), ScenarioError> {
+    // The native service appends this receipt last. Assert its exact new
+    // value, then retain byte equality for all scene, editor and span data.
+    let before = before
+        .strip_suffix(b",\"native_restore\":null}")
+        .ok_or_else(|| fail("committed inspector unexpectedly already has a restore receipt"))?;
+    let fallback = fallback.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
+    let receipt = format!("{{\"mode\":\"{mode}\",\"frame\":{frame},\"fallback\":{fallback}}}");
+    let suffix = format!(",\"native_restore\":{receipt}}}");
+    let after = after
+        .strip_suffix(suffix.as_bytes())
+        .ok_or_else(|| fail("restored inspector reports the wrong recovery mechanism"))?;
+    if before != after {
+        return Err(fail(
+            "restored inspector changed committed scene or editor state",
+        ));
+    }
+    Ok(())
+}
+
 fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
     // Constructed frame zero plus the 0.25 s hold's eight native samples.
     studio_view_with_frame_count(bytes, frame, 9)
@@ -4685,9 +4711,13 @@ fn studio_interactive_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scen
         return Err(fail("Native input replay changed decoded pixels"));
     }
     let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
-    if restored != committed {
-        return Err(fail("Native input replay changed inspected state"));
-    }
+    studio_restored_inspector_matches(
+        &committed,
+        &restored,
+        "cold_verified",
+        0,
+        Some("edited_input"),
+    )?;
     ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "restarted"));
 
     endpoint.request(
@@ -4833,11 +4863,7 @@ fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
     }
     let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
     studio_view(&restored, 1)?;
-    if restored != committed_inspect {
-        return Err(fail(
-            "Studio restart did not reproduce the committed live inspector",
-        ));
-    }
+    studio_restored_inspector_matches(&committed_inspect, &restored, "checkpoint", 0, None)?;
     ctx.event(
         LogEvent::new("e2e.studio.lifecycle")
             .field("phase", "restarted")
@@ -16342,12 +16368,16 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             counter_eq("studio_registered_checkpoint_restores", 2),
             counter_eq("studio_registered_checkpoint_frames", 4),
             counter_eq("studio_registered_checkpoint_suffix_entries", 2),
+            counter_eq("studio_restored_pure_wait_frames", 4089),
+            counter_eq("studio_restored_pure_wait_jumps", 1),
         ],
         vec![LogExpect::span_present(
             "e2e.studio.registered_checkpoint",
             vec![
                 FieldPred::u64_eq("checkpoint_frame", 600),
                 FieldPred::u64_eq("work_budget", 8),
+                FieldPred::u64_eq("pure_suffix_frames", 4089),
+                FieldPred::u64_eq("pure_suffix_jumps", 1),
                 FieldPred::str_eq("restore_mode", "checkpoint"),
                 FieldPred::str_eq("state_and_pixels_equal", "true"),
             ],

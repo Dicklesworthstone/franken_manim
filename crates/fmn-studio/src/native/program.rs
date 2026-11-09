@@ -1103,3 +1103,67 @@ pub(super) fn execution_error(error: impl std::fmt::Display) -> ServiceError {
 pub(super) fn invalid(message: impl Into<String>) -> ServiceError {
     ServiceError::new(WorkerErrorCode::InvalidRequest, message)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fmn_mobject::Mobject;
+    use fmn_scene::RuntimeConfig;
+
+    fn static_waits() -> NativeSceneProgram {
+        let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+        scene
+            .add_mobject(Mobject::from_points(&[[1.0, 2.0, 0.0]]))
+            .unwrap();
+        NativeSceneProgram::new(
+            scene,
+            vec![
+                NativeSegment::WaitFrames { frames: 120_000 },
+                NativeSegment::WaitFrames { frames: 7 },
+            ],
+            120_007,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn resumed_static_wait_evaluates_one_sample_and_preserves_its_pending_epilogue() {
+        let mut uninterrupted = static_waits();
+        uninterrupted.advance_to(7).unwrap();
+        let CheckpointAdmission::Resume(cursor) = uninterrupted.checkpoint_admission().unwrap()
+        else {
+            panic!("static wait must admit a continuation");
+        };
+        let bytes = uninterrupted.state_bytes().unwrap();
+        let mut resumed = static_waits();
+        resumed.restore_checkpoint(&bytes, &cursor).unwrap();
+        let work = resumed.advance_to_with_work(120_000).unwrap();
+        assert_eq!(work.frames_advanced, 119_993);
+        assert_eq!(work.frames_evaluated, 1);
+        assert_eq!(resumed.frame_index(), 120_000);
+        assert!(resumed.at_segment_boundary());
+        assert_eq!(resumed.preview().scene().play_count(), 0);
+
+        uninterrupted.advance_to(120_000).unwrap();
+        assert_eq!(
+            resumed.state_bytes().unwrap(),
+            uninterrupted.state_bytes().unwrap()
+        );
+        let actual = resumed.next_frame().unwrap().unwrap();
+        let expected = uninterrupted.next_frame().unwrap().unwrap();
+        assert_eq!(actual.frame_index(), 120_001);
+        assert_eq!(actual.segment_frame(), 1);
+        assert_eq!(actual.frame_index(), expected.frame_index());
+        assert_eq!(actual.alpha().to_bits(), expected.alpha().to_bits());
+        assert_eq!(
+            actual.rng_fork("resumed-static-wait").next_u64(),
+            expected.rng_fork("resumed-static-wait").next_u64(),
+        );
+        assert_eq!(resumed.preview().scene().play_count(), 1);
+        assert!(!resumed.at_segment_boundary());
+        assert_eq!(
+            resumed.state_bytes().unwrap(),
+            uninterrupted.state_bytes().unwrap()
+        );
+    }
+}

@@ -27,7 +27,7 @@ mod parallel;
 pub use fmn_anim::OpenWaitCheckpoint;
 pub use idle::IdleFrame;
 
-use fmn_anim::pure_frame::PureSegment;
+use fmn_anim::pure_frame::{PureSegment, PureWaitAdvance};
 use fmn_anim::{
     AnimError, Animation, AnimationBoundary, BeginState, Duration, FrameMetadata, FramePacket,
     ImpureEffect, OpenSegment, OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime,
@@ -748,7 +748,7 @@ pub struct SteppedPlay {
 /// [`SteppedPlay`].
 pub struct SteppedWait {
     open: OpenWait,
-    pure_seek: Option<PureSegment>,
+    pure_seek: Option<PureWaitAdvance>,
     sink_error: Option<IntegrationError>,
 }
 
@@ -1756,7 +1756,7 @@ impl Scene {
             )?
         };
         let pure_seek = (allow_seek && self.allows_unobserved_advance())
-            .then(|| PureSegment::freeze_wait(&self.stage, &self.clock, &self.rng_root, &open).ok())
+            .then(|| PureWaitAdvance::admit(&self.stage, &self.clock, &self.rng_root, &open).ok())
             .flatten();
         Ok(SteppedWait {
             open,
@@ -1784,7 +1784,7 @@ impl Scene {
             return Ok(None);
         };
         program
-            .try_advance_wait_on_owner(
+            .try_advance(
                 &mut self.stage,
                 &mut self.clock,
                 &self.rng_root,
@@ -1822,6 +1822,8 @@ impl Scene {
     /// clock and completed play count remain unchanged; the next frame uses
     /// the original segment alpha and global frame-indexed RNG. Finishing the
     /// returned handle performs the original pending epilogue exactly once.
+    /// A static continuation may also use [`Self::try_advance_pure_wait`] after
+    /// the ordinary observer/purity checks; no historical begin is fabricated.
     ///
     /// # Errors
     /// Unbound/failed updaters, failed event state, exhausted play count or an
@@ -1838,12 +1840,16 @@ impl Scene {
             ));
         }
         let open = resume_open_wait(&self.stage, &self.clock, checkpoint)?;
+        let pure_seek = self
+            .allows_unobserved_advance()
+            .then(|| PureWaitAdvance::admit(&self.stage, &self.clock, &self.rng_root, &open).ok())
+            .flatten();
         // An open wait has already passed preflight. Restoring its continuation
         // must not make the next segment run that old phase a second time.
         self.preflight_done = true;
         Ok(SteppedWait {
             open,
-            pure_seek: None,
+            pure_seek,
             sink_error: None,
         })
     }

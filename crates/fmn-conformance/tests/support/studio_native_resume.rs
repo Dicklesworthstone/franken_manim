@@ -1,11 +1,15 @@
 //! Registered updater restoration and journal suffixes under a prefix-sized budget.
 
+use fmn_anim::{FrameMetadata, FramePacket};
 use fmn_core::color::LinearRgba;
 use fmn_mobject::{Mob, Stage};
 use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
 };
-use fmn_scene::{Journal, RuntimeConfig, Scene};
+use fmn_scene::{
+    CaptureReason, IntegrationError, Journal, LifecycleEvent, NullSceneSink, RuntimeConfig, Scene,
+    SceneSink,
+};
 use fmn_studio::native::{
     NativeReplayPolicy, NativeRestoreMode, NativeSceneProgram, NativeSceneWorker, NativeSegment,
     NativeUpdaterRegistry, NativeWorkerConfig,
@@ -161,7 +165,185 @@ fn png(worker: &mut NativeSceneWorker, frame: i64) -> Result<Vec<u8>, ScenarioEr
     }
 }
 
+#[derive(Default)]
+struct PureWaitSink {
+    captures: u64,
+    last: Option<FrameMetadata>,
+    events: Vec<LifecycleEvent>,
+}
+
+impl SceneSink for PureWaitSink {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn capture_state_required(&self) -> bool {
+        false
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
+        self.capture_metadata(reason, packet.metadata())
+    }
+
+    fn capture_metadata(
+        &mut self,
+        _reason: CaptureReason,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.captures += 1;
+        self.last = Some(metadata);
+        Ok(())
+    }
+}
+
+fn pure_wait_scene() -> Result<Scene, ScenarioError> {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 24,
+            ..RuntimeConfig::default()
+        },
+        71,
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    scene
+        .add_mobject(fmn_library::Circle::new().radius(0.4).build())
+        .map_err(|e| fail(e.to_string()))?;
+    Ok(scene)
+}
+
+fn pure_wait_resume() -> Result<u64, ScenarioError> {
+    const FRAMES: u64 = 4096;
+    const PREFIX: u64 = 7;
+    let mut source = pure_wait_scene()?;
+    source
+        .wait_frames(3, &mut NullSceneSink)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut original = source
+        .begin_seekable_wait_frames(FRAMES, &mut NullSceneSink)
+        .map_err(|e| fail(e.to_string()))?;
+    for _ in 0..PREFIX {
+        source
+            .prepare_stepped_wait_frame(&mut original)
+            .map_err(|e| fail(e.to_string()))?;
+        source
+            .complete_stepped_wait_frame(&mut original, &mut NullSceneSink)
+            .map_err(|e| fail(e.to_string()))?;
+    }
+    let cursor = source
+        .checkpoint_stepped_wait(&original)
+        .map_err(|e| fail(e.to_string()))?;
+    let bytes = source.state_bytes().map_err(|e| fail(e.to_string()))?;
+    let mut resumed = pure_wait_scene()?;
+    // This exercises the public low-level lifecycle contract. Native workers
+    // separately refuse opaque preflight captures for checkpoint admission.
+    let preflight_calls = std::rc::Rc::new(std::cell::Cell::new(0_u64));
+    let observed = std::rc::Rc::clone(&preflight_calls);
+    resumed
+        .set_preflight_hook(move |_, _| {
+            observed.set(observed.get() + 1);
+            Ok(())
+        })
+        .map_err(|e| fail(e.to_string()))?;
+    resumed
+        .restore_state_bytes(&bytes)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut wait = resumed
+        .resume_stepped_wait(cursor)
+        .map_err(|e| fail(e.to_string()))?;
+    if resumed.state_bytes().map_err(|e| fail(e.to_string()))? != bytes {
+        return Err(fail("pure wait admission replayed part of the prefix"));
+    }
+    let sample = resumed
+        .try_advance_pure_wait(&mut wait, FRAMES - PREFIX)
+        .map_err(|e| fail(e.to_string()))?
+        .ok_or_else(|| fail("restored pure wait lost its unobserved advance proof"))?;
+    if sample.frame_index() != 4099
+        || sample.segment_frame() != 4096
+        || sample.alpha().to_bits() != 1.0_f64.to_bits()
+        || !wait.frames_complete()
+        || resumed.play_count() != 1
+        || preflight_calls.get() != 0
+    {
+        return Err(fail(
+            "pure continuation changed its sample, callback history or pending epilogue",
+        ));
+    }
+
+    // Independent oracle: ordinary serial Scene stepping, retaining only the
+    // latest capture metadata so the fast scenario needs no frame archive.
+    let mut control = pure_wait_scene()?;
+    control
+        .wait_frames(3, &mut NullSceneSink)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut control_wait = control
+        .begin_stepped_wait_frames(FRAMES, &mut NullSceneSink)
+        .map_err(|e| fail(e.to_string()))?;
+    let mut samples = PureWaitSink::default();
+    for _ in 0..FRAMES {
+        control
+            .prepare_stepped_wait_frame(&mut control_wait)
+            .map_err(|e| fail(e.to_string()))?;
+        control
+            .complete_stepped_wait_frame(&mut control_wait, &mut samples)
+            .map_err(|e| fail(e.to_string()))?;
+    }
+    let expected = samples
+        .last
+        .ok_or_else(|| fail("serial pure wait omitted its last capture"))?;
+    if samples.captures != FRAMES
+        || sample != expected
+        || sample.rng_fork("pure-resume").state() != expected.rng_fork("pure-resume").state()
+        || resumed.state_bytes().map_err(|e| fail(e.to_string()))?
+            != control.state_bytes().map_err(|e| fail(e.to_string()))?
+    {
+        return Err(fail(
+            "one restored pure jump diverged from ordinary serial samples",
+        ));
+    }
+    let mut finish = PureWaitSink::default();
+    let mut control_finish = PureWaitSink::default();
+    let report = resumed
+        .finish_stepped_wait(wait, &mut finish)
+        .map_err(|e| fail(e.to_string()))?;
+    let expected_report = control
+        .finish_stepped_wait(control_wait, &mut control_finish)
+        .map_err(|e| fail(e.to_string()))?;
+    if report.begin_state.is_some()
+        || report.base_frame != 3
+        || report.n_frames != 4096
+        || report.purity != expected_report.purity
+        || finish.events != control_finish.events
+        || finish.captures != 0
+        || resumed.play_count() != 2
+    {
+        return Err(fail(
+            "pure continuation lost its original finish or fabricated a begin snapshot",
+        ));
+    }
+    resumed
+        .wait_frames(0, &mut NullSceneSink)
+        .map_err(|e| fail(e.to_string()))?;
+    control
+        .wait_frames(0, &mut NullSceneSink)
+        .map_err(|e| fail(e.to_string()))?;
+    if preflight_calls.get() != 0
+        || resumed.state_bytes().map_err(|e| fail(e.to_string()))?
+            != control.state_bytes().map_err(|e| fail(e.to_string()))?
+    {
+        return Err(fail(
+            "pure continuation replayed preflight on the following segment",
+        ));
+    }
+    Ok(FRAMES - PREFIX)
+}
+
 pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let pure_suffix_frames = pure_wait_resume()?;
     let mut serial = program().map_err(|e| fail(e.to_string()))?;
     for _ in 0..600 {
         if serial
@@ -273,6 +455,8 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             .field("work_budget", 8_u64)
             .field("continued_frames", 4_u64)
             .field("suffix_entries", 2_u64)
+            .field("pure_suffix_frames", pure_suffix_frames)
+            .field("pure_suffix_jumps", 1_u64)
             .field("restore_mode", "checkpoint")
             .field("state_and_pixels_equal", "true"),
     );
@@ -280,6 +464,8 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("studio_registered_checkpoint_restores", 2)
         .with_counter("studio_registered_checkpoint_frames", 4)
         .with_counter("studio_registered_checkpoint_suffix_entries", 2)
+        .with_counter("studio_restored_pure_wait_frames", pure_suffix_frames)
+        .with_counter("studio_restored_pure_wait_jumps", 1)
         .with_artifact("native_resume_checkpoint.bin", state)
         .with_artifact("native_resume_next.png", next_png)
         .with_artifact("native_resume_suffix.png", suffix_png))
