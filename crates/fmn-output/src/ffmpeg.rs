@@ -221,7 +221,7 @@ pub enum BoundaryError {
         /// The payload length that failed the divisibility check.
         got: usize,
     },
-    /// The wall-clock timeout expired and the child was killed.
+    /// The wall-clock timeout expired before spawn or while supervising a child.
     JobTimedOut {
         /// The configured timeout.
         timeout: Duration,
@@ -1592,12 +1592,17 @@ impl Boundary {
                 return Err(error);
             }
         };
-        let process = match self.runner.start(&spec, cancellation.clone(), stdin_limits) {
-            Ok(process) => process,
+        let (process, watch) = match start_watched_process(
+            self.runner.as_ref(),
+            &spec,
+            cancellation.clone(),
+            stdin_limits,
+            watch,
+        ) {
+            Ok(started) => started,
             Err(error) => {
-                drop(watch);
                 self.cleanup(&workdir);
-                return Err(error.into());
+                return Err(error);
             }
         };
         let post_start = workdir
@@ -1723,9 +1728,13 @@ impl Boundary {
     ) -> Result<ProcessOutcome, BoundaryError> {
         let cancellation = ProcessCancellation::new();
         let watch = ArtifactWatch::start(workdir, artifact, max_bytes, cancellation.clone())?;
-        let process = self
-            .runner
-            .start(spec, cancellation, ProcessStdinLimits::new(1, 0))?;
+        let (process, watch) = start_watched_process(
+            self.runner.as_ref(),
+            spec,
+            cancellation,
+            ProcessStdinLimits::new(1, 0),
+            watch,
+        )?;
         let post_start = workdir
             .verify_current("finish artifact-process spawn")
             .and_then(|()| bound_tool.verify_current(&self.tool));
@@ -2156,10 +2165,12 @@ impl StreamingEncode {
                 self.limits.max_artifact_bytes,
                 self.cancellation.clone(),
             )?;
-            let process = self.runner.start(
+            let (process, watch) = start_watched_process(
+                self.runner.as_ref(),
                 &spec,
                 self.cancellation.clone(),
                 ProcessStdinLimits::new(1, 0),
+                watch,
             )?;
             let post_start = self
                 .workdir
@@ -2452,6 +2463,31 @@ fn invocation_report(
         },
         stderr,
         artifact,
+    }
+}
+
+/// Startup control refusals have the same job meaning as supervised terminal
+/// outcomes. Join the disk watcher first: its concrete budget/identity error
+/// takes precedence when that watcher was responsible for cancellation.
+fn start_watched_process(
+    runner: &dyn ProcessRunner,
+    spec: &ProcessSpec,
+    cancellation: ProcessCancellation,
+    stdin_limits: ProcessStdinLimits,
+    watch: ArtifactWatch,
+) -> Result<(Box<dyn RunningProcess>, ArtifactWatch), BoundaryError> {
+    match runner.start(spec, cancellation, stdin_limits) {
+        Ok(process) => Ok((process, watch)),
+        Err(error) => {
+            watch.finish()?;
+            Err(match error.startup_termination() {
+                Some(ProcessTermination::Cancelled) => BoundaryError::Cancelled,
+                Some(ProcessTermination::TimedOut) => BoundaryError::JobTimedOut {
+                    timeout: spec.timeout,
+                },
+                _ => BoundaryError::Mechanism(error),
+            })
+        }
     }
 }
 

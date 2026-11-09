@@ -2024,6 +2024,31 @@ pub enum ProcessError {
     },
 }
 
+impl ProcessError {
+    /// A deadline or cancellation that refused startup before a child existed.
+    ///
+    /// This classifies only the runner's own typed control refusal. An OS
+    /// loader error with the same I/O kind remains a mechanism failure, so
+    /// callers need not guess from diagnostic text or depend on the substrate.
+    #[must_use]
+    pub fn startup_termination(&self) -> Option<ProcessTermination> {
+        match self {
+            #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+            Self::Spawn {
+                err: asupersync::process::ProcessError::Io(error),
+                ..
+            } => error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<StartupRefusal>())
+                .map(|refusal| match refusal {
+                    StartupRefusal::Cancelled => ProcessTermination::Cancelled,
+                    StartupRefusal::TimedOut => ProcessTermination::TimedOut,
+                }),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for ProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2176,6 +2201,28 @@ pub trait ProcessRunner: Send + Sync {
 #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// Keep startup control refusals distinct from unrelated OS errors even when
+/// their public I/O kinds and diagnostic wording happen to match.
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+#[derive(Debug)]
+enum StartupRefusal {
+    Cancelled,
+    TimedOut,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+impl fmt::Display for StartupRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Cancelled => "process was cancelled before executable spawn",
+            Self::TimedOut => "process deadline expired before executable spawn",
+        })
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+impl std::error::Error for StartupRefusal {}
+
 /// One deadline covers loader retries, pipe setup, and child supervision.
 /// Keeping elapsed time rather than adding to `Instant` also accepts a
 /// caller's arbitrarily large `Duration` without overflowing the clock.
@@ -2220,15 +2267,9 @@ fn spawn_with_busy_retry<T>(
 
     let check_start = || {
         let refusal = if cancellation.is_cancelled() {
-            Some((
-                io::ErrorKind::Interrupted,
-                "process was cancelled before executable spawn",
-            ))
+            Some((io::ErrorKind::Interrupted, StartupRefusal::Cancelled))
         } else if deadline.expired() {
-            Some((
-                io::ErrorKind::TimedOut,
-                "process deadline expired before executable spawn",
-            ))
+            Some((io::ErrorKind::TimedOut, StartupRefusal::TimedOut))
         } else {
             None
         };
@@ -2939,7 +2980,32 @@ mod spawn_retry_tests {
         .err()
         .expect("cancellation must prevent an otherwise successful retry");
         assert_eq!(attempts, 1);
+        assert_eq!(
+            error.startup_termination(),
+            Some(ProcessTermination::Cancelled)
+        );
         assert_spawn_io(error, io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn startup_control_classification_does_not_relabel_os_loader_errors() {
+        for (kind, message) in [
+            (
+                io::ErrorKind::Interrupted,
+                "process was cancelled before executable spawn",
+            ),
+            (
+                io::ErrorKind::TimedOut,
+                "process deadline expired before executable spawn",
+            ),
+        ] {
+            let error = ProcessError::Spawn {
+                program: PathBuf::from("/native-image"),
+                err: asupersync::process::ProcessError::Io(io::Error::new(kind, message)),
+            };
+            assert_eq!(error.startup_termination(), None);
+            assert_spawn_io(error, kind);
+        }
     }
 
     #[test]
