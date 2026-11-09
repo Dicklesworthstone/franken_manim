@@ -222,13 +222,14 @@ impl CameraCapture {
             threads,
         })
         .map_err(native_error)?;
-        let baseline = fmn_render::CameraConfig::default().frame;
-        let [frame_width, frame_height] = baseline.shape();
-        let planar_map_matches =
-            (frame_width - frame_height * f64::from(width) / f64::from(height)).abs() < 1e-9;
-        // Match file output's retained +Y-up route when its map applies.
-        // Moved cameras, other aspects and nonplanar content still project.
-        if fmn::rendering::planar_capture_refusal(&stage, &camera, planar_map_matches).is_none() {
+        let planar_policy = fmn_render::PlanarCapturePolicy::for_output(
+            (width, height),
+            fmn_core::constants::FRAME_HEIGHT,
+        )
+        .map_err(native_error)?;
+        // Match file output's retained +Y-up route at every output aspect.
+        // Live camera edits and nonplanar content still require projection.
+        if planar_policy.refusal(&stage, &camera).is_none() {
             renderer.render(&stage, 0).map_err(native_error)?;
         } else {
             renderer

@@ -4,13 +4,13 @@ use fmn_anim::pure_frame::PureSegment;
 use fmn_anim::{
     AnimConfig, Animation, RateFunc, RationalFrameClock, Transform, advance_play, open_play,
 };
-use fmn_core::{color::LinearRgba, rate::CatalogRate, rng::RngRoot};
+use fmn_core::{color::LinearRgba, constants::FRAME_HEIGHT, rate::CatalogRate, rng::RngRoot};
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_output::{EmitterConfig, OrderedEmitter, SinkBinding, SinkWrite};
 use fmn_platform::topology::HardwareTopology;
 use fmn_render::{
-    Camera, CameraConfig, EngineIdentity, FrameConfig, RetainedFrameRenderer,
+    Camera, CameraConfig, EngineIdentity, FrameConfig, PlanarCapturePolicy, RetainedFrameRenderer,
     RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
 };
 use fmn_runtime::{ExecutionPlan, OutputPixelFormat, PlanRequest, RenderIntent, SurfaceSpec};
@@ -70,6 +70,10 @@ fn camera() -> Camera {
         ..CameraConfig::default()
     })
     .unwrap()
+}
+
+fn output_policy(frame_height: f64) -> PlanarCapturePolicy {
+    PlanarCapturePolicy::for_output((32, 18), frame_height).unwrap()
 }
 
 fn renderer_config(plan: &ExecutionPlan, camera: &Camera) -> RetainedFrameRendererConfig {
@@ -177,8 +181,9 @@ fn pure_worker_routes_match_serial_pixels_when_a_transform_enters_and_leaves_3d(
                 .unwrap();
                 let mut pipeline =
                     NativeFramePipeline::new(plan, config, None, emitter.handle()).unwrap();
-                let policy = NativeAdaptiveCamera::new(camera.clone(), true, None)
-                    .with_camera_tiling(camera_tiling);
+                let policy =
+                    NativeAdaptiveCamera::new(camera.clone(), output_policy(FRAME_HEIGHT), None)
+                        .with_camera_tiling(camera_tiling);
                 for frame in 1..=5 {
                     pipeline
                         .capture_pure_adaptive(
@@ -267,7 +272,8 @@ fn adaptive_workers_replace_camera_tile_policy_without_changing_planar_config() 
     {
         // Force this fixed capture through the camera. Repeating its scene
         // makes a stale projection or pixel key visible in the raster count.
-        let mut policy = NativeAdaptiveCamera::new(camera.clone(), false, None);
+        let mut policy =
+            NativeAdaptiveCamera::new(camera.clone(), output_policy(2.0 * FRAME_HEIGHT), None);
         if let Some(tiling) = tiling {
             policy = policy.with_camera_tiling(tiling);
         }
@@ -313,7 +319,8 @@ fn adaptive_workers_replace_camera_tile_policy_without_changing_planar_config() 
 fn native_light_is_read_from_the_sample_and_stale_lights_refuse() {
     let (mut stage, _) = fixture();
     let light = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
-    let policy = NativeAdaptiveCamera::new(camera(), false, Some(light));
+    let policy =
+        NativeAdaptiveCamera::new(camera(), output_policy(2.0 * FRAME_HEIGHT), Some(light));
     let (capture, _) = policy.for_stage(&stage).unwrap();
     assert_eq!(capture.unwrap().light_source_position(), [1.0, 2.0, 3.0]);
     stage.shift(light, [2.0, 3.0, 4.0]);
@@ -331,7 +338,7 @@ fn native_light_is_read_from_the_sample_and_stale_lights_refuse() {
 
 #[test]
 fn route_diagnostics_follow_output_order_despite_worker_completion_order() {
-    let policy = NativeAdaptiveCamera::new(camera(), true, None);
+    let policy = NativeAdaptiveCamera::new(camera(), output_policy(FRAME_HEIGHT), None);
     policy.record(12, Some("later")).unwrap();
     policy.record(10, Some("earlier")).unwrap();
     policy.record(11, None).unwrap();

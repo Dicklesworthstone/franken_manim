@@ -5920,6 +5920,78 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
         .with_counter("python_planar_surface_camera", 1))
 }
 
+/// fm-lrni: ordinary landscape and portrait output retain the planar route,
+/// while live camera changes continue to require projection.
+fn python_portal_planar_aspects_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_planar_aspects")?;
+    let readings = manimlib::run_portal_gauntlet_planar_aspects(&root)
+        .map_err(|error| fail(format!("run Python portal aspect routes: {error}")))?;
+    let resolutions: Vec<_> = readings.iter().map(|reading| reading.resolution).collect();
+    if resolutions != [(854, 480), (480, 854)] {
+        return Err(fail(format!(
+            "portal aspect witness omitted its landscape or portrait output: {resolutions:?}"
+        )));
+    }
+    let mut planar_frames = 0;
+    let mut camera_refusals = 0;
+    for reading in &readings {
+        let (serial_planar, serial_camera, serial_reason) = &reading.serial_routes;
+        let (parallel_planar, parallel_camera, parallel_reason) = &reading.parallel_routes;
+        if reading.frame_count == 0
+            || *serial_planar != reading.frame_count
+            || *parallel_planar != reading.frame_count
+            || *serial_camera != 0
+            || *parallel_camera != 0
+            || serial_reason.is_some()
+            || parallel_reason.is_some()
+            || reading.parallel_teams_used == 0
+            || !reading.readback_matches_file
+            || !reading.serial_matches_parallel
+        {
+            return Err(fail(format!(
+                "portal aspect route or pixel agreement failed: {reading:?}"
+            )));
+        }
+        let mut mutations = Vec::new();
+        for (name, planar, camera, reason) in &reading.camera_mutation_routes {
+            if *planar != 0 || *camera == 0 || reason.is_none() {
+                return Err(fail(format!(
+                    "portal {:?} camera mutation {name} incorrectly retained the planar route: \
+                     planar={planar}, camera={camera}, reason={reason:?}",
+                    reading.resolution
+                )));
+            }
+            mutations.push(name.as_str());
+            camera_refusals += 1;
+        }
+        mutations.sort_unstable();
+        mutations.dedup();
+        if mutations.len() != 3 {
+            return Err(fail(format!(
+                "portal {:?} omitted a camera mutation witness: {mutations:?}",
+                reading.resolution
+            )));
+        }
+        planar_frames += serial_planar + parallel_planar;
+        ctx.event(
+            LogEvent::new("e2e.python.planar_aspect")
+                .field("width", reading.resolution.0)
+                .field("height", reading.resolution.1)
+                .field("serial_planar_frames", *serial_planar)
+                .field("parallel_planar_frames", *parallel_planar)
+                .field("camera_frames", 0_u64)
+                .field("parallel_teams_used", reading.parallel_teams_used)
+                .field("readback_matches_file", "true")
+                .field("serial_matches_parallel", "true")
+                .field("camera_refusals", mutations.len()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("python_planar_aspect_cases", readings.len() as u64)
+        .with_counter("python_planar_aspect_frames", planar_frames)
+        .with_counter("python_planar_aspect_camera_refusals", camera_refusals))
+}
+
 /// Native pure plays must actually reach the bounded worker pipeline while
 /// retaining serial pixels, exact clocks and authored observer fallback.
 fn python_portal_native_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -17047,6 +17119,40 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_portal_planar_aspects.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_planar_aspects_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_planar_aspect_cases", 2),
+            counter_ge("python_planar_aspect_frames", 4),
+            counter_eq("python_planar_aspect_camera_refusals", 6),
+        ],
+        vec![
+            LogExpect::span_present(
+                "e2e.python.planar_aspect",
+                vec![
+                    FieldPred::u64_eq("width", 854),
+                    FieldPred::u64_eq("height", 480),
+                    FieldPred::u64_eq("camera_frames", 0),
+                    FieldPred::str_eq("readback_matches_file", "true"),
+                    FieldPred::str_eq("serial_matches_parallel", "true"),
+                ],
+            ),
+            LogExpect::span_present(
+                "e2e.python.planar_aspect",
+                vec![
+                    FieldPred::u64_eq("width", 480),
+                    FieldPred::u64_eq("height", 854),
+                    FieldPred::u64_eq("camera_frames", 0),
+                    FieldPred::str_eq("readback_matches_file", "true"),
+                    FieldPred::str_eq("serial_matches_parallel", "true"),
+                ],
+            ),
+        ],
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_png_still.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -19008,6 +19114,16 @@ fn python_planar_route_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_planar_route.v1")
         .expect("Python planar route scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_planar_aspects_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_portal_planar_aspects.v1")
+        .expect("non-widescreen Python planar routes are registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

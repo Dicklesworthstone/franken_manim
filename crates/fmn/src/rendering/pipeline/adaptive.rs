@@ -2,8 +2,8 @@
 
 use std::sync::{Arc, Mutex};
 
-use fmn_mobject::{Mob, ProgramKind, Stage};
-use fmn_render::{Camera, CameraConfig, Tiling};
+use fmn_mobject::{Mob, Stage};
+use fmn_render::{Camera, PlanarCapturePolicy, Tiling};
 
 use super::NativeFrameError;
 
@@ -33,20 +33,20 @@ struct Counts {
 pub struct NativeAdaptiveCamera {
     camera: Camera,
     camera_tiling: Option<Tiling>,
-    planar_map_matches: bool,
+    planar_policy: PlanarCapturePolicy,
     light_mob: Option<Mob>,
     counts: Arc<Mutex<Counts>>,
 }
 
 impl NativeAdaptiveCamera {
-    /// Snapshot the camera and the portal's existing planar-map admission.
+    /// Snapshot the camera and the output's frozen planar admission policy.
     /// `light_mob` must refer to the segment's Stage if provided.
     #[must_use]
-    pub fn new(camera: Camera, planar_map_matches: bool, light_mob: Option<Mob>) -> Self {
+    pub fn new(camera: Camera, planar_policy: PlanarCapturePolicy, light_mob: Option<Mob>) -> Self {
         Self {
             camera,
             camera_tiling: None,
-            planar_map_matches,
+            planar_policy,
             light_mob,
             counts: Arc::new(Mutex::new(Counts::default())),
         }
@@ -99,7 +99,7 @@ impl NativeAdaptiveCamera {
                 .set_light_source_position(stage.get_center(light))
                 .map_err(NativeFrameError::Camera)?;
         }
-        let refusal = planar_capture_refusal(stage, &camera, self.planar_map_matches);
+        let refusal = self.planar_policy.refusal(stage, &camera);
         Ok((refusal.map(|_| camera), refusal))
     }
 
@@ -126,66 +126,6 @@ impl NativeAdaptiveCamera {
         }
         Ok(())
     }
-}
-
-/// Explain why a capture needs camera projection rather than the retained
-/// planar renderer. File output, in-memory readback and pure-segment workers
-/// share this decision so observing a scene selects the same raster route.
-#[must_use]
-pub fn planar_capture_refusal(
-    stage: &Stage,
-    camera: &Camera,
-    planar_map_matches: bool,
-) -> Option<&'static str> {
-    let frame = camera.frame();
-    let baseline = CameraConfig::default().frame;
-    if !planar_map_matches {
-        Some("output aspect differs from the default frame")
-    } else if frame.center() != baseline.center()
-        || frame.shape() != baseline.shape()
-        || frame.orientation() != baseline.orientation()
-        || frame.field_of_view() != baseline.field_of_view()
-    {
-        Some("camera frame differs from the default frame")
-    } else {
-        planar_stage_refusal(stage)
-    }
-}
-
-/// Explain why captured geometry needs Lumen's camera route. The same rule
-/// guards planar FMTL export and ordinary portal captures, so pure offload
-/// cannot change accepted geometry or guess that a whole animation stays 2D.
-#[must_use]
-pub fn planar_stage_refusal(stage: &Stage) -> Option<&'static str> {
-    for item in stage.draw_plan().items() {
-        let Some(entry) = stage.get(item.mob) else {
-            return Some("stale drawable");
-        };
-        let uniforms = entry.uniforms();
-        if item.key.program != ProgramKind::Vector
-            || uniforms.depth_test
-            || uniforms.shading != [0.0; 3]
-            || uniforms.clip_planes != [[0.0; 4]; 4]
-        {
-            return Some(
-                "depth, raster primitives, lighting or clip planes require a camera-bearing bundle",
-            );
-        }
-        if uniforms.is_fixed_in_frame != 0.0 || uniforms.scale_stroke_with_zoom {
-            return Some("fixed-in-frame or zoom-scaled strokes require a camera-bearing bundle");
-        }
-        let placement = entry.placement();
-        if let Some(points) = entry.buffer.read_column("point")
-            && points
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .any(|point| placement.apply_point(point.map(f64::from))[2] != 0.0)
-        {
-            return Some("nonplanar geometry requires a camera-bearing bundle");
-        }
-    }
-    None
 }
 
 #[cfg(test)]

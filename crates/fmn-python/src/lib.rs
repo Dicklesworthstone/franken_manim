@@ -477,10 +477,9 @@ struct PortalFrameSession {
     next_sequence: u64,
     single_frame: bool,
     timeline: OutputTimeline,
-    /// The default camera frame. While the scene's frame equals it and the
-    /// output aspect is the frame's, planar vector content takes the retained
-    /// 2D route (tile cache, adaptive AA) instead of the camera route.
-    planar_map_matches: bool,
+    /// Canonical camera admission for this output's aspect and frame height,
+    /// shared with readback and every native frame worker.
+    planar_policy: fmn_render::PlanarCapturePolicy,
     routes: PortalRoutes,
 }
 
@@ -632,14 +631,12 @@ impl PortalFrameSession {
             ..CameraConfig::default()
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        // The retained 2D route maps scene units by output height over the
-        // configured frame height with the origin at the centre. It draws what
-        // the camera route draws only while the scene frame is the default one
-        // and that frame has the output's aspect.
-        let planar_baseline = CameraConfig::default().frame;
-        let [frame_width, frame_height] = planar_baseline.shape();
-        let planar_map_matches = (frame_height - config.sizes.frame_height).abs() < 1e-12
-            && (frame_width - frame_height * f64::from(width) / f64::from(height)).abs() < 1e-9;
+        // The canonical frame follows the actual output aspect. Capture its
+        // admission independently of later live camera edits so workers and
+        // serial captures make the same decision for every frame.
+        let planar_policy =
+            fmn_render::PlanarCapturePolicy::for_output((width, height), config.sizes.frame_height)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
         // ubs:ignore — compares a public output-format enum, not a secret.
         let pixel_format = wire.frame_format();
         let output_layout = FrameLayout::tight(pixel_format, width, height)
@@ -856,7 +853,7 @@ impl PortalFrameSession {
                 next_sequence: 0,
                 single_frame,
                 timeline: OutputTimeline::new(single_frame),
-                planar_map_matches,
+                planar_policy,
                 // Team zero retains the session renderer. Eligible pure plays
                 // use the other planned teams through NativeFramePipeline.
                 routes: PortalRoutes {
@@ -938,11 +935,10 @@ impl PortalFrameSession {
         // fm-sq8.11: planar vector content under the default camera frame
         // takes Lumen's retained 2D route, the one standalone fmn uses (tile
         // cache, adaptive AA, revisioned plan reuse); its +Y-up screen map
-        // renders upright since fm-sq8.9. Anything else (a moved or rotated
-        // frame, another output aspect, depth, lighting, clip planes, raster
-        // primitives, non-planar points) keeps the camera route.
-        let refusal =
-            fmn::rendering::planar_capture_refusal(stage, &self.camera, self.planar_map_matches);
+        // renders upright since fm-sq8.9. Moved, zoomed or rotated frames,
+        // depth, lighting, clip planes, raster primitives and nonplanar points
+        // keep the camera route.
+        let refusal = self.planar_policy.refusal(stage, &self.camera);
         self.routes.performance.capture_prepare_ns += portal_elapsed_ns(preparation_start);
         let render_start = Instant::now();
         if let Some(reason) = refusal {
@@ -1033,7 +1029,7 @@ impl PortalFrameSession {
         let config = self.renderer.config();
         let camera = fmn::rendering::NativeAdaptiveCamera::new(
             self.camera.clone(),
-            self.planar_map_matches,
+            self.planar_policy,
             self.light_mob,
         )
         .with_camera_tiling(self.camera_tiling);
@@ -14251,6 +14247,140 @@ pub struct PortalPlanarRouteGauntletReport {
     pub conversion_reuses: u64,
 }
 
+/// File, worker and readback agreement at one canonical output aspect.
+#[cfg(any(test, feature = "gauntlet"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalPlanarAspectReading {
+    /// The actual full-size file and readback output dimensions.
+    pub resolution: (u32, u32),
+    /// Completed frames in each serial and pure-worker sequence.
+    pub frame_count: u64,
+    /// `(planar frames, camera frames, first camera reason)` on the owner.
+    pub serial_routes: (u64, u64, Option<String>),
+    /// The same counters when the play uses native frame workers.
+    pub parallel_routes: (u64, u64, Option<String>),
+    /// Render teams actually used, rather than merely planned.
+    pub parallel_teams_used: u64,
+    /// Final-pose and moved/zoomed/rotated readbacks match decoded file pixels.
+    pub readback_matches_file: bool,
+    /// Every published serial frame matches its pure-worker counterpart.
+    pub serial_matches_parallel: bool,
+    /// `(mutation, planar frames, camera frames, first reason)` for stills
+    /// with each output dimension halved, preserving the exact aspect.
+    pub camera_mutation_routes: Vec<(String, u64, u64, Option<String>)>,
+}
+
+/// Exercise the real portal's retained route at 854×480 and 480×854, including
+/// pure plays, file/readback pixel agreement and live camera fallback.
+///
+/// # Errors
+/// A render, publication, PNG decode, admission or observer assertion failed.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_planar_aspects(
+    directory: &std::path::Path,
+) -> Result<Vec<PortalPlanarAspectReading>, String> {
+    let decode = |path: &std::path::Path, resolution: (u32, u32)| {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("read aspect witness {}: {error}", path.display()))?;
+        let image = fmn_codec::png::decode(&bytes, &fmn_codec::png::PngLimits::default())
+            .map_err(|error| format!("decode aspect witness {}: {error}", path.display()))?;
+        if (image.width, image.height) != resolution {
+            return Err(format!(
+                "aspect witness {} has dimensions {:?}, expected {resolution:?}",
+                path.display(),
+                (image.width, image.height),
+            ));
+        }
+        Ok(image.rgba)
+    };
+    with_python_test_module("planar output aspects", |py, _module, globals| {
+        let source = CString::new(include_str!("../tests/planar_aspects.py"))
+            .expect("planar aspect suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let readings = globals
+            .get_item("run_planar_aspect_acceptance")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "planar aspect acceptance entry point is missing".to_owned())?
+            .call1((directory.to_string_lossy().as_ref(),))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let mut output = Vec::new();
+        for reading in readings.try_iter().map_err(|error| error.to_string())? {
+            let reading = reading.map_err(|error| error.to_string())?;
+            let get = |name: &str| {
+                reading
+                    .get_item(name)
+                    .map_err(|error| format!("planar aspect report {name}: {error}"))
+            };
+            let resolution: (u32, u32) = get("resolution")?
+                .extract()
+                .map_err(|error| error.to_string())?;
+            let frame_count: u64 = get("frame_count")?
+                .extract()
+                .map_err(|error| error.to_string())?;
+            let root = directory.join(format!("{}x{}", resolution.0, resolution.1));
+            let mut serial_matches_parallel = true;
+            let mut first_pixels = Vec::new();
+            let mut last_pixels = Vec::new();
+            for frame in 0..frame_count {
+                let name = format!("frame_{frame:06}.png");
+                let serial = decode(&root.join("serial").join(&name), resolution)?;
+                let parallel = decode(&root.join("parallel").join(&name), resolution)?;
+                serial_matches_parallel &= serial == parallel;
+                if frame == 0 {
+                    first_pixels.clone_from(&parallel);
+                }
+                last_pixels = parallel;
+            }
+            if first_pixels.is_empty() || first_pixels == last_pixels {
+                return Err(format!(
+                    "planar aspect {resolution:?} did not publish changing animation pixels"
+                ));
+            }
+            let readback: Vec<u8> = get("readback")?
+                .extract()
+                .map_err(|error| error.to_string())?;
+            let mut readback_matches_file = readback == last_pixels;
+            let camera_mutation_routes: Vec<(String, u64, u64, Option<String>)> =
+                get("camera_mutation_routes")?
+                    .extract()
+                    .map_err(|error| error.to_string())?;
+            let mutation_readbacks: Vec<Vec<u8>> = get("camera_mutation_readbacks")?
+                .extract()
+                .map_err(|error| error.to_string())?;
+            if camera_mutation_routes.len() != mutation_readbacks.len() {
+                return Err("planar aspect mutation report omitted a readback".to_owned());
+            }
+            for ((name, ..), pixels) in camera_mutation_routes.iter().zip(mutation_readbacks) {
+                let file = decode(
+                    &root.join(name).join("frame_000000.png"),
+                    (resolution.0 / 2, resolution.1 / 2),
+                )?;
+                readback_matches_file &= pixels == file;
+            }
+            output.push(PortalPlanarAspectReading {
+                resolution,
+                frame_count,
+                serial_routes: get("serial_routes")?
+                    .extract()
+                    .map_err(|error| error.to_string())?,
+                parallel_routes: get("parallel_routes")?
+                    .extract()
+                    .map_err(|error| error.to_string())?,
+                parallel_teams_used: get("parallel_teams_used")?
+                    .extract()
+                    .map_err(|error| error.to_string())?,
+                readback_matches_file,
+                serial_matches_parallel,
+                camera_mutation_routes,
+            });
+        }
+        Ok(output)
+    })
+}
+
 /// One semantic-oracle reading from the portal suite (fm-5wq.46).
 #[cfg(feature = "gauntlet")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15220,6 +15350,50 @@ mod tests {
                 .inspect_err(|error| error.print(py))
                 .expect("decoded native GIF/y4m/WAV acceptance suite");
         });
+    }
+
+    #[test]
+    fn nonstandard_output_aspects_keep_planar_file_readback_and_worker_agreement() {
+        let directory = std::env::temp_dir().join(format!(
+            "fmn-planar-aspects-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the test host clock is after the Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create a fresh planar aspect test directory");
+        let readings = run_portal_gauntlet_planar_aspects(&directory)
+            .expect("native planar aspect acceptance");
+        assert_eq!(
+            readings
+                .iter()
+                .map(|row| row.resolution)
+                .collect::<Vec<_>>(),
+            [(854, 480), (480, 854)]
+        );
+        for row in readings {
+            assert_eq!(row.frame_count, 6);
+            assert_eq!(row.serial_routes, (row.frame_count, 0, None));
+            assert_eq!(row.parallel_routes, row.serial_routes);
+            assert!(row.parallel_teams_used > 0);
+            assert!(row.serial_matches_parallel, "{:?}", row.resolution);
+            assert!(row.readback_matches_file, "{:?}", row.resolution);
+            assert_eq!(
+                row.camera_mutation_routes
+                    .iter()
+                    .map(|(name, ..)| name.as_str())
+                    .collect::<Vec<_>>(),
+                ["move", "zoom", "rotate"]
+            );
+            for (_, planar, camera, reason) in row.camera_mutation_routes {
+                assert_eq!((planar, camera), (0, 1));
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("camera frame differs from the default frame")
+                );
+            }
+        }
     }
 
     #[test]
