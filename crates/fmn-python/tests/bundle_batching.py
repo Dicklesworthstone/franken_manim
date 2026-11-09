@@ -99,6 +99,38 @@ class BundleBatching(unittest.TestCase):
         self.assertFalse(report.outcomes[1].destination.exists())
         self.assertTrue(report.outcomes[2].destination.is_file())
 
+    def test_compact_batch_matches_single_export_and_resumes_without_scene_execution(self):
+        for camera, cls in ((False, Planar), (True, Camera)):
+            with self.subTest(camera=camera):
+                directory = f"compact-{camera}"
+                journal = self.root / f"compact-{camera}.json"
+                jobs = [RenderJob("Second", cls), RenderJob("First", cls)]
+                single_path = self.root / f"compact-single-{camera}.fmtl"
+                single = export_bundle(cls, single_path, storage="compact", camera=camera,
+                                       resolution=(96, 54), fps=8)
+                expected = single_path.read_bytes()
+                common = dict(bundle_storage="compact", bundle_camera=camera,
+                              checkpoint=journal, resume_key="native-compact-v1",
+                              bundle_limits={"max_output_bytes": len(expected)})
+                report = self.batch(jobs, directory=directory, **common)
+                self.assertTrue(report.ok)
+                for row in report.outcomes:
+                    self.assertEqual(row.destination.read_bytes(), expected)
+                    self.assertEqual(row.result.digest, single.digest)
+                    self.assertEqual(row.result.storage, "compact")
+                    self.assertEqual(row.result.as_dict()["fmtl_minor"], 3)
+                CONSTRUCTIONS.clear()
+                EXECUTIONS.clear()
+                resumed = self.batch(jobs, directory=directory, resume=True, **common)
+                self.assertEqual(resumed.as_dict(), report.as_dict())
+                self.assertEqual(CONSTRUCTIONS, [])
+                self.assertEqual(EXECUTIONS, [])
+                with self.assertRaisesRegex(ValueError, "plan|options"):
+                    self.batch(jobs, directory=directory, resume=True,
+                               bundle_compact_limits={"max_snapshot_work_bytes": 1024 * 1024}, **common)
+                self.assertEqual(CONSTRUCTIONS, [])
+                self.assertEqual(EXECUTIONS, [])
+
     def test_fail_fast_and_interrupt_stop_without_constructing_later_scene(self):
         for cls, error in ((Broken, BatchRenderError), (Stop, KeyboardInterrupt)):
             with self.subTest(scene=cls.__name__):

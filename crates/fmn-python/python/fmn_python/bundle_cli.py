@@ -12,7 +12,8 @@ import os
 from pathlib import Path
 import sys
 
-from .bundle_export import BundleExportSession, _validated_audio_options, require_bundle_capability
+from .bundle_export import (BundleExportSession, _validated_audio_options,
+                            _validated_storage, require_bundle_capability)
 from .console_rendering import _tokens, _VALUE_FLAGS, _message, _MAX_SELECTED_SCENES, _output_paths, _single_destination
 from .batch_cli import _emit_result
 from .checkpoint_cli import CHECKPOINT_HELP, take_checkpoint_options
@@ -24,11 +25,14 @@ from .source_job_file import JOBS_FILE_FLAG, JOBS_FILE_HELP, load_source_jobs, t
 BUNDLE_HELP = """Portable scene bundles:
   fmn-python [--robot] SOURCE.py [SCENE] --format fmtl
              [--bundle-camera] [--bundle-audio] [--resolution WIDTHxHEIGHT] [--fps FPS]
+             [--bundle-storage recorded|compact]
              [--video_dir DIRECTORY | --output FILE.fmtl] [--file_name NAME]
   fmn-python [--robot] SOURCE.py SCENE1 SCENE2 --format fmtl
-             [--bundle-camera] [--bundle-audio] [--keep-going] [--video_dir DIRECTORY]
+             [--bundle-camera] [--bundle-audio] [--bundle-storage recorded|compact]
+             [--keep-going] [--video_dir DIRECTORY]
   fmn-python [--robot] SOURCE.py --write_all --format fmtl
-             [--bundle-camera] [--bundle-audio] [--keep-going] [--video_dir DIRECTORY]
+             [--bundle-camera] [--bundle-audio] [--bundle-storage recorded|compact]
+             [--keep-going] [--video_dir DIRECTORY]
 
 Without --workers, setup/construct/tear_down runs once in the host interpreter.
 With multiple named scenes or --write_all, --workers 1..64 runs each scene in a
@@ -63,6 +67,21 @@ its separate 256 MiB limit. No transcoder is invoked by bundle export. Compresse
 cues, partial playback and source certification remain explicit refusals.
 Audio settings are bound into batch checkpoint identity. No-cue scenes retain
 ordinary picture-only bundles, even when --bundle-audio is selected.
+--bundle-storage compact stores the same observed frames in lossless minor-3
+blocks. Every authored callback still runs during export; playback remains
+code-free. Camera capture and native WAV soundtracks also support this mode.
+The default recorded storage and its cumulative capture budget are unchanged.
+Compact settings (unsigned decimal, require --bundle-storage compact):
+  --bundle-max-retained-bytes BYTES       1..268435456; default 268435456.
+  --bundle-max-snapshot-bytes BYTES       1..67108864; default 67108864.
+  --bundle-max-snapshot-work-bytes BYTES  1..17179869184; default 17179869184.
+Retained bytes include encoded blocks/tables and camera samples. Snapshot work
+counts full canonical bytes for every captured frame, including unchanged ones;
+the individual snapshot cap is enforced during encoding. The complete artifact
+keeps its separate 256 MiB output cap. These caps apply independently to each
+scene, including --workers and --jobs-file batches. Checkpoint/resume binds the
+normalized storage choice and every compact budget; changed settings refuse
+before scene execution. Matching completed bundles are hash-verified and reused.
 Use the same --resolution for exact replay; camera bundles also record aspect.
 """
 
@@ -78,22 +97,30 @@ _AUDIO_VALUE_FLAGS = {
     "--bundle-audio-max-bytes": "max_audio_bytes",
 }
 
+_STORAGE_VALUE_FLAGS = {
+    "--bundle-storage": "storage",
+    "--bundle-max-retained-bytes": "max_retained_bytes",
+    "--bundle-max-snapshot-bytes": "max_snapshot_bytes",
+    "--bundle-max-snapshot-work-bytes": "max_snapshot_work_bytes",
+}
 
-def _take_audio_options(arguments):
+
+def _take_capture_options(arguments):
     """Separate bundle-only arguments without mistaking option values for flags.
 
     Keep malformed values as data until try_bundle_cli owns error/robot output.
     A missing number must not consume a following --robot or --help switch.
     """
-    remaining, switches, values = [], [], []
+    remaining, switches, values, storage = [], [], [], []
     index = 0
     while index < len(arguments):
         token = arguments[index]
-        if token in _AUDIO_VALUE_FLAGS:
+        if token in _AUDIO_VALUE_FLAGS or token in _STORAGE_VALUE_FLAGS:
             value = arguments[index + 1] if index + 1 < len(arguments) else None
             if value is not None and value.startswith("--"):
                 value = None
-            values.append((token, value))
+            destination = values if token in _AUDIO_VALUE_FLAGS else storage
+            destination.append((token, value))
             index += 1 if value is None else 2
         elif token in _VALUE_FLAGS:
             remaining.extend(arguments[index:index + 2])
@@ -104,7 +131,26 @@ def _take_audio_options(arguments):
         else:
             remaining.append(token)
             index += 1
-    return remaining, switches, values
+    return remaining, switches, values, storage
+
+
+def _storage_configuration(values):
+    mode, limits, seen = "recorded", {}, set()
+    for flag, value in values:
+        if flag in seen:
+            raise ValueError(f"{flag} must not be repeated")
+        seen.add(flag)
+        key = _STORAGE_VALUE_FLAGS[flag]
+        if key == "storage":
+            if value not in ("recorded", "compact"):
+                raise ValueError("--bundle-storage requires recorded or compact")
+            mode = value
+        else:
+            if (value is None or not value.isascii() or not value.isdecimal()
+                    or len(value) > 20):
+                raise ValueError(f"{flag} requires an unsigned decimal integer")
+            limits[key] = int(value)
+    return mode, _validated_storage(mode, limits if limits else None)
 
 
 def _audio_configuration(switches, values):
@@ -132,14 +178,15 @@ def _audio_configuration(switches, values):
 def _bundle_options(arguments):
     """Recognize an actual format option, not 'fmtl' inside another value."""
     normalized, formats = [], []
-    value_flags = _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys() | {JOBS_FILE_FLAG}
+    capture_flags = _AUDIO_VALUE_FLAGS.keys() | _STORAGE_VALUE_FLAGS.keys()
+    value_flags = _VALUE_FLAGS | capture_flags | {JOBS_FILE_FLAG}
     index = 0
     while index < len(arguments):
         token = arguments[index]
         if token in value_flags:
             normalized.append(token)
             if (index + 1 < len(arguments) and not
-                    (token in _AUDIO_VALUE_FLAGS and arguments[index + 1].startswith("--"))):
+                    (token in capture_flags and arguments[index + 1].startswith("--"))):
                 value = arguments[index + 1]
                 normalized.append(value)
                 if token == "--format":
@@ -167,14 +214,15 @@ def try_bundle_cli(native, arguments):
     from .parallel_cli_options import emit_deadline_failure, start_batch_budget
 
     arguments, formats = _bundle_options(arguments)
-    arguments, job_files = take_jobs_file_options(arguments, _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys())
-    arguments, audio_switches, audio_values = _take_audio_options(arguments)
+    arguments, job_files = take_jobs_file_options(
+        arguments, _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys() | _STORAGE_VALUE_FLAGS.keys())
+    arguments, audio_switches, audio_values, storage_values = _take_capture_options(arguments)
     native_options, selectors, switches = _tokens(
         arguments, {"--robot", "--bundle-camera", "--write_all", "-a", "--keep-going"}
     )
     camera = "--bundle-camera" in switches
     audio = bool(audio_switches)
-    if "fmtl" not in formats and not camera and not audio and not audio_values:
+    if "fmtl" not in formats and not camera and not audio and not audio_values and not storage_values:
         return None
     robot = "--robot" in switches
     if "--help" in switches or "-h" in switches:
@@ -191,6 +239,7 @@ def try_bundle_cli(native, arguments):
         if switches.count("--robot") > 1 or switches.count("--bundle-camera") > 1:
             raise ValueError("--robot and --bundle-camera must not be repeated")
         audio_options = _audio_configuration(audio_switches, audio_values)
+        storage, compact_limits = _storage_configuration(storage_values)
         write_all = switches.count("--write_all") + switches.count("-a")
         keep_going = switches.count("--keep-going")
         if write_all > 1 or keep_going > 1:
@@ -240,7 +289,7 @@ def try_bundle_cli(native, arguments):
                 raise native._CapabilityError(
                     f"{token} is not supported for full-scene FMTL export; use the PNG/video path"
                 )
-        require_bundle_capability(native, camera=camera, audio=audio)
+        require_bundle_capability(native, camera=camera, audio=audio, storage=storage)
         parser_options = list(native_options)
         parser_options[parser_options.index("--format") + 1] = "png_sequence"
         # Only common syntax/config validation is delegated. Never render PNG.
@@ -311,6 +360,8 @@ def try_bundle_cli(native, arguments):
                     *batch_args,
                     format="fmtl", resolution=(width, height), fps=fps,
                     bundle_camera=camera, continue_on_error=bool(keep_going),
+                    **({"bundle_storage": "compact", "bundle_compact_limits": compact_limits}
+                       if storage == "compact" else {}),
                     **({"bundle_audio": True, "bundle_audio_options": audio_options} if audio else {}),
                     max_jobs=_MAX_SELECTED_SCENES, **recovery,
                     **({} if configuration is None else {"_configuration": configuration}),
@@ -336,6 +387,7 @@ def try_bundle_cli(native, arguments):
                 session = BundleExportSession(
                     scene, destination, resolution=(width, height), fps=fps,
                     camera=camera, _native=native,
+                    storage=storage, compact_limits=compact_limits,
                     **({"audio": True, **audio_options} if audio else {}),
                 )
                 with session:

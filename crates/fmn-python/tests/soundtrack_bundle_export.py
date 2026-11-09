@@ -100,6 +100,27 @@ with tempfile.TemporaryDirectory(prefix="fmn-python-audible-") as temporary:
             raise AssertionError("combined picture/audio byte budget ignored")
         assert not limited.exists()
 
+        compact_scene = Selected()
+        compact_path = root / f"compact-sound-{camera}.fmtl"
+        compact = export_bundle(compact_scene, compact_path, storage="compact", audio=True,
+                                camera=camera, audio_sample_rate=8, audio_threads=4,
+                                resolution=(64, 36), fps=8)
+        compact_data = compact_path.read_bytes()
+        assert compact.as_dict()["storage"] == "compact"
+        assert compact.as_dict()["fmtl_minor"] == 2
+        assert compact.as_dict()["picture_fmtl_minor"] == 3
+        assert compact.camera_track == camera and compact_scene.construct_calls == 1
+        assert _test_bundle_pcm(compact_data) == _test_bundle_pcm(reference)
+        compact_updates = compact_scene.updates
+        assert replay(compact_data, [3, 0, 2, 1], 64, 36, 4) == [pictures[i] for i in (3, 0, 2, 1)]
+        assert compact_scene.updates == compact_updates
+        compact_silent = root / f"compact-silent-{camera}.fmtl"
+        silent_result = export_bundle(Silent, compact_silent, storage="compact", audio=True,
+                                     camera=camera, resolution=(64, 36), fps=8)
+        assert silent_result.as_dict()["fmtl_minor"] == 3
+        assert silent_result.soundtrack is None
+        assert _test_bundle_pcm(compact_silent.read_bytes()) is None
+
     # Native resampling must match the existing direct WAV route, not just our
     # small analytic sample fixture. A nonexistent ffmpeg path cannot affect WAV.
     class NoExternalDecoder(Narrated):

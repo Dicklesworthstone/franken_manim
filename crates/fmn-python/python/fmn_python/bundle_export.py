@@ -7,6 +7,7 @@ format authority. Exported bundles contain no Python executable or callback.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Mapping
 from dataclasses import dataclass
 import importlib
 import os
@@ -17,6 +18,11 @@ from .rendering import RenderSession, _positive_integer
 from .scene_execution import _note
 
 _CAP = 256 * 1024 * 1024
+_COMPACT_DEFAULTS = {
+    "max_retained_bytes": _CAP,
+    "max_snapshot_bytes": 64 * 1024 * 1024,
+    "max_snapshot_work_bytes": 16 * 1024 * 1024 * 1024,
+}
 _OWNER = "_fmn_owned_render_session"
 _SEGMENTS = "_fmn_subdivision_session"  # Existing play/wait segment-observer protocol.
 
@@ -43,6 +49,7 @@ class BundleExportResult:
     resolution: tuple[int, int]
     camera_track: bool = False
     soundtrack: BundleSoundtrackInfo | None = None
+    storage: str = "recorded"
 
     def as_dict(self) -> dict[str, Any]:
         result = {"schema": "fmn.python-bundle-export", "version": 1,
@@ -52,17 +59,24 @@ class BundleExportResult:
                 "replay_resolution": list(self.resolution), "certified_source": False}
         if self.camera_track:
             result.update(camera_track=True, fmtl_minor=1)
+        if self.storage == "compact":
+            result.update(storage="compact", fmtl_minor=3)
         if self.soundtrack is not None:
             result.update(soundtrack=self.soundtrack.as_dict(), fmtl_minor=2)
+            if self.storage == "compact":
+                result["picture_fmtl_minor"] = 3
         return result
 
 
-def require_bundle_capability(native, *, camera=False, audio=False):
+def require_bundle_capability(native, *, camera=False, audio=False, storage="recorded"):
     if type(camera) is not bool:
         raise TypeError("camera must be a bool")
     if type(audio) is not bool:
         raise TypeError("audio must be a bool")
-    begin = ("_portal_begin_soundtrack_bundle" if audio else
+    if storage not in ("recorded", "compact"):
+        raise ValueError("bundle storage must be 'recorded' or 'compact'")
+    begin = ("_portal_begin_compact_bundle" if storage == "compact" else
+             "_portal_begin_soundtrack_bundle" if audio else
              "_portal_begin_camera_bundle" if camera else "_portal_begin_bundle")
     finish = "_portal_finish_soundtrack_bundle" if audio else "_portal_finish_bundle"
     for name in (begin, "_portal_bundle_segment", finish):
@@ -78,6 +92,39 @@ def _validated_limits(*, max_frames=1_000_000, max_capture_bytes=_CAP, max_outpu
         "max_capture_bytes": _positive_integer(max_capture_bytes, "max_capture_bytes", _CAP),
         "max_output_bytes": _positive_integer(max_output_bytes, "max_output_bytes", _CAP),
     }
+
+
+def _validated_storage(storage="recorded", compact_limits=None):
+    """Compact limits do not redefine the legacy cumulative capture budget."""
+    if storage not in ("recorded", "compact"):
+        raise ValueError("bundle storage must be 'recorded' or 'compact'")
+    if storage == "recorded":
+        if compact_limits is not None:
+            raise ValueError("compact_limits require storage='compact'")
+        return None
+    supplied = {} if compact_limits is None else dict(compact_limits)
+    unknown = set(supplied) - _COMPACT_DEFAULTS.keys()
+    if unknown:
+        raise ValueError("unknown compact recording limit: " + ", ".join(sorted(map(repr, unknown))))
+    return {
+        key: _positive_integer(supplied.get(key, default), key, default)
+        for key, default in _COMPACT_DEFAULTS.items()
+    }
+
+
+def _validated_batch_storage(*, storage="recorded", compact_limits=None, limits=None):
+    """Freeze recording admission without changing legacy journal options."""
+    if limits is not None and not isinstance(limits, Mapping):
+        raise TypeError("bundle_limits must be a mapping or None")
+    if compact_limits is not None and not isinstance(compact_limits, Mapping):
+        raise TypeError("bundle_compact_limits must be a mapping or None")
+    capture = _validated_limits(**({} if limits is None else dict(limits)))
+    compact = _validated_storage(storage, compact_limits)
+    if compact is None:
+        return capture, {}
+    if capture["max_capture_bytes"] != _CAP:
+        raise ValueError("max_capture_bytes applies to recorded storage; use bundle_compact_limits")
+    return capture, {"bundle_storage": "compact", "bundle_compact_limits": compact}
 
 
 def _validated_audio_options(*, audio=False, audio_sample_rate=48_000, audio_channels=2,
@@ -119,13 +166,21 @@ class BundleExportSession:
     With audio=True, native WAV cues are mixed into a self-contained minor-2
     soundtrack. No transcoder runs during export. Arbitrary Python source
     effects are not certified by exporting their observed pictures.
+    storage="compact" records the same captures using lossless minor-3 blocks;
+    compact_limits separately bounds retained bytes, one snapshot and cumulative
+    snapshot work. The legacy max_capture_bytes option belongs to recorded storage.
     """
     def __init__(self, scene, destination, *, resolution=None, fps=None, camera=False,
                  max_frames=1_000_000, max_capture_bytes=_CAP, max_output_bytes=_CAP,
                  audio=False, audio_sample_rate=48_000, audio_channels=2,
-                 audio_threads=1, max_audio_bytes=64 * 1024 * 1024, _native=None):
+                 audio_threads=1, max_audio_bytes=64 * 1024 * 1024,
+                 storage="recorded", compact_limits=None, _native=None):
         native = importlib.import_module("manimlib") if _native is None else _native
-        require_bundle_capability(native, camera=camera, audio=audio)
+        self._compact_limits = _validated_storage(storage, compact_limits)
+        if storage == "compact" and max_capture_bytes != _CAP:
+            raise ValueError("max_capture_bytes applies to recorded storage; use compact_limits")
+        require_bundle_capability(native, camera=camera, audio=audio, storage=storage)
+        self.storage = storage
         self._audio_options = _validated_audio_options(
             audio=audio, audio_sample_rate=audio_sample_rate, audio_channels=audio_channels,
             audio_threads=audio_threads, max_audio_bytes=max_audio_bytes)
@@ -178,7 +233,15 @@ class BundleExportSession:
         arguments = (self.scene, str(self.destination), *self.resolution, self.fps,
                      self._configuration.seed, self.max_frames, self.max_capture_bytes,
                      self.max_output_bytes)
-        if self._audio:
+        if self.storage == "compact":
+            self._native._portal_begin_compact_bundle(
+                self.scene, str(self.destination), *self.resolution, self.fps,
+                self._configuration.seed, self.max_frames, self.max_output_bytes,
+                self._camera_track, self._audio,
+                *(self._compact_limits[key] for key in _COMPACT_DEFAULTS),
+                *self._audio_options,
+            )
+        elif self._audio:
             self._native._portal_begin_soundtrack_bundle(
                 *arguments, self._camera_track, *self._audio_options)
         else:
@@ -266,7 +329,8 @@ class BundleExportSession:
                 self._artifact_published = True
             path, frames, segments, size, digest = receipt
             self.result = BundleExportResult(Path(path), frames, segments, size, digest,
-                                             self.fps, self.resolution, self._camera_track, soundtrack)
+                                             self.fps, self.resolution, self._camera_track,
+                                             soundtrack, self.storage)
             self._state = "finished"
         except BaseException as primary:
             self._abort_preserving(primary)
@@ -284,8 +348,18 @@ def export_bundle(scene, destination, *, scene_kwargs=None, **options):
     the same ownership, capture budgets and atomic create-only publication.
     """
     native = importlib.import_module("manimlib")
+    compact_limits = _validated_storage(options.get("storage", "recorded"), options.get("compact_limits"))
+    if compact_limits is not None:
+        # Preserve the checked values even if the caller supplied an iterator
+        # or a mapping that authored construction could subsequently mutate.
+        options["compact_limits"] = compact_limits
+    if options.get("storage") == "compact" and options.get("max_capture_bytes", _CAP) != _CAP:
+        raise ValueError("max_capture_bytes applies to recorded storage; use compact_limits")
+    _validated_limits(**{key: options[key] for key in (
+        "max_frames", "max_capture_bytes", "max_output_bytes") if key in options})
     require_bundle_capability(native, camera=options.get("camera", False),
-                              audio=options.get("audio", False))
+                              audio=options.get("audio", False),
+                              storage=options.get("storage", "recorded"))
     _validated_audio_options(**{key: options[key] for key in (
         "audio", "audio_sample_rate", "audio_channels", "audio_threads", "max_audio_bytes") if key in options})
     if isinstance(scene, type) and issubclass(scene, native.Scene):

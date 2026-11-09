@@ -74,6 +74,35 @@ with tempfile.TemporaryDirectory(prefix="fmn-python-fmtl-") as temporary:
             raise AssertionError("output budget did not reject encoding")
         assert not too_small.exists()
 
+        # Storage changes independently of Python callbacks, the frame clock,
+        # render-only projection and the direct-render oracle above.
+        compact_scene = Authored()
+        compact_path = root / f"compact-{fps}.fmtl"
+        compact = export_bundle(compact_scene, compact_path, storage="compact",
+                                resolution=(96, 54), fps=fps)
+        compact_data = compact_path.read_bytes()
+        assert compact.as_dict()["fmtl_minor"] == 3
+        assert compact.as_dict()["storage"] == "compact"
+        assert (compact.frame_count, compact.segment_count) == (receipt.frame_count, receipt.segment_count)
+        assert compact_scene.calls == calls
+        assert _test_bundle_frames(compact_data, indices[::-1], 96, 54, 4) == replay[::-1]
+        assert compact_scene.calls == calls, "compact replay executed authored callbacks"
+        compact_again = root / f"compact-again-{fps}.fmtl"
+        assert export_bundle(Authored, compact_again, storage="compact",
+                             resolution=(96, 54), fps=fps).digest == compact.digest
+
+    # A canonical-work refusal must not publish the successful prefix, even
+    # though compact storage itself could have admitted its encoded bytes.
+    exhausted = root / "compact-work-exhausted.fmtl"
+    try:
+        export_bundle(Authored, exhausted, storage="compact", fps=24,
+                      compact_limits={"max_snapshot_work_bytes": 1})
+    except RuntimeError as error:
+        assert "snapshot work" in str(error)
+    else:
+        raise AssertionError("compact canonical work budget was ignored")
+    assert not exhausted.exists()
+
     class Static(m.Scene):
         def construct(self):
             self.add(m.Square(fill_opacity=1))

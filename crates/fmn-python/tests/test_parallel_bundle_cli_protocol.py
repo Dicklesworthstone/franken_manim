@@ -194,6 +194,33 @@ class ParallelBundleCliTests(unittest.TestCase):
         self.assertEqual(self.invoke(names=("Beta", "Alpha")), 0)
         self.assertEqual(self.process_calls[1][1]["scene_names"], ["Beta", "Alpha"])
 
+    def test_compact_parameter_jobs_and_resume_keep_storage_and_budgets(self):
+        variants = self.root / "variants.json"
+        variants.write_text(json.dumps({"schema": "fmn-python.source-jobs", "version": 1,
+            "jobs": [{"name": "One", "scene": "Alpha", "scene_kwargs": {"scale": 1}},
+                     {"name": "Two", "scene": "Beta", "scene_kwargs": {"scale": 2}}]}))
+        flags = ("--jobs-file", str(variants), "--bundle-storage=compact", "--bundle-camera",
+                 "--bundle-audio", "--bundle-max-retained-bytes=123456",
+                 "--bundle-max-snapshot-bytes=3456", "--bundle-max-snapshot-work-bytes=9000000000",
+                 "--checkpoint", str(self.checkpoint), "--resume-key", "compact-v1")
+        self.assertEqual(self.invoke(*flags, names=()), 0)
+        options = self.process_calls[0][1]
+        self.assertEqual(options["bundle_storage"], "compact")
+        self.assertEqual(options["bundle_compact_limits"], {"max_retained_bytes": 123456,
+                         "max_snapshot_bytes": 3456, "max_snapshot_work_bytes": 9_000_000_000})
+        rows = self.records[-1]["batch"]["outcomes"]
+        self.assertEqual([row["name"] for row in rows], ["One", "Two"])
+        for row in rows:
+            self.assertEqual(row["result"]["storage"], "compact")
+            self.assertEqual((row["result"]["fmtl_minor"], row["result"]["picture_fmtl_minor"]), (2, 3))
+        original = self.checkpoint.read_bytes()
+        with patch.object(self.h.coordinator, "run_process_jobs", side_effect=AssertionError("no workers")):
+            self.assertEqual(self.invoke(*flags, "--resume", names=()), 0)
+        self.assertEqual(self.records[-1]["batch"]["reused"], ["One", "Two"])
+        self.assertEqual(self.checkpoint.read_bytes(), original)
+        for name in ("One", "Two"):
+            self.assertEqual(len((self.root / (name + ".attempts")).read_text().splitlines()), 1)
+
     def test_parallel_checkpoint_resume_reuses_completed_without_native_import_in_parent(self):
         flags = ("--checkpoint", str(self.checkpoint), "--resume-key", "assets-v1", "--bundle-audio", "--keep-going")
         self.behavior(Beta="fail")

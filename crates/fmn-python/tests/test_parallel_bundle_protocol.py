@@ -94,6 +94,7 @@ def host_fixture():
         native._CapabilityError = CapabilityError
         native.Scene = type("Scene", (), {})
         for name in ("_portal_begin_bundle", "_portal_begin_camera_bundle",
+                     "_portal_begin_compact_bundle",
                      "_portal_begin_soundtrack_bundle", "_portal_bundle_segment",
                      "_portal_finish_bundle", "_portal_finish_soundtrack_bundle"):
             setattr(native, name, lambda *args: None)
@@ -157,14 +158,27 @@ def publish_bundle_job(job):
                "certified_source": False}
     if options["bundle_camera"]:
         receipt.update(camera_track=True, fmtl_minor=1)
+    if options.get("bundle_storage") == "compact":
+        receipt.update(storage="compact", fmtl_minor=3)
     if options.get("bundle_audio") and mode != "no_cues":
         sound = options["bundle_audio_options"]
         receipt.update(fmtl_minor=2, soundtrack={"sample_rate": sound["audio_sample_rate"],
                        "channels": sound["audio_channels"], "sample_frames": 16})
+        if options.get("bundle_storage") == "compact":
+            receipt["picture_fmtl_minor"] = 3
     if mode == "wrong_camera":
         receipt.update(camera_track=True, fmtl_minor=2 if "soundtrack" in receipt else 1)
     if mode == "wrong_rate":
         receipt["soundtrack"]["sample_rate"] += 1
+    if mode == "wrong_storage":
+        receipt.pop("storage", None)
+        receipt.pop("picture_fmtl_minor", None)
+        if "soundtrack" in receipt or options["bundle_camera"]:
+            receipt["fmtl_minor"] = 2 if "soundtrack" in receipt else 1
+        else:
+            receipt.pop("fmtl_minor", None)
+    if mode == "wrong_picture_minor":
+        receipt["picture_fmtl_minor"] = 1
     return {"name": name, "destination": str(destination), "status": "succeeded",
             "result": receipt, "error": None}
 
@@ -229,6 +243,72 @@ class ParallelBundleTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertTrue(all(row.result.soundtrack is None for row in result.outcomes))
         self.assertTrue(all("fmtl_minor" not in row.result.as_dict() for row in result.outcomes))
+
+    def test_spawned_compact_jobs_freeze_budgets_and_preserve_camera_soundtrack_receipts(self):
+        compact = {"max_retained_bytes": 123456, "max_snapshot_bytes": 3456,
+                   "max_snapshot_work_bytes": 9_000_000_000}
+        expected = dict(compact)
+        limits = {"max_frames": 40, "max_output_bytes": 2048}
+        def names():
+            compact["max_retained_bytes"] = 1
+            limits["max_frames"] = 1
+            yield "Alpha"
+            yield "Beta"
+        def observer(_):
+            compact["max_snapshot_work_bytes"] = 1
+        result = self.render(names(), bundle_storage="compact", bundle_compact_limits=compact,
+                             bundle_limits=limits, bundle_camera=True, bundle_audio=True,
+                             on_result=observer)
+        self.assertTrue(result.ok)
+        pids = [int(self.attempts(name)[0]) for name in ("Alpha", "Beta")]
+        self.assertEqual(len(set([*pids, os.getpid()])), 3)
+        for row in result.outcomes:
+            self.assertEqual(row.result.storage, "compact")
+            receipt = row.result.as_dict()
+            self.assertEqual((receipt["fmtl_minor"], receipt["picture_fmtl_minor"]), (2, 3))
+            self.assertTrue(row.result.camera_track)
+            job = json.loads((self.root / (row.name + ".job.json")).read_text())
+            self.assertEqual(job["options"]["bundle_compact_limits"], expected)
+            self.assertEqual(job["options"]["bundle_limits"]["max_frames"], 40)
+
+    def test_compact_checkpoint_resumes_only_unfinished_and_binds_every_budget(self):
+        self.behavior(Beta="fail")
+        common = dict(bundle_storage="compact", bundle_camera=True, bundle_audio=True,
+                      checkpoint=self.journal, resume_key="compact-v1", continue_on_error=True)
+        first = self.render(**common)
+        self.assertFalse(first.ok)
+        preserved = (self.output / "Alpha.fmtl").read_bytes()
+        self.behavior(Beta="no_cues")
+        defaults = dict(self.h.bundle._COMPACT_DEFAULTS)
+        second = self.render(**common, resume=True, workers=1, bundle_compact_limits=defaults)
+        self.assertTrue(second.ok)
+        self.assertEqual(second.reused, ("Alpha",))
+        self.assertEqual(second.outcomes[0].result.as_dict(), first.outcomes[0].result.as_dict())
+        self.assertIsNone(second.outcomes[1].result.soundtrack)
+        self.assertEqual(second.outcomes[1].result.as_dict()["fmtl_minor"], 3)
+        self.assertEqual((self.output / "Alpha.fmtl").read_bytes(), preserved)
+        self.assertEqual([len(self.attempts(name)) for name in ("Alpha", "Beta")], [1, 2])
+        original = self.journal.read_bytes()
+        with patch.object(self.parallel, "run_process_jobs", side_effect=AssertionError("no launch")):
+            third = self.render(**common, resume=True, workers=4)
+            self.assertEqual(third.reused, ("Alpha", "Beta"))
+            changes = [{"bundle_storage": "recorded"}, {"bundle_limits": {"max_frames": 20}},
+                       {"bundle_limits": {"max_output_bytes": 4096}}]
+            changes.extend({"bundle_compact_limits": {key: value // 2}}
+                           for key, value in defaults.items())
+            for change in changes:
+                with self.subTest(change=change), self.assertRaisesRegex(ValueError, "plan|options"):
+                    self.render(**{**common, **change, "resume": True},
+                                on_result=lambda _: self.fail("observer ran"))
+                self.assertEqual(self.journal.read_bytes(), original)
+
+    def test_parent_refuses_compact_worker_receipt_downgrades_without_checkpoint(self):
+        for name, mode in (("WrongStorage", "wrong_storage"), ("WrongPicture", "wrong_picture_minor")):
+            self.behavior(**{name: mode})
+            with self.subTest(mode=mode), self.assertRaises(ValueError) as caught:
+                self.render((name,), bundle_storage="compact", bundle_camera=True, bundle_audio=True)
+            self.assertEqual(caught.exception.render_batch_result.outcomes[0].status, "failed")
+            self.assertTrue((self.output / (name + ".fmtl")).exists())
 
     def test_checkpoint_partial_failure_reuses_complete_bundles_only(self):
         self.behavior(Beta="fail")
@@ -352,7 +432,11 @@ class ParallelBundleTests(unittest.TestCase):
                    dict(bundle_limits={"max_frames": 0}), dict(bundle_limits={"surprise": 1}),
                    dict(bundle_audio_options={}), dict(bundle_audio=True, bundle_audio_options=[]),
                    dict(bundle_audio=True, bundle_audio_options={"audio_channels": 3}),
-                   dict(bundle_audio=True, bundle_audio_options={"max_audio_bytes": 7})]
+                   dict(bundle_audio=True, bundle_audio_options={"max_audio_bytes": 7}),
+                   dict(bundle_storage="other"), dict(bundle_compact_limits={}),
+                   dict(bundle_storage="compact", bundle_compact_limits=[]),
+                   dict(bundle_storage="compact", bundle_compact_limits={"max_snapshot_bytes": 0}),
+                   dict(bundle_storage="compact", bundle_limits={"max_capture_bytes": 10})]
         with patch.object(self.parallel, "run_process_jobs", side_effect=AssertionError("no launch")):
             for kwargs in invalid:
                 with self.subTest(kwargs=kwargs), self.assertRaises((ValueError, TypeError, CapabilityError)):
@@ -397,7 +481,10 @@ class ParallelBundleTests(unittest.TestCase):
         job = dict(source=str(self.source), source_digest=hashlib.sha256(self.source.read_bytes()).hexdigest(),
                    directory=str(self.output), name="Alpha", working_directory=str(self.root),
                    options={"format": "fmtl", "bundle_camera": True, "bundle_audio": True,
-                            "bundle_audio_options": {"audio_channels": 1}})
+                            "bundle_audio_options": {"audio_channels": 1},
+                            "bundle_storage": "compact", "bundle_compact_limits": {
+                                "max_retained_bytes": 123456, "max_snapshot_bytes": 3456,
+                                "max_snapshot_work_bytes": 9_000_000_000}})
         loaded = types.SimpleNamespace(scenes={"Alpha": self.h.native.Scene},
                                        _source_bytes={self.source: self.source.read_bytes()})
         loading = types.ModuleType("fmn_python.scene_loading")

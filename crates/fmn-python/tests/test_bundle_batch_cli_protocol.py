@@ -63,6 +63,12 @@ class BundleBatchCliProtocol(unittest.TestCase):
 
         self.native._portal_begin_bundle = begin
         self.native._portal_begin_camera_bundle = lambda *args: begin(*args, camera=True)
+        self.compact_calls = []
+        def compact_begin(scene, path, width, height, fps, seed, max_frames, max_output,
+                          camera, audio, retained, snapshot, work, *audio_options):
+            self.compact_calls.append((retained, snapshot, work))
+            begin(scene, path, width, height, fps, seed, max_frames, max_output, camera=camera)
+        self.native._portal_begin_compact_bundle = compact_begin
         self.native._portal_bundle_segment = lambda *args: None
         self.native._portal_finish_bundle = finish
         self.modules = patch.dict(sys.modules, {"manimlib": self.native})
@@ -113,6 +119,38 @@ class BundleBatchCliProtocol(unittest.TestCase):
             self.assertEqual(row["result"]["fmtl_minor"], 1)
             self.assertFalse(row["result"]["certified_source"])
             self.assertEqual(Path(row["destination"]).suffix, ".fmtl")
+
+    def test_compact_write_all_and_resume_use_normalized_budgets(self):
+        checkpoint = self.root / "compact.json"
+        flags = ("--write_all", "--bundle-storage=compact", "--bundle-camera",
+                 "--bundle-max-retained-bytes=123456", "--bundle-max-snapshot-bytes", "3456",
+                 "--bundle-max-snapshot-work-bytes=9000000000", "--checkpoint", str(checkpoint),
+                 "--resume-key", "compact-source-v1")
+        code, report, _ = self.batch(*flags)
+        self.assertEqual(code, 0)
+        self.assertEqual(self.compact_calls, [(123456, 3456, 9_000_000_000)] * 2)
+        for row in report["batch"]["outcomes"]:
+            self.assertEqual(row["result"]["storage"], "compact")
+            self.assertEqual(row["result"]["fmtl_minor"], 3)
+            self.assertTrue(row["result"]["camera_track"])
+        original = checkpoint.read_bytes()
+        self.calls.clear()
+        self.compact_calls.clear()
+        self.native.instances.clear()
+        code, resumed, _ = self.batch(*flags, "--resume")
+        self.assertEqual(code, 0)
+        self.assertEqual(report["batch"], resumed["batch"])
+        self.assertEqual(checkpoint.read_bytes(), original)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.native.instances, [])
+        changed = tuple("--bundle-max-retained-bytes=123457" if flag ==
+                        "--bundle-max-retained-bytes=123456" else flag for flag in flags)
+        code, failure, _ = self.batch(*changed, "--resume")
+        self.assertEqual(code, 2)
+        self.assertIn("plan", failure["message"])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(checkpoint.read_bytes(), original)
 
     def test_failed_middle_keeps_previous_and_keep_going_controls_later_constructor(self):
         self.source.write_text(SOURCE + '\nclass Middle(Scene):\n    def construct(self):\n        raise ValueError("authored failure")\n')

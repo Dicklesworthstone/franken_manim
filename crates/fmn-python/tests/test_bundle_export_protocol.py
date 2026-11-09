@@ -54,6 +54,98 @@ class BundleProtocol(unittest.TestCase):
     def session(self, **options):
         return BundleExportSession(self.scene, "scene.fmtl", **options)
 
+    def enable_compact(self):
+        begin = self.native._portal_begin_bundle
+        def compact_begin(scene, *arguments):
+            begin(scene, *arguments)
+            self.native.events[-1] = ("compact", arguments)
+        self.native._portal_begin_compact_bundle = compact_begin
+
+    def test_compact_limits_have_a_separate_native_entry_and_receipt(self):
+        self.enable_compact()
+        self.native._portal_begin_bundle = None
+        limits = {"max_retained_bytes": 123456,
+                  "max_snapshot_bytes": 3456,
+                  "max_snapshot_work_bytes": 9_000_000_000}
+        with self.session(storage="compact", compact_limits=limits,
+                          max_frames=543, max_output_bytes=234567,
+                          fps=24, resolution=(128, 72)) as session:
+            with session._segment("wait") as segment:
+                segment.select(True)
+        name, arguments = self.native.events[0]
+        self.assertEqual(name, "compact")
+        self.assertEqual(arguments[1:4], (128, 72, 24))
+        self.assertEqual(arguments[5:12],
+                         (543, 234567, False, False, 123456, 3456, 9_000_000_000))
+        self.assertEqual(arguments[12:], (48000, 2, 1, 64 * 1024 * 1024))
+        self.assertEqual([event[0] for event in self.native.events],
+                         ["compact", "wait", "wait", "finish"])
+        self.assertEqual(session.result.storage, "compact")
+        self.assertEqual(session.result.as_dict()["fmtl_minor"], 3)
+        self.assertEqual(session.result.as_dict()["storage"], "compact")
+
+    def test_compact_camera_and_audio_keep_existing_finish_ownership(self):
+        self.enable_compact()
+        finish = self.native._portal_finish_bundle
+        self.native._portal_finish_soundtrack_bundle = lambda scene: (finish(scene), (8000, 1, 80))
+        with self.session(storage="compact", camera=True, audio=True,
+                          audio_sample_rate=8000, audio_channels=1,
+                          audio_threads=3, max_audio_bytes=4096) as session:
+            pass
+        arguments = self.native.events[0][1]
+        self.assertEqual(arguments[7:9], (True, True))
+        self.assertEqual(arguments[9:12],
+                         (256 * 1024 * 1024, 64 * 1024 * 1024, 16 * 1024 * 1024 * 1024))
+        self.assertEqual(arguments[12:], (8000, 1, 3, 4096))
+        receipt = session.result.as_dict()
+        self.assertTrue(receipt["camera_track"])
+        self.assertEqual(receipt["fmtl_minor"], 2)
+        self.assertEqual(receipt["picture_fmtl_minor"], 3)
+        self.assertEqual(receipt["soundtrack"], {"sample_rate": 8000, "channels": 1, "sample_frames": 80})
+
+    def test_compact_limits_and_missing_capability_fail_before_constructor(self):
+        calls = []
+        class UserScene(Scene):
+            def __init__(self):
+                calls.append(1)
+                super().__init__()
+        with self.assertRaisesRegex(CapabilityError, "matching native wheel"):
+            export_bundle(UserScene, "scene.fmtl", storage="compact")
+        self.enable_compact()
+        bad_options = [
+            {"storage": "unknown"},
+            {"compact_limits": {"max_retained_bytes": 100}},
+            {"storage": "compact", "compact_limits": {"unknown": 1}},
+            {"storage": "compact", "max_capture_bytes": 123},
+        ]
+        for key, maximum in (("max_retained_bytes", 256 * 1024 * 1024),
+                             ("max_snapshot_bytes", 64 * 1024 * 1024),
+                             ("max_snapshot_work_bytes", 16 * 1024 * 1024 * 1024)):
+            for value in (0, -1, maximum + 1, True):
+                bad_options.append({"storage": "compact", "compact_limits": {key: value}})
+        for options in bad_options:
+            with self.subTest(options=options):
+                with self.assertRaises((TypeError, ValueError)):
+                    export_bundle(UserScene, "scene.fmtl", **options)
+        self.assertEqual(calls, [])
+        self.assertEqual(self.native.events, [])
+
+    def test_compact_budget_is_frozen_before_authored_constructor(self):
+        self.enable_compact()
+        limits = {"max_retained_bytes": 123456}
+        class UserScene(Scene):
+            def __init__(self):
+                limits["max_retained_bytes"] = 999999
+                super().__init__()
+            def run(self):
+                pass
+        export_bundle(UserScene, "scene.fmtl", storage="compact", compact_limits=limits)
+        self.assertEqual(self.native.events[0][1][9], 123456)
+        self.native.events.clear()
+        export_bundle(UserScene, "another.fmtl", storage="compact",
+                      compact_limits=iter((("max_retained_bytes", 654321),)))
+        self.assertEqual(self.native.events[0][1][9], 654321)
+
     def test_public_result_and_segment_boundaries(self):
         with self.session(fps=24, resolution=(128, 72)) as session:
             self.assertIs(vars(self.scene)["_fmn_owned_render_session"], session)

@@ -8,7 +8,7 @@ use super::*;
 use crate::portal_audio::BundleAudioOptions;
 use fmn_anim::SegmentKind;
 use fmn_platform::fs::{FileSystem, StdFs};
-use fmn_scene::recording::{RecordingError, SceneBundleRecorder};
+use fmn_scene::recording::{CompactRecordingLimits, RecordingError, SceneBundleRecorder};
 use fmn_scene::{BundleExportLimits, CaptureReason, LifecycleEvent, LifecyclePhase, SceneSink};
 
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -19,6 +19,10 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.setattr(
         "_portal_begin_camera_bundle",
         wrap_pyfunction!(_portal_begin_camera_bundle, module)?,
+    )?;
+    module.setattr(
+        "_portal_begin_compact_bundle",
+        wrap_pyfunction!(_portal_begin_compact_bundle, module)?,
     )?;
     module.setattr(
         "_portal_bundle_segment",
@@ -159,6 +163,7 @@ fn _portal_begin_bundle(
         max_output_bytes,
         false,
         None,
+        None,
     )
 }
 
@@ -186,6 +191,7 @@ fn _portal_begin_camera_bundle(
         max_capture_bytes,
         max_output_bytes,
         true,
+        None,
         None,
     )
 }
@@ -227,6 +233,65 @@ fn _portal_begin_soundtrack_bundle(
         max_output_bytes,
         camera_track,
         Some(audio),
+        None,
+    )
+}
+
+#[pyfunction]
+#[allow(clippy::too_many_arguments)]
+fn _portal_begin_compact_bundle(
+    scene: &Bound<'_, PyScene>,
+    destination: String,
+    width: u32,
+    height: u32,
+    fps: u32,
+    seed: u64,
+    max_frames: u64,
+    max_output_bytes: usize,
+    camera_track: bool,
+    audio: bool,
+    max_retained_bytes: usize,
+    max_snapshot_bytes: usize,
+    max_snapshot_work_bytes: u64,
+    sample_rate: u32,
+    channels: u16,
+    workers: usize,
+    max_audio_bytes: usize,
+) -> PyResult<()> {
+    let audio_options = if audio {
+        Some(
+            BundleAudioOptions {
+                sample_rate,
+                channels,
+                workers,
+                max_bytes: max_audio_bytes,
+            }
+            .validate()?,
+        )
+    } else {
+        if (sample_rate, channels, workers, max_audio_bytes) != (48_000, 2, 1, 64 * 1024 * 1024) {
+            return Err(PyValueError::new_err("audio settings require audio=True"));
+        }
+        None
+    };
+    begin_bundle(
+        scene,
+        destination,
+        width,
+        height,
+        fps,
+        seed,
+        max_frames,
+        max_retained_bytes,
+        max_output_bytes,
+        camera_track,
+        audio_options,
+        Some(CompactRecordingLimits {
+            max_frames,
+            max_retained_bytes,
+            max_snapshot_bytes,
+            max_snapshot_work_bytes,
+        }),
     )
 }
 
@@ -243,6 +308,7 @@ fn begin_bundle(
     max_output_bytes: usize,
     camera_track: bool,
     audio: Option<BundleAudioOptions>,
+    compact: Option<CompactRecordingLimits>,
 ) -> PyResult<()> {
     if destination.is_empty() || destination.contains('\0') {
         return Err(PyValueError::new_err(
@@ -280,10 +346,11 @@ fn begin_bundle(
     };
     // Portable bundles replay pictures, not the arena's authoring history.
     // Do not retain hidden target/saved copies or Python proxy pins per frame.
-    let recorder = if camera_track {
-        SceneBundleRecorder::new_render_only_with_camera(fps, limits)
-    } else {
-        SceneBundleRecorder::new_render_only(fps, limits)
+    let recorder = match (compact, camera_track) {
+        (Some(limits), false) => SceneBundleRecorder::new_compact_render_only(fps, limits),
+        (Some(limits), true) => SceneBundleRecorder::new_compact_with_camera(fps, limits),
+        (None, true) => SceneBundleRecorder::new_render_only_with_camera(fps, limits),
+        (None, false) => SceneBundleRecorder::new_render_only(fps, limits),
     }
     .map_err(native_error)?;
     // Reuse the capture owner's configured camera and validation. The bundle

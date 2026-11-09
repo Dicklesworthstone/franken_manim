@@ -8,9 +8,10 @@ from collections.abc import Mapping
 
 def prepare_bundle_options(native, *, camera, audio, limits, audio_options,
                            resolution, fps, threads, animation_range, subdivide,
-                           save_last_frame, reproducible, output_options):
+                           save_last_frame, reproducible, output_options,
+                           storage="recorded", compact_limits=None):
     from .bundle_export import (
-        _validated_audio_options, _validated_limits, require_bundle_capability,
+        _validated_audio_options, _validated_batch_storage, require_bundle_capability,
     )
 
     if type(camera) is not bool or type(audio) is not bool:
@@ -24,14 +25,13 @@ def prepare_bundle_options(native, *, camera, audio, limits, audio_options,
     if ((resolution is not None and resolution[0] * resolution[1] > 16_777_216)
             or (fps is not None and fps > 240)):
         raise ValueError("bundle export requires at most 16M pixels and 1..240 FPS")
-    if limits is not None and not isinstance(limits, Mapping):
-        raise TypeError("bundle_limits must be a mapping or None")
     if audio_options is not None and not isinstance(audio_options, Mapping):
         raise TypeError("bundle_audio_options must be a mapping or None")
     if audio_options is not None and not audio:
         raise ValueError("bundle_audio_options require bundle_audio=True")
-    result = {"bundle_camera": camera,
-              "bundle_limits": _validated_limits(**({} if limits is None else dict(limits)))}
+    capture, storage_options = _validated_batch_storage(
+        storage=storage, compact_limits=compact_limits, limits=limits)
+    result = {"bundle_camera": camera, "bundle_limits": capture, **storage_options}
     if audio:
         rate, channels, workers, budget = _validated_audio_options(
             audio=True, **({} if audio_options is None else dict(audio_options)))
@@ -39,5 +39,5 @@ def prepare_bundle_options(native, *, camera, audio, limits, audio_options,
             "audio_sample_rate": rate, "audio_channels": channels,
             "audio_threads": workers, "max_audio_bytes": budget,
         })
-    require_bundle_capability(native, camera=camera, audio=audio)
+    require_bundle_capability(native, camera=camera, audio=audio, storage=storage)
     return result

@@ -32,25 +32,38 @@ def restore_bundle_receipt(data, *, destination=None, options=None):
 
     The key/plan and output inventory are checked by the journal owner. No
     field in a checkpoint can turn a captured Python picture into certified
-    source execution, or change its camera/audio mode. Audio-enabled scenes
+    source execution, or change its camera/audio/storage mode. Audio-enabled scenes
     with no cues legitimately retain the legacy picture-only receipt.
     """
     if not isinstance(data, dict):
         raise ValueError("invalid checkpoint bundle receipt")
-    keys = frozenset(data)
-    if keys not in (_REQUIRED, _REQUIRED | _CAMERA, _REQUIRED | _SOUNDTRACK,
-                    _REQUIRED | _CAMERA | _SOUNDTRACK):
+    camera, audio, compact = "camera_track" in data, "soundtrack" in data, "storage" in data
+    expected = _REQUIRED
+    if camera:
+        expected |= _CAMERA
+    if audio:
+        expected |= _SOUNDTRACK
+    if compact:
+        if data["storage"] != "compact":
+            raise ValueError("invalid checkpoint bundle storage metadata")
+        expected |= {"storage", "fmtl_minor"}
+        if audio:
+            expected |= {"picture_fmtl_minor"}
+    if frozenset(data) != expected:
         raise ValueError("invalid checkpoint bundle receipt fields")
     if (data["schema"] != "fmn.python-bundle-export" or type(data["version"]) is not int
             or data["version"] != 1 or data["format"] != "fmtl"
             or data["certified_source"] is not False):
         raise ValueError("invalid checkpoint bundle receipt schema or certification")
-    camera, audio = "camera_track" in data, "soundtrack" in data
     if camera and data["camera_track"] is not True:
         raise ValueError("invalid checkpoint bundle camera metadata")
-    if camera or audio:
-        if type(data["fmtl_minor"]) is not int or data["fmtl_minor"] != (2 if audio else 1):
-            raise ValueError("invalid checkpoint bundle camera/audio version")
+    if camera or audio or compact:
+        minor = 2 if audio else 3 if compact else 1
+        if type(data["fmtl_minor"]) is not int or data["fmtl_minor"] != minor:
+            raise ValueError("invalid checkpoint bundle camera/audio/storage version")
+    if compact and audio:
+        if type(data["picture_fmtl_minor"]) is not int or data["picture_fmtl_minor"] != 3:
+            raise ValueError("invalid checkpoint compact soundtrack picture version")
     name = data["destination"]
     if (not isinstance(name, str) or not name or "\0" in name
             or not Path(name).is_absolute() or ".." in Path(name).parts):
@@ -73,6 +86,9 @@ def restore_bundle_receipt(data, *, destination=None, options=None):
         raise ValueError("invalid checkpoint bundle digest")
     soundtrack = _restore_soundtrack(data["soundtrack"], data["bytes"]) if audio else None
     if options is not None:
+        storage = "compact" if compact else "recorded"
+        if storage != options.get("bundle_storage", "recorded"):
+            raise ValueError("checkpoint bundle storage mode differs from the scene plan")
         if camera != options["bundle_camera"]:
             raise ValueError("checkpoint bundle camera mode differs from the scene plan")
         if audio:
@@ -92,4 +108,5 @@ def restore_bundle_receipt(data, *, destination=None, options=None):
         if data["frame_count"] > limits["max_frames"] or data["bytes"] > limits["max_output_bytes"]:
             raise ValueError("checkpoint bundle exceeds the admitted recording limits")
     return BundleExportResult(path, data["frame_count"], data["segment_count"],
-                              data["bytes"], digest, data["fps"], tuple(resolution), camera, soundtrack)
+                              data["bytes"], digest, data["fps"], tuple(resolution), camera, soundtrack,
+                              "compact" if compact else "recorded")
