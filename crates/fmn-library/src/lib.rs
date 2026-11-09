@@ -137,7 +137,9 @@ pub use coords::{
     Axes, AxisConfig, CoordinateFrame, CoordinateFrameError, CoordinateSystem, CoordsError,
     LiveCoordinateSystem, NumberLine, RiemannConfig, Slider, UnitInterval, create_axis,
 };
-pub use data_mobjects::{BarChart, DataMobjectError, TableMobject};
+pub use data_mobjects::{
+    BarChart, BarChartBinding, ChangeBarValues, DataMobjectError, TableMobject,
+};
 pub use fields::{
     AnimatedBoundary, AnimatedStreamLines, FieldError, IntegratorTune, OdeError, OdeSamples,
     STREAM_LINES_SUBSTREAM, StreamLineMeta, StreamLineStyle, StreamLines, StreamLinesMobject,

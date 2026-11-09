@@ -60,6 +60,9 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
+#[allow(dead_code)]
+#[path = "../../fmn/examples/live_bar_chart.rs"]
+mod live_bar_chart_example;
 #[path = "support/path_motion.rs"]
 mod path_motion;
 #[path = "support/path_observation.rs"]
@@ -12753,6 +12756,80 @@ fn neural_network_live_training_and_purity_run(
         .with_artifact("neural-after.frame", after))
 }
 
+/// Execute the public native example through bounded ordered PNG publication.
+fn live_bar_chart_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::fs::FileSystem as _;
+
+    let mut baseline = None;
+    let mut rendered_frames = 0;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/live-bars")
+            .map_err(|error| fail(format!("bar chart options: {error}")))?;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 6.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        options.typeset_cache = false;
+        let report = fmn::render_with_fs(
+            &mut live_bar_chart_example::LiveBarChart,
+            options,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("bar chart render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("bar chart omitted the native frame pipeline"))?;
+        if report.artifact.frame_count != 14
+            || pipeline.submitted != 14
+            || pipeline.emitted != 14
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail("bar chart lost bounded ordered publication"));
+        }
+        let frames = (0..14)
+            .map(|index| {
+                fs.read(&PathBuf::from("/live-bars").join(format!("frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("bar chart PNG: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if frames[1] == frames[5] || frames[7] == frames[11] || frames[11] == frames[12] {
+            return Err(fail(
+                "signed animation or the live prefix update drew no change",
+            ));
+        }
+        if frames[12] != frames[13] {
+            return Err(fail("the completed chart changed during its final hold"));
+        }
+        if let Some(expected) = &baseline {
+            if expected != &frames {
+                return Err(fail(format!(
+                    "bar chart PNG bytes changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = baseline.ok_or_else(|| fail("no bar chart frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.data.live_bar_chart")
+            .field("thread_counts", 3_u64)
+            .field("rendered_frames", rendered_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("bars-initial.png", frames[0].clone())
+        .with_artifact("bars-negative.png", frames[5].clone())
+        .with_artifact("bars-updated.png", frames[13].clone())
+        .with_counter("bar_chart_thread_counts", 3)
+        .with_counter("bar_chart_frames", rendered_frames))
+}
+
 /// CSV → TableMobject end-to-end through the suite's frame parser and
 /// Scribe: insertion-order headers survive, the null cell renders empty,
 /// and two builds of the same table hash identically.
@@ -18681,6 +18758,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     );
     specs.push(
         spec(
+            "lifecycle.live_bar_chart.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(live_bar_chart_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("bar_chart_thread_counts", 3),
+                counter_eq("bar_chart_frames", 42),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.data.live_bar_chart",
+                vec![
+                    FieldPred::u64_eq("thread_counts", 3),
+                    FieldPred::u64_eq("rendered_frames", 42),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "data_table.csv_roundtrip.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -19971,6 +20069,16 @@ fn cli_doctor_capabilities_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.cli_doctor_capabilities.v1")
         .expect("doctor capability scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn live_bar_chart_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.live_bar_chart.v1")
+        .expect("live native bar chart scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

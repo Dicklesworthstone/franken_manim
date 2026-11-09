@@ -39,6 +39,9 @@ use crate::style::Style;
 use crate::text::Text;
 use crate::vmobject::{VMobject, v_group};
 
+mod bar_chart;
+pub use bar_chart::{BarChartBinding, ChangeBarValues, MAX_BAR_CHART_BARS};
+
 /// Cell padding fraction of the body font's line box.
 const CELL_PADDING_X: f64 = 0.18;
 /// Vertical padding per row, in units.
@@ -64,6 +67,19 @@ pub enum DataMobjectError {
         /// How many replacement values arrived.
         values: usize,
     },
+    /// A chart control, value, or live geometry is invalid.
+    InvalidChart(&'static str),
+    /// A chart exceeds a declared construction or update bound.
+    ChartLimit {
+        /// The bounded dimension.
+        context: &'static str,
+        /// Requested count.
+        requested: usize,
+        /// Maximum admitted count.
+        max: usize,
+    },
+    /// A live handle or animation lifecycle operation was refused.
+    Animation(fmn_anim::AnimError),
     /// A geometry primitive refused construction.
     Geometry(String),
 }
@@ -75,14 +91,41 @@ impl std::fmt::Display for DataMobjectError {
             Self::EmptyFrame => write!(f, "frame has no columns or no data rows"),
             Self::NoValues => write!(f, "chart has no values to draw"),
             Self::BarValueCountMismatch { bars, values } => {
-                write!(f, "got {values} replacement bar values for {bars} bars")
+                write!(
+                    f,
+                    "got {values} replacement bar values for at most {bars} bars"
+                )
             }
+            Self::InvalidChart(detail) => write!(f, "invalid bar chart: {detail}"),
+            Self::ChartLimit {
+                context,
+                requested,
+                max,
+            } => {
+                write!(
+                    f,
+                    "bar chart {context} needs {requested} items, exceeding {max}"
+                )
+            }
+            Self::Animation(error) => error.fmt(f),
             Self::Geometry(detail) => write!(f, "data family geometry refused: {detail}"),
         }
     }
 }
 
 impl std::error::Error for DataMobjectError {}
+
+impl From<fmn_mobject::StageError> for DataMobjectError {
+    fn from(error: fmn_mobject::StageError) -> Self {
+        Self::Animation(fmn_anim::AnimError::Stage(error))
+    }
+}
+
+impl From<fmn_anim::AnimError> for DataMobjectError {
+    fn from(error: fmn_anim::AnimError) -> Self {
+        Self::Animation(error)
+    }
+}
 
 /// One documented rendering rule per [`Scalar`](fp_types::Scalar) variant.
 #[must_use]
@@ -439,7 +482,8 @@ impl BarChart {
         self
     }
 
-    /// Pin the scale top; [`None`] derives it from `max(values)`.
+    /// Pin the positive scale; [`None`] derives `max(abs(values))`, using one
+    /// for an all-zero series so later updates can grow its bars.
     #[must_use]
     pub fn max_value(mut self, max_value: Option<f64>) -> Self {
         self.max_value = max_value;
@@ -463,20 +507,10 @@ impl BarChart {
     /// Build the whole chart through Scribe for its labels.
     ///
     /// # Errors
-    /// [`DataMobjectError`] for refused primitives or empty values with a
-    /// derived max.
+    /// [`DataMobjectError`] for empty or excessive series, invalid layout or
+    /// scale controls, refused text/primitives, or nonrepresentable geometry.
     pub fn build(&self, book: &FontBook) -> Result<VMobject, DataMobjectError> {
-        if self.values.is_empty() {
-            return Err(DataMobjectError::NoValues);
-        }
-        let max_value = match self.max_value {
-            Some(max) => max,
-            None => self
-                .values
-                .iter()
-                .copied()
-                .fold(f64::NEG_INFINITY, f64::max),
-        };
+        let max_value = self.validated_scale()?;
         let mut members: Vec<VMobject> = Vec::new();
 
         // add_axes: x then y axis, ticks, optional labels.
@@ -512,12 +546,7 @@ impl BarChart {
         }
         if self.label_y_axis {
             for (y, value) in y_tick_points.iter().skip(1).copied() {
-                let rounded = numpy_round2(value);
-                let label_text = if (rounded - rounded.trunc()).abs() < 1e-9 {
-                    format!("{}", rounded as i64)
-                } else {
-                    format!("{rounded}")
-                };
+                let label_text = chart_tick_label(value);
                 let mut label = Text::new(&label_text)
                     .build(book)
                     .map_err(|error| DataMobjectError::Geometry(error.to_string()))?
@@ -535,7 +564,7 @@ impl BarChart {
         let colors = fmn_core::color::color_gradient(&self.bar_colors, count);
         let mut bars: Vec<VMobject> = Vec::new();
         for (i, value) in self.values.iter().enumerate() {
-            let bar_height = (value / max_value) * self.height;
+            let bar_height = (value.abs() / max_value) * self.height;
             let bar = Rectangle::new()
                 .width(buff)
                 .height(bar_height)
@@ -550,7 +579,14 @@ impl BarChart {
                         .fill_opacity(self.bar_fill_opacity)
                         .stroke_width(self.bar_stroke_width)
                 });
-            bars.push(bar);
+            // A negative value extends from the same baseline in the opposite
+            // direction. Reflect only signed bars; positive constructor bytes
+            // keep their established geometry and primitive hint unchanged.
+            bars.push(if *value < 0.0 {
+                bar.map_points(|point| [point[0], -point[1], point[2]])
+            } else {
+                bar
+            });
         }
         members.push(v_group(bars));
 
@@ -567,7 +603,28 @@ impl BarChart {
 
         let group = v_group(members);
         // The Reference ends __init__ with self.center().
-        Ok(group.moved_to([0.0, 0.0, 0.0]))
+        let group = group.moved_to([0.0, 0.0, 0.0]);
+        bar_chart::validate_detached_chart(&group, self.bars_index())?;
+        Ok(group)
+    }
+}
+
+fn chart_tick_label(value: f64) -> String {
+    // At 2^53 and beyond every finite f64 is already integral: multiplying
+    // by 100 cannot improve decimal rounding and can overflow a valid scale.
+    let rounded = if value.abs() >= 9_007_199_254_740_992.0 {
+        value
+    } else {
+        numpy_round2(value)
+    };
+    if rounded >= i64::MAX as f64 || rounded < i64::MIN as f64 {
+        // Keep large semantic values legible without saturating an integer
+        // cast or allocating hundreds of decimal glyphs for one tick label.
+        format!("{rounded:e}")
+    } else if (rounded - rounded.trunc()).abs() < 1e-9 {
+        format!("{}", rounded as i64)
+    } else {
+        format!("{rounded}")
     }
 }
 
