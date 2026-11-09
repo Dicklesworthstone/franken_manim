@@ -40,6 +40,40 @@ fn picture(history: usize, reverse_allocation: bool) -> Stage {
 }
 
 #[test]
+fn snapshot_encoding_limits_bound_growth_without_changing_canonical_bytes() {
+    let stage = picture(3, false);
+    let snapshot = stage.snapshot();
+    let full = snapshot.to_bytes().unwrap();
+    let render = snapshot.to_render_bytes().unwrap();
+    let cap = |max_total| Limits {
+        max_total,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(
+        snapshot.to_bytes_with_limits(cap(full.len())).unwrap(),
+        full
+    );
+    assert!(matches!(
+        snapshot.to_bytes_with_limits(cap(full.len() - 1)),
+        Err(SerialError::SizeLimit { limit, .. }) if limit == full.len() - 1
+    ));
+    assert_eq!(
+        snapshot
+            .to_render_bytes_with_encoding_limits(RenderSnapshotLimits::DEFAULT, cap(render.len()),)
+            .unwrap(),
+        render
+    );
+    assert!(matches!(
+        snapshot.to_render_bytes_with_encoding_limits(
+            RenderSnapshotLimits::DEFAULT,
+            cap(render.len() - 1),
+        ),
+        Err(RenderSnapshotError::Serial(SerialError::SizeLimit { limit, .. }))
+            if limit == render.len() - 1
+    ));
+}
+
+#[test]
 fn render_bytes_ignore_unrooted_history_and_allocation_order() {
     let clean = picture(0, false).snapshot();
     let noisy = picture(512, true).snapshot();

@@ -66,7 +66,8 @@ pub use runtime::{
     ThreeDAddOptions, ThreeDScene,
 };
 pub use timeline_bundle::{
-    BundleError, BundleExportLimits, BundleReadError, BundleSegmentKind, DEFAULT_MAX_BUNDLE_BYTES,
-    DEFAULT_MAX_BUNDLE_EXPORT_FRAMES, TIMELINE_BUNDLE_SCHEMA, TimelineBundle,
-    bundle_engine_version, export_timeline_bundle, export_timeline_bundle_with_limits,
+    BundleError, BundleExportLimits, BundleReadError, BundleSegmentKind,
+    COMPACT_TIMELINE_BUNDLE_SCHEMA, DEFAULT_MAX_BUNDLE_BYTES, DEFAULT_MAX_BUNDLE_EXPORT_FRAMES,
+    TIMELINE_BUNDLE_SCHEMA, TimelineBundle, bundle_engine_version, export_timeline_bundle,
+    export_timeline_bundle_with_limits,
 };

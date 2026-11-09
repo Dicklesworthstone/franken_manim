@@ -372,8 +372,24 @@ impl Snapshot {
         &self,
         limits: RenderSnapshotLimits,
     ) -> Result<Vec<u8>, RenderSnapshotError> {
-        project(self, limits)?
-            .to_bytes()
+        self.to_render_bytes_with_encoding_limits(limits, Limits::DEFAULT)
+    }
+
+    /// Render-only encoding with independent graph and canonical byte budgets.
+    ///
+    /// The byte budget is enforced before each encoder growth. The graph
+    /// budget still bounds projection workspace; neither changes the source
+    /// snapshot or the bytes emitted for a successful encoding.
+    ///
+    /// # Errors
+    /// As [`Self::to_render_bytes`], including a narrowed encoding size limit.
+    pub fn to_render_bytes_with_encoding_limits(
+        &self,
+        graph_limits: RenderSnapshotLimits,
+        encoding_limits: Limits,
+    ) -> Result<Vec<u8>, RenderSnapshotError> {
+        project(self, graph_limits)?
+            .to_bytes_with_limits(encoding_limits)
             .map_err(RenderSnapshotError::Serial)
     }
 }

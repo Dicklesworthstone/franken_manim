@@ -12,14 +12,14 @@ pub use crate::exporting::{
     export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
 };
 pub use crate::{
-    BundleExportError, BundleExportOptions, BundleExportReport, CompletedScene, Error, ErrorKind,
-    FfmpegCapability, LibraryError, RenderError, RenderFormat, RenderOptions, RenderReport,
-    SceneBundleExport, SceneConstruct, SoundtrackRenderOptions, SoundtrackRenderReport, Stage,
-    SvgRenderError, SvgRenderOptions, SvgRenderReport, TexPreflightError, export_bundle,
-    export_bundle_bytes, export_bundle_with_fs, render, render_soundtrack,
-    render_soundtrack_with_fs, render_svg, render_svg_camera, render_svg_camera_with_fs,
-    render_svg_with_fs, render_with_fs, run_scene, run_scene_with_typesetting,
-    run_scene_with_typography,
+    BundleExportError, BundleExportOptions, BundleExportReport, BundleStorage,
+    CompactRecordingLimits, CompletedScene, Error, ErrorKind, FfmpegCapability, LibraryError,
+    RenderError, RenderFormat, RenderOptions, RenderReport, SceneBundleExport, SceneConstruct,
+    SoundtrackRenderOptions, SoundtrackRenderReport, Stage, SvgRenderError, SvgRenderOptions,
+    SvgRenderReport, TexPreflightError, export_bundle, export_bundle_bytes, export_bundle_with_fs,
+    render, render_soundtrack, render_soundtrack_with_fs, render_svg, render_svg_camera,
+    render_svg_camera_with_fs, render_svg_with_fs, render_with_fs, run_scene,
+    run_scene_with_typesetting, run_scene_with_typography,
 };
 pub use fmn_anim::{
     AnimConfig, AnimError, Animation, AnimationGroup, ApplyMethod, DrawBorderThenFill,

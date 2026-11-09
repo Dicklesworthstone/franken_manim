@@ -12,7 +12,9 @@ use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
     Tiling, Viewport,
 };
-use fmn_scene::recording::{RecordedSceneBundle, RecordingError, SceneBundleRecorder};
+use fmn_scene::recording::{
+    CompactRecordingLimits, RecordedSceneBundle, RecordingError, SceneBundleRecorder,
+};
 use fmn_scene::timeline_bundle::{SharedTimelineBundle, TimelineFrameCache};
 use fmn_scene::{
     BundleError, BundleExportLimits, BundleSegmentKind, CaptureReason, IntegrationError,
@@ -396,4 +398,233 @@ fn equal_empty_frames_do_not_inherit_offscene_durable_resources() {
     assert_eq!(a.bytes, b.bytes);
     assert_eq!(a.digest, sha256(&a.bytes));
     assert!(source.contains(root));
+}
+
+struct ObservedCompact {
+    recorder: SceneBundleRecorder,
+    frames: Vec<Vec<u8>>,
+}
+
+impl SceneSink for ObservedCompact {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        self.recorder.event(event)
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
+        self.frames.push(packet.state().to_render_bytes().unwrap());
+        self.recorder.capture(reason, packet)
+    }
+}
+
+#[test]
+fn compact_recording_preserves_every_callback_frame_across_block_boundaries() {
+    let mut source = scene();
+    let moving = rect(source.stage_mut(), -1.0, [0.0, 0.5, 1.0, 0.75]);
+    source.stage_mut().add_to_scene(moving).unwrap();
+    let calls = Rc::new(Cell::new(0_u64));
+    let observed = Rc::clone(&calls);
+    source
+        .stage_mut()
+        .add_dt_updater(
+            moving,
+            move |stage, mob, dt| {
+                if dt > 0.0 {
+                    observed.set(observed.get() + 1);
+                    stage.shift(mob, [dt / 64.0, 0.0, 0.0]);
+                    if observed.get() == 65 {
+                        stage.get_mut(mob).unwrap().buffer.write_range(
+                            "fill_rgba",
+                            0,
+                            &[0.75, 0.25, 0.0, 0.75].repeat(9),
+                        );
+                    }
+                }
+            },
+            false,
+        )
+        .unwrap();
+    let mut sink = ObservedCompact {
+        recorder: SceneBundleRecorder::new_compact_render_only(
+            8,
+            CompactRecordingLimits::default(),
+        )
+        .unwrap(),
+        frames: Vec::new(),
+    };
+    source.wait_frames(130, &mut sink).unwrap();
+    source.wait_frames(0, &mut sink).unwrap();
+    source.show(&mut sink).unwrap();
+    assert_eq!(calls.get(), 130);
+    let artifact = sink.recorder.finish().unwrap();
+    assert_eq!((artifact.frame_count, artifact.segment_count), (131, 3));
+    assert_eq!(artifact.digest, sha256(&artifact.bytes));
+    let raw_bytes: usize = sink.frames.iter().map(Vec::len).sum();
+    assert!(
+        artifact.bytes.len() < raw_bytes / 3,
+        "compact recording retained {} of {raw_bytes} observed snapshot bytes",
+        artifact.bytes.len(),
+    );
+    let bundle = TimelineBundle::from_bytes(&artifact.bytes).unwrap();
+    for segment in 0..3 {
+        assert_eq!(
+            bundle.segment_kind(segment),
+            Some(BundleSegmentKind::CompactRecorded),
+        );
+    }
+    assert_eq!(bundle.segment_frame_range(0), Some(0..130));
+    assert_eq!(bundle.segment_frame_range(1), Some(130..130));
+    assert_eq!(bundle.segment_frame_range(2), Some(130..131));
+    for index in (0..artifact.frame_count).rev() {
+        let replay = bundle.stage_at(index).unwrap();
+        assert_eq!(
+            replay.snapshot().to_render_bytes().unwrap(),
+            sink.frames[index as usize],
+            "frame {index}",
+        );
+    }
+    let mut expected_renderer = renderer(1);
+    let mut actual_renderer = renderer(4);
+    for index in [0, 63, 64, 65, 127, 128, 129, 130] {
+        let binding = Stage::new();
+        let expected = fmn_mobject::Snapshot::from_bytes(&sink.frames[index], &binding)
+            .unwrap()
+            .snapshot
+            .materialize();
+        assert_eq!(
+            pixels(
+                &mut actual_renderer,
+                &bundle.stage_at(index as u32).unwrap()
+            ),
+            pixels(&mut expected_renderer, &expected),
+        );
+    }
+    assert_eq!(calls.get(), 130, "replay must never invoke the updater");
+}
+
+#[test]
+fn compact_storage_budget_does_not_redefine_legacy_snapshot_work() {
+    let mut source = scene();
+    let root = rect(source.stage_mut(), -1.0, [0.0, 0.5, 1.0, 0.75]);
+    source.stage_mut().add_to_scene(root).unwrap();
+    let frame_bytes = source.stage().snapshot().to_render_bytes().unwrap().len();
+    let retained = 12 * frame_bytes + 16 * 1024;
+    assert!(retained < 130 * frame_bytes);
+    let mut compact = SceneBundleRecorder::new_compact_render_only(
+        8,
+        CompactRecordingLimits {
+            max_retained_bytes: retained,
+            max_snapshot_work_bytes: (130 * frame_bytes) as u64,
+            ..CompactRecordingLimits::default()
+        },
+    )
+    .unwrap();
+    source.wait_frames(130, &mut compact).unwrap();
+    let compact = compact.finish().unwrap();
+    assert_eq!(compact.frame_count, 130);
+    assert!(compact.bytes.len() < retained);
+
+    let mut control = scene();
+    let root = rect(control.stage_mut(), -1.0, [0.0, 0.5, 1.0, 0.75]);
+    control.stage_mut().add_to_scene(root).unwrap();
+    let mut legacy = SceneBundleRecorder::new_render_only(
+        8,
+        BundleExportLimits {
+            max_frames: 130,
+            max_capture_bytes: retained,
+        },
+    )
+    .unwrap();
+    assert!(control.wait_frames(130, &mut legacy).is_err());
+    assert!(matches!(
+        legacy.finish(),
+        Err(RecordingError::Bundle(
+            BundleError::CaptureLimitExceeded { .. }
+        )),
+    ));
+}
+
+#[test]
+fn compact_snapshot_work_retained_and_output_limits_are_independent_and_sticky() {
+    let stage = picture(0);
+    let frame_bytes = stage.snapshot().to_render_bytes().unwrap().len();
+    let limits = CompactRecordingLimits {
+        max_snapshot_bytes: frame_bytes,
+        max_snapshot_work_bytes: frame_bytes as u64,
+        ..CompactRecordingLimits::default()
+    };
+    let mut exact = SceneBundleRecorder::new_compact_render_only(8, limits).unwrap();
+    exact.capture_terminal_still(&stage).unwrap();
+    let artifact = exact.finish().unwrap();
+    let mut exact_output = SceneBundleRecorder::new_compact_render_only(8, limits).unwrap();
+    exact_output.capture_terminal_still(&stage).unwrap();
+    assert_eq!(
+        exact_output
+            .finish_with_max_bytes(artifact.bytes.len())
+            .unwrap()
+            .bytes,
+        artifact.bytes,
+    );
+    let mut short_output = SceneBundleRecorder::new_compact_render_only(8, limits).unwrap();
+    short_output.capture_terminal_still(&stage).unwrap();
+    assert!(matches!(
+        short_output.finish_with_max_bytes(artifact.bytes.len() - 1),
+        Err(RecordingError::OutputLimit { limit, .. }) if limit == artifact.bytes.len() - 1,
+    ));
+    let mut short_snapshot = SceneBundleRecorder::new_compact_render_only(
+        8,
+        CompactRecordingLimits {
+            max_snapshot_bytes: frame_bytes - 1,
+            ..limits
+        },
+    )
+    .unwrap();
+    assert!(short_snapshot.capture_terminal_still(&stage).is_err());
+    assert!(
+        short_snapshot
+            .capture_terminal_still(&Stage::new())
+            .is_err()
+    );
+    assert!(matches!(
+        short_snapshot.finish(),
+        Err(RecordingError::SnapshotLimit { limit, .. }) if limit == frame_bytes - 1,
+    ));
+    let mut short_retained = SceneBundleRecorder::new_compact_render_only(
+        8,
+        CompactRecordingLimits {
+            max_retained_bytes: frame_bytes,
+            ..limits
+        },
+    )
+    .unwrap();
+    assert!(short_retained.capture_terminal_still(&stage).is_err());
+    assert!(matches!(
+        short_retained.finish(),
+        Err(RecordingError::Bundle(
+            BundleError::CaptureLimitExceeded { .. }
+        )),
+    ));
+
+    let mut source = scene();
+    let root = rect(source.stage_mut(), -1.0, [0.0, 0.5, 1.0, 0.75]);
+    source.stage_mut().add_to_scene(root).unwrap();
+    let bytes = source.stage().snapshot().to_render_bytes().unwrap().len();
+    let mut work = SceneBundleRecorder::new_compact_render_only(
+        8,
+        CompactRecordingLimits {
+            max_snapshot_work_bytes: (2 * bytes - 1) as u64,
+            ..CompactRecordingLimits::default()
+        },
+    )
+    .unwrap();
+    assert!(source.wait_frames(2, &mut work).is_err());
+    assert_eq!(work.frame_count(), 1);
+    assert!(source.show(&mut work).is_err());
+    assert!(matches!(
+        work.finish(),
+        Err(RecordingError::SnapshotWorkLimit { limit, .. }) if limit == (2 * bytes - 1) as u64,
+    ));
 }

@@ -22,6 +22,8 @@ use fmn_platform::fs::{FileSystem, FsError, StdFs};
 use fmn_scene::recording::{RecordedSceneBundle, RecordingError, SceneBundleRecorder};
 use fmn_scene::{BundleExportLimits, RuntimeConfig, SceneRunReport};
 
+pub use fmn_scene::recording::CompactRecordingLimits;
+
 use crate::SceneConstruct;
 
 pub mod soundtrack;
@@ -29,14 +31,29 @@ pub mod soundtrack;
 mod camera;
 pub use camera::{export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs};
 
+/// Storage for the real frames observed during an imperative scene export.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BundleStorage {
+    /// Original minor-0/1 snapshots with cumulative [`BundleExportLimits`].
+    #[default]
+    Recorded,
+    /// Lossless minor-3 delta blocks with independent retention/work budgets.
+    /// No callback or animation is inferred or executed during replay.
+    Compact(CompactRecordingLimits),
+}
+
 /// Explicit semantic settings and bounded storage for one native scene export.
 #[derive(Clone, Debug)]
 pub struct BundleExportOptions {
     /// Scene timing, deterministic seed and the native typesetting template
     /// affect construction. Renderer/output policy is supplied on playback.
     pub config: Config,
-    /// Cumulative snapshot/table budget and maximum admitted output frames.
+    /// Cumulative snapshot/table budget and maximum admitted output frames
+    /// for [`BundleStorage::Recorded`]. Compact storage carries its own limits;
+    /// setting this field to a nondefault value with compact storage is refused.
     pub limits: BundleExportLimits,
+    /// Explicit storage choice; existing exports default to recorded snapshots.
+    pub storage: BundleStorage,
     /// Maximum complete canonical artifact size, enforced during encoding.
     pub max_output_bytes: usize,
 }
@@ -50,19 +67,56 @@ impl BundleExportOptions {
         Ok(Self {
             config: Config::resolve(&[], None)?.config,
             limits: BundleExportLimits::default(),
+            storage: BundleStorage::Recorded,
             max_output_bytes: fmn_scene::DEFAULT_MAX_BUNDLE_BYTES,
         })
     }
 
+    /// Bundled scene defaults with lossless compact recording enabled.
+    ///
+    /// Captured geometry, camera samples, sound and callback execution keep
+    /// their ordinary semantics. The independent compact budgets allow longer
+    /// recordings without storing a complete snapshot for every frame.
+    ///
+    /// # Errors
+    /// Returns the same bundled configuration error as [`Self::new`].
+    pub fn compact() -> Result<Self, fmn_config::ConfigError> {
+        let mut options = Self::new()?;
+        options.storage = BundleStorage::Compact(CompactRecordingLimits::default());
+        Ok(options)
+    }
+
+    fn recorder(&self, fps: u32, camera: bool) -> Result<SceneBundleRecorder, RecordingError> {
+        match (self.storage, camera) {
+            (BundleStorage::Recorded, false) => SceneBundleRecorder::new(fps, self.limits),
+            (BundleStorage::Recorded, true) => {
+                SceneBundleRecorder::new_render_only_with_camera(fps, self.limits)
+            }
+            (BundleStorage::Compact(limits), false) => {
+                SceneBundleRecorder::new_compact(fps, limits)
+            }
+            (BundleStorage::Compact(limits), true) => {
+                SceneBundleRecorder::new_compact_with_camera(fps, limits)
+            }
+        }
+    }
+
     fn validate(&self) -> Result<(), BundleExportError> {
+        if matches!(self.storage, BundleStorage::Compact(_))
+            && self.limits != BundleExportLimits::default()
+        {
+            return Err(BundleExportError::InvalidOptions(
+                "BundleExportOptions.limits applies to recorded storage; set limits in BundleStorage::Compact instead",
+            ));
+        }
         if self.config.camera.fps == 0 {
             return Err(BundleExportError::InvalidOptions(
                 "bundle fps must be nonzero",
             ));
         }
-        if self.limits.max_frames == 0
-            || self.limits.max_capture_bytes == 0
-            || self.max_output_bytes == 0
+        if self.max_output_bytes == 0
+            || (self.storage == BundleStorage::Recorded
+                && (self.limits.max_frames == 0 || self.limits.max_capture_bytes == 0))
         {
             return Err(BundleExportError::InvalidOptions(
                 "bundle export budgets must be nonzero",
@@ -175,7 +229,8 @@ fn export_bundle_bytes_inner<P: SceneConstruct + ?Sized>(
 ) -> Result<SceneBundleExport, BundleExportError> {
     options.validate()?;
     let runtime = RuntimeConfig::from_config(&options.config);
-    let mut recorder = SceneBundleRecorder::new(runtime.effective_fps(), options.limits)
+    let mut recorder = options
+        .recorder(runtime.effective_fps(), false)
         .map_err(BundleExportError::Recording)?;
     let typesetting = fmn_tex::TexSession::memory(options.config.tex.template.clone());
     let run = crate::run_scene_with_typography(

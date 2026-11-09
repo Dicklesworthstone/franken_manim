@@ -78,8 +78,9 @@ mod typesetting;
 pub use typesetting::TexPreflightError;
 
 pub use exporting::{
-    BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport, export_bundle,
-    export_bundle_bytes, export_bundle_with_fs, export_camera_bundle, export_camera_bundle_bytes,
+    BundleExportError, BundleExportOptions, BundleExportReport, BundleStorage,
+    CompactRecordingLimits, SceneBundleExport, export_bundle, export_bundle_bytes,
+    export_bundle_with_fs, export_camera_bundle, export_camera_bundle_bytes,
     export_camera_bundle_with_fs,
 };
 

@@ -945,7 +945,23 @@ impl Snapshot {
     /// [`SerialError::SizeLimit`] when the state exceeds
     /// [`Limits::DEFAULT`] or one of the format's fixed-width count fields.
     pub fn to_bytes(&self) -> Result<Vec<u8>, SerialError> {
-        let mut w = Writer::new(SNAPSHOT_SCHEMA);
+        self.to_bytes_with_limits(Limits::DEFAULT)
+    }
+
+    /// Serialize with a document/field budget checked before writer growth.
+    ///
+    /// The canonical schema and bytes are identical to [`Self::to_bytes`].
+    /// Explicit budgets can only narrow the production encoder's limits.
+    ///
+    /// # Errors
+    /// [`SerialError::SizeLimit`] when the next field would exceed either
+    /// effective budget or one of the format's fixed-width count fields.
+    pub fn to_bytes_with_limits(&self, limits: Limits) -> Result<Vec<u8>, SerialError> {
+        let limits = Limits {
+            max_total: limits.max_total.min(Limits::DEFAULT.max_total),
+            max_field: limits.max_field.min(Limits::DEFAULT.max_field),
+        };
+        let mut w = Writer::with_limits(SNAPSHOT_SCHEMA, limits);
         w.put_u32(count_u32(self.slots.len())?);
         for (generation, entry) in &self.slots {
             w.put_u32(*generation);

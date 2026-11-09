@@ -115,6 +115,61 @@ fn exported_stateful_scene_replays_identical_png_bytes_at_different_thread_count
     assert_eq!(again.bundle.digest.to_hex(), receipt.digest);
 }
 
+#[test]
+fn compact_export_uses_lossless_recording_and_replays_direct_native_pixels() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut compact = BundleExportOptions::compact().unwrap();
+    compact.config = options().config;
+    assert!(matches!(compact.storage, BundleStorage::Compact(_)));
+    assert_eq!(options().storage, BundleStorage::Recorded);
+    let calls = Rc::new(Cell::new(0));
+    let mut ambiguous = compact.clone();
+    ambiguous.limits.max_frames = 1;
+    assert!(matches!(
+        export_bundle_bytes(&mut StatefulScene(Rc::clone(&calls)), ambiguous),
+        Err(BundleExportError::InvalidOptions(_))
+    ));
+    assert_eq!(
+        calls.get(),
+        0,
+        "ambiguous budgets fail before authored work"
+    );
+    let artifact =
+        export_bundle_bytes(&mut StatefulScene(Rc::clone(&calls)), compact.clone()).unwrap();
+    let bundle = TimelineBundle::from_bytes(&artifact.bundle.bytes).unwrap();
+    assert_eq!(
+        bundle.segment_kind(0),
+        Some(fmn_scene::BundleSegmentKind::CompactRecorded),
+    );
+    let after_export = calls.get();
+    let direct = render_with_fs(
+        &mut StatefulScene(Rc::new(Cell::new(0))),
+        render_options("/compact-direct", &compact.config, 1),
+        fs.clone(),
+    )
+    .unwrap();
+    for threads in [1, 4] {
+        let output = format!("/compact-replay-{threads}");
+        let replay = render_bundle_with_fs(
+            &artifact.bundle.bytes,
+            render_options(&output, &compact.config, threads),
+            fs.clone(),
+        )
+        .unwrap();
+        assert_eq!(replay.artifact.frame_count, direct.artifact.frame_count);
+        for frame in 0..artifact.bundle.frame_count {
+            let name = format!("frame_{frame:06}.png");
+            assert_eq!(
+                fs.read(&Path::new("/compact-direct").join(&name)).unwrap(),
+                fs.read(&Path::new(&output).join(&name)).unwrap(),
+            );
+        }
+    }
+    assert_eq!(calls.get(), after_export);
+    let second = export_bundle_bytes(&mut StatefulScene(Rc::new(Cell::new(0))), compact).unwrap();
+    assert_eq!(artifact.bundle.bytes, second.bundle.bytes);
+}
+
 struct StaticScene;
 
 impl SceneConstruct for StaticScene {

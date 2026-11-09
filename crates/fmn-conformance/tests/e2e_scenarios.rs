@@ -11379,6 +11379,200 @@ fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .with_counter("bundle_render_state_matches", matches))
 }
 
+/// Compact storage preserves actual imperative captures, including transient
+/// updater state, across block boundaries and detached worker ownership.
+fn lifecycle_compact_scene_bundle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::exporting::{BundleExportOptions, BundleStorage, export_bundle_bytes};
+    use fmn_scene::timeline_bundle::{
+        BundleReadError, BundleSoundtrack, TimelineFrameCache, attach_bundle_soundtrack,
+    };
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn bundle_failure(error: impl std::fmt::Display) -> ScenarioError {
+        fail(error.to_string())
+    }
+    struct MovingWait(Rc<Cell<u32>>);
+    impl fmn::SceneConstruct for MovingWait {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let mob = stage.add(fmn_library::Circle::new().radius(0.5))?;
+            // The native entry point retains full snapshots, including arena
+            // entries that a render-only projection would intentionally omit.
+            stage
+                .arena_mut()
+                .add(fmn_mobject::Mobject::from_points(&[[7.0, 8.0, 9.0]]));
+            let calls = self.0.clone();
+            stage.add_updater(
+                mob,
+                move |stage, mob| {
+                    let tick = calls.get() + 1;
+                    calls.set(tick);
+                    stage.set_x(mob, f64::from(tick % 11) / 8.0);
+                    stage
+                        .get_mut(mob)
+                        .expect("the scene retains its updated circle")
+                        .uniforms_mut()
+                        .depth_test = tick % 3 == 1;
+                },
+                false,
+            )?;
+            stage.wait_frames(67)?;
+            stage.wait_frames(3)?;
+            Ok(())
+        }
+    }
+    let mut options = BundleExportOptions::compact().map_err(bundle_failure)?;
+    options.config.camera.fps = 8;
+    options.config.determinism.seed = ctx.seed;
+    ctx.set_fps((8, 1));
+    let oracle_calls = Rc::new(Cell::new(0));
+    let mut sink = PacketSink::default();
+    fmn::run_scene(
+        &mut MovingWait(oracle_calls.clone()),
+        RuntimeConfig::from_config(&options.config),
+        ctx.seed,
+        &mut sink,
+    )
+    .map_err(bundle_failure)?;
+    let binding = Stage::new();
+    let oracle = sink
+        .packets
+        .iter()
+        .map(|packet| {
+            let bytes = packet.state().to_bytes().map_err(bundle_failure)?;
+            let observed =
+                fmn_mobject::Snapshot::from_bytes(&bytes, &binding).map_err(bundle_failure)?;
+            if observed.updaters.entries.len() != 1 || observed.updaters.entries[0].1.len() != 1 {
+                return Err(fail("the serial oracle lost its live updater binding"));
+            }
+            // Snapshot persistence records updater identities but never their
+            // callables. Normalize that existing decode/materialize contract
+            // while retaining all arena state, including detached entries.
+            observed
+                .snapshot
+                .materialize()
+                .snapshot()
+                .to_bytes()
+                .map_err(bundle_failure)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_calls = Rc::new(Cell::new(0));
+    let exported = export_bundle_bytes(&mut MovingWait(source_calls.clone()), options.clone())
+        .map_err(bundle_failure)?;
+    let calls_at_export = source_calls.get();
+    let repeated = export_bundle_bytes(&mut MovingWait(Rc::new(Cell::new(0))), options.clone())
+        .map_err(bundle_failure)?;
+    let mut recorded_options = options;
+    recorded_options.storage = BundleStorage::Recorded;
+    let recorded = export_bundle_bytes(&mut MovingWait(Rc::new(Cell::new(0))), recorded_options)
+        .map_err(bundle_failure)?;
+    let bundle =
+        fmn_scene::TimelineBundle::from_bytes(&exported.bundle.bytes).map_err(bundle_failure)?;
+    let recorded_bundle =
+        fmn_scene::TimelineBundle::from_bytes(&recorded.bundle.bytes).map_err(bundle_failure)?;
+    let compact = bundle.segment_count() == 2
+        && (0..2).all(|index| {
+            bundle.segment_kind(index) == Some(fmn_scene::BundleSegmentKind::CompactRecorded)
+                && recorded_bundle.segment_kind(index)
+                    == Some(fmn_scene::BundleSegmentKind::Stateful)
+        });
+    if oracle.len() != 70 || bundle.frame_count() != 70 {
+        return Err(fail(
+            "compact export changed the imperative wait frame grid",
+        ));
+    }
+    let mut ordinary_matches = 0_u64;
+    for index in (0..70).rev().chain((0..70).map(|index| (index * 37) % 70)) {
+        let bytes = bundle
+            .stage_at(index)
+            .map_err(bundle_failure)?
+            .snapshot()
+            .to_bytes()
+            .map_err(bundle_failure)?;
+        ordinary_matches += u64::from(bytes == oracle[index as usize]);
+    }
+
+    let soundtrack =
+        BundleSoundtrack::new(11, 2, vec![0.0, -0.25, 0.5, -0.5]).map_err(bundle_failure)?;
+    let audible = attach_bundle_soundtrack(
+        &exported.bundle.bytes,
+        &soundtrack,
+        fmn_scene::DEFAULT_MAX_BUNDLE_BYTES,
+    )
+    .map_err(bundle_failure)?;
+    let mut audible = fmn_scene::TimelineBundle::from_bytes(&audible).map_err(bundle_failure)?;
+    let explicit_audio = audible.soundtrack() == Some(&soundtrack)
+        && matches!(
+            audible.stage_at(0),
+            Err(BundleReadError::SoundtrackRequired)
+        )
+        && audible.take_soundtrack() == Some(soundtrack);
+    let shared = audible.into_shared().map_err(bundle_failure)?;
+    let jobs = (0..70)
+        .rev()
+        .map(|index| shared.frame_job(index).map_err(bundle_failure))
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(shared);
+    drop(bundle);
+    let mut worker_matches = 0_u64;
+    for workers in [1, 4, 16] {
+        worker_matches += std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for worker in 0..workers {
+                let jobs = &jobs;
+                let oracle = &oracle;
+                handles.push(scope.spawn(move || -> Result<u64, String> {
+                    let mut cache = TimelineFrameCache::default();
+                    let mut matches = 0;
+                    for job in jobs.iter().skip(worker).step_by(workers) {
+                        let bytes = cache
+                            .materialize(job)
+                            .map_err(|error| error.to_string())?
+                            .snapshot()
+                            .to_bytes()
+                            .map_err(|error| error.to_string())?;
+                        matches += u64::from(bytes == oracle[job.index() as usize]);
+                    }
+                    Ok(matches)
+                }));
+            }
+            handles.into_iter().try_fold(0_u64, |matches, handle| {
+                let worker_matches = handle
+                    .join()
+                    .map_err(|_| fail("compact frame worker panicked"))?
+                    .map_err(fail)?;
+                Ok::<_, ScenarioError>(matches + worker_matches)
+            })
+        })?;
+    }
+    let deterministic = repeated.bundle.bytes == exported.bundle.bytes;
+    let smaller = exported.bundle.bytes.len() < recorded.bundle.bytes.len();
+    let callbacks_preserved = calls_at_export > 0
+        && calls_at_export == oracle_calls.get()
+        && source_calls.get() == calls_at_export;
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.compact_scene_bundle")
+            .field("compact", truth(compact))
+            .field("deterministic", truth(deterministic))
+            .field("smaller", truth(smaller))
+            .field("explicit_audio", truth(explicit_audio))
+            .field("callbacks_preserved", truth(callbacks_preserved))
+            .field("compact_bytes", exported.bundle.bytes.len() as u64)
+            .field("recorded_bytes", recorded.bundle.bytes.len() as u64)
+            .field("sha256", exported.bundle.digest.to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("compact_bundle_frames", oracle.len() as u64)
+        .with_counter("compact_bundle_kinds", u64::from(compact))
+        .with_counter("compact_bundle_ordinary_matches", ordinary_matches)
+        .with_counter("compact_bundle_worker_matches", worker_matches)
+        .with_counter("compact_bundle_deterministic", u64::from(deterministic))
+        .with_counter("compact_bundle_smaller", u64::from(smaller))
+        .with_counter("compact_bundle_audio", u64::from(explicit_audio))
+        .with_counter("compact_bundle_callbacks", u64::from(callbacks_preserved))
+        .with_artifact("compact-scene.fmtl", exported.bundle.bytes))
+}
+
 /// Native pole sampling reaches the renderer as absent triangles, including
 /// through a morph to a complete surface. The oracle contains only the one
 /// surviving triangle and is built from an independently sampled finite grid.
@@ -15716,6 +15910,32 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.compact_scene_bundle.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_compact_scene_bundle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("compact_bundle_frames", 70),
+            counter_eq("compact_bundle_kinds", 1),
+            counter_eq("compact_bundle_ordinary_matches", 140),
+            counter_eq("compact_bundle_worker_matches", 210),
+            counter_eq("compact_bundle_deterministic", 1),
+            counter_eq("compact_bundle_smaller", 1),
+            counter_eq("compact_bundle_audio", 1),
+            counter_eq("compact_bundle_callbacks", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.compact_scene_bundle",
+            vec![
+                FieldPred::str_eq("compact", "true"),
+                FieldPred::str_eq("deterministic", "true"),
+                FieldPred::str_eq("explicit_audio", "true"),
+                FieldPred::str_eq("callbacks_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.traced_path_cadence.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -18933,6 +19153,16 @@ fn bundle_render_state_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.bundle_render_state.v1")
         .expect("the bundle render-state scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn compact_scene_bundle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.compact_scene_bundle.v1")
+        .expect("the compact scene bundle lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

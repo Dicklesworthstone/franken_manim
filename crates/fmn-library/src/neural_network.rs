@@ -1159,7 +1159,7 @@ fn sync_rgb(
     let rgb = [color.r as f32, color.g as f32, color.b as f32];
     let alpha = opacity.map(|value| value as f32);
     let mut changed = false;
-    for rgba in scratch.chunks_exact_mut(4) {
+    for rgba in scratch.as_chunks_mut::<4>().0 {
         if rgba[..3] != rgb || alpha.is_some_and(|value| rgba[3] != value) {
             rgba[..3].copy_from_slice(&rgb);
             if let Some(alpha) = alpha {
