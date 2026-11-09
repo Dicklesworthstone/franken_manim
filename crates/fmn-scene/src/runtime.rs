@@ -24,6 +24,7 @@ use std::path::{Path, PathBuf};
 
 mod idle;
 mod parallel;
+pub use fmn_anim::OpenWaitCheckpoint;
 pub use idle::IdleFrame;
 
 use fmn_anim::pure_frame::PureSegment;
@@ -34,7 +35,7 @@ use fmn_anim::{
     complete_play_frame_with_capture, complete_wait_frame_with_capture, finish_open_play,
     finish_open_play_animations, finish_open_wait, open_play_with_mode, open_wait,
     open_wait_after_updaters, prepare_play_animation, prepare_play_frame, prepare_wait_frame,
-    validate_play, wait_segment_with_capture,
+    resume_open_wait, validate_play, wait_segment_with_capture,
 };
 use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
@@ -715,6 +716,7 @@ pub struct Scene {
     skipping: bool,
     original_skipping: bool,
     preflight_done: bool,
+    custom_preflight: bool,
     preflight: Box<dyn PreflightHook>,
     hold_controller: Box<dyn HoldController>,
     unbound_updaters: Option<UpdaterManifest>,
@@ -867,6 +869,7 @@ impl Scene {
             skipping,
             original_skipping,
             preflight_done: false,
+            custom_preflight: false,
             preflight: Box::new(NoPreflight),
             hold_controller: Box::new(ImmediateRelease),
             unbound_updaters: None,
@@ -941,6 +944,16 @@ impl Scene {
         &mut self.stage
     }
 
+    /// Original root seed used for named, frame-indexed RNG forks.
+    ///
+    /// Durable SceneState restores the serial stream separately. Checkpoint
+    /// owners must also bind this root identity so an equal serial stream
+    /// cannot silently select different randomness for later frame work.
+    #[must_use]
+    pub const fn rng_seed(&self) -> u64 {
+        self.rng_root.seed()
+    }
+
     /// The scene-serial named RNG substream. Frame work must use
     /// [`FramePacket::rng_fork`] instead.
     pub fn rng_mut(&mut self) -> &mut Pcg64Dxsm {
@@ -977,6 +990,32 @@ impl Scene {
         !self.event_inbox.is_exclusive_empty()
             || !self.queued_events.is_empty()
             || self.event_error.is_some()
+    }
+
+    /// Whether scene-owned transient state permits a native wait continuation,
+    /// without losing input, presenter or sound history.
+    ///
+    /// Dormant listeners may be recreated by the deterministic factory. Their
+    /// callbacks have not run when no input sequence has ever been reserved.
+    /// This does not grant updater replay permission: the continuation owner
+    /// must separately admit its schedule and rebind every updater by identity.
+    /// That owner also binds the RNG root and preserves Stage configuration
+    /// such as its alignment frame, which durable SceneState omits.
+    #[must_use]
+    pub fn can_resume_wait_checkpoint(&self) -> bool {
+        !self.config.skip_animations
+            && self.config.start_at_play.is_none()
+            && self.config.end_at_play.is_none()
+            && !self.config.presenter_mode
+            && !self.original_skipping
+            && !self.skipping
+            && !self.custom_preflight
+            && self.unbound_updaters.is_none()
+            && self.stage.updater_error().is_none()
+            && !self.has_external_event_ingress()
+            && self.recorded_events.is_empty()
+            && self.next_event_sequence == Some(0)
+            && self.sound_requests.is_empty()
     }
 
     /// Queue one already-available live event for the next serial boundary.
@@ -1099,6 +1138,7 @@ impl Scene {
             ));
         }
         self.preflight = Box::new(hook);
+        self.custom_preflight = true;
         Ok(())
     }
 
@@ -1752,6 +1792,60 @@ impl Scene {
                 max_frames,
             )
             .map_err(Into::into)
+    }
+
+    /// Capture an opened wait's cursor at a completed frame boundary.
+    /// SceneState bytes and executable updater registration remain separate.
+    ///
+    /// # Errors
+    /// Unbound/failed updaters, a failed capture, an unfinished frame, or a
+    /// cursor which no longer matches this Scene's clock.
+    pub fn checkpoint_stepped_wait(
+        &self,
+        wait: &SteppedWait,
+    ) -> Result<OpenWaitCheckpoint, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if wait.sink_error.is_some() || self.event_error.is_some() {
+            return Err(SceneError::InvalidLifecycle(
+                "cannot checkpoint a wait after a failed capture",
+            ));
+        }
+        let checkpoint = wait.open.checkpoint()?;
+        checkpoint.validate_clock(&self.clock)?;
+        Ok(checkpoint)
+    }
+
+    /// Resume a wait after restoring its SceneState and rebinding its updaters.
+    ///
+    /// This runs no preflight, pre-play, zero-dt updater or capture. The saved
+    /// clock and completed play count remain unchanged; the next frame uses
+    /// the original segment alpha and global frame-indexed RNG. Finishing the
+    /// returned handle performs the original pending epilogue exactly once.
+    ///
+    /// # Errors
+    /// Unbound/failed updaters, failed event state, exhausted play count or an
+    /// invalid cursor/clock pair. Refusal leaves the Scene unchanged.
+    pub fn resume_stepped_wait(
+        &mut self,
+        checkpoint: OpenWaitCheckpoint,
+    ) -> Result<SteppedWait, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if self.event_error.is_some() || self.play_count == u64::MAX {
+            return Err(SceneError::InvalidLifecycle(
+                "cannot resume a wait with failed events or an exhausted play count",
+            ));
+        }
+        let open = resume_open_wait(&self.stage, &self.clock, checkpoint)?;
+        // An open wait has already passed preflight. Restoring its continuation
+        // must not make the next segment run that old phase a second time.
+        self.preflight_done = true;
+        Ok(SteppedWait {
+            open,
+            pure_seek: None,
+            sink_error: None,
+        })
     }
 
     /// Advance a stepped wait's rational clock, yielding before scene

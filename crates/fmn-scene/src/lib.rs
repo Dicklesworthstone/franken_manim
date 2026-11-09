@@ -32,10 +32,13 @@ pub use camera_rig::CameraRig;
 /// edges to Marionette, Choreo, or Lumen.
 pub mod studio_bridge {
     pub use fmn_anim::{
-        AnimError, Animation, FrameMetadata, FramePacket, Purity, Timeline, classify_play,
-        classify_wait,
+        AnimError, Animation, Duration, FrameMetadata, FramePacket, FrameSegment, ImpureEffect,
+        OpenWaitCheckpoint, Purity, RationalFrameClock, Timeline, classify_play, classify_wait,
     };
-    pub use fmn_mobject::{Mob, SceneState, Snapshot, Stage, Uniforms};
+    pub use fmn_mobject::{
+        Mob, SceneState, Snapshot, Stage, Uniforms, UpdaterFn, UpdaterId, UpdaterKindTag,
+        UpdaterManifest,
+    };
     pub use fmn_render::{CameraError, CameraFrame};
 }
 
@@ -57,9 +60,10 @@ pub use journal::{
 pub use runtime::{
     BlankScene, CameraOrientation, CaptureReason, CompletionRequest, EndScene, HoldController,
     HoldDecision, HoldKind, IntegrationError, LifecycleEvent, LifecyclePhase, NullSceneSink,
-    OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError, SceneProgram, SceneRegistration,
-    SceneRegistry, SceneRunReport, SceneSelection, SceneSelectionError, SceneSink,
-    SceneStateRestore, SoundRequest, SteppedPlay, SteppedWait, ThreeDAddOptions, ThreeDScene,
+    OpenWaitCheckpoint, OutputNaming, PlayOverrides, RuntimeConfig, Scene, SceneError,
+    SceneProgram, SceneRegistration, SceneRegistry, SceneRunReport, SceneSelection,
+    SceneSelectionError, SceneSink, SceneStateRestore, SoundRequest, SteppedPlay, SteppedWait,
+    ThreeDAddOptions, ThreeDScene,
 };
 pub use timeline_bundle::{
     BundleError, BundleExportLimits, BundleReadError, BundleSegmentKind, DEFAULT_MAX_BUNDLE_BYTES,

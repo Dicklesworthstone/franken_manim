@@ -867,6 +867,240 @@ fn stepped_wait_uses_the_same_scene_updater_release_window() {
 }
 
 #[test]
+fn durable_wait_continuation_restores_updates_rng_and_pending_lifecycle_without_replay() {
+    fn update(stage: &mut Stage, mob: fmn_mobject::Mob, dt: f64) {
+        let x = stage.get_center(mob)[0];
+        // Zero-dt is deliberately observable, so reopening the remainder of
+        // the wait instead of restoring its cursor cannot pass this oracle.
+        stage.set_x(mob, x * 1.01 + 0.125 + dt);
+    }
+    let config = RuntimeConfig {
+        fps: 24,
+        ..RuntimeConfig::default()
+    };
+    let mut source = Scene::new(config.clone(), 19).unwrap();
+    let mob = source.add_mobject(point()).unwrap();
+    source
+        .stage_mut()
+        .add_dt_updater(mob, update, false)
+        .unwrap();
+    source.wait_frames(3, &mut NullSceneSink).unwrap();
+    source.rng_mut().next_u64();
+    let mut original = source
+        .begin_stepped_wait_frames(17, &mut NullSceneSink)
+        .unwrap();
+    for _ in 0..4 {
+        source
+            .prepare_stepped_wait_frame(&mut original)
+            .unwrap()
+            .unwrap();
+        source
+            .complete_stepped_wait_frame(&mut original, &mut NullSceneSink)
+            .unwrap();
+    }
+    let cursor = source.checkpoint_stepped_wait(&original).unwrap();
+    assert_eq!((cursor.base_frame, cursor.stepped), (3, 4));
+    let bytes = source.state_bytes().unwrap();
+    let mut restored = Scene::new(config, 19).unwrap();
+    let preflights = Rc::new(RefCell::new(0));
+    let observed = Rc::clone(&preflights);
+    restored
+        .set_preflight_hook(move |_, _| {
+            *observed.borrow_mut() += 1;
+            Ok(())
+        })
+        .unwrap();
+    restored.restore_state_bytes(&bytes).unwrap();
+    assert!(!restored.can_resume_wait_checkpoint());
+    assert!(matches!(
+        restored.resume_stepped_wait(cursor.clone()),
+        Err(SceneError::UnboundUpdaters)
+    ));
+    restored
+        .rebind_updaters(|_, _, kind| {
+            assert_eq!(kind, UpdaterKindTag::Dt);
+            Ok(UpdaterFn::Dt(Rc::new(RefCell::new(update))))
+        })
+        .unwrap();
+    assert!(
+        !restored.can_resume_wait_checkpoint(),
+        "the explicit low-level resume does not admit opaque preflight captures"
+    );
+    let mut invalid = cursor.clone();
+    invalid.stepped += 1;
+    assert!(restored.resume_stepped_wait(invalid).is_err());
+    assert_eq!(restored.state_bytes().unwrap(), bytes);
+    let mut resumed = restored.resume_stepped_wait(cursor).unwrap();
+    assert_eq!(
+        restored.state_bytes().unwrap(),
+        bytes,
+        "resume cannot run any updater"
+    );
+    assert_eq!(restored.play_count(), 1);
+    assert_eq!(restored.rng_mut().next_u64(), source.rng_mut().next_u64());
+    for frame in 8..=20 {
+        let mut expected = PacketSink::default();
+        let mut actual = PacketSink::default();
+        source
+            .prepare_stepped_wait_frame(&mut original)
+            .unwrap()
+            .unwrap();
+        source
+            .complete_stepped_wait_frame(&mut original, &mut expected)
+            .unwrap();
+        restored
+            .prepare_stepped_wait_frame(&mut resumed)
+            .unwrap()
+            .unwrap();
+        restored
+            .complete_stepped_wait_frame(&mut resumed, &mut actual)
+            .unwrap();
+        let expected = expected.packet.unwrap();
+        let actual = actual.packet.unwrap();
+        assert_eq!(actual.frame_index(), frame);
+        assert_eq!(actual.segment_frame(), expected.segment_frame());
+        assert_eq!(actual.alpha().to_bits(), expected.alpha().to_bits());
+        assert_eq!(actual.time(), expected.time());
+        assert_eq!(
+            actual.rng_fork("checkpoint").next_u64(),
+            expected.rng_fork("checkpoint").next_u64()
+        );
+        assert_eq!(
+            actual.state().to_bytes().unwrap(),
+            expected.state().to_bytes().unwrap()
+        );
+        assert_eq!(
+            restored.state_bytes().unwrap(),
+            source.state_bytes().unwrap()
+        );
+    }
+    assert!(resumed.frames_complete());
+    assert_eq!(
+        restored.play_count(),
+        1,
+        "last capture leaves the epilogue pending"
+    );
+    let mut expected_events = RecordingSink::default();
+    let mut actual_events = RecordingSink::default();
+    let expected_report = source
+        .finish_stepped_wait(original, &mut expected_events)
+        .unwrap();
+    let actual_report = restored
+        .finish_stepped_wait(resumed, &mut actual_events)
+        .unwrap();
+    assert_eq!((actual_report.base_frame, actual_report.n_frames), (3, 17));
+    assert_eq!(actual_report.purity, expected_report.purity);
+    assert_eq!(actual_events.events, expected_events.events);
+    assert_eq!(restored.play_count(), 2);
+    source.wait_frames(0, &mut NullSceneSink).unwrap();
+    restored.wait_frames(0, &mut NullSceneSink).unwrap();
+    assert_eq!(
+        *preflights.borrow(),
+        0,
+        "the resumed opener already passed preflight"
+    );
+    assert_eq!(
+        restored.state_bytes().unwrap(),
+        source.state_bytes().unwrap()
+    );
+}
+
+#[test]
+fn frame_rng_root_identity_survives_equal_serial_streams() {
+    let mut first = Scene::new(RuntimeConfig::default(), 7).unwrap();
+    let mut second = Scene::new(RuntimeConfig::default(), 11).unwrap();
+    *second.rng_mut() = first.rng_mut().clone();
+    assert_eq!(first.state_bytes().unwrap(), second.state_bytes().unwrap());
+    assert_eq!(first.rng_seed(), 7);
+    assert_eq!(second.rng_seed(), 11);
+    let mut first_capture = PacketSink::default();
+    let mut second_capture = PacketSink::default();
+    first.wait_frames(1, &mut first_capture).unwrap();
+    second.wait_frames(1, &mut second_capture).unwrap();
+    assert_ne!(
+        first_capture.packet.unwrap().rng_fork("root").state(),
+        second_capture.packet.unwrap().rng_fork("root").state(),
+        "matching serial RNG bytes do not bind frame-indexed randomness"
+    );
+}
+
+#[test]
+fn wait_checkpoint_admission_refuses_unserialized_scene_history() {
+    let mut scene = Scene::default();
+    assert!(scene.can_resume_wait_checkpoint());
+    let mut preflight = Scene::default();
+    preflight.set_preflight_hook(|_, _| Ok(())).unwrap();
+    assert!(!preflight.can_resume_wait_checkpoint());
+    preflight.wait_frames(1, &mut NullSceneSink).unwrap();
+    assert!(!preflight.can_resume_wait_checkpoint());
+    let preflight_bytes = preflight.state_bytes().unwrap();
+    preflight.restore_state_bytes(&preflight_bytes).unwrap();
+    assert!(
+        !preflight.can_resume_wait_checkpoint(),
+        "restoring data cannot erase an opaque preflight declaration"
+    );
+    let inbox = scene.event_inbox();
+    assert!(!scene.can_resume_wait_checkpoint());
+    drop(inbox);
+    assert!(scene.can_resume_wait_checkpoint());
+    scene
+        .queue_event(fmn_scene::EventPayload::MouseMotion {
+            point: [1.0, 0.0, 0.0],
+            delta: [1.0, 0.0, 0.0],
+            modifiers: fmn_scene::Modifiers::NONE,
+        })
+        .unwrap();
+    assert!(!scene.can_resume_wait_checkpoint());
+    scene.dispatch_pending_events().unwrap();
+    assert!(!scene.can_resume_wait_checkpoint());
+    scene.take_recorded_events();
+    assert!(
+        !scene.can_resume_wait_checkpoint(),
+        "draining a log cannot erase input history"
+    );
+    let mut sound = Scene::default();
+    sound.add_sound("tone.wav", 0.0, None, None).unwrap();
+    assert!(!sound.can_resume_wait_checkpoint());
+    for config in [
+        RuntimeConfig {
+            skip_animations: true,
+            ..RuntimeConfig::default()
+        },
+        RuntimeConfig {
+            presenter_mode: true,
+            ..RuntimeConfig::default()
+        },
+        RuntimeConfig {
+            start_at_play: Some(0),
+            ..RuntimeConfig::default()
+        },
+        RuntimeConfig {
+            end_at_play: Some(1),
+            ..RuntimeConfig::default()
+        },
+    ] {
+        assert!(!Scene::new(config, 0).unwrap().can_resume_wait_checkpoint());
+    }
+    let mut failed = Scene::default();
+    let mut sink = RecordingSink {
+        fail_capture_at: Some(0),
+        ..RecordingSink::default()
+    };
+    let mut wait = failed.begin_stepped_wait_frames(1, &mut sink).unwrap();
+    failed
+        .prepare_stepped_wait_frame(&mut wait)
+        .unwrap()
+        .unwrap();
+    // Capture errors are latched so the ordinary epilogue can run. They must
+    // still refuse a checkpoint before finish surfaces the original error.
+    failed
+        .complete_stepped_wait_frame(&mut wait, &mut sink)
+        .unwrap();
+    assert!(failed.checkpoint_stepped_wait(&wait).is_err());
+    assert!(failed.finish_stepped_wait(wait, &mut sink).is_err());
+}
+
+#[test]
 fn immutable_packets_materialize_with_live_handles_and_cow_isolation() {
     let mut scene = Scene::default();
     let mob = scene.add_mobject(point()).expect("root");

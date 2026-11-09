@@ -1011,7 +1011,71 @@ pub struct OpenWait {
     prepared: Option<StepPlan>,
 }
 
+/// The data needed to continue an already opened wait between captures.
+///
+/// This is a cursor, not a Stage snapshot or executable callback registry.
+/// A restore owner must separately restore the matching scene data and rebind
+/// its updater identities. The original segment retains the seconds-versus-
+/// frames alpha law; replacing it with a wait for the remaining duration would
+/// change both its samples and its lifecycle.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenWaitCheckpoint {
+    /// Original nominal sampling grid, including its original alpha law.
+    pub segment: FrameSegment,
+    /// Global frame index immediately before this wait began.
+    pub base_frame: i64,
+    /// Completed nominal samples inside the original segment.
+    pub stepped: i64,
+    /// Previously observed effects; restoration cannot erase their evidence.
+    pub purity: Purity,
+}
+
+impl OpenWaitCheckpoint {
+    /// Check this cursor against the already restored rational clock.
+    ///
+    /// # Errors
+    /// Refuses a different frame grid, invalid duration or frame range,
+    /// overflow, or a clock which is not at the saved completed-frame boundary.
+    pub fn validate_clock(&self, clock: &RationalFrameClock) -> Result<(), AnimError> {
+        let frames = self.segment.n_frames();
+        if self.segment.end_time().fps() != clock.fps()
+            || !self.segment.run_time().is_finite()
+            || self.segment.run_time() < 0.0
+            || self.base_frame < 0
+            || frames < 0
+            || self.stepped < 0
+            || self.stepped > frames
+            || self.base_frame.checked_add(frames).is_none()
+            || self.base_frame.checked_add(self.stepped) != Some(clock.now().frames())
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "wait checkpoint disagrees with its original segment or restored clock",
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl OpenWait {
+    /// Capture a continuation cursor without running an updater or changing time.
+    /// The final capture remains distinct from the still-pending wait epilogue.
+    ///
+    /// # Errors
+    /// A prepared frame must finish its updater/capture phase before checkpointing.
+    pub fn checkpoint(&self) -> Result<OpenWaitCheckpoint, AnimError> {
+        if !self.is_at_frame_boundary() {
+            return Err(AnimError::InvalidFramePhase(
+                "complete the prepared wait frame before checkpointing",
+            ));
+        }
+        Ok(OpenWaitCheckpoint {
+            segment: self.segment,
+            base_frame: self.report.base_frame,
+            stepped: self.stepped,
+            purity: self.report.purity.clone(),
+        })
+    }
+
     /// All nominal wait frames have completed; reading this never advances time.
     #[must_use]
     pub fn frames_complete(&self) -> bool {
@@ -1061,6 +1125,51 @@ impl OpenWait {
         note_external_updaters(&mut self.report);
         Ok(())
     }
+}
+
+/// Continue an opened wait on its restored Stage and clock without replaying
+/// its prefix, its initial zero-dt updater pass, or any lifecycle callback.
+///
+/// The owner must rebind all durable updater identities before calling this
+/// function. Current updater effects are merged with the saved inventory. No
+/// pure begin snapshot is fabricated from the later restored state, and the
+/// ordinary finish operation remains pending even at the final sample.
+///
+/// # Errors
+/// Invalid cursor/clock correspondence or an unacknowledged updater failure.
+pub fn resume_open_wait(
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    checkpoint: OpenWaitCheckpoint,
+) -> Result<OpenWait, AnimError> {
+    check_updater_error(stage)?;
+    checkpoint.validate_clock(clock)?;
+    let mut purity = checkpoint.purity;
+    if let Purity::Stateful(current) = classify_wait(stage, false) {
+        match &mut purity {
+            Purity::Pure => purity = Purity::Stateful(current),
+            Purity::Stateful(previous) => {
+                for effect in current {
+                    if !previous.contains(&effect) {
+                        previous.push(effect);
+                    }
+                }
+            }
+        }
+    }
+    Ok(OpenWait {
+        report: SegmentReport {
+            kind: SegmentKind::Wait,
+            purity,
+            begin_state: None,
+            base_frame: checkpoint.base_frame,
+            n_frames: checkpoint.segment.n_frames(),
+            run_time: checkpoint.segment.run_time(),
+        },
+        segment: checkpoint.segment,
+        stepped: checkpoint.stepped,
+        prepared: None,
+    })
 }
 
 /// Consume a wait abandoned at a host-language updater boundary.
@@ -1602,6 +1711,143 @@ mod tests {
     use super::*;
     use crate::{AnimConfig, Transform};
     use fmn_mobject::Mobject;
+
+    #[test]
+    fn resumed_wait_retains_the_original_alpha_grid_and_global_rng_without_prefix_steps() {
+        let large = 1_i64 << 53;
+        for (duration, frame, expected_alpha) in [
+            (
+                Duration::Frames((large + 1) as u64),
+                large,
+                1.0_f64.next_down(),
+            ),
+            (
+                Duration::Frames(i64::MAX as u64),
+                i64::MAX - 1,
+                1.0_f64.next_down(),
+            ),
+            // Seconds must keep their historical rounded alpha: at 24 fps
+            // 43/24 seconds covers 44 frames, but sample 43 already has alpha 1.
+            (Duration::Seconds(43.0 / 24.0), 43, 1.0),
+        ] {
+            let mut stage = Stage::new();
+            let mob = stage.add(Mobject::from_points(&[[0.0; 3]]));
+            stage.add_to_scene(mob).unwrap();
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let observed = std::rc::Rc::clone(&calls);
+            stage
+                .add_dt_updater(mob, move |_, _, _| observed.set(observed.get() + 1), false)
+                .unwrap();
+            let mut clock = RationalFrameClock::new(24).unwrap();
+            let segment = clock.segment(duration).unwrap();
+            clock.advance_frames(frame - 1).unwrap();
+            let mut resumed = resume_open_wait(
+                &stage,
+                &clock,
+                OpenWaitCheckpoint {
+                    segment,
+                    base_frame: 0,
+                    stepped: frame - 1,
+                    purity: Purity::Pure,
+                },
+            )
+            .unwrap();
+            assert_eq!(calls.get(), 0, "resume must not run the zero-dt opener");
+            assert!(matches!(resumed.report().purity, Purity::Stateful(_)));
+            let boundary = prepare_wait_frame(&mut stage, &mut clock, &mut resumed)
+                .unwrap()
+                .unwrap();
+            assert_eq!(boundary.sample.frame, frame);
+            assert_eq!(boundary.sample.alpha, expected_alpha);
+            let rng = RngRoot::from_seed(42);
+            let mut captured = None;
+            complete_wait_frame(
+                &mut stage,
+                &clock,
+                &rng,
+                &mut resumed,
+                true,
+                &mut |_, _| {},
+                &mut |packet| captured = Some(packet),
+            )
+            .unwrap();
+            let packet = captured.unwrap();
+            assert_eq!(packet.frame_index(), frame);
+            assert_eq!(packet.segment_frame(), frame);
+            assert_eq!(
+                packet.rng_fork("continuation").next_u64(),
+                rng.substream("continuation")
+                    .fork_frame(frame as u64)
+                    .next_u64()
+            );
+            assert_eq!(calls.get(), 1, "only the requested next sample executes");
+            assert_eq!(resumed.checkpoint().unwrap().stepped, frame);
+        }
+    }
+
+    #[test]
+    fn wait_checkpoints_refuse_incomplete_frames_and_mismatched_clocks() {
+        let mut stage = Stage::new();
+        let mut clock = RationalFrameClock::new(8).unwrap();
+        clock.advance_frames(2).unwrap();
+        let mut wait = open_wait(&mut stage, &clock, 0.5, BeginState::Retain).unwrap();
+        let checkpoint = wait.checkpoint().unwrap();
+        assert_eq!(checkpoint.base_frame, 2);
+        for (base_frame, stepped) in [(-1, 0), (2, -1), (2, 5), (2, 1), (i64::MAX, 0)] {
+            let invalid = OpenWaitCheckpoint {
+                base_frame,
+                stepped,
+                ..checkpoint.clone()
+            };
+            assert!(resume_open_wait(&stage, &clock, invalid).is_err());
+        }
+        let mut different_grid = RationalFrameClock::new(9).unwrap();
+        different_grid.advance_frames(2).unwrap();
+        assert!(resume_open_wait(&stage, &different_grid, checkpoint.clone()).is_err());
+        prepare_wait_frame(&mut stage, &mut clock, &mut wait)
+            .unwrap()
+            .unwrap();
+        assert!(wait.checkpoint().is_err());
+        let rng = RngRoot::from_seed(0);
+        complete_wait_frame(
+            &mut stage,
+            &clock,
+            &rng,
+            &mut wait,
+            false,
+            &mut |_, _| {},
+            &mut |_| {},
+        )
+        .unwrap();
+        while prepare_wait_frame(&mut stage, &mut clock, &mut wait)
+            .unwrap()
+            .is_some()
+        {
+            complete_wait_frame(
+                &mut stage,
+                &clock,
+                &rng,
+                &mut wait,
+                false,
+                &mut |_, _| {},
+                &mut |_| {},
+            )
+            .unwrap();
+        }
+        let mut resumed = resume_open_wait(&stage, &clock, wait.checkpoint().unwrap()).unwrap();
+        assert!(resumed.frames_complete());
+        assert!(
+            prepare_wait_frame(&mut stage, &mut clock, &mut resumed)
+                .unwrap()
+                .is_none()
+        );
+        let report = finish_open_wait(resumed).unwrap();
+        assert_eq!((report.base_frame, report.n_frames), (2, 4));
+        assert!(
+            report.begin_state.is_none(),
+            "a later state is not a pure begin snapshot"
+        );
+    }
 
     #[test]
     fn stepped_animation_boundary_preserves_exact_endpoints_and_seconds_compatibility() {
