@@ -152,6 +152,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### Live neural-network values (Rust)
+
+Supply layer sizes, activations and weights from your own model or training
+loop. `NeuralNetworkMobject::add_to` installs the visual family and returns a
+`NeuralNetworkBinding`; `sync_values` refreshes its neuron colors and synapse
+colors, widths and opacity while preserving handles, geometry and placement.
+Use a direct refresh for discrete changes or a fallible updater for live values:
+
+```rust,no_run
+use fmn::prelude::*;
+use std::{cell::RefCell, rc::Rc};
+
+struct TrainingReadout;
+
+impl SceneConstruct for TrainingReadout {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let mut model = NeuralNetworkMobject::from_layer_sizes(&[2, 4, 1])?;
+        let mut live = model.add_to(stage.arena_mut())?;
+        let root = live.mobject();
+        stage.arena_mut().add_to_scene(root)?;
+
+        model.set_layer_activations(1, &[0.2, 0.5, 0.8, 1.0])?;
+        model.set_synapse_weight(0, 0, 3, -0.9)?;
+        live.sync_values(stage.arena_mut(), &model)?;
+
+        let values = Rc::new(RefCell::new(model));
+        let source = Rc::clone(&values);
+        let updater = stage.arena_mut().add_try_updater(
+            root,
+            move |arena, _| {
+                live.sync_values(arena, &source.borrow())
+                    .map_err(|error| UpdaterError::callback("neural values", error))
+            },
+            false,
+        )?;
+
+        // Updates from the caller reach the same objects on the next tick.
+        values.borrow_mut().set_neuron_activation(2, 0, 0.95)?;
+        stage.wait(1.0)?;
+        stage.arena_mut().remove_updater(root, updater);
+        Ok(())
+    }
+}
+```
+
+Before moving the binding into an updater, use `live.neuron(layer, index)` or
+`live.synapse(layer, from, to)` to retain individual `Mob` handles for ordinary
+animations. Compressed layers show the first and last neurons with their
+original model indices; elided neurons and connections return `None`. Configure
+the display cap and layout before installing the binding.
+
+Refreshes require the same layer sizes, configuration and bound family shape.
+Deleting, regrouping or replacing a bound child requires a new binding;
+removing the root from the draw list and readding it is supported. Invalid
+displayed values or a stale binding fail before any style update. Neuron opacity
+and stroke styling remain caller-controlled, and unchanged values leave record
+revisions unchanged. A live updater makes its playback segment stateful under
+the normal purity rules.
+
 For a long-form example ("Made with FrankenManim"), [`crates/fmn/examples/hoeffding_d`](crates/fmn/examples/hoeffding_d/main.rs) is an eight-chapter explainer of Hoeffding's D, about 4,000 lines of Rust, paired with a source-unedited Python portal counterpart in [`crates/fmn-python/tests/hoeffding_portal.py`](crates/fmn-python/tests/hoeffding_portal.py). It runs over four minutes at 1080p60 (`15,144` frames) with a procedurally synthesized score mixed natively and muxed through the governed `ffmpeg` boundary (`render_matrix.hoeffding_d_full_mp4.v1`). Its readouts recompute the statistic from live dot positions every frame. Run `cargo run --release -p fmn --example hoeffding_d -- render all` for MP4 (ffmpeg on `PATH`), or add `--format png --res 480x270 --fps 15` for a fully native draft. The e2e suite renders all eight native chapters (`render_matrix.hoeffding_d_chapters.v1`) and the portal segments (`render_matrix.hoeffding_d_portal.v1`) on every commit.
 
 ---

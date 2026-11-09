@@ -9060,22 +9060,24 @@ fn cli_compiled_range_scenario_passes() {
 /// canonical document — the same renderer `tests/scene_goldens.rs`
 /// injects into the corpus artifact form.
 fn render_certified_doc(stage: &Stage) -> Vec<u8> {
+    render_certified_doc_with_plan(stage, &mut RenderPlan::new())
+}
+
+fn render_certified_doc_with_plan(stage: &Stage, plan: &mut RenderPlan) -> Vec<u8> {
     let config = scene_goldens::frame_config();
-    let mut plan = RenderPlan::new();
     plan.sync(stage, 0)
         .expect("valid certified document fixture");
     let mono =
-        MonoTable::build(&plan, config.map).expect("bounded certified document monotone table");
-    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        MonoTable::build(plan, config.map).expect("bounded certified document monotone table");
+    let mut binning = Binning::build(plan, config.viewport, TILING, config.map)
         .expect("bounded conformance binning");
     binning
-        .prune_occluded(&plan)
+        .prune_occluded(plan)
         .expect("occlusion pruning matches the plan");
-    let frame =
-        FrameJob::with_identity(&plan, &mono, &binning, config, EngineIdentity::certified())
-            .expect("frame job matches the plan")
-            .render(1)
-            .expect("the engine renders the frame");
+    let frame = FrameJob::with_identity(plan, &mono, &binning, config, EngineIdentity::certified())
+        .expect("frame job matches the plan")
+        .render(1)
+        .expect("the engine renders the frame");
     encode_frame(&frame).expect("the frame encodes into its canonical document")
 }
 
@@ -12420,23 +12422,57 @@ fn neural_network_live_training_and_purity_run(
         .map_err(|error| fail(format!("feed forward: {error}")))?;
     let feed_forward_matches = u64::from(!out.is_empty() && out[0] > 0.0 && out[0] < 1.0);
 
-    let built = net
-        .build()
-        .map_err(|error| fail(format!("net build: {error}")))?;
     let mut stage = Stage::new();
-    let handle = stage.add(built);
+    let mut binding = net
+        .add_to(&mut stage)
+        .map_err(|error| fail(format!("net binding: {error}")))?;
+    let handle = binding.mobject();
     stage
         .add_to_scene(handle)
         .map_err(|error| fail(format!("add to scene: {error}")))?;
 
     let initial_purity = classify_wait(&stage, false);
     let initially_pure = u64::from(initial_purity.is_pure());
+    let initial_geometry = stage
+        .family(handle)
+        .into_iter()
+        .map(|mob| (mob, stage.get_points(mob).expect("neural family is live")))
+        .collect::<Vec<_>>();
+    let mut live_plan = RenderPlan::new();
+    let before = render_certified_doc_with_plan(&stage, &mut live_plan);
+
+    // Independent detached construction supplies the expected final picture.
+    // The live route must reach it using the same installed family, through
+    // an actual updater and the production renderer.
+    let mut expected = net.clone();
+    expected
+        .set_neuron_activation(2, 0, 1.0)
+        .map_err(|error| fail(format!("expected activation: {error}")))?;
+    expected
+        .set_synapse_weight(1, 2, 0, -0.9)
+        .map_err(|error| fail(format!("expected weight: {error}")))?;
+    let mut expected_stage = Stage::new();
+    let expected_root = expected_stage.add(
+        expected
+            .build()
+            .map_err(|error| fail(format!("expected geometry: {error}")))?,
+    );
+    expected_stage
+        .add_to_scene(expected_root)
+        .map_err(|error| fail(format!("expected scene: {error}")))?;
+    let expected_pixels = render_certified_doc(&expected_stage);
 
     stage
-        .add_updater(
+        .add_try_updater(
             handle,
-            |_stage, _mob| {
-                // simulated live training update
+            move |stage, _mob| {
+                let mut update = || -> Result<(), fmn_library::NeuralNetworkError> {
+                    net.set_neuron_activation(2, 0, 1.0)?;
+                    net.set_synapse_weight(1, 2, 0, -0.9)?;
+                    binding.sync_values(stage, &net)
+                };
+                update()
+                    .map_err(|error| fmn_mobject::UpdaterError::callback("neural values", error))
             },
             false,
         )
@@ -12447,24 +12483,52 @@ fn neural_network_live_training_and_purity_run(
         post_purity,
         Purity::Stateful(ref effs) if effs.contains(&ImpureEffect::SceneUpdater)
     ));
+    stage.update(1.0 / 30.0);
+    if let Some(error) = stage.updater_error() {
+        return Err(fail(format!("neural updater: {error}")));
+    }
+    let after = render_certified_doc_with_plan(&stage, &mut live_plan);
+    let live_pixels_match = u64::from(after != before && after == expected_pixels);
+    let stable_geometry = u64::from(
+        initial_geometry
+            .iter()
+            .all(|(mob, points)| stage.get_points(*mob).as_ref() == Some(points))
+            && stage.family(handle)
+                == initial_geometry
+                    .iter()
+                    .map(|(mob, _)| *mob)
+                    .collect::<Vec<_>>(),
+    );
 
-    if feed_forward_matches != 1 || initially_pure != 1 || purity_is_stateful != 1 {
+    if feed_forward_matches != 1
+        || initially_pure != 1
+        || purity_is_stateful != 1
+        || live_pixels_match != 1
+        || stable_geometry != 1
+    {
         return Err(fail(format!(
-            "neural network e2e broken: feed_forward={feed_forward_matches} pure_init={initially_pure} stateful={purity_is_stateful}"
+            "neural network e2e broken: feed_forward={feed_forward_matches} pure_init={initially_pure} stateful={purity_is_stateful} pixels={live_pixels_match} stable_geometry={stable_geometry}"
         )));
     }
 
     ctx.event(
         LogEvent::new("e2e.neural_network.live_training")
             .field("layers", 3_u64)
+            .field("live_pixels_match", live_pixels_match)
             .field("stateful", 1_u64),
     );
     ctx.counter("feed_forward_matches", feed_forward_matches);
     ctx.counter("purity_is_stateful", purity_is_stateful);
+    ctx.counter("live_pixels_match", live_pixels_match);
+    ctx.counter("stable_geometry", stable_geometry);
 
     Ok(RunOutcome::ok()
         .with_counter("feed_forward_matches", feed_forward_matches)
-        .with_counter("purity_is_stateful", purity_is_stateful))
+        .with_counter("purity_is_stateful", purity_is_stateful)
+        .with_counter("live_pixels_match", live_pixels_match)
+        .with_counter("stable_geometry", stable_geometry)
+        .with_artifact("neural-before.frame", before)
+        .with_artifact("neural-after.frame", after))
 }
 
 /// CSV → TableMobject end-to-end through the suite's frame parser and
@@ -18323,12 +18387,15 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 Assertion::ExitCode(0),
                 counter_eq("feed_forward_matches", 1),
                 counter_eq("purity_is_stateful", 1),
+                counter_eq("live_pixels_match", 1),
+                counter_eq("stable_geometry", 1),
             ],
             vec![LogExpect::span_present(
                 "e2e.neural_network.live_training",
                 vec![
                     FieldPred::u64_eq("layers", 3),
                     FieldPred::u64_eq("stateful", 1),
+                    FieldPred::u64_eq("live_pixels_match", 1),
                 ],
             )],
         )
@@ -19616,6 +19683,16 @@ fn graph_animations_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.graph_animations.v1")
         .expect("native graph animation lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn neural_network_live_values_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "neural_network.live_training_and_purity.v1")
+        .expect("native neural live-value lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -172,7 +172,8 @@ pub use network_graph::{
 pub use neural_network::{
     DEFAULT_LAYER_SPACING, DEFAULT_MAX_DISPLAYED_NEURONS, DEFAULT_NEURON_RADIUS,
     DEFAULT_NEURON_SPACING, DEFAULT_SYNAPSE_STROKE_WIDTH, LayerKind, LayerSpec,
-    NeuralNetworkConfig, NeuralNetworkError, NeuralNetworkMobject,
+    MAX_NEURAL_NETWORK_PARTS, MAX_NEURAL_NETWORK_VALUES, NeuralNetworkBinding, NeuralNetworkConfig,
+    NeuralNetworkError, NeuralNetworkMobject,
 };
 pub use numbers::{DEFAULT_MAX_NUMBER_CHARACTERS, DecimalNumber, Integer};
 pub use obj_materials::{

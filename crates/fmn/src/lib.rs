@@ -1199,6 +1199,9 @@ impl LibraryError {
             | Self::Graph(GraphError::Sampling(error)) => sampling(error),
             Self::TextMatching(TextMatchingError::BudgetExceeded { .. }) => true,
             Self::TexBinding(error) => error.is_budget_exceeded(),
+            Self::NeuralNetwork(
+                NeuralNetworkError::TooManyParts { .. } | NeuralNetworkError::TooManyValues { .. },
+            ) => true,
             _ => false,
         }
     }
