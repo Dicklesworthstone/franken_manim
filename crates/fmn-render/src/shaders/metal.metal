@@ -1417,9 +1417,14 @@ kernel void fmn_render_three_d(
     device const uint *tile_draws [[buffer(6)]],
     device half4 *surface [[buffer(7)]],
     device uint *status [[buffer(8)]],
+    device const uint *command_triangles [[buffer(9)]],
+    device const uint *tile_triangles [[buffer(10)]],
     uint2 group_id [[threadgroup_position_in_grid]],
     uint2 local_id [[thread_position_in_threadgroup]]
 ) {
+    // Each tile command lists only its draw's triangles whose pixel bounds
+    // meet this tile, in draw order; the rest fail
+    // three_d_pixel_in_triangle_bounds at every pixel here.
     uint width = params_u32[0];
     uint height = params_u32[1];
     uint tile = params_u32[2];
@@ -1441,12 +1446,11 @@ kernel void fmn_render_three_d(
                  command++) {
                 uint draw = tile_draws[command];
                 if (draw >= draw_count) continue;
-                uint draw_base = draw * (uint)THREE_D_DRAW_U32_STRIDE;
-                uint triangle_lo = draw_u32[draw_base + 0u];
-                uint triangle_hi = triangle_lo + draw_u32[draw_base + 1u];
-                for (uint triangle = triangle_lo;
-                     triangle < triangle_hi;
-                     triangle++) {
+                uint entry_hi = command_triangles[command + 1u];
+                for (uint entry = command_triangles[command];
+                     entry < entry_hi;
+                     entry++) {
+                    uint triangle = tile_triangles[entry];
                     if (three_d_triangle_marks_boundary(
                             triangles, triangle, px, py)) {
                         boundary = true;
@@ -1479,13 +1483,13 @@ kernel void fmn_render_three_d(
             uint draw = tile_draws[command];
             if (draw >= draw_count) continue;
             uint draw_base = draw * (uint)THREE_D_DRAW_U32_STRIDE;
-            uint triangle_lo = draw_u32[draw_base + 0u];
-            uint triangle_hi = triangle_lo + draw_u32[draw_base + 1u];
             uint shader = draw_u32[draw_base + 2u];
             bool depth_test = draw_u32[draw_base + 3u] != 0u;
-            for (uint triangle = triangle_lo;
-                 triangle < triangle_hi;
-                 triangle++) {
+            uint entry_hi = command_triangles[command + 1u];
+            for (uint entry = command_triangles[command];
+                 entry < entry_hi;
+                 entry++) {
+                uint triangle = tile_triangles[entry];
                 if (!three_d_pixel_in_triangle_bounds(
                         triangles, triangle, px, py)) {
                     continue;

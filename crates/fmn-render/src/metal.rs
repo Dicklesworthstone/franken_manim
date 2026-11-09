@@ -1118,6 +1118,10 @@ impl MetalRenderer {
         let draw_f32 = self.gateway.buffer_f32(nonempty_f32(&flat.draw_f32))?;
         let tile_offsets = self.gateway.buffer_u32(&flat.tile_offsets)?;
         let tile_draws = self.gateway.buffer_u32(nonempty_u32(&flat.tile_draws))?;
+        let command_triangles = self.gateway.buffer_u32(&flat.command_triangles)?;
+        let tile_triangles = self
+            .gateway
+            .buffer_u32(nonempty_u32(&flat.tile_triangles))?;
         let group_count = flat
             .cols()
             .checked_mul(flat.rows())
@@ -1144,6 +1148,8 @@ impl MetalRenderer {
                     .ok_or(MetalError::Layout("raw surface disappeared"))?
                     .buffer,
                 &status,
+                &command_triangles,
+                &tile_triangles,
             ],
             Grid::grid_2d(flat.cols(), flat.rows(), tile, tile),
         )?;
@@ -1955,10 +1961,29 @@ struct FlatThreeDFrame {
     draw_f32: Vec<f32>,
     tile_offsets: Vec<u32>,
     tile_draws: Vec<u32>,
+    /// CSR over `tile_draws`: command `c`'s triangles are
+    /// `tile_triangles[command_triangles[c]..command_triangles[c + 1]]`.
+    command_triangles: Vec<u32>,
+    tile_triangles: Vec<u32>,
+}
+
+/// Which of a draw's triangles a tile command lists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TriangleBins {
+    /// Only the triangles whose f32 pixel bounds meet the tile.
+    PerTile,
+    /// Every triangle of the draw, in every tile the draw is binned to (the
+    /// kernel's behaviour before per-tile lists; kept as the test reference).
+    #[cfg_attr(not(test), allow(dead_code))]
+    Whole,
 }
 
 impl FlatThreeDFrame {
     fn derive(job: &ThreeDJob<'_>) -> Result<Self, MetalError> {
+        Self::derive_with(job, TriangleBins::PerTile)
+    }
+
+    fn derive_with(job: &ThreeDJob<'_>, bins: TriangleBins) -> Result<Self, MetalError> {
         let camera = job.camera();
         let width = camera.pixel_width();
         let height = camera.pixel_height();
@@ -1984,6 +2009,8 @@ impl FlatThreeDFrame {
             draw_f32: Vec::with_capacity(job.prepared_draws().len() * THREE_D_DRAW_F32_STRIDE),
             tile_offsets: Vec::new(),
             tile_draws: Vec::new(),
+            command_triangles: Vec::new(),
+            tile_triangles: Vec::new(),
         };
         let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
 
@@ -2033,6 +2060,14 @@ impl FlatThreeDFrame {
 
         (flat.tile_offsets, flat.tile_draws) =
             stable_three_d_bins(&draw_bounds, width, height, tile)?;
+        (flat.command_triangles, flat.tile_triangles) = three_d_tile_triangles(
+            &flat.triangles,
+            &flat.draw_u32,
+            &flat.tile_offsets,
+            &flat.tile_draws,
+            [width, height, tile],
+            bins,
+        )?;
         flat.validate()?;
         Ok(flat)
     }
@@ -2076,6 +2111,31 @@ impl FlatThreeDFrame {
         {
             return Err(MetalError::Layout("3D stable tile CSR"));
         }
+        // Every listed triangle is its command's draw's, ascending.
+        if self.command_triangles.len() != self.tile_draws.len() + 1
+            || self.command_triangles.first().copied() != Some(0)
+            || self.command_triangles.last().copied()
+                != u32::try_from(self.tile_triangles.len()).ok()
+            || self
+                .command_triangles
+                .windows(2)
+                .any(|pair| pair[0] > pair[1])
+        {
+            return Err(MetalError::Layout("3D tile triangle CSR"));
+        }
+        let ranges = self.draw_u32.as_chunks::<THREE_D_DRAW_U32_STRIDE>().0;
+        for (command, &draw) in self.tile_draws.iter().enumerate() {
+            let [first, count, ..] = ranges[draw as usize];
+            let listed = &self.tile_triangles[self.command_triangles[command] as usize
+                ..self.command_triangles[command + 1] as usize];
+            if listed.windows(2).any(|pair| pair[0] >= pair[1])
+                || listed
+                    .iter()
+                    .any(|&triangle| triangle < first || triangle - first >= count)
+            {
+                return Err(MetalError::Layout("3D tile triangle outside its draw"));
+            }
+        }
         Ok(())
     }
 
@@ -2100,6 +2160,8 @@ impl FlatThreeDFrame {
             self.draw_f32.len(),
             self.tile_offsets.len(),
             self.tile_draws.len(),
+            self.command_triangles.len(),
+            self.tile_triangles.len(),
         ]
         .into_iter()
         .try_fold(0usize, |sum, len| sum.checked_add(len))
@@ -2162,6 +2224,131 @@ fn three_d_shader_slab(shader: Shader<'_>) -> [f32; THREE_D_DRAW_F32_STRIDE] {
         slab[19..22].copy_from_slice(&camera_position.map(|value| value as f32));
     }
     slab
+}
+
+/// The half-open pixel span `[floor(min), ceil(max))` of three f32 corner
+/// coordinates, exactly as `three_d_pixel_in_triangle_bounds` computes it on
+/// the device (f32 min and max are exact, floor and ceil of an f32 are exact).
+fn three_d_pixel_span(a: f32, b: f32, c: f32) -> (f32, f32) {
+    (a.min(b.min(c)).floor(), a.max(b.max(c)).ceil())
+}
+
+/// The first and last (inclusive) tile along one axis whose pixels the span
+/// `[lo, hi)` meets, within `0..extent` pixels; `None` when it meets none.
+fn three_d_tile_range(lo: f32, hi: f32, extent: u32, tile: u32) -> Option<(usize, usize)> {
+    // `lo` and `hi` are integral f32 values; every pixel index below `extent`
+    // is exact in f32, so these comparisons are the kernel's.
+    let extent_f = extent as f32;
+    if !(hi > 0.0 && lo < extent_f && lo < hi) {
+        return None;
+    }
+    let first = if lo <= 0.0 { 0 } else { lo as u32 };
+    let end = if hi >= extent_f { extent } else { hi as u32 };
+    if first >= end {
+        return None;
+    }
+    Some(((first / tile) as usize, ((end - 1) / tile) as usize))
+}
+
+/// Each tile command's triangle list (see [`FlatThreeDFrame`]).
+///
+/// The kernel runs both of its per-triangle tests (the supersampling boundary
+/// and the shading pass) only for pixels inside the triangle's f32 pixel
+/// span, `three_d_pixel_in_triangle_bounds`. A triangle whose span misses
+/// every pixel of a tile therefore changes nothing there and is left out of
+/// that tile's lists. The kept triangles stay in their draw's order, and the
+/// tile's draws are `tile_draws` unchanged, so every pixel sees the same
+/// sequence of triangles that can touch it as with whole draws.
+fn three_d_tile_triangles(
+    triangles: &[f32],
+    draw_u32: &[u32],
+    tile_offsets: &[u32],
+    tile_draws: &[u32],
+    [width, height, tile]: [u32; 3],
+    bins: TriangleBins,
+) -> Result<(Vec<u32>, Vec<u32>), MetalError> {
+    let cols = width.div_ceil(tile) as usize;
+    let ranges = draw_u32.as_chunks::<THREE_D_DRAW_U32_STRIDE>().0;
+    let tile_count = tile_offsets.len().saturating_sub(1);
+    // The (tile, command) pairs of each draw, in tile order.
+    let mut by_draw: Vec<Vec<(usize, usize)>> = vec![Vec::new(); ranges.len()];
+    for tile_index in 0..tile_count {
+        let lo = tile_offsets[tile_index] as usize;
+        let hi = tile_offsets[tile_index + 1] as usize;
+        let commands = tile_draws
+            .get(lo..hi)
+            .ok_or(MetalError::Layout("3D tile command range"))?;
+        for (offset, &draw) in commands.iter().enumerate() {
+            by_draw
+                .get_mut(draw as usize)
+                .ok_or(MetalError::Layout("3D tile command names no draw"))?
+                .push((tile_index, lo + offset));
+        }
+    }
+    let mut lists: Vec<Vec<u32>> = vec![Vec::new(); tile_draws.len()];
+    let mut command_of_tile = vec![usize::MAX; tile_count];
+    for (draw, pairs) in by_draw.iter().enumerate() {
+        if pairs.is_empty() {
+            continue;
+        }
+        let [first, count, ..] = ranges[draw];
+        let last = first
+            .checked_add(count)
+            .ok_or(MetalError::SizeOverflow("3D draw triangle range"))?;
+        if bins == TriangleBins::Whole {
+            for &(_, command) in pairs {
+                lists[command].extend(first..last);
+            }
+            continue;
+        }
+        for &(tile_index, command) in pairs {
+            command_of_tile[tile_index] = command;
+        }
+        for triangle in first..last {
+            let corner = |index: usize, axis: usize| -> Result<f32, MetalError> {
+                triangles
+                    .get(
+                        triangle as usize * THREE_D_TRIANGLE_STRIDE
+                            + index * THREE_D_VERTEX_STRIDE
+                            + axis,
+                    )
+                    .copied()
+                    .filter(|value| value.is_finite())
+                    .ok_or(MetalError::Layout("3D triangle corner"))
+            };
+            let (x_lo, x_hi) = three_d_pixel_span(corner(0, 0)?, corner(1, 0)?, corner(2, 0)?);
+            let (y_lo, y_hi) = three_d_pixel_span(corner(0, 1)?, corner(1, 1)?, corner(2, 1)?);
+            let (Some((col_lo, col_hi)), Some((row_lo, row_hi))) = (
+                three_d_tile_range(x_lo, x_hi, width, tile),
+                three_d_tile_range(y_lo, y_hi, height, tile),
+            ) else {
+                continue;
+            };
+            for row in row_lo..=row_hi {
+                for col in col_lo..=col_hi {
+                    let command = command_of_tile[row * cols + col];
+                    if command != usize::MAX {
+                        lists[command].push(triangle);
+                    }
+                }
+            }
+        }
+        for &(tile_index, _) in pairs {
+            command_of_tile[tile_index] = usize::MAX;
+        }
+    }
+    let total = lists.iter().map(Vec::len).sum::<usize>();
+    let mut offsets = Vec::with_capacity(lists.len() + 1);
+    let mut flat = Vec::with_capacity(total);
+    offsets.push(0);
+    for list in lists {
+        flat.extend_from_slice(&list);
+        offsets.push(
+            u32::try_from(flat.len())
+                .map_err(|_| MetalError::SizeOverflow("3D tile triangle offset"))?,
+        );
+    }
+    Ok((offsets, flat))
 }
 
 fn stable_three_d_bins(
@@ -2410,6 +2597,286 @@ mod tests {
             assert!(
                 KERNEL_SOURCE.contains(&format!("kernel void {kernel}(")),
                 "shader is missing `{kernel}`"
+            );
+        }
+    }
+
+    /// Random 3D jobs that stress per-tile triangle lists: a dense
+    /// field-like Gouraud grid, glowing and plain dots, and loose triangles
+    /// with corners on and a hair off tile edges (both sides of f32
+    /// rounding), partly off screen, sub-pixel and depth-tested.
+    /// A camera, its meshes, its dots (centre, radius, glow) and fine tile.
+    type TileListJob = (Camera, Vec<SurfaceMesh>, Vec<([f64; 3], f64, bool)>, u32);
+
+    fn tile_list_jobs() -> Vec<TileListJob> {
+        let mut state = 0x243F_6A88_85A3_08D3_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut jobs = Vec::new();
+        for (case, &(resolution, samples, fine)) in [
+            ((96_u32, 72_u32), 1_u8, 8_u32),
+            ((80, 64), 2, 8),
+            ((64, 48), 4, 16),
+            ((101, 67), 2, 16),
+            ((48, 96), 1, 8),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let camera = Camera::new(CameraConfig {
+                resolution,
+                samples,
+                background: Srgb::from_rgb8(4, 8, 16).to_linear(1.0),
+                ..CameraConfig::default()
+            })
+            .expect("camera");
+            let mut meshes = Vec::new();
+            // A dense grid over most of the frame, coloured per vertex.
+            let (nu, nv) = (24 + case * 3, 18 + case * 2);
+            let mut vertices = Vec::new();
+            for j in 0..nv {
+                for i in 0..nu {
+                    let x = -6.5 + 13.0 * i as f64 / (nu - 1) as f64;
+                    let y = -3.8 + 7.6 * j as f64 / (nv - 1) as f64;
+                    let color = Srgb::from_rgb8(
+                        (unit() * 255.0) as u8,
+                        (unit() * 255.0) as u8,
+                        (unit() * 255.0) as u8,
+                    )
+                    .to_linear(0.6 + 0.4 * unit());
+                    vertices.push(SurfaceVertex::colored([x, y, 0.0], [0.0, 0.0, 1.0], color));
+                }
+            }
+            meshes.push(SurfaceMesh::from_uv_grid(vertices, (nu as u32, nv as u32)).expect("grid"));
+            // Loose triangles: random, tiny, huge, partly off screen.
+            for _ in 0..40 {
+                let scale = [0.02, 0.3, 2.0, 9.0][(unit() * 4.0) as usize % 4];
+                let center = [(unit() - 0.5) * 16.0, (unit() - 0.5) * 10.0, unit() - 0.5];
+                let corner = |unit: &mut dyn FnMut() -> f64| {
+                    [
+                        center[0] + (unit() - 0.5) * scale,
+                        center[1] + (unit() - 0.5) * scale,
+                        center[2],
+                    ]
+                };
+                let color = Srgb::from_rgb8(200, 120, 40).to_linear(0.5 + 0.5 * unit());
+                let normal = [0.0, 0.0, 1.0];
+                let vertices = vec![
+                    SurfaceVertex::colored(corner(&mut unit), normal, color),
+                    SurfaceVertex::colored(corner(&mut unit), normal, color),
+                    SurfaceVertex::colored(corner(&mut unit), normal, color),
+                ];
+                meshes.push(SurfaceMesh::new(vertices, vec![0, 1, 2]).expect("triangle"));
+            }
+            let mut dots = Vec::new();
+            for _ in 0..60 {
+                dots.push((
+                    [(unit() - 0.5) * 15.0, (unit() - 0.5) * 9.0, unit()],
+                    0.05 + 0.6 * unit(),
+                    unit() < 0.5,
+                ));
+            }
+            jobs.push((camera, meshes, dots, fine));
+        }
+        jobs
+    }
+
+    fn tile_list_draws<'a>(
+        meshes: &'a [SurfaceMesh],
+        dots: &[([f64; 3], f64, bool)],
+        case: usize,
+    ) -> Vec<ThreeDDraw<'a>> {
+        let white = Srgb::from_rgb8(255, 255, 255).to_linear(0.9);
+        let mut draws = Vec::new();
+        for (index, mesh) in meshes.iter().enumerate() {
+            let mut draw = SurfaceDraw::new(mesh);
+            draw.depth_test = (index + case).is_multiple_of(3);
+            draws.push(ThreeDDraw::Surface(draw));
+        }
+        for &(center, radius, glow) in dots {
+            draws.push(ThreeDDraw::TrueDot(if glow {
+                TrueDotDraw::glow(center, radius, white)
+            } else {
+                TrueDotDraw::new(center, radius, white)
+            }));
+        }
+        draws
+    }
+
+    #[test]
+    fn three_d_tile_lists_drop_only_triangles_outside_every_tile_pixel() {
+        // The host replica of three_d_pixel_in_triangle_bounds: a triangle
+        // the per-tile lists leave out must fail it at every pixel of the
+        // tile, and the kept ones keep the whole list's order.
+        let (mut kept, mut dropped) = (0_usize, 0_usize);
+        for (case, (camera, meshes, dots, fine)) in tile_list_jobs().into_iter().enumerate() {
+            let draws = tile_list_draws(&meshes, &dots, case);
+            let job = ThreeDJob::new(
+                &camera,
+                &draws,
+                crate::bin::Tiling {
+                    macro_tile: 32,
+                    fine_tile: fine,
+                },
+            )
+            .expect("job");
+            let tiled = FlatThreeDFrame::derive_with(&job, TriangleBins::PerTile).expect("tiled");
+            let whole = FlatThreeDFrame::derive_with(&job, TriangleBins::Whole).expect("whole");
+            assert_eq!(tiled.triangles, whole.triangles);
+            assert_eq!(tiled.tile_draws, whole.tile_draws);
+            let [width, height, tile, cols] = [0, 1, 2, 3].map(|index| tiled.params_u32[index]);
+            for tile_index in 0..tiled.tile_offsets.len() - 1 {
+                let (tx, ty) = (tile_index as u32 % cols, tile_index as u32 / cols);
+                for command in tiled.tile_offsets[tile_index] as usize
+                    ..tiled.tile_offsets[tile_index + 1] as usize
+                {
+                    let list = |flat: &FlatThreeDFrame| {
+                        flat.tile_triangles[flat.command_triangles[command] as usize
+                            ..flat.command_triangles[command + 1] as usize]
+                            .to_vec()
+                    };
+                    let (short, full) = (list(&tiled), list(&whole));
+                    let mut rest = full.iter();
+                    assert!(
+                        short.iter().all(|t| rest.any(|u| u == t)),
+                        "case {case} tile {tile_index}: kept triangles leave the draw's order"
+                    );
+                    for &triangle in full.iter().filter(|t| !short.contains(t)) {
+                        dropped += 1;
+                        let base = triangle as usize * THREE_D_TRIANGLE_STRIDE;
+                        let corner = |c: usize, axis: usize| {
+                            tiled.triangles[base + c * THREE_D_VERTEX_STRIDE + axis]
+                        };
+                        let xs = [corner(0, 0), corner(1, 0), corner(2, 0)];
+                        let ys = [corner(0, 1), corner(1, 1), corner(2, 1)];
+                        let (x_lo, x_hi) = (
+                            xs[0].min(xs[1].min(xs[2])).floor(),
+                            xs[0].max(xs[1].max(xs[2])).ceil(),
+                        );
+                        let (y_lo, y_hi) = (
+                            ys[0].min(ys[1].min(ys[2])).floor(),
+                            ys[0].max(ys[1].max(ys[2])).ceil(),
+                        );
+                        for py in ty * tile..((ty + 1) * tile).min(height) {
+                            for px in tx * tile..((tx + 1) * tile).min(width) {
+                                let inside = px as f32 >= x_lo
+                                    && py as f32 >= y_lo
+                                    && (px as f32) < x_hi
+                                    && (py as f32) < y_hi;
+                                assert!(
+                                    !inside,
+                                    "case {case}: dropped triangle {triangle} reaches pixel ({px}, {py})"
+                                );
+                            }
+                        }
+                    }
+                    kept += short.len();
+                }
+            }
+        }
+        assert!(
+            dropped > 10_000,
+            "the lists dropped {dropped} triangle visits"
+        );
+        assert!(kept > 1_000, "the lists kept {kept} triangle visits");
+    }
+
+    #[test]
+    fn metal_three_d_tile_lists_render_the_whole_draw_bytes() {
+        // The same kernel over per-tile lists and over whole draws (the
+        // kernel's behaviour before the lists) must write the same raw
+        // RGBA16F bytes, supersampled or not, depth-tested or not.
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        for (case, (camera, meshes, dots, fine)) in tile_list_jobs().into_iter().enumerate() {
+            let draws = tile_list_draws(&meshes, &dots, case);
+            let job = ThreeDJob::new(
+                &camera,
+                &draws,
+                crate::bin::Tiling {
+                    macro_tile: 32,
+                    fine_tile: fine,
+                },
+            )
+            .expect("job");
+            let layout = job.layout().expect("layout");
+            let mut frames = Vec::new();
+            for bins in [TriangleBins::PerTile, TriangleBins::Whole] {
+                let flat = FlatThreeDFrame::derive_with(&job, bins).expect("packet");
+                renderer
+                    .dispatch_three_d(&flat, layout.total_bytes())
+                    .expect("dispatch");
+                let mut frame = FrameBuffer::new(layout.clone());
+                renderer
+                    .raw_surface
+                    .as_ref()
+                    .expect("raw surface")
+                    .buffer
+                    .read_u8(frame.as_bytes_mut())
+                    .expect("read back");
+                frames.push(frame);
+            }
+            let background = frames[1]
+                .as_bytes()
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .filter(|pixel| **pixel == frames[1].as_bytes()[..8])
+                .count();
+            assert!(
+                background < frames[1].as_bytes().len() / 8,
+                "case {case} drew something"
+            );
+            assert!(
+                frames[0].as_bytes() == frames[1].as_bytes(),
+                "case {case}: per-tile lists change the frame"
+            );
+        }
+    }
+
+    #[test]
+    fn metal_three_d_stays_within_the_cpu_routes_measured_distance() {
+        // An oracle outside the kernel. Before the per-tile lists (at
+        // 6f786e77) the Metal RGBA8 frames of these jobs differed from the
+        // CPU route's by at most 6 levels in at most 5 bytes per job
+        // (boundary supersampling decided in f32 against f64). A kernel
+        // that skipped or repeated a listed triangle moves whole triangles
+        // of these random colours and breaks the bound by far.
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        for (case, (camera, meshes, dots, fine)) in tile_list_jobs().into_iter().enumerate() {
+            let draws = tile_list_draws(&meshes, &dots, case);
+            let job = ThreeDJob::new(
+                &camera,
+                &draws,
+                crate::bin::Tiling {
+                    macro_tile: 32,
+                    fine_tile: fine,
+                },
+            )
+            .expect("job");
+            let cpu = render_cpu_three_d_rgba8(&job, 4).expect("CPU frame");
+            let (metal, _) = renderer.render_three_d_rgba8(&job).expect("Metal frame");
+            assert_eq!(cpu.as_bytes().len(), metal.as_bytes().len());
+            let deltas = cpu
+                .as_bytes()
+                .iter()
+                .zip(metal.as_bytes())
+                .map(|(a, b)| a.abs_diff(*b))
+                .collect::<Vec<_>>();
+            let largest = deltas.iter().copied().max().unwrap_or(0);
+            let differing = deltas.iter().filter(|delta| **delta > 0).count();
+            assert!(
+                largest <= 8 && differing <= 32,
+                "case {case}: largest byte delta {largest}, {differing} bytes differ"
             );
         }
     }
