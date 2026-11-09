@@ -11,9 +11,11 @@ import math
 import operator
 from types import SimpleNamespace
 
-from .surface_admission import GRID_BUDGET
+from .surface_admission import GRID_BUDGET, undefined_policy
+from .sampling_callbacks import point_sample
 
-_METADATA = ("u_range", "v_range", "epsilon", "normal_nudge", "preferred_creation_axis")
+_METADATA = ("u_range", "v_range", "epsilon", "normal_nudge", "preferred_creation_axis",
+             "allow_undefined")
 
 
 def _controls(surface):
@@ -31,7 +33,7 @@ def _controls(surface):
         raise ValueError("surface epsilon must be positive; normal_nudge must be nonnegative; both must be finite")
     if any(not math.isfinite(value + epsilon) for pair in domains for value in pair):
         raise ValueError("surface derivative samples must remain finite")
-    return resolution, *domains, epsilon, nudge
+    return resolution, *domains, epsilon, nudge, undefined_policy(getattr(surface, "allow_undefined", False))
 
 
 
@@ -44,7 +46,8 @@ def _solid_recipe(g, surface, controls):
     """
     common = dict(resolution=controls[0], u_range=controls[1], v_range=controls[2],
                   epsilon=controls[3], normal_nudge=controls[4],
-                  preferred_creation_axis=operator.index(surface.preferred_creation_axis))
+                  preferred_creation_axis=operator.index(surface.preferred_creation_axis),
+                  allow_undefined=controls[5])
     function = getattr(surface.uv_func, "__func__", None)
     for name in ("Sphere", "Torus", "Cone", "Cylinder", "Disk3D", "Square3D"):
         cls = g[name]
@@ -156,20 +159,15 @@ def install_surface_geometry(native):
                     raise TypeError("surface uv_func must be callable")
                 prepare = g.get("_fmn_prepare_surface_function")
                 if prepare is not None:
-                    function, verify_sampling = prepare(function)
+                    function, verify_sampling = prepare(function, allow_undefined=controls[5])
                 failure = None
                 def sample(u, v):
                     nonlocal failure
                     if failure is not None:
                         raise failure
                     try:
-                        value = np.asarray(function(u, v))
-                        if value.shape != (3,) or value.dtype.kind not in "fiu":
-                            raise ValueError("surface uv_func must return three real coordinates")
-                        value = np.asarray(value, dtype=float)
-                        if not np.isfinite(value).all() or np.any(np.abs(value) > np.finfo(np.float32).max):
-                            raise ValueError("surface uv_func must return finite f32-representable coordinates")
-                        return tuple(value)
+                        return point_sample(function(u, v), np=np, label="surface uv_func",
+                                            allow_undefined=controls[5])
                     except BaseException as error:
                         failure = error
                         raise
@@ -178,15 +176,16 @@ def install_surface_geometry(native):
                     # owns the finite-difference normal convention and grid.
                     result = Surface.__new__(Surface)
                     g["_install_live_state"](result)
-                    shape, u_range, v_range, epsilon, nudge = controls
+                    shape, u_range, v_range, epsilon, nudge, holes = controls
                     specs = result._build_parametric_surface(g["_native_surface_shell_factory"],
-                                sample, u_range, v_range, shape, epsilon, nudge)
+                                sample, u_range, v_range, shape, epsilon, nudge, holes)
                     g["_hang_native_children"](result, specs)
                     return result
                 build_solid = g.get("_fmn_build_solid_candidate")
                 sample_options = dict(resolution=controls[0], u_range=controls[1],
                     v_range=controls[2], epsilon=controls[3], normal_nudge=controls[4],
-                    preferred_creation_axis=self.preferred_creation_axis)
+                    preferred_creation_axis=self.preferred_creation_axis,
+                    allow_undefined=controls[5])
                 candidate = (sample_candidate() if build_solid is None else
                              build_solid(self, sample_options, sample_candidate))
             if verify_sampling is not None:

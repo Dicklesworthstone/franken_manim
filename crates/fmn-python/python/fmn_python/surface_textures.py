@@ -104,6 +104,7 @@ def install_surface_textures(native: Any) -> None:
             metadata = {name: getattr(uv_surface, name) for name in (
                 "resolution", "u_range", "v_range", "preferred_creation_axis", "epsilon", "normal_nudge",
             )}
+            metadata["allow_undefined"] = getattr(uv_surface, "allow_undefined", False)
             g["_install_live_state"](self)
             specs = g["_build_textured_surface"](self, uv_surface, payload, g["_native_surface_shell_factory"],
                                   dark_payload)

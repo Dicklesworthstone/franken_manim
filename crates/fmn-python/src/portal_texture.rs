@@ -6,7 +6,7 @@ use fmn_mobject::RenderPrimitive;
 #[path = "portal_surface.rs"]
 mod surface;
 #[cfg(feature = "gauntlet")]
-pub use surface::run_portal_gauntlet_surface_lifecycle;
+pub use surface::{run_portal_gauntlet_surface_holes, run_portal_gauntlet_surface_lifecycle};
 
 #[path = "portal_raster.rs"]
 pub(crate) mod raster;
@@ -55,6 +55,13 @@ fn _build_textured_surface<'py>(
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
     }
     let mut tree = with_stage(source, |stage, mob| -> PyResult<Mobject> {
+        let validity = fmn_mobject::stage::surface_validity(
+            &stage
+                .get(mob)
+                .ok_or_else(|| StaleHandleError::new_err("source surface is stale"))?
+                .buffer,
+        )
+        .map_err(native_error)?;
         stage.bake_placement(mob).map_err(stage_error)?;
         let entry = stage
             .get(mob)
@@ -118,6 +125,10 @@ fn _build_textured_surface<'py>(
             ];
             buffer.write(row, "im_coords", &uv);
             buffer.write(row, "opacity", &[opacity]);
+        }
+        if let Some(validity) = validity {
+            buffer = fmn_mobject::stage::with_surface_validity(&buffer, &validity)
+                .map_err(native_error)?;
         }
         Ok(Mobject::from_buffer(buffer)
             .with_uniforms(*entry.uniforms())

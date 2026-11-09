@@ -55,7 +55,10 @@ mod portal_video;
 #[cfg(any(test, feature = "gauntlet"))]
 mod structural_parity;
 #[cfg(feature = "gauntlet")]
-pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures};
+pub use portal_texture::{
+    run_portal_gauntlet_surface_holes, run_portal_gauntlet_surface_lifecycle,
+    run_portal_gauntlet_textures,
+};
 #[cfg(feature = "gauntlet")]
 pub use structural_parity::{
     CorpusRegressionCase, EnvelopeDrillReport, StructuralParityReport, TexSelectionReport,
@@ -6264,9 +6267,9 @@ impl BridgeMobject {
     /// `ParametricSurface(uv_func, ...)`: the native sampler over a
     /// Python callable. The callable runs during construction only (no
     /// engine borrow is held); its first error aborts the build.
-    // The argument count mirrors the Reference ParametricSurface constructor
-    // surface one-to-one; collapsing it would change the Python-visible API.
+    // Sampling controls remain individually visible to the authored adapters.
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (factory, uv_func, u_range, v_range, resolution, epsilon, normal_nudge, allow_undefined=false))]
     fn _build_parametric_surface<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
@@ -6276,6 +6279,7 @@ impl BridgeMobject {
         resolution: (usize, usize),
         epsilon: f64,
         normal_nudge: f64,
+        allow_undefined: bool,
     ) -> PyResult<Bound<'py, PyList>> {
         if slf.borrow().engine.is_some() {
             return Err(PyRuntimeError::new_err(
@@ -6293,12 +6297,16 @@ impl BridgeMobject {
         // No engine borrow spans user code. The fallible native loop returns
         // immediately, without sentinel probes or constructing a doomed grid.
         // Fixed-array extraction also prevents an unbounded result Vec allocation.
-        let surface = spec
-            .try_sample(|u, v| uv_func.call1((u, v))?.extract::<[f64; 3]>())
-            .map_err(|error| match error {
-                fmn_library::solids::SurfaceSampleError::Callback(error) => error,
-                other => PyValueError::new_err(other.to_string()),
-            })?;
+        let sample = |u, v| uv_func.call1((u, v))?.extract::<[f64; 3]>();
+        let surface = if allow_undefined {
+            spec.try_sample_with_holes(sample)
+        } else {
+            spec.try_sample(sample)
+        }
+        .map_err(|error| match error {
+            fmn_library::solids::SurfaceSampleError::Callback(error) => error,
+            other => PyValueError::new_err(other.to_string()),
+        })?;
         install_native_tree(slf, factory, surface)
     }
 
@@ -6795,6 +6803,29 @@ impl BridgeMobject {
             ));
         }
         let normals = normals.extract::<Vec<[f64; 3]>>()?;
+        // Accessors may execute authored code, so acquire the native snapshot
+        // only after both calls. Presence comes from its validated record lane,
+        // never from inert coordinates or an overridable Python mask accessor.
+        let validity = with_stage(source.cast::<BridgeMobject>()?, |stage, mob| {
+            let entry = stage
+                .get(mob)
+                .ok_or_else(|| StaleHandleError::new_err("SurfaceMesh source is stale"))?;
+            let topology_matches = match entry.render_primitive() {
+                fmn_mobject::RenderPrimitive::SurfaceGrid { resolution } => {
+                    resolution == source_resolution
+                }
+                // Empty constructors remain native containers; they yield no
+                // wires rather than acquiring a drawable triangle topology.
+                fmn_mobject::RenderPrimitive::Vector => count == 0,
+                _ => false,
+            };
+            if !topology_matches || entry.buffer.len() != count {
+                return Err(PyValueError::new_err(
+                    "SurfaceMesh source changed its native UV topology during sampling",
+                ));
+            }
+            fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)
+        })??;
         let mut mesh = fmn_library::SurfaceMesh::from_samples(points, normals, source_resolution)
             .map_err(|error| PyValueError::new_err(error.to_string()))?
             .resolution(resolution.0, resolution.1)
@@ -6802,6 +6833,11 @@ impl BridgeMobject {
             .stroke_width(stroke_width)
             .depth_test(depth_test)
             .joint_type(fmn_mobject::JointType::from_code(joint_code));
+        if let Some(validity) = validity {
+            mesh = mesh
+                .with_sample_validity(validity.into_iter().map(|value| value == 1.0).collect())
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
         if let Some(color) = stroke_color {
             mesh = mesh.stroke_color(srgb_from_py(color)?);
         }

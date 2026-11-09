@@ -28,12 +28,12 @@ def install_surface_lifecycle(native):
     def controls(self):
         return sampling_options({name: getattr(self, name) for name in
             ("resolution", "u_range", "v_range", "epsilon", "normal_nudge",
-             "preferred_creation_axis")})
+             "preferred_creation_axis", "allow_undefined")})
 
     def initialize(self, color=g["GREY"], shading=(.3, .2, .4), depth_test=True,
                    u_range=(0, 1), v_range=(0, 1), resolution=(101, 101),
                    preferred_creation_axis=1, epsilon=.001, normal_nudge=.001,
-                   **kwargs):
+                   allow_undefined=False, **kwargs):
         if self._is_bound():
             raise RuntimeError("a surface constructor requires a detached target; use init_points or become")
         if id(self) in constructing:
@@ -45,7 +45,7 @@ def install_surface_lifecycle(native):
         g["_refuse_surface_keywords"](type(self).__name__ + "()", kwargs)
         options = sampling_options(dict(resolution=resolution, u_range=u_range,
             v_range=v_range, preferred_creation_axis=preferred_creation_axis,
-            epsilon=epsilon, normal_nudge=normal_nudge))
+            epsilon=epsilon, normal_nudge=normal_nudge, allow_undefined=allow_undefined))
         seeds = dict(color=g["GREY"] if color is None else color,
                      opacity=1.0 if opacity is None else opacity,
                      shading=(.3, .2, .4) if shading is None else shading,
@@ -112,14 +112,14 @@ def install_surface_lifecycle(native):
             verify = None
             prepare = g.get("_fmn_prepare_surface_function")
             if prepare is not None:
-                function, verify = prepare(function)
+                function, verify = prepare(function, allow_undefined=options["allow_undefined"])
             def sample():
                 candidate = Surface.__new__(Surface)
                 g["_install_live_state"](candidate)
                 specs = candidate._build_parametric_surface(
                     g["_native_surface_shell_factory"], function,
                     options["u_range"], options["v_range"], options["resolution"],
-                    options["epsilon"], options["normal_nudge"])
+                    options["epsilon"], options["normal_nudge"], options["allow_undefined"])
                 if specs:
                     raise RuntimeError("a UV surface sampler returned unexpected children")
                 return candidate

@@ -43,6 +43,13 @@ def _finite(value, name, *, record=False):
     return result
 
 
+def undefined_policy(value):
+    """The hole policy is explicit; a truthy string must not enable it."""
+    if type(value) is not bool:
+        raise TypeError("surface allow_undefined must be a bool")
+    return value
+
+
 def sampling_options(options):
     """Normalize controls once, before a grid-sized allocation or any UV call."""
     result = dict(options)
@@ -61,7 +68,8 @@ def sampling_options(options):
     axis = operator.index(result.get("preferred_creation_axis", 1))
     if axis not in (0, 1):
         raise ValueError("surface preferred_creation_axis must be 0 or 1")
-    result.update(epsilon=epsilon, normal_nudge=nudge, preferred_creation_axis=axis)
+    result.update(epsilon=epsilon, normal_nudge=nudge, preferred_creation_axis=axis,
+                  allow_undefined=undefined_policy(result.get("allow_undefined", False)))
     return result
 
 
@@ -96,7 +104,8 @@ def install_surface_admission(native):
             values = bound.arguments
             if "resolution" in values:
                 normalized = sampling_options({key: values[key] for key in
-                    ("resolution", "u_range", "v_range", "epsilon", "normal_nudge", "preferred_creation_axis")
+                    ("resolution", "u_range", "v_range", "epsilon", "normal_nudge",
+                     "preferred_creation_axis", "allow_undefined")
                     if key in values})
                 values.update({key: val for key, val in normalized.items() if key in values})
             if "square_resolution" in values:
@@ -112,8 +121,10 @@ def install_surface_admission(native):
                     values[key] = tuple(_finite(v, "surface " + key, record=True) for v in vector)
             guard = None
             if "uv_func" in values:
+                holes = undefined_policy(values.get("allow_undefined", False))
                 guard = FirstFailure(values["uv_func"],
-                    functools.partial(point_sample, np=np, label="surface uv_func"), (0., 0., 0.))
+                    functools.partial(point_sample, np=np, label="surface uv_func",
+                                      allow_undefined=holes), (0., 0., 0.))
                 values["uv_func"] = guard
             try:
                 # Dictionary lookup avoids retaining a native module through a

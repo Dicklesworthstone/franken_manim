@@ -3245,7 +3245,10 @@ class Mobject(_BridgeMobject):
             # changes, as the Stage does for a bound family: a refused
             # become (or restore) leaves the receiver exactly as it was.
             for receiver, source in zip(receiver_family, source_family):
-                if receiver.data.dtype != source.data.dtype:
+                # The native preflight admits only the optional surface
+                # presence lane beyond exact schemas, and validates every
+                # paired mask before any earlier family member can change.
+                if not _become_schema_compatible(receiver, source):
                     raise RuntimeError("become between records of different schemas")
         self._become(mobject, match_updaters)
         if not self._is_bound():
@@ -11238,6 +11241,16 @@ class Surface(Mobject):
         d = verts_by_uv[u_int_plus, v_int_plus, :]
         u_res = scaled_u % 1
         v_res = scaled_v % 1
+        if "surface_validity" in self.data.dtype.names:
+            present = self.get_sample_validity().reshape((nu, nv))
+            for i, j, weight in (
+                (u_int, v_int, (1 - u_res) * (1 - v_res)),
+                (u_int, v_int_plus, (1 - u_res) * v_res),
+                (u_int_plus, v_int, u_res * (1 - v_res)),
+                (u_int_plus, v_int_plus, u_res * v_res),
+            ):
+                if weight != 0 and not present[i, j]:
+                    raise ValueError("UV query touches an undefined surface sample")
         return _interpolate(
             _interpolate(a, b, v_res),
             _interpolate(c, d, v_res),
@@ -11261,7 +11274,15 @@ class Surface(Mobject):
         return self.triangle_indices
 
     def get_triangle_indices(self):
+        if "surface_validity" in self.data.dtype.names:
+            indices = self.triangle_indices.reshape((-1, 3))
+            present = self.get_sample_validity()
+            return indices[present[indices].all(axis=1)].reshape(-1)
         return self.triangle_indices
+
+    def get_sample_validity(self):
+        """Copy the native presence mask; raw point rows at holes are inert."""
+        return _np.asarray(_surface_sample_validity(self), dtype=bool)
 
     def get_unit_normals(self):
         # Reference surface.py:171 over the live normal-seed records.
@@ -11271,7 +11292,10 @@ class Surface(Mobject):
         )
         norms = _np.sqrt((normals * normals).sum(axis=1))
         norms[norms == 0] = 1
-        return normals / norms[:, _np.newaxis]
+        normals = normals / norms[:, _np.newaxis]
+        if "surface_validity" in self.data.dtype.names:
+            normals[~self.get_sample_validity()] = 0
+        return normals
 
     def get_partial_points_array(self, points, a, b, resolution, axis):
         if len(points) == 0:

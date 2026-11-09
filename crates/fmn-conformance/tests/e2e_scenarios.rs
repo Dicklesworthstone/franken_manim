@@ -5212,6 +5212,13 @@ fn python_surface_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("surface_hook_cases", cases))
 }
 
+fn python_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_surface_holes()
+        .map_err(|error| fail(format!("Python explicit surface holes: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.surface_holes").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("surface_hole_cases", cases))
+}
+
 /// The same real five-point camera lifecycle suite as the installed-wheel gate,
 /// including live views, Group transforms, capture and SceneState restoration.
 fn python_camera_frame_points_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -16419,6 +16426,17 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_surface_holes.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_surface_holes_run),
+        vec![Assertion::ExitCode(0), counter_eq("surface_hole_cases", 17)],
+        vec![LogExpect::span_present(
+            "e2e.python.surface_holes",
+            vec![FieldPred::u64_eq("cases", 17)],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_camera_frame_points.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -18411,6 +18429,16 @@ fn native_surface_holes_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_surface_holes.v1")
         .expect("the native surface hole scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_surface_holes_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_surface_holes.v1")
+        .expect("the Python surface hole scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

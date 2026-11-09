@@ -33,16 +33,29 @@ class FirstFailure:
         self.function = self.convert = None
 
 
-def point_sample(value, *, np, label):
+def point_sample(value, *, np, label, allow_undefined=False):
     # Runs once per sampled point (7.5M calls in one corpus scene), so no
     # per-coordinate generators: unpack once, and one chained comparison per
     # coordinate, which is false for NaN, infinities and |v| > F32_MAX alike.
     array = np.asarray(value)
     if array.shape != (3,) or array.dtype.kind not in "biuf":
         raise ValueError(label + " must return exactly three real coordinates")
+    # Extended NumPy floats can be finite outside f64, or only just outside
+    # f32 while rounding back into range on conversion. Validate their source
+    # values before narrowing so finite overflow never becomes a hole.
+    if (array.dtype.kind == "f" and array.dtype.itemsize > 8
+            and np.any(np.isfinite(array) & (np.abs(array) > F32_MAX))):
+        raise ValueError(label + " must return f32-representable finite coordinates")
     x, y, z = array.tolist()
     x, y, z = float(x), float(y), float(z)
-    if not (-F32_MAX <= x <= F32_MAX and -F32_MAX <= y <= F32_MAX and -F32_MAX <= z <= F32_MAX):
+    if allow_undefined:
+        # Atlas turns numerical poles into an explicit validity mask. Finite
+        # overflow is still a malformed coordinate, even beside a NaN/inf.
+        if ((math.isfinite(x) and abs(x) > F32_MAX)
+                or (math.isfinite(y) and abs(y) > F32_MAX)
+                or (math.isfinite(z) and abs(z) > F32_MAX)):
+            raise ValueError(label + " must return f32-representable finite coordinates")
+    elif not (-F32_MAX <= x <= F32_MAX and -F32_MAX <= y <= F32_MAX and -F32_MAX <= z <= F32_MAX):
         raise ValueError(label + " must return finite f32-representable coordinates")
     return (x, y, z)
 
