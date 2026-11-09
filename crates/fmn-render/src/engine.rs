@@ -1069,6 +1069,9 @@ pub(crate) struct Draw {
     pub(crate) style: Style,
     /// The hinted fill route, or [`FillKernel::General`].
     pub(crate) kernel: FillKernel,
+    /// A proved decomposition over this draw's actual monotone pieces. Only
+    /// admitted draws allocate a descriptor in the frame arena.
+    pub(crate) rounded_rect: Option<u32>,
     /// Recovering a primitive from current geometry keeps the previous general
     /// native row and edge classifier. Only subcell integration uses the
     /// recovered closed form: hinted edge probes count corners differently.
@@ -1787,6 +1790,30 @@ impl<'a> FrameJob<'a> {
                 }
                 recovered_geometry = kernel != FillKernel::General;
             }
+            let rounded_rect = if kernel == FillKernel::General
+                && draws_fill
+                && identity.engine == EngineKind::FastCpu
+            {
+                let pieces = match transformed_pieces {
+                    Some(range) => arena.pieces.slice(range),
+                    None => mono.pieces_of(inst.shape),
+                };
+                if let Some(proof) = fill::QuadraticRoundedRect::from_shape(shape, pieces) {
+                    let start = arena.rounded_rects.len();
+                    arena.rounded_rects.put(proof.data());
+                    recovered_geometry = true;
+                    Some(
+                        arena
+                            .rounded_rects
+                            .range_from("rounded rectangle descriptors", start)?
+                            .start,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let joins = {
                 let start = arena.joins.len();
                 stroke::join_wedges_into(
@@ -1893,6 +1920,7 @@ impl<'a> FrameJob<'a> {
                 straight_segments,
                 style: style.clone(),
                 kernel,
+                rounded_rect,
                 recovered_geometry,
                 joins,
                 stroke,
@@ -2900,6 +2928,20 @@ impl<'a> FrameJob<'a> {
                     if pixel_misses_hull(rec.fill_slab, subcell.px, subcell.py) {
                         return 0.0;
                     }
+                    if let Some(index) = rec.rounded_rect
+                        && let Some(coverage) = self.arena().rounded_rects[index as usize]
+                            .coverage_subcell(
+                                self.pieces_of(rec),
+                                rec.translate,
+                                subcell.py,
+                                subcell.px,
+                                subcell.samples,
+                                subcell.x,
+                                subcell.y,
+                            )
+                    {
+                        return coverage;
+                    }
                     fill::coverage_at_subcell(
                         self.pieces_of(rec),
                         rec.translate,
@@ -3748,6 +3790,71 @@ mod tests {
             out.push([b[0], b[1], 0.0]);
         }
         out
+    }
+
+    /// Actual native rounded-rectangle curves, including elliptical corners,
+    /// before the ordinary record-buffer conversion to f32.
+    fn rounded_rect_points() -> Vec<[f64; 3]> {
+        let document = fmn_geom::svg::SvgDocument::parse(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="112" height="112">
+                <rect x="-12" y="-8" width="24" height="16" rx="4" ry="3"/>
+            </svg>"#,
+        )
+        .expect("native rounded SVG fixture");
+        assert_eq!(document.shapes.len(), 1);
+        document.shapes[0].path.points().to_vec()
+    }
+
+    fn rounded_rect_field(rows: u32, columns: u32, styled: bool) -> Stage {
+        let points = rounded_rect_points();
+        let mut stage = Stage::new();
+        for row in 0..rows {
+            for column in 0..columns {
+                let mob = stage.add(vmob(
+                    &points,
+                    [0.2, 0.7, 0.9, 0.72],
+                    if styled {
+                        [0.95, 0.3, 0.2, 0.65]
+                    } else {
+                        [0.0; 4]
+                    },
+                    if styled { 80.0 } else { 0.0 },
+                ));
+                if styled {
+                    let last = points.len() - 1;
+                    let entry = stage.get_mut(mob).expect("rounded field member");
+                    assert!(
+                        entry
+                            .buffer
+                            .write(last, "fill_rgba", &[0.9, 0.2, 0.4, 0.72])
+                    );
+                    assert!(
+                        entry
+                            .buffer
+                            .write(last, "stroke_rgba", &[0.2, 0.8, 0.4, 0.9])
+                    );
+                    assert!(entry.buffer.write(last, "stroke_width", &[160.0]));
+                }
+                let linear = match (row * columns + column) % 3 {
+                    0 => Placement::IDENTITY.linear(),
+                    1 => [[1.125, 0.0, 0.0], [0.0, 0.75, 0.0], [0.0, 0.0, 1.0]],
+                    _ => [[0.0, -0.875, 0.0], [-1.125, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                };
+                stage.add_to_scene(mob).expect("rounded field root");
+                stage.apply_affine(
+                    mob,
+                    Placement::new(
+                        linear,
+                        [
+                            17.0 + 28.0 * f64::from(column),
+                            16.0 + 24.0 * f64::from(row),
+                            0.0,
+                        ],
+                    ),
+                );
+            }
+        }
+        stage
     }
 
     /// The engine's corpus scene: overlapping translucent fills, a winding hole,
@@ -6554,6 +6661,7 @@ mod tests {
         for draw in arena.draws.slice_mut(job.draws).iter_mut().flatten() {
             if draw.recovered_geometry {
                 draw.kernel = FillKernel::General;
+                draw.rounded_rect = None;
                 draw.recovered_geometry = false;
             }
         }
@@ -6901,6 +7009,220 @@ mod tests {
             FillKernel::Disc { .. }
         ));
         assert_eq!(job.render(1).unwrap().as_bytes(), first_pixels.unwrap());
+    }
+
+    #[test]
+    fn rounded_geometry_recovery_uses_current_monotone_corners() {
+        let points = rounded_rect_points();
+        let mut cfg = config();
+        cfg.map = ScreenMap {
+            scale: 1.25,
+            origin: [5.25, 91.5],
+            y_up: true,
+        };
+        for (name, linear, admitted) in [
+            ("translated", Placement::IDENTITY.linear(), true),
+            (
+                "stretched",
+                [[1.25, 0.0, 0.0], [0.0, 0.75, 0.0], [0.0, 0.0, 1.0]],
+                true,
+            ),
+            (
+                "reflected quarter-turn",
+                [[0.0, -1.25, 0.0], [-0.75, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                true,
+            ),
+            (
+                "general rotation",
+                [[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+            (
+                "shear",
+                [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+        ] {
+            let mut stage = Stage::new();
+            let mob = stage.add(vmob(&points, [0.2, 0.7, 0.9, 0.8], [0.0; 4], 0.0));
+            stage.add_to_scene(mob).expect("rounded root");
+            stage.apply_affine(mob, Placement::new(linear, [34.25, 38.5, 0.0]));
+            let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap();
+                let draw = job.draws()[0].as_ref().expect("rounded draw");
+                let shape = plan.shapes().shape(draw.shape).expect("rounded shape");
+                assert_eq!(
+                    fill::QuadraticRoundedRect::from_shape(shape, job.pieces_of(draw)).is_some(),
+                    admitted,
+                    "actual native rounded geometry: {name}",
+                );
+                assert_eq!(
+                    draw.kernel,
+                    FillKernel::General,
+                    "ideal circular corners must not substitute for the authored curves"
+                );
+                assert_eq!(
+                    draw.recovered_geometry,
+                    admitted && identity.engine == EngineKind::FastCpu,
+                    "rounded recovery not wired for {name}, {identity:?}",
+                );
+                assert_eq!(
+                    draw.rounded_rect.is_some(),
+                    admitted && identity.engine == EngineKind::FastCpu,
+                    "rounded descriptor admission: {name}, {identity:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_geometry_recovery_preserves_pixels_sampling_and_threads() {
+        let stage = rounded_rect_field(2, 3, true);
+        let cfg = config();
+        let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+                let cfg = cfg.with_aa_policy(aa);
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap();
+                assert_eq!(job.draw_count(), 6);
+                assert_eq!(
+                    job.arena().rounded_rects.len(),
+                    if identity.engine == EngineKind::FastCpu {
+                        6
+                    } else {
+                        0
+                    }
+                );
+                for draw in job.draws().iter().flatten() {
+                    assert_eq!(draw.kernel, FillKernel::General);
+                    assert_eq!(
+                        draw.rounded_rect.is_some(),
+                        identity.engine == EngineKind::FastCpu
+                    );
+                    assert!(draw.field.is_some() && draw.stroke.is_some());
+                }
+                let general = without_geometry_recovery(
+                    FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap(),
+                );
+                let (expected, expected_stats) = general.render_with_stats(1).unwrap();
+                let (first, stats) = job.render_with_stats(1).unwrap();
+                assert_eq!(
+                    stats, expected_stats,
+                    "rounded recovery changed AA sampling"
+                );
+                if identity.engine == EngineKind::CertifiedCpu {
+                    assert_frames_equal(&first, &expected, "certified rounded route changed");
+                } else {
+                    let (maximum, _) = visual_error(&first, &expected);
+                    assert!(
+                        maximum <= fill::HINT_BUDGET_PX,
+                        "quadratic corner integration exceeded the existing budget: {maximum}"
+                    );
+                }
+                for threads in [4, 16] {
+                    let (frame, parallel_stats) = job.render_with_stats(threads).unwrap();
+                    assert_frames_equal(
+                        &frame,
+                        &first,
+                        "rounded recovery changed with worker count",
+                    );
+                    assert_eq!(parallel_stats, stats);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_geometry_recovery_reuses_its_pool_and_keeps_frozen_view_geometry() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vmob(
+            &rounded_rect_points(),
+            [0.2, 0.7, 0.9, 0.8],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.add_to_scene(mob).expect("live rounded root");
+        stage.apply_affine(
+            mob,
+            Placement::new(
+                [[0.0, -1.25, 0.0], [-0.75, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                [40.25, 43.5, 0.0],
+            ),
+        );
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("foreign rounded point view");
+        let first_snapshot = stage.snapshot();
+        let frozen = first_snapshot.materialize();
+        let cfg = config().with_aa_policy(AaPolicy::Ssaa4x);
+        let mut arena = FrameArena::new();
+        let mut plan = RenderPlan::new();
+        let mut frame = FrameBuffer::new(cfg.layout().unwrap());
+        let render = |frozen: &Stage,
+                      plan: &mut RenderPlan,
+                      arena: &mut FrameArena,
+                      frame: &mut FrameBuffer,
+                      admitted: bool| {
+            let sync = plan
+                .sync(frozen, 0)
+                .expect("observe rounded foreign geometry");
+            assert_eq!(sync.shapes_reused, 0);
+            let instance = &plan.shapes().instances()[0];
+            assert!(instance.volatile && instance.hint_unsafe);
+            assert!(!instance.placement.is_translation());
+            let mono = MonoTable::build(plan, cfg.map).unwrap();
+            let bins = Binning::build(plan, cfg.viewport, default_tiling(), cfg.map).unwrap();
+            let job =
+                FrameJob::with_identity_in(arena, plan, &mono, &bins, cfg, EngineIdentity::fast())
+                    .unwrap();
+            assert_eq!(
+                job.arena().rounded_rects.len(),
+                usize::from(admitted),
+                "descriptor pool retained an earlier frame's logical rows"
+            );
+            assert_eq!(
+                job.draws()[0].as_ref().unwrap().rounded_rect.is_some(),
+                admitted
+            );
+            job.render_into(4, frame).unwrap();
+            job.allocation_stats()
+        };
+        let warm = render(&frozen, &mut plan, &mut arena, &mut frame, true);
+        assert!(warm.heap_allocs_this_frame > 0);
+        let first_pixels = frame.as_bytes().to_vec();
+        let reused = render(&frozen, &mut plan, &mut arena, &mut frame, true);
+        assert_eq!(
+            reused.heap_allocs_this_frame, 0,
+            "rounded frame preparation allocated after warm-up"
+        );
+        assert_eq!(reused.arena_buffer_bytes, warm.arena_buffer_bytes);
+        assert_eq!(frame.as_bytes(), first_pixels);
+
+        let revision = stage.get(mob).unwrap().buffer.field_revision("point");
+        assert!(view.write_foreign(1, "point", &[35.0, 12.0, 0.0]));
+        assert_eq!(
+            stage.get(mob).unwrap().buffer.field_revision("point"),
+            revision
+        );
+        let changed = stage.snapshot().materialize();
+        render(&changed, &mut plan, &mut arena, &mut frame, false);
+        assert_ne!(
+            frame.as_bytes(),
+            first_pixels,
+            "foreign corner edit did not reach pixels"
+        );
+
+        let frozen = first_snapshot.materialize();
+        render(&frozen, &mut plan, &mut arena, &mut frame, true);
+        assert_eq!(
+            frame.as_bytes(),
+            first_pixels,
+            "later writes altered captured corner geometry"
+        );
     }
 
     #[test]

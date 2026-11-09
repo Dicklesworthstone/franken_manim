@@ -418,8 +418,12 @@ pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), St
                 a: 1.0,
             },
         ),
-        classify: FillKernel::from_exact_rectangle,
-        accepts: |kernel| matches!(kernel, FillKernel::Rect { .. }),
+        accepts: |shape, segments, _pieces, map, translate| {
+            matches!(
+                FillKernel::from_exact_rectangle(shape, segments, map, translate),
+                FillKernel::Rect { .. }
+            )
+        },
     })
 }
 
@@ -456,8 +460,51 @@ pub fn run_portal_gauntlet_disc_recovery() -> Result<(u64, u64, String), String>
                 a: 1.0,
             },
         ),
-        classify: FillKernel::from_bounded_disc,
-        accepts: |kernel| matches!(kernel, FillKernel::Disc { .. }),
+        accepts: |shape, segments, _pieces, map, translate| {
+            matches!(
+                FillKernel::from_bounded_disc(shape, segments, map, translate),
+                FillKernel::Disc { .. }
+            )
+        },
+    })
+}
+
+/// Exercise exact quadratic-corner recovery through real RoundedRectangle
+/// construction and the same live-view lifecycle as rectangle/disc recovery.
+/// These corners exceed the circular approximation budget at this screen scale;
+/// their authored quadratic curves must be retained in the recovered evaluator.
+/// Returns `(proved_rounded_rectangles, rendered_frames, final_raw_digest)`.
+///
+/// # Errors
+/// Reports lost view invalidation, unsound geometry admission, changed frozen
+/// pixels, or worker-count-dependent output.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_rounded_rectangle_recovery() -> Result<(u64, u64, String), String> {
+    use fmn_render::fill::QuadraticRoundedRect;
+
+    run_portal_recovery(RecoveryFixture {
+        name: "portal quadratic rounded rectangle recovery",
+        setup: c"import numpy as np\nfrom manimlib import Scene, RoundedRectangle, Circle, BLUE, WHITE\nscene = Scene()\nshapes = [RoundedRectangle(width=0.38, height=0.22, corner_radius=0.06).set_fill(BLUE, 0.8).set_stroke(WHITE, 2).move_to((-0.78 + (i % 4) * 0.52, -0.45 + (i // 4) * 0.3, 0)) for i in range(16)]\nshapes.append(Circle(radius=0.5).set_fill(BLUE, 0.8).move_to((5, 3, 0)))\nscene.add(*shapes)\npoint_views = [shape.get_points() for shape in shapes]\n",
+        frame: FrameConfig::new(
+            Viewport {
+                width: 320,
+                height: 180,
+            },
+            ScreenMap {
+                scale: 135.0,
+                origin: [160.0, 90.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.04,
+                g: 0.04,
+                b: 0.06,
+                a: 1.0,
+            },
+        ),
+        accepts: |shape, _segments, pieces, _map, _translate| {
+            QuadraticRoundedRect::from_shape(shape, pieces).is_some()
+        },
     })
 }
 
@@ -466,13 +513,13 @@ struct RecoveryFixture {
     name: &'static str,
     setup: &'static std::ffi::CStr,
     frame: FrameConfig,
-    classify: fn(
+    accepts: fn(
         &fmn_render::table::Shape,
         &[fmn_render::table::Segment],
+        &[fmn_render::fill::MonoPiece],
         ScreenMap,
         [f64; 2],
-    ) -> fmn_render::fill::FillKernel,
-    accepts: fn(fmn_render::fill::FillKernel) -> bool,
+    ) -> bool,
 }
 
 #[cfg(any(test, feature = "gauntlet"))]
@@ -523,6 +570,8 @@ fn run_portal_recovery(fixture: RecoveryFixture) -> Result<(u64, u64, String), S
                     .render(&frozen, 0)
                     .map_err(|error| error.to_string())?;
                 let plan = renderer.plan();
+                let mono = fmn_render::fill::MonoTable::build(plan, frame.map)
+                    .map_err(|error| error.to_string())?;
                 let mut admitted = 0;
                 for instance in plan.shapes().instances() {
                     if !instance.volatile || !instance.hint_unsafe {
@@ -535,12 +584,13 @@ fn run_portal_recovery(fixture: RecoveryFixture) -> Result<(u64, u64, String), S
                     let start = shape.first_segment as usize;
                     let segments = &plan.segments()[start..start + shape.segment_count as usize];
                     if instance.placement.is_translation()
-                        && (fixture.accepts)((fixture.classify)(
+                        && (fixture.accepts)(
                             shape,
                             segments,
+                            mono.pieces_of(instance.shape),
                             frame.map,
                             instance_translation(instance, frame.map),
-                        ))
+                        )
                     {
                         admitted += 1;
                     }
@@ -605,6 +655,14 @@ mod tests {
         let (discs, frames, _) = super::run_portal_gauntlet_disc_recovery()
             .expect("portal disc recovery through native retained rendering");
         assert_eq!((discs, frames), (61, 13));
+    }
+
+    #[test]
+    fn production_rounded_rectangle_recovery_preserves_views_snapshots_and_pixels() {
+        let (rounded_rectangles, frames, _) =
+            super::run_portal_gauntlet_rounded_rectangle_recovery()
+                .expect("portal quadratic rounded rectangle recovery through retained rendering");
+        assert_eq!((rounded_rectangles, frames), (61, 13));
     }
 
     #[test]

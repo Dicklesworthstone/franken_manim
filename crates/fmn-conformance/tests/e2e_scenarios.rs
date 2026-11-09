@@ -5266,6 +5266,28 @@ fn python_disc_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("disc_recovery_frames", frames))
 }
 
+/// Recover actual quadratic corner coverage after the portal invalidates tags.
+fn python_rounded_rectangle_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (candidates, frames, digest) = manimlib::run_portal_gauntlet_rounded_rectangle_recovery()
+        .map_err(|error| {
+        fail(format!(
+            "Python quadratic rounded rectangle recovery: {error}"
+        ))
+    })?;
+    ctx.event(
+        LogEvent::new("e2e.python.rounded_rectangle_recovery")
+            .field("mode", "standard")
+            .field("engine", "fast_cpu")
+            .field("candidates", candidates)
+            .field("frames", frames)
+            .field("thread_counts", 3_u64)
+            .field("sha256", digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("rounded_rectangle_recovery_candidates", candidates)
+        .with_counter("rounded_rectangle_recovery_frames", frames))
+}
+
 /// Structural parity (fm-5wq.36): the fixed construction set, extracted in
 /// the embedded portal by the same `structural_facts.py` the Reference ran,
 /// matches the checked-in Reference facts except for BN-keyed and open-bead
@@ -16512,6 +16534,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_rounded_rectangle_recovery.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_rounded_rectangle_recovery_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("rounded_rectangle_recovery_candidates", 61),
+            counter_eq("rounded_rectangle_recovery_frames", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.rounded_rectangle_recovery",
+            vec![
+                FieldPred::str_eq("mode", "standard"),
+                FieldPred::str_eq("engine", "fast_cpu"),
+                FieldPred::u64_eq("candidates", 61),
+                FieldPred::u64_eq("frames", 13),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "parity.structural_facts.v1",
         ScenarioClass::ParityDrill,
         Surface::PythonInProcess,
@@ -19678,6 +19721,18 @@ fn python_disc_recovery_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_disc_recovery.standard.v1")
         .expect("standard portal disc recovery is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_rounded_rectangle_recovery_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| {
+            scenario.name == "render_matrix.python_rounded_rectangle_recovery.standard.v1"
+        })
+        .expect("standard portal quadratic rounded rectangle recovery is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

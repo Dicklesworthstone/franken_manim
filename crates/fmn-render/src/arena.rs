@@ -31,7 +31,7 @@
 //! documented warm-up that sizes every buffer.
 
 use crate::engine::{Draw, WorkerPool};
-use crate::fill::MonoPiece;
+use crate::fill::{MonoPiece, RoundedRectData};
 use crate::stroke::{JoinWedge, PreparedSegment};
 use crate::table::Segment;
 use std::collections::TryReserveError;
@@ -363,6 +363,8 @@ pub struct FrameArena {
     pub(crate) segments: Pool<Segment>,
     /// Monotone pieces derived from those transformed segments.
     pub(crate) pieces: Pool<MonoPiece>,
+    /// Proved rounded-corner decompositions for the draws that use them.
+    pub(crate) rounded_rects: Pool<RoundedRectData>,
     /// Per-draw prepared stroke segments (slabs and arc lengths).
     pub(crate) stroke_segments: Pool<PreparedSegment>,
     /// Per-draw fine-tile CSR start offsets for large strokes.
@@ -398,6 +400,7 @@ impl Default for FrameArena {
             joins: Pool::default(),
             segments: Pool::default(),
             pieces: Pool::default(),
+            rounded_rects: Pool::default(),
             stroke_segments: Pool::default(),
             stroke_bin_starts: Pool::default(),
             stroke_bin_entries: Pool::default(),
@@ -427,6 +430,7 @@ impl FrameArena {
         self.joins.begin_frame();
         self.segments.begin_frame();
         self.pieces.begin_frame();
+        self.rounded_rects.begin_frame();
         self.stroke_segments.begin_frame();
         self.stroke_bin_starts.begin_frame();
         self.stroke_bin_entries.begin_frame();
@@ -447,6 +451,7 @@ impl FrameArena {
         let pool_allocs = self.joins.allocs()
             + self.segments.allocs()
             + self.pieces.allocs()
+            + self.rounded_rects.allocs()
             + self.stroke_segments.allocs()
             + self.stroke_bin_starts.allocs()
             + self.stroke_bin_entries.allocs()
@@ -463,6 +468,7 @@ impl FrameArena {
             arena_buffer_bytes: self.joins.buffer_bytes()
                 + self.segments.buffer_bytes()
                 + self.pieces.buffer_bytes()
+                + self.rounded_rects.buffer_bytes()
                 + self.stroke_segments.buffer_bytes()
                 + self.stroke_bin_starts.buffer_bytes()
                 + self.stroke_bin_entries.buffer_bytes()
