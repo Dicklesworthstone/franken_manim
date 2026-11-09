@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::rc::Rc;
 
 use fmn_core::color::LinearRgba;
-use fmn_mobject::{Mobject, RecordBuffer, RecordSchema};
+use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
 };
@@ -13,7 +13,8 @@ use fmn_scene::{
     EffectClass, Entry, EventPayload, Journal, Key, Modifiers, MouseButton, RuntimeConfig, Scene,
 };
 use fmn_studio::native::{
-    NativeReplayPolicy, NativeSceneProgram, NativeSceneWorker, NativeSegment, NativeWorkerConfig,
+    NativeReplayPolicy, NativeRestoreMode, NativeSceneProgram, NativeSceneWorker, NativeSegment,
+    NativeUpdaterRegistry, NativeWorkerConfig,
 };
 use fmn_studio::protocol::studio_seek_command;
 use fmn_studio::{
@@ -24,6 +25,114 @@ use fmn_studio::{
 };
 
 const NAME: &str = "LiveSquare";
+
+thread_local! {
+    // Write-only execution witnesses: these counters never affect authored
+    // state or callback behavior. The model's actual counter is a Stage tracker.
+    static REGISTERED_CALLS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+const CHECKPOINT_WAIT_SCHEDULE: [u64; 3] = [350, 450, 100];
+
+fn registered_counter_update(stage: &mut Stage, mob: Mob, dt: f64) {
+    REGISTERED_CALLS.with(|calls| {
+        let (total, zero_dt) = calls.get();
+        calls.set((total + 1, zero_dt + u64::from(dt == 0.0)));
+    });
+    let counter = stage.get(mob).unwrap().submobjects()[0];
+    stage.increment_tracker_value(counter, 1.0).unwrap();
+    let step = stage.tracker_value(counter).unwrap();
+    let shape = stage.frame_shape();
+    stage
+        .set_frame_shape([shape[0] + 1.0 / 1024.0, shape[1] + 1.0 / 2048.0])
+        .unwrap();
+    // Later samples depend on the previously authored frame shape, which is
+    // outside the durable arena document and must travel in the native cursor.
+    stage.shift(mob, [step * shape[0] * 0.000_000_1, 0.0, 0.0]);
+    let phase = (step as u64 % 16) as f32 / 16.0;
+    let fill = [0.25 + phase * 0.5, 1.0 - phase * 0.5, 0.125, 1.0];
+    let entry = stage.get_mut(mob).unwrap();
+    for index in 0..entry.buffer.len() {
+        entry.buffer.write(index, "fill_rgba", &fill);
+    }
+}
+
+fn checkpointed_program(
+    seed: u64,
+    version: fmn_studio::ProtocolDigest,
+    schedule: [u64; 3],
+) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), seed).unwrap();
+    let _ = scene.rng_mut().next_u64();
+    let _ = scene.rng_mut().next_u64();
+    let points = [
+        [-0.5_f32, -0.5, 0.0],
+        [0.0, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+        [-0.5, 0.0, 0.0],
+        [-0.5, -0.5, 0.0],
+    ];
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+    for (index, point) in points.iter().enumerate() {
+        buffer.write(index, "point", point);
+        buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 1.0]);
+        buffer.write(index, "stroke_width", &[0.0]);
+    }
+    let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+    let counter = scene.stage_mut().add_value_tracker(0.0);
+    scene.stage_mut().attach(root, counter).unwrap();
+    scene.add(&[root]).unwrap();
+    let mut registry = NativeUpdaterRegistry::new();
+    registry.register_dt(scene.stage_mut(), root, version, registered_counter_update)?;
+    let frame_limit = schedule.iter().sum();
+    NativeSceneProgram::new(
+        scene,
+        schedule
+            .into_iter()
+            .map(|frames| NativeSegment::WaitFrames { frames })
+            .collect(),
+        frame_limit,
+    )?
+    .with_checkpoint_registry(registry)
+}
+
+fn checkpointed_config() -> NativeWorkerConfig {
+    let mut config = config();
+    config.frame_count = 901;
+    config.replay = NativeReplayPolicy::Checkpointed;
+    config.source_digest = protocol_digest(b"registered-counter-and-grid-v1");
+    config
+}
+
+fn checkpointed_worker() -> NativeSceneWorker {
+    NativeSceneWorker::new(checkpointed_config(), || {
+        checkpointed_program(
+            71,
+            protocol_digest(b"registered-counter-v1"),
+            CHECKPOINT_WAIT_SCHEDULE,
+        )
+    })
+    .unwrap()
+}
+
+fn checkpoint_observation(
+    worker: &NativeSceneWorker,
+) -> (Vec<u8>, i64, u64, EffectClass, bool, [u64; 2]) {
+    let program = worker.program().unwrap();
+    let scene = program.preview().scene();
+    (
+        scene.stage().snapshot().to_bytes().unwrap(),
+        scene.time().frames(),
+        scene.play_count(),
+        program.effect_class(),
+        program.at_segment_boundary(),
+        scene.stage().frame_shape().map(f64::to_bits),
+    )
+}
 
 fn program() -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
@@ -279,6 +388,505 @@ fn checkpoint_cold_execution_restores_real_callback_state_for_continuation() {
         count,
         "resuming the restored cursor must not rebuild callbacks again"
     );
+}
+
+#[test]
+fn registered_checkpoint_resumes_at_twenty_seconds_without_evaluating_the_prefix() {
+    let mut original = checkpointed_worker();
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    let at_checkpoint = checkpoint_observation(&original);
+    assert_eq!(at_checkpoint.1, 600);
+    assert_eq!(at_checkpoint.2, 1, "second wait is still open");
+    assert!(matches!(at_checkpoint.3, EffectClass::Stateful(_)));
+    let original_root = original.program().unwrap().preview().stage().roots()[0];
+    let mut expected = Vec::new();
+    for frame in [601, 603, 800, 801, 802] {
+        let capture = seek(&mut original, frame);
+        expected.push((
+            frame,
+            png(&capture).to_vec(),
+            checkpoint_observation(&original),
+        ));
+    }
+
+    let builds = Rc::new(Cell::new(0_u32));
+    let observed = Rc::clone(&builds);
+    let mut recovered = NativeSceneWorker::new(checkpointed_config(), move || {
+        observed.set(observed.get() + 1);
+        checkpointed_program(
+            71,
+            protocol_digest(b"registered-counter-v1"),
+            CHECKPOINT_WAIT_SCHEDULE,
+        )
+    })
+    .unwrap();
+    let before_builds = builds.get();
+    REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+    let ack = recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap();
+    assert_eq!(
+        ack,
+        WorkerResponse::Ack {
+            state_hash: Some(entry.state_hash),
+            journal_len: 1,
+        }
+    );
+    assert_eq!(
+        builds.get(),
+        before_builds + 1,
+        "one fresh callback registry"
+    );
+    assert_eq!(
+        REGISTERED_CALLS.with(Cell::get),
+        (0, 0),
+        "restoring data must not execute 600 historical updates or a wait prologue",
+    );
+    assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+    assert!(
+        !recovered
+            .program()
+            .unwrap()
+            .preview()
+            .stage()
+            .contains(original_root)
+    );
+    let report = recovered.last_restore().unwrap();
+    assert_eq!(report.mode, NativeRestoreMode::Checkpoint);
+    assert_eq!(report.frame, 600);
+    assert_eq!(report.fallback, None);
+    let WorkerResponse::StudioData { bytes, .. } = recovered
+        .handle(SupervisorRequest::Inspect { scene: NAME.into() })
+        .unwrap()
+    else {
+        panic!("inspection after checkpoint restoration")
+    };
+    assert!(
+        String::from_utf8(bytes).unwrap().contains(
+            "\"native_restore\":{\"mode\":\"checkpoint\",\"frame\":600,\"fallback\":null}"
+        )
+    );
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+
+    let bound_builds = builds.get();
+    for (frame, expected_png, expected_state) in expected {
+        let before_calls = REGISTERED_CALLS.with(Cell::get);
+        let actual = seek(&mut recovered, frame);
+        assert_eq!(png(&actual), expected_png, "PNG at frame {frame}");
+        assert_eq!(
+            checkpoint_observation(&recovered),
+            expected_state,
+            "frame {frame}"
+        );
+        let calls = REGISTERED_CALLS.with(Cell::get);
+        if frame == 601 {
+            assert_eq!(calls, (1, 0), "the next sample executes exactly once");
+        } else if frame == 801 {
+            assert_eq!(calls, (before_calls.0 + 2, before_calls.1 + 1));
+            assert_eq!(
+                recovered.program().unwrap().preview().scene().play_count(),
+                2
+            );
+        }
+    }
+    assert_eq!(
+        builds.get(),
+        bound_builds,
+        "forward continuation retains its owner"
+    );
+}
+
+#[test]
+fn registered_checkpoint_binds_seed_callback_version_schedule_and_read_closure() {
+    let mut original = checkpointed_worker();
+    let saved = checkpoint(&commit(&mut original, 600), 0);
+    for changed in 0..4 {
+        let mut config = checkpointed_config();
+        let seed = if changed == 0 { 72 } else { 71 };
+        let version = protocol_digest(if changed == 1 {
+            b"registered-counter-v2"
+        } else {
+            b"registered-counter-v1"
+        });
+        let schedule = if changed == 2 {
+            [400, 400, 100]
+        } else {
+            CHECKPOINT_WAIT_SCHEDULE
+        };
+        if changed == 3 {
+            config.source_digest = protocol_digest(b"changed-source-closure");
+        }
+        let mut candidate = NativeSceneWorker::new(config, move || {
+            checkpointed_program(seed, version, schedule)
+        })
+        .unwrap();
+        let before = seek(&mut candidate, 2);
+        let before_state = checkpoint_observation(&candidate);
+        let error = candidate
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            WorkerErrorCode::CheckpointRejected,
+            "case {changed}"
+        );
+        assert_eq!(
+            checkpoint_observation(&candidate),
+            before_state,
+            "case {changed}"
+        );
+        assert_eq!(candidate.journal_position(), 0);
+        assert_eq!(candidate.last_state_hash(), None);
+        assert_eq!(candidate.last_restore(), None);
+        assert_eq!(png(&seek(&mut candidate, 2)), png(&before));
+    }
+}
+
+#[test]
+fn rehashed_native_continuations_reject_invalid_cursors_without_replacing_the_owner() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+    use fmn_mobject::SCENE_STATE_SCHEMA;
+
+    let schema = Schema::new(*b"FMNR", 1, 0, 0);
+    let mut original = checkpointed_worker();
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let scene_name = reader.get_str().unwrap();
+    let position = reader.get_u64().unwrap();
+    let read_count = reader.get_u32().unwrap();
+    let mut reads = Vec::new();
+    for _ in 0..read_count {
+        reads.push((reader.get_str().unwrap(), reader.get_bytes().unwrap()));
+    }
+    let factory = reader.get_bytes().unwrap();
+    let frame = reader.get_u64().unwrap();
+    let shape = [reader.get_u64().unwrap(), reader.get_u64().unwrap()];
+    let started = reader.get_u64().unwrap();
+    let effects = reader.get_u8().unwrap();
+    assert!(reader.get_bool().unwrap());
+    let base = reader.get_i64().unwrap();
+    let stepped = reader.get_i64().unwrap();
+    let purity = reader.get_u8().unwrap();
+    let scene_state = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    assert_eq!((frame, started, base, stepped), (600, 2, 350, 250));
+
+    let mut nested = Reader::open(
+        scene_state,
+        SCENE_STATE_SCHEMA,
+        Limits::DEFAULT,
+        UnknownPolicy::Strict,
+    )
+    .unwrap();
+    let frames_elapsed = nested.get_i64().unwrap();
+    let fps = nested.get_u32().unwrap();
+    let play_count = nested.get_u64().unwrap();
+    let rng = [
+        nested.get_u64().unwrap(),
+        nested.get_u64().unwrap(),
+        nested.get_u64().unwrap(),
+        nested.get_u64().unwrap(),
+    ];
+    let snapshot = nested.get_bytes().unwrap();
+    nested.finish().unwrap();
+
+    let mut recovered = checkpointed_worker();
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+        .unwrap();
+    let before = checkpoint_observation(&recovered);
+    let before_png = seek(&mut recovered, 600);
+    let report = recovered.last_restore();
+    for case in [
+        "base outside schedule",
+        "zero stepped samples",
+        "stepped beyond wait",
+        "unknown effect",
+        "unknown wait purity",
+        "missing current updater effects",
+        "nonfinite frame width",
+        "zero frame height",
+        "missing active cursor",
+        "nested clock mismatch",
+        "nested play count mismatch",
+        "malformed nested snapshot",
+    ] {
+        let mut malformed_shape = shape;
+        let mut malformed_effects = effects;
+        let mut malformed_base = base;
+        let mut malformed_stepped = stepped;
+        let mut malformed_purity = purity;
+        let mut active = true;
+        let mut nested_frames = frames_elapsed;
+        let mut nested_plays = play_count;
+        let mut nested_snapshot = snapshot;
+        match case {
+            "base outside schedule" => malformed_base += 1,
+            "zero stepped samples" => malformed_stepped = 0,
+            "stepped beyond wait" => malformed_stepped = 451,
+            "unknown effect" => malformed_effects |= 128,
+            "unknown wait purity" => malformed_purity |= 128,
+            "missing current updater effects" => {
+                malformed_effects = 0;
+                malformed_purity = 0;
+            }
+            "nonfinite frame width" => malformed_shape[0] = f64::NAN.to_bits(),
+            "zero frame height" => malformed_shape[1] = 0.0_f64.to_bits(),
+            "missing active cursor" => active = false,
+            "nested clock mismatch" => nested_frames += 1,
+            "nested play count mismatch" => nested_plays += 1,
+            "malformed nested snapshot" => nested_snapshot = b"invalid arena document",
+            _ => unreachable!(),
+        }
+        let mut nested_writer = Writer::new(SCENE_STATE_SCHEMA);
+        nested_writer
+            .put_i64(nested_frames)
+            .put_u32(fps)
+            .put_u64(nested_plays);
+        for word in rng {
+            nested_writer.put_u64(word);
+        }
+        nested_writer.put_bytes(nested_snapshot);
+        let nested_bytes = nested_writer.finish().unwrap();
+
+        let mut writer = Writer::new(schema);
+        writer
+            .put_str(scene_name)
+            .put_u64(position)
+            .put_u32(read_count);
+        for (path, digest) in &reads {
+            writer.put_str(path).put_bytes(digest);
+        }
+        writer
+            .put_bytes(factory)
+            .put_u64(frame)
+            .put_u64(malformed_shape[0])
+            .put_u64(malformed_shape[1])
+            .put_u64(started)
+            .put_u8(malformed_effects)
+            .put_bool(active);
+        if active {
+            writer
+                .put_i64(malformed_base)
+                .put_i64(malformed_stepped)
+                .put_u8(malformed_purity);
+        }
+        writer.put_bytes(&nested_bytes);
+        let state = writer.finish().unwrap();
+        // Both containers and the protocol digest are freshly valid. Refusal
+        // must come from continuation/Scene validation, not a stale checksum.
+        let state_hash = protocol_digest(&state);
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        let error = recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                state,
+                state_hash,
+                ..saved.clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected, "{case}");
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "{case}");
+        assert_eq!(checkpoint_observation(&recovered), before, "{case}");
+        assert_eq!(recovered.journal_position(), 1, "{case}");
+        assert_eq!(
+            recovered.last_state_hash(),
+            Some(entry.state_hash),
+            "{case}"
+        );
+        assert_eq!(recovered.last_restore(), report, "{case}");
+        assert!(recovered.journal_tail().is_empty(), "{case}");
+        assert_eq!(png(&seek(&mut recovered, 600)), png(&before_png), "{case}");
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "{case}");
+    }
+}
+
+#[test]
+fn pure_waits_with_empty_registry_resume_initial_and_boundary_states() {
+    fn pure_program() -> Result<NativeSceneProgram, ServiceError> {
+        let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
+        for (index, point) in [[-0.5_f32, 0.0, 0.0], [0.0, 0.5, 0.0], [0.5, 0.0, 0.0]]
+            .iter()
+            .enumerate()
+        {
+            buffer.write(index, "point", point);
+            buffer.write(index, "stroke_rgba", &[0.25, 1.0, 0.125, 1.0]);
+            buffer.write(index, "stroke_width", &[5.0]);
+        }
+        let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+        scene.stage_mut().shift(root, [0.25, -0.125, 0.0]);
+        scene.stage_mut().set_frame_shape([12.0, 7.0]).unwrap();
+        let temporary = scene.stage_mut().add_value_tracker(7.0);
+        scene.stage_mut().delete(temporary).unwrap();
+        assert!(!scene.stage().has_rollback_identity_history());
+        scene.add(&[root]).unwrap();
+        // No explicit registry is needed when no executable updater exists.
+        NativeSceneProgram::new(
+            scene,
+            vec![
+                NativeSegment::WaitFrames { frames: 3 },
+                NativeSegment::Wait {
+                    duration: Some(2.0 / 30.0),
+                },
+            ],
+            5,
+        )
+    }
+
+    for frame in [0, 3, 4] {
+        let mut policy = checkpointed_config();
+        policy.frame_count = 6;
+        let mut original = NativeSceneWorker::new(policy.clone(), pure_program).unwrap();
+        let entry = commit(&mut original, frame);
+        let saved = checkpoint(&entry, 0);
+        assert!(saved.state.starts_with(b"FMNR"));
+        let at_checkpoint = checkpoint_observation(&original);
+        let expected = seek(&mut original, frame + 1);
+        let expected_state = checkpoint_observation(&original);
+        // Even a boundary after several frames must restore without charging
+        // the old prefix against this one-frame continuation work budget.
+        policy.max_replay_frames = 1;
+        let mut recovered = NativeSceneWorker::new(policy, pure_program).unwrap();
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(saved))
+            .unwrap();
+        assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+        let report = recovered.last_restore().unwrap();
+        assert_eq!(report.mode, NativeRestoreMode::Checkpoint);
+        assert_eq!(report.frame, frame as u64);
+        assert_eq!(report.fallback, None);
+        assert_eq!(png(&seek(&mut recovered, frame + 1)), png(&expected));
+        assert_eq!(checkpoint_observation(&recovered), expected_state);
+    }
+}
+
+#[test]
+fn checkpoint_policy_reports_cold_fallback_for_opaque_mutable_callback_state() {
+    let mut config = config();
+    config.replay = NativeReplayPolicy::Checkpointed;
+    let mut original = NativeSceneWorker::new(config.clone(), program).unwrap();
+    let entry = commit(&mut original, 3);
+    let expected = seek(&mut original, 6);
+    let mut recovered = NativeSceneWorker::new(config, program).unwrap();
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+        .unwrap();
+    let report = recovered.last_restore().unwrap();
+    assert_eq!(report.mode, NativeRestoreMode::ColdVerified);
+    assert_eq!(report.frame, 3);
+    assert!(report.fallback.is_some());
+    let WorkerResponse::StudioData { bytes, .. } = recovered
+        .handle(SupervisorRequest::Inspect { scene: NAME.into() })
+        .unwrap()
+    else {
+        panic!("inspection after cold fallback")
+    };
+    assert!(String::from_utf8(bytes).unwrap().contains(
+        "\"native_restore\":{\"mode\":\"cold_verified\",\"frame\":3,\"fallback\":\"unregistered_updater\"}"
+    ));
+    assert_eq!(png(&seek(&mut recovered, 6)), png(&expected));
+    assert_eq!(
+        checkpoint_observation(&recovered),
+        checkpoint_observation(&original)
+    );
+}
+
+#[test]
+fn registered_suffix_charges_only_new_frames_and_commits_transactionally() {
+    let mut original = checkpointed_worker();
+    let first = commit(&mut original, 600);
+    let saved = checkpoint(&first, 0);
+    let at_checkpoint = checkpoint_observation(&original);
+    let checkpoint_png = seek(&mut original, 600);
+    let second = commit(&mut original, 602);
+    let third = commit(&mut original, 604);
+    let expected = seek(&mut original, 604);
+    let expected_state = checkpoint_observation(&original);
+    let mut journal = Journal::new();
+    for entry in [&first, &second, &third] {
+        journal.record(entry.clone()).unwrap();
+    }
+    let journal_bytes = journal.to_bytes().unwrap();
+    let mut divergent = Journal::new();
+    divergent.record(first.clone()).unwrap();
+    divergent.record(second.clone()).unwrap();
+    let mut wrong = third.clone();
+    wrong.state_hash = protocol_digest(b"wrong final suffix state");
+    wrong.checkpoint = None;
+    divergent.record(wrong).unwrap();
+
+    for budget in [3, 4] {
+        let mut policy = checkpointed_config();
+        policy.max_replay_frames = budget;
+        let mut recovered = NativeSceneWorker::new(policy, || {
+            checkpointed_program(
+                71,
+                protocol_digest(b"registered-counter-v1"),
+                CHECKPOINT_WAIT_SCHEDULE,
+            )
+        })
+        .unwrap();
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap();
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+        let restore_report = recovered.last_restore();
+        // A budget of three refuses the four-frame suffix before execution.
+        // A budget of four reaches the deliberately wrong *second* suffix hash.
+        let attempted = if budget == 3 {
+            journal_bytes.clone()
+        } else {
+            divergent.to_bytes().unwrap()
+        };
+        let error = recovered
+            .handle(SupervisorRequest::ReplayJournal(JournalReplay {
+                scene: NAME.into(),
+                from_entry: 1,
+                through_entry: 3,
+                journal: attempted,
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::ReplayFailed);
+        assert_eq!(
+            REGISTERED_CALLS.with(Cell::get),
+            if budget == 3 { (0, 0) } else { (4, 0) },
+            "only the uncommitted suffix candidate may run",
+        );
+        assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+        assert_eq!(recovered.journal_position(), 1);
+        assert_eq!(recovered.last_state_hash(), Some(first.state_hash));
+        assert_eq!(recovered.last_restore(), restore_report);
+        assert!(recovered.journal_tail().is_empty());
+        assert_eq!(png(&seek(&mut recovered, 600)), png(&checkpoint_png));
+
+        if budget == 4 {
+            REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+            let response = recovered
+                .handle(SupervisorRequest::ReplayJournal(JournalReplay {
+                    scene: NAME.into(),
+                    from_entry: 1,
+                    through_entry: 3,
+                    journal: journal_bytes.clone(),
+                }))
+                .unwrap();
+            assert_eq!(
+                response,
+                WorkerResponse::ReplayComplete {
+                    from_entry: 1,
+                    state_hashes: vec![second.state_hash, third.state_hash],
+                },
+            );
+            assert_eq!(REGISTERED_CALLS.with(Cell::get), (4, 0));
+            assert_eq!(recovered.journal_position(), 3);
+            assert_eq!(recovered.last_state_hash(), Some(third.state_hash));
+            assert_eq!(checkpoint_observation(&recovered), expected_state);
+            assert_eq!(png(&seek(&mut recovered, 604)), png(&expected));
+        }
+    }
 }
 
 #[test]

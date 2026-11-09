@@ -69,6 +69,8 @@ mod path_observation;
 mod semantic_routes;
 #[path = "support/studio_mjpeg.rs"]
 mod studio_mjpeg;
+#[path = "support/studio_native_resume.rs"]
+mod studio_native_resume;
 #[path = "support/studio_pure_seek.rs"]
 mod studio_pure_seek;
 
@@ -16326,6 +16328,32 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_registered_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_resume_checkpoint.bin".into(),
+                "native_resume_next.png".into(),
+                "native_resume_suffix.png".into(),
+            ]),
+            counter_eq("studio_registered_checkpoint_restores", 2),
+            counter_eq("studio_registered_checkpoint_frames", 4),
+            counter_eq("studio_registered_checkpoint_suffix_entries", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.registered_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_frame", 600),
+                FieldPred::u64_eq("work_budget", 8),
+                FieldPred::str_eq("restore_mode", "checkpoint"),
+                FieldPred::str_eq("state_and_pixels_equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_mjpeg_preview.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -19603,6 +19631,16 @@ fn studio_terminal_controls_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_terminal_controls.v1")
         .expect("terminal Studio controls scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_registered_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_registered_checkpoint.v1")
+        .expect("registered native checkpoint scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

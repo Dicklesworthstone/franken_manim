@@ -258,20 +258,99 @@ Use the supervisor's read-validation path for checkpoints: static policy and
 role-binding authority live in the journal, not in bare SceneState bytes.
 
 Replay is disabled by default: unknown callback programs are opaque barriers.
-`NativeReplayPolicy::ColdVerified` is an explicit author attestation that every
-factory creates independent animation/updater/listener captures and depends
-only on the hashed input closure. No unjournaled I/O or externally shared mutable
-factory state may influence it. It is still stateful, never advertised as
-frame-parallel pure.
+Both replay policies require a deterministic factory: each invocation creates
+independent captures and depends only on the hashed source/input closure.
+Unjournaled I/O and externally shared mutable state must not affect execution.
+The policy selects how that factory recovers an interrupted program:
 
-Checkpoint restore decodes metadata only to locate the frame. The callback-free
-snapshot is never installed. A new factory executes from zero and its complete
-state bytes must match before replacing the owner. Forward playback then uses
-the reconstructed callback state, including camera updaters. Replay validates
-ranges, source/effect/backend identities, event ownership, checkpoint hashes
-and total frame-work budget before factory calls, then verifies every requested
-state. A later divergence installs no earlier prefix. Only executed entries
-replace the crash tail; empty replay preserves the owner and tail.
+| `NativeReplayPolicy` | Recovery behavior |
+| --- | --- |
+| `Disabled` | Callback recovery and durable input refuse. |
+| `ColdVerified` | Reconstruct from frame zero, then compare complete state bytes before installing the replacement owner. |
+| `Checkpointed` | Restore admitted wait programs directly; use verified cold reconstruction for other programs. |
+
+### Restore registered wait programs
+
+`Checkpointed` can restore a schedule consisting entirely of `Wait` and
+`WaitFrames` segments, including zero-duration waits. Updaters must be registered
+through a fresh `NativeUpdaterRegistry` in each factory. Its registration
+methods accept function pointers, and all mutable callback state must live in
+durable Stage records or trackers. Registration does not run an initial update.
+Change the supplied version digest whenever a function's behavior changes.
+
+For example, after constructing `scene` and rooting `mob`:
+
+```rust
+use fmn_scene::studio_bridge::{Mob, Stage};
+use fmn_studio::native::{
+    NativeReplayPolicy, NativeSceneProgram, NativeSegment, NativeUpdaterRegistry,
+};
+use fmn_studio::protocol_digest;
+
+fn drift(stage: &mut Stage, mob: Mob, dt: f64) {
+    stage.shift(mob, [0.05 * dt, 0.0, 0.0]);
+}
+
+let mut registry = NativeUpdaterRegistry::new();
+registry.register_dt(scene.stage_mut(), mob, protocol_digest(b"drift-v1"), drift)?;
+let program = NativeSceneProgram::new(
+    scene,
+    vec![NativeSegment::WaitFrames { frames: 900 }],
+    900,
+)?
+.with_checkpoint_registry(registry)?;
+worker_config.replay = NativeReplayPolicy::Checkpointed;
+```
+
+`register_no_dt` supports ordinary scene updaters with signature
+`fn(&mut Stage, Mob)`. Unregistered callbacks, replaced bindings and native
+`updater_state` attributes require cold reconstruction. A schedule containing
+`Play` or deferred `Build` segments also retains that path. Custom preflight
+hooks, sound requests, input history, live event ingress and edited source spans
+cannot be silently discarded by a direct restore. Dormant event listeners may
+be recreated by the fresh factory when no input has run.
+
+An admitted checkpoint uses the versioned `FMNR` envelope. It binds the original
+root RNG seed separately from the serial RNG stream, the source/input closure,
+worker build, frame grid, initial factory state, declared schedule and updater
+versions. It carries the durable scene data, current Stage alignment frame,
+cumulative effect evidence and exact open-wait cursor. Restoration validates
+these identities on an independent factory instance, installs the data and
+rebinds the registered functions under their original updater identities.
+It does not evaluate the preceding frames, rerun the current wait's zero-dt
+opener, or emit its pre-play lifecycle again.
+
+The next sample retains its original segment alpha, global frame index and
+frame-indexed RNG. A checkpoint on the wait's last capture still has a pending
+epilogue; moving forward finishes it once before opening the next segment.
+Forward journal suffixes continue from the restored cursor and charge only the
+new frame work. Every requested state hash is still checked before the candidate
+is installed. A later divergence installs no earlier prefix.
+
+Run the complete portable example:
+
+```sh
+cargo run --locked -p fmn-studio --example native_checkpoint
+```
+
+It commits frame 600, restores it in an independent worker whose frame-work
+budget is only **one frame**, and verifies that frame 601's encoded PNG equals
+the uninterrupted worker's PNG. Replaying the prefix could not fit that budget.
+The example uses the real worker service and renderer in-process and prints the
+restored frame, checkpoint size and PNG digest; it needs no browser, GPU, Python
+or ffmpeg.
+
+`NativeSceneWorker::last_restore()` reports `NativeRestoreMode::Checkpoint` or
+`ColdVerified`, the restored frame and any fallback reason. Inspector JSON
+exposes the same evidence in `native_restore`; the `mode` strings are
+`checkpoint` and `cold_verified`. Legacy SceneState checkpoints retain verified
+cold reconstruction. Checkpoints for opaque schedules and committed input
+retain their existing format and named fallback, so opting into `Checkpointed`
+does not claim those callbacks are serializable or frame-parallel pure.
+
+Replay validates ranges, source/effect/backend identities, event ownership,
+checkpoint hashes and total frame-work budgets. Only executed entries replace
+the crash tail; empty replay preserves the owner and tail.
 
 A failed live execution invalidates that cursor rather than pretending record
 restoration rolls back closure state. A new seek can construct a healthy owner.
@@ -288,9 +367,9 @@ arbitrary source files. Programs have an owned declarative segment schedule,
 not a suspended arbitrary Rust stack. Perspective editing, projected overlays,
 Metal presentation, Python callback ownership and audio export are not added.
 
-Recovery is cold execution, not constant-time restoration; Studio latency and
-memory/performance budgets have not been benchmarked for this path. Hashes and
-state equality detect divergence but do not sandbox effects. Native editing
+Admitted waits restore data and their continuation without prefix execution.
+Other schedules still need bounded cold execution. Restore latency and memory
+cost depend on the saved scene; no constant-time claim is made. Native editing
 history does not rewind external state inside closures.
 
 The focused Native Studio workflow runs the whole Studio test suite, native

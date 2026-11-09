@@ -32,7 +32,7 @@ use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::StageError;
 use crate::bbox::BboxCache;
 use crate::mobject::{ImageResource, Mobject, RenderPrimitive};
-use crate::persist::{UpdaterIdentity, UpdaterKindTag};
+use crate::persist::{UpdaterIdentity, UpdaterKindTag, UpdaterManifest};
 use crate::placement::Placement;
 use crate::record::RecordBuffer;
 use crate::shape::ShapeSlot;
@@ -1171,6 +1171,29 @@ impl Stage {
         self.id == snapshot.stage_id
     }
 
+    /// Whether rollback retained allocation identities beyond durable state.
+    ///
+    /// In-memory rollback never reissues a discarded handle or updater token.
+    /// Those physical high-water marks are intentionally absent from durable
+    /// snapshots. A data-only continuation cannot reproduce subsequent
+    /// allocations while this probe is true without restoring that history too.
+    /// Ordinary allocation and deletion keep their cursors in the snapshot.
+    #[must_use]
+    pub fn has_rollback_identity_history(&self) -> bool {
+        self.updater_id_high_water > self.next_updater_id
+            || self
+                .generation_high_water
+                .iter()
+                .enumerate()
+                .any(|(index, &issued)| {
+                    let durable = self.slots.get(index).map_or(0, |slot| {
+                        slot.generation
+                            .saturating_add(u32::from(slot.entry.is_some()))
+                    });
+                    issued > durable
+                })
+    }
+
     // ------------------------------------------------------------ handles
 
     fn available_generation(&self, index: usize, recorded: u32) -> Option<u32> {
@@ -1936,6 +1959,20 @@ impl Stage {
     #[must_use]
     pub fn padding_source(&self, mob: Mob) -> Option<Mob> {
         self.get(mob).and_then(|e| e.padding_source)
+    }
+
+    /// Whether a live entry retains an invisible padding copy's source link.
+    ///
+    /// These observable links are transient and absent from durable snapshots.
+    /// Data-only checkpoint owners must reconstruct them or refuse continuation.
+    /// Detached padding members count even when their source was deleted.
+    #[must_use]
+    pub fn has_padding_sources(&self) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.entry
+                .as_ref()
+                .is_some_and(|entry| entry.padding_source.is_some())
+        })
     }
 
     /// Record each member of a padding copy as a copy of its source member.
@@ -2807,6 +2844,68 @@ impl Stage {
         self.get(mob)
             .map(|e| e.updaters.iter().map(|s| s.id).collect())
             .unwrap_or_default()
+    }
+
+    /// The original callable under an updater removal identity.
+    ///
+    /// This shares the same callable as ordinary mobject copies. Reading a
+    /// binding never invokes it or changes its registration. Replay admission
+    /// can compare the `Rc` identity with an explicitly registered callback.
+    #[must_use]
+    pub fn updater_binding(&self, mob: Mob, id: UpdaterId) -> Option<UpdaterFn> {
+        self.get(mob)?
+            .updaters
+            .iter()
+            .find(|slot| slot.id == id)
+            .map(|slot| slot.func.clone())
+    }
+
+    /// Every live slot's durable updater identities, in arena and execution
+    /// order. Detached objects are included, just as in an arena snapshot.
+    /// This copies only the manifest; it neither snapshots records nor calls
+    /// an updater.
+    #[must_use]
+    pub fn updater_manifest(&self) -> UpdaterManifest {
+        UpdaterManifest {
+            entries: self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| {
+                    let entry = slot.entry.as_ref()?;
+                    (!entry.updaters.is_empty()).then(|| {
+                        (
+                            index as u32,
+                            entry
+                                .updaters
+                                .iter()
+                                .map(|slot| {
+                                    let kind = match &slot.func {
+                                        UpdaterFn::NonDt(_) => UpdaterKindTag::NonDt,
+                                        UpdaterFn::Dt(_) => UpdaterKindTag::Dt,
+                                    };
+                                    (slot.id.raw(), kind)
+                                })
+                                .collect(),
+                        )
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether any live arena entry retains native updater attributes.
+    ///
+    /// These typed values are absent from durable snapshots. Checkpoint owners
+    /// must refuse a data-only resume unless they separately reconstruct them.
+    /// Attributes on detached objects and removed updater slots still count.
+    #[must_use]
+    pub fn has_native_updater_state(&self) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.entry
+                .as_ref()
+                .is_some_and(|entry| !entry.updater_states.is_empty())
+        })
     }
 
     /// Atomically reinstall updater callables under identities recovered from

@@ -1,4 +1,4 @@
-//! Concrete native WorkerService, with cold, hash-verified recovery.
+//! Concrete native WorkerService with registered continuations and verified replay.
 
 mod pending;
 mod recovery;
@@ -13,7 +13,10 @@ use crate::{
 };
 
 use super::NativeSceneProgram;
-use super::edits::{EditTrack, MAX_RECORDED_INPUTS, encode_state};
+use super::edits::{
+    EditTrack, MAX_RECORDED_INPUTS, decode_resume_state, encode_resume_state, encode_state,
+};
+use super::program::{CheckpointAdmission, NativeCheckpointFallback};
 use super::program::{execution_error, invalid};
 use super::raster::NativeRaster;
 
@@ -27,6 +30,33 @@ pub enum NativeReplayPolicy {
     /// content-hashed closure. No unjournaled I/O or shared mutable state may
     /// affect execution. Recovery verifies real execution, never decoded closures.
     ColdVerified,
+    /// Resume admitted wait continuations from supervisor-owned checkpoints.
+    /// Function-pointer updaters must be explicitly registered and keep all
+    /// mutable state in durable Stage records. Other programs retain verified
+    /// cold reconstruction. The supervisor's journal authenticates the expected
+    /// state hash; this mode checks the input closure and continuation identity
+    /// without independently re-executing the historical prefix.
+    Checkpointed,
+}
+
+/// Mechanism used by the most recent successful checkpoint restoration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeRestoreMode {
+    /// Scene data, exact wait cursor and registered callbacks were restored.
+    Checkpoint,
+    /// The independent factory re-executed and verified the scene state.
+    ColdVerified,
+}
+
+/// Observable checkpoint restoration evidence, also exposed by inspection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NativeRestoreReport {
+    /// Which execution mechanism actually supplied the installed program.
+    pub mode: NativeRestoreMode,
+    /// Original capture index, without output or clock rebasing.
+    pub frame: u64,
+    /// Named reason why a checkpoint needed cold reconstruction.
+    pub fallback: Option<NativeCheckpointFallback>,
 }
 
 /// Policy and content identities for a single registered native scene.
@@ -68,7 +98,8 @@ pub struct NativeWorkerConfig {
     /// Stage successful preview Event requests for explicit Save. A committed
     /// seek to that same frame publishes the pending inputs as one journal
     /// batch. A noncommitting scrub discards them. Disabled by default; requires
-    /// ColdVerified and affine input support. No new protocol variant is used.
+    /// An explicit replay policy and affine input support are required. No new
+    /// protocol variant is used.
     pub stage_input_events: bool,
     /// Pause browser playback at native play/wait boundaries. The worker stays
     /// responsive to input, inspection and explicit seeks while the host holds
@@ -144,6 +175,12 @@ impl NativeWorkerConfig {
                 digest: protocol_digest(b"native-segment-boundary-holds-v1"),
             });
         }
+        if self.replay == NativeReplayPolicy::Checkpointed {
+            reads.push(AssetRead {
+                path: "native/checkpoint-continuation-semantics".into(),
+                digest: protocol_digest(b"registered-native-wait-continuation-v1"),
+            });
+        }
         reads
     }
 }
@@ -155,7 +192,7 @@ impl NativeWorkerConfig {
 /// Clean forward scrubs execute only the remaining captures and input events.
 /// Backward/dirty scrubs reconstruct from a fresh independent factory.
 ///
-/// Committed input is opt-in through `ColdVerified`, frame-stamped and guarded
+/// Committed input is opt-in through a replay policy, frame-stamped and guarded
 /// by the journal revision. Input in the past abandons the later input branch.
 /// Every event uses the ordinary native editor/application dispatcher. Neither
 /// closures nor editor history are deserialized: checkpoints include their
@@ -175,6 +212,8 @@ pub struct NativeSceneWorker {
     tail: Vec<u8>,
     edits: EditTrack,
     pending_inputs: Vec<CommandRecord>,
+    resume_factory: Option<ProtocolDigest>,
+    last_restore: Option<NativeRestoreReport>,
 }
 
 impl NativeSceneWorker {
@@ -222,8 +261,13 @@ impl NativeSceneWorker {
                 digest: raster.backend()?.digest(),
             });
         }
-        let program = factory()?;
+        let mut program = factory()?;
         Self::validate_program(&config, &program)?;
+        let resume_factory = if config.replay == NativeReplayPolicy::Checkpointed {
+            Some(program.factory_fingerprint(config.limits.max_checkpoint_bytes)?)
+        } else {
+            None
+        };
         let camera_binding = program.camera_binding_index()?;
         raster.bind_camera(camera_binding)?;
         if camera_binding.is_some() {
@@ -246,6 +290,8 @@ impl NativeSceneWorker {
             tail: Vec::new(),
             edits: EditTrack::default(),
             pending_inputs: Vec::new(),
+            resume_factory,
+            last_restore: None,
         })
     }
 
@@ -253,6 +299,12 @@ impl NativeSceneWorker {
     #[must_use]
     pub fn program(&self) -> Option<&NativeSceneProgram> {
         self.program.as_ref()
+    }
+
+    /// Report the actual last restoration route and any cold fallback reason.
+    #[must_use]
+    pub const fn last_restore(&self) -> Option<NativeRestoreReport> {
+        self.last_restore
     }
 
     /// Optimistic revision required by the next canonical committed input.
@@ -310,7 +362,10 @@ impl NativeSceneWorker {
 
     fn target(&self, frame: i64) -> Result<u64, ServiceError> {
         let frame = u64::try_from(frame).map_err(|_| invalid("negative native frame"))?;
-        if frame >= self.config.frame_count || frame > self.config.max_replay_frames {
+        if frame >= self.config.frame_count
+            || (self.config.replay != NativeReplayPolicy::Checkpointed
+                && frame > self.config.max_replay_frames)
+        {
             return Err(invalid(
                 "native target exceeds the scene or execution budget",
             ));
@@ -327,13 +382,31 @@ impl NativeSceneWorker {
         Ok(())
     }
 
-    fn fresh_at(&self, frame: u64, edits: &EditTrack) -> Result<NativeSceneProgram, ServiceError> {
-        self.require_input_budget(edits, frame)?;
+    fn require_frame_work(&self, frames: u64) -> Result<(), ServiceError> {
+        if frames > self.config.max_replay_frames {
+            return Err(invalid("native execution exceeds its frame work budget"));
+        }
+        Ok(())
+    }
+
+    fn fresh_program(&self) -> Result<NativeSceneProgram, ServiceError> {
         let mut program = (self.factory)()?;
         Self::validate_program(&self.config, &program)?;
         if program.camera_binding_index()? != self.camera_binding {
             return Err(invalid("native factory changed its camera rig binding"));
         }
+        if let Some(expected) = self.resume_factory
+            && program.factory_fingerprint(self.config.limits.max_checkpoint_bytes)? != expected
+        {
+            return Err(invalid("native factory changed its checkpoint identity"));
+        }
+        Ok(program)
+    }
+
+    fn fresh_at(&self, frame: u64, edits: &EditTrack) -> Result<NativeSceneProgram, ServiceError> {
+        self.require_input_budget(edits, frame)?;
+        self.require_frame_work(frame)?;
+        let mut program = self.fresh_program()?;
         edits.advance(&mut program, frame, None)?;
         Ok(program)
     }
@@ -344,6 +417,20 @@ impl NativeSceneWorker {
         edits: &EditTrack,
         position: u64,
     ) -> Result<Vec<u8>, ServiceError> {
+        if let Some(factory) = self.resume_factory
+            && edits.is_empty()
+            && let CheckpointAdmission::Resume(cursor) = program.checkpoint_admission()?
+        {
+            return encode_resume_state(
+                &self.config.scene,
+                position,
+                &self.reads,
+                factory,
+                &cursor,
+                &program.state_bytes()?,
+                self.config.limits.max_checkpoint_bytes,
+            );
+        }
         encode_state(
             &self.config.scene,
             position,
@@ -352,6 +439,93 @@ impl NativeSceneWorker {
             program.state_bytes()?,
             self.config.limits.max_checkpoint_bytes,
         )
+    }
+
+    /// Snapshot only an admitted, clean owner. Replay additionally requires the
+    /// exact installed committed state, so an intervening preview cannot become
+    /// an unverified starting point. No factory or updater runs in this phase.
+    fn continuation_bytes(&mut self, committed: bool) -> Result<Option<Vec<u8>>, ServiceError> {
+        let Some(factory) = self.resume_factory else {
+            return Ok(None);
+        };
+        if !self.preview_clean || !self.edits.is_empty() {
+            return Ok(None);
+        }
+        let Some(program) = self.program.as_mut() else {
+            return Ok(None);
+        };
+        let CheckpointAdmission::Resume(cursor) = program.checkpoint_admission()? else {
+            return Ok(None);
+        };
+        let state = program.state_bytes()?;
+        let bytes = encode_resume_state(
+            &self.config.scene,
+            self.position,
+            &self.reads,
+            factory,
+            &cursor,
+            &state,
+            self.config.limits.max_checkpoint_bytes,
+        )?;
+        if committed && self.last_hash != Some(protocol_digest(&bytes)) {
+            return Ok(None);
+        }
+        Ok(Some(bytes))
+    }
+
+    /// Construct an independent executable owner from an authenticated envelope.
+    /// Errors leave the currently installed preview and journal untouched.
+    fn resumed_program(
+        &self,
+        bytes: &[u8],
+        position: u64,
+    ) -> Result<NativeSceneProgram, ServiceError> {
+        let factory = self
+            .resume_factory
+            .ok_or_else(|| invalid("native checkpoint resume is disabled"))?;
+        let restored = decode_resume_state(
+            bytes,
+            &self.config.scene,
+            position,
+            &self.reads,
+            factory,
+            self.config.limits.max_checkpoint_bytes,
+        )?;
+        let frame = i64::try_from(restored.cursor.frame).map_err(execution_error)?;
+        self.target(frame)?;
+        let mut program = self.fresh_program()?;
+        program.restore_checkpoint(restored.state, &restored.cursor)?;
+        if self.state_bytes(&mut program, &EditTrack::default(), position)? != bytes {
+            return Err(invalid(
+                "native continuation is not a canonical resumable capture",
+            ));
+        }
+        Ok(program)
+    }
+
+    fn candidate_at(
+        &mut self,
+        frame: u64,
+        edits: &EditTrack,
+    ) -> Result<NativeSceneProgram, ServiceError> {
+        if edits.is_empty()
+            && self
+                .program
+                .as_ref()
+                .is_some_and(|program| program.frame_index() <= frame)
+            && let Some(bytes) = self.continuation_bytes(false)?
+        {
+            let after = self
+                .program
+                .as_ref()
+                .ok_or_else(|| invalid("native cursor disappeared"))?
+                .frame_index();
+            self.require_frame_work(frame - after)?;
+            let mut program = self.resumed_program(&bytes, self.position)?;
+            program.advance_to(frame)?;
+            return Ok(program);
+        }
+        self.fresh_at(frame, edits)
     }
 
     fn checked(&self, response: WorkerResponse) -> Result<WorkerResponse, ServiceError> {
@@ -378,7 +552,9 @@ impl NativeSceneWorker {
     fn effect(&self, program: &NativeSceneProgram) -> EffectClass {
         match self.config.replay {
             NativeReplayPolicy::Disabled => EffectClass::Opaque,
-            NativeReplayPolicy::ColdVerified => program.effect_class(),
+            NativeReplayPolicy::ColdVerified | NativeReplayPolicy::Checkpointed => {
+                program.effect_class()
+            }
         }
     }
 
@@ -386,14 +562,14 @@ impl NativeSceneWorker {
         if self.config.replay == NativeReplayPolicy::Disabled {
             return Err(ServiceError::new(
                 code,
-                "native callback replay requires an explicit ColdVerified factory contract",
+                "native callback replay requires an explicit replay factory contract",
             ));
         }
         Ok(())
     }
 
     fn input_enabled(&self) -> bool {
-        self.config.replay == NativeReplayPolicy::ColdVerified
+        self.config.replay != NativeReplayPolicy::Disabled
             && self.config.camera.is_none()
             && self.config.max_recorded_inputs != 0
     }
@@ -440,6 +616,12 @@ impl NativeSceneWorker {
                 .as_ref()
                 .is_some_and(|program| program.frame_index() <= frame)
         {
+            let after = self
+                .program
+                .as_ref()
+                .ok_or_else(|| invalid("native cursor disappeared"))?
+                .frame_index();
+            self.require_frame_work(frame - after)?;
             let mut program = self
                 .program
                 .take()
@@ -508,7 +690,7 @@ impl NativeSceneWorker {
             .ok_or_else(|| invalid("native journal position exhausted"))?;
         let mut edits = self.edits.try_clone()?;
         let frame = self.prepare_command(&command, self.position, &mut edits)?;
-        let mut program = self.fresh_at(frame, &edits)?;
+        let mut program = self.candidate_at(frame, &edits)?;
         let state = self.state_bytes(&mut program, &edits, next)?;
         let mut raster = self.new_raster()?;
         if command.kind == CommandKind::Input {
@@ -557,8 +739,25 @@ impl NativeSceneWorker {
             .as_ref()
             .ok_or_else(|| invalid("native preview requires a successful seek"))?;
         let max = self.config.limits.max_studio_data_bytes;
+        let restoration = self.last_restore.map_or_else(
+            || "null".to_owned(),
+            |report| {
+                let mode = match report.mode {
+                    NativeRestoreMode::Checkpoint => "checkpoint",
+                    NativeRestoreMode::ColdVerified => "cold_verified",
+                };
+                let fallback = report.fallback.map_or_else(
+                    || "null".to_owned(),
+                    |reason| format!("\"{}\"", reason.as_str()),
+                );
+                format!(
+                    "{{\"mode\":\"{mode}\",\"frame\":{},\"fallback\":{fallback}}}",
+                    report.frame
+                )
+            },
+        );
         let suffix = format!(
-            ",\"native_edit\":{{\"revision\":{},\"committed_inputs\":{},\"enabled\":{},\"preview_commit\":{},\"pending_inputs\":{}}},\"presenter\":{{\"enabled\":{},\"at_boundary\":{}}}}}",
+            ",\"native_edit\":{{\"revision\":{},\"committed_inputs\":{},\"enabled\":{},\"preview_commit\":{},\"pending_inputs\":{}}},\"presenter\":{{\"enabled\":{},\"at_boundary\":{}}},\"native_restore\":{restoration}}}",
             self.position,
             self.edits.len(),
             self.input_enabled(),

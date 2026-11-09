@@ -4,13 +4,14 @@
 use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer};
 use fmn_scene::{AssetRead, CommandKind, CommandRecord};
 
-use crate::ServiceError;
 use crate::protocol::{StudioInput, studio_input_payload};
+use crate::{ProtocolDigest, ServiceError};
 
 use super::NativeSceneProgram;
-use super::program::{execution_error, invalid};
+use super::program::{NativeProgramCheckpoint, NativeWaitCursor, execution_error, invalid};
 
 const EDIT_STATE_SCHEMA: Schema = Schema::new(*b"FMEI", 1, 2, 0);
+const RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 1, 0, 0);
 /// Hard ceiling independent of caller policy; each label is separately bounded.
 pub(super) const MAX_RECORDED_INPUTS: usize = 65_536;
 
@@ -290,4 +291,120 @@ pub(super) fn decode_state<'a>(
     let state = reader.get_bytes().map_err(execution_error)?;
     reader.finish().map_err(execution_error)?;
     Ok(RestoredTrack { edits, state })
+}
+
+/// An admitted continuation binds executable declarations separately from the
+/// scene snapshot. The supervisor owns the expected digest; the envelope binds
+/// that state to this exact build, input closure, factory and journal position.
+pub(super) fn encode_resume_state(
+    scene: &str,
+    position: u64,
+    reads: &[AssetRead],
+    factory: ProtocolDigest,
+    cursor: &NativeProgramCheckpoint,
+    state: &[u8],
+    max_bytes: usize,
+) -> Result<Vec<u8>, ServiceError> {
+    let mut writer = Writer::with_limits(
+        RESUME_STATE_SCHEMA,
+        Limits {
+            max_total: max_bytes,
+            max_field: max_bytes,
+        },
+    );
+    writer
+        .put_str(scene)
+        .put_u64(position)
+        .put_u32(reads.len() as u32);
+    for read in reads {
+        writer.put_str(&read.path).put_bytes(read.digest.as_bytes());
+    }
+    writer
+        .put_bytes(factory.as_bytes())
+        .put_u64(cursor.frame)
+        .put_u64(cursor.frame_shape[0])
+        .put_u64(cursor.frame_shape[1])
+        .put_u64(cursor.started_segments as u64)
+        .put_u8(cursor.effects)
+        .put_bool(cursor.active.is_some());
+    if let Some(wait) = &cursor.active {
+        writer
+            .put_i64(wait.base_frame)
+            .put_i64(wait.stepped)
+            .put_u8(wait.purity);
+    }
+    writer.put_bytes(state);
+    writer.finish().map_err(execution_error)
+}
+
+pub(super) struct RestoredContinuation<'a> {
+    pub cursor: NativeProgramCheckpoint,
+    pub state: &'a [u8],
+}
+
+pub(super) fn decode_resume_state<'a>(
+    bytes: &'a [u8],
+    scene: &str,
+    position: u64,
+    reads: &[AssetRead],
+    factory: ProtocolDigest,
+    max_bytes: usize,
+) -> Result<RestoredContinuation<'a>, ServiceError> {
+    let mut reader = Reader::open(
+        bytes,
+        RESUME_STATE_SCHEMA,
+        Limits {
+            max_total: max_bytes,
+            max_field: max_bytes,
+        },
+        UnknownPolicy::Strict,
+    )
+    .map_err(execution_error)?;
+    if reader.get_str().map_err(execution_error)? != scene
+        || reader.get_u64().map_err(execution_error)? != position
+        || reader.get_u32().map_err(execution_error)? as usize != reads.len()
+    {
+        return Err(invalid(
+            "native continuation scene, position or input closure differs",
+        ));
+    }
+    for read in reads {
+        if reader.get_str().map_err(execution_error)? != read.path
+            || reader.get_bytes().map_err(execution_error)? != read.digest.as_bytes()
+        {
+            return Err(invalid("native continuation input closure differs"));
+        }
+    }
+    if reader.get_bytes().map_err(execution_error)? != factory.as_bytes() {
+        return Err(invalid("native continuation factory identity differs"));
+    }
+    let frame = reader.get_u64().map_err(execution_error)?;
+    let frame_shape = [
+        reader.get_u64().map_err(execution_error)?,
+        reader.get_u64().map_err(execution_error)?,
+    ];
+    let started_segments =
+        usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
+    let effects = reader.get_u8().map_err(execution_error)?;
+    let active = if reader.get_bool().map_err(execution_error)? {
+        Some(NativeWaitCursor {
+            base_frame: reader.get_i64().map_err(execution_error)?,
+            stepped: reader.get_i64().map_err(execution_error)?,
+            purity: reader.get_u8().map_err(execution_error)?,
+        })
+    } else {
+        None
+    };
+    let state = reader.get_bytes().map_err(execution_error)?;
+    reader.finish().map_err(execution_error)?;
+    Ok(RestoredContinuation {
+        cursor: NativeProgramCheckpoint {
+            frame,
+            frame_shape,
+            started_segments,
+            effects,
+            active,
+        },
+        state,
+    })
 }

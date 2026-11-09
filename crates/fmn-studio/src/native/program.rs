@@ -2,9 +2,11 @@
 
 use std::collections::VecDeque;
 
+use fmn_hash::{Limits, Schema, Writer};
 use fmn_render::CameraConfig;
 use fmn_scene::studio_bridge::{
-    Animation, FrameMetadata, FramePacket, Purity, classify_play, classify_wait,
+    Animation, Duration, FrameMetadata, FramePacket, FrameSegment, ImpureEffect,
+    OpenWaitCheckpoint, Purity, RationalFrameClock, classify_play, classify_wait,
 };
 use fmn_scene::{
     CameraRig, CaptureReason, EffectClass, EventPayload, ImpureEffectTag, IntegrationError,
@@ -12,9 +14,12 @@ use fmn_scene::{
     SteppedWait,
 };
 
-use crate::{InteractiveDispatch, InteractivePreview, ServiceError, SpanRegistry, WorkerErrorCode};
+use crate::{
+    InteractiveDispatch, InteractivePreview, ProtocolDigest, ServiceError, SpanRegistry,
+    WorkerErrorCode, protocol_digest,
+};
 
-use super::{NativeBuild, NativeBuildContext};
+use super::{NativeBuild, NativeBuildContext, NativeUpdaterRegistry};
 
 /// Maximum cumulative segments admitted by one native program, including
 /// deferred construction and every segment it generates, not just queue length.
@@ -33,6 +38,78 @@ pub struct NativeSeekWork {
     pub frames_evaluated: u64,
 }
 
+/// Why a native checkpoint requires independent execution from its factory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeCheckpointFallback {
+    /// An older checkpoint contains scene data without an executable cursor.
+    LegacyCheckpoint,
+    /// Animation objects or deferred constructors have no durable continuation.
+    UnsupportedSchedule,
+    /// A live callback is not an unchanged function registered for restoration.
+    UnregisteredUpdater,
+    /// Editor input, event history, native attributes or sound need reconstruction.
+    TransientSceneState,
+    /// Committed input must reconstruct editor selection and undo history.
+    EditedInput,
+    /// The program is not paused at a supported completed-frame boundary.
+    IncompleteContinuation,
+}
+
+impl NativeCheckpointFallback {
+    /// Stable diagnostic code, suitable for inspector and journal logs.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LegacyCheckpoint => "legacy_checkpoint",
+            Self::UnsupportedSchedule => "unsupported_schedule",
+            Self::UnregisteredUpdater => "unregistered_updater",
+            Self::TransientSceneState => "transient_scene_state",
+            Self::EditedInput => "edited_input",
+            Self::IncompleteContinuation => "incomplete_continuation",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum WaitSpec {
+    Seconds(f64),
+    Frames(u64),
+}
+
+impl WaitSpec {
+    fn segment(self, fps: u32) -> Result<FrameSegment, ServiceError> {
+        let clock = RationalFrameClock::new(fps).map_err(execution_error)?;
+        clock
+            .segment(match self {
+                Self::Seconds(seconds) => Duration::Seconds(seconds),
+                Self::Frames(frames) => Duration::Frames(frames),
+            })
+            .map_err(execution_error)
+    }
+}
+
+/// Data only: no animation, closure, editor or renderer is deserialized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NativeProgramCheckpoint {
+    pub frame: u64,
+    pub frame_shape: [u64; 2],
+    pub started_segments: usize,
+    pub effects: u8,
+    pub active: Option<NativeWaitCursor>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct NativeWaitCursor {
+    pub base_frame: i64,
+    pub stepped: i64,
+    pub purity: u8,
+}
+
+pub(super) enum CheckpointAdmission {
+    Resume(NativeProgramCheckpoint),
+    Replay(NativeCheckpointFallback),
+}
+
 // A cumulative prefix, not a per-request delta: journal replay can continue a
 // live candidate while recording reconstructs the same prefix from frame zero.
 // Keep the existing journal vocabulary and a canonical order for strict replay
@@ -40,6 +117,26 @@ pub struct NativeSeekWork {
 #[derive(Default)]
 struct EffectInventory {
     reasons: u8,
+}
+
+fn purity_from_bits(bits: u8) -> Result<Purity, ServiceError> {
+    if bits & !15 != 0 {
+        return Err(invalid("native checkpoint contains unknown effect bits"));
+    }
+    if bits == 0 {
+        return Ok(Purity::Pure);
+    }
+    Ok(Purity::Stateful(
+        [
+            (1, ImpureEffect::DtUpdater),
+            (2, ImpureEffect::SceneUpdater),
+            (4, ImpureEffect::UnclassifiedAnimation),
+            (8, ImpureEffect::StopCondition),
+        ]
+        .into_iter()
+        .filter_map(|(mask, effect)| (bits & mask != 0).then_some(effect))
+        .collect(),
+    ))
 }
 
 impl EffectInventory {
@@ -260,6 +357,9 @@ pub struct NativeSceneProgram {
     admitted_segments: usize,
     started_segments: usize,
     segment_limit: usize,
+    wait_schedule: Option<Vec<WaitSpec>>,
+    checkpoint_registry: NativeUpdaterRegistry,
+    changed_spans: bool,
 }
 
 impl NativeSceneProgram {
@@ -300,6 +400,16 @@ impl NativeSceneProgram {
         if segments.len() > MAX_NATIVE_SEGMENTS || frame_limit > i64::MAX.cast_unsigned() {
             return Err(invalid("native program exceeds its segment or clock limit"));
         }
+        let wait_schedule = segments
+            .iter()
+            .map(|segment| match segment {
+                NativeSegment::Wait { duration } => Some(WaitSpec::Seconds(
+                    duration.unwrap_or(config.default_wait_time),
+                )),
+                NativeSegment::WaitFrames { frames } => Some(WaitSpec::Frames(*frames)),
+                NativeSegment::Play { .. } | NativeSegment::Build { .. } => None,
+            })
+            .collect::<Option<Vec<_>>>();
         let preview = InteractivePreview::from_interactive(scene).map_err(execution_error)?;
         let admitted_segments = segments.len();
         let mut program = Self {
@@ -316,9 +426,33 @@ impl NativeSceneProgram {
             admitted_segments,
             started_segments: 0,
             segment_limit: MAX_NATIVE_SEGMENTS,
+            wait_schedule,
+            checkpoint_registry: NativeUpdaterRegistry::new(),
+            changed_spans: false,
         };
         program.observe_scene_effects();
         Ok(program)
+    }
+
+    /// Declare the function-pointer callbacks whose mutable state is entirely
+    /// stored in this Scene's durable records. Registration is checked again
+    /// at every checkpoint; replacing a callback, attaching native attributes,
+    /// or adding an opaque callback makes that checkpoint require cold replay.
+    ///
+    /// Install the registry before executing any segment. The worker must also
+    /// opt in through [`super::NativeReplayPolicy::Checkpointed`].
+    pub fn with_checkpoint_registry(
+        mut self,
+        registry: NativeUpdaterRegistry,
+    ) -> Result<Self, ServiceError> {
+        self.require_healthy()?;
+        if self.frame != 0 || self.started_segments != 0 || self.active.is_some() {
+            return Err(invalid(
+                "bind the checkpoint registry before native execution",
+            ));
+        }
+        self.checkpoint_registry = registry;
+        Ok(self)
     }
 
     /// Tighten cumulative schedule admission before execution. Every deferred
@@ -432,6 +566,7 @@ impl NativeSceneProgram {
     /// Bind source spans while constructing the program. Deferred constructors
     /// can register their spans through NativeBuildContext as well.
     pub fn spans_mut(&mut self) -> &mut SpanRegistry {
+        self.changed_spans |= self.frame != 0 || self.started_segments != 0;
         &mut self.spans
     }
 
@@ -472,6 +607,235 @@ impl NativeSceneProgram {
             .scene_mut()
             .state_bytes()
             .map_err(execution_error)
+    }
+
+    /// Bind actual factory data and declarations, including the original seed,
+    /// without evaluating a frame or a wait prologue. Addresses never enter it.
+    pub(super) fn factory_fingerprint(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<ProtocolDigest, ServiceError> {
+        self.require_healthy()?;
+        if self.frame != 0 || self.started_segments != 0 || self.active.is_some() {
+            return Err(invalid(
+                "checkpoint factory identity requires the initial program",
+            ));
+        }
+        let state = self.state_bytes()?;
+        let mut writer = Writer::with_limits(
+            Schema::new(*b"FNCF", 1, 0, 0),
+            Limits {
+                max_total: max_bytes,
+                max_field: max_bytes,
+            },
+        );
+        writer
+            .put_u64(self.preview.scene().rng_seed())
+            .put_u64(self.preview.stage().frame_shape()[0].to_bits())
+            .put_u64(self.preview.stage().frame_shape()[1].to_bits())
+            .put_u64(self.frame_limit)
+            .put_u64(self.segment_limit as u64)
+            .put_bytes(self.checkpoint_registry.fingerprint().as_bytes())
+            .put_bytes(&state);
+        if let Some(schedule) = &self.wait_schedule {
+            writer.put_u8(1).put_u32(schedule.len() as u32);
+            for segment in schedule {
+                match segment {
+                    WaitSpec::Seconds(seconds) => {
+                        writer.put_u8(0).put_u64(seconds.to_bits());
+                    }
+                    WaitSpec::Frames(frames) => {
+                        writer.put_u8(1).put_u64(*frames);
+                    }
+                }
+            }
+        } else {
+            writer.put_u8(0);
+        }
+        Ok(protocol_digest(&writer.finish().map_err(execution_error)?))
+    }
+
+    pub(super) fn checkpoint_admission(&self) -> Result<CheckpointAdmission, ServiceError> {
+        self.require_healthy()?;
+        let replay = |reason| Ok(CheckpointAdmission::Replay(reason));
+        if self.wait_schedule.is_none() {
+            return replay(NativeCheckpointFallback::UnsupportedSchedule);
+        }
+        let scene = self.preview.scene();
+        if self.changed_spans || !scene.can_resume_wait_checkpoint() {
+            return replay(NativeCheckpointFallback::TransientSceneState);
+        }
+        let stage = self.preview.stage();
+        if stage.has_native_updater_state()
+            || stage.has_padding_sources()
+            || stage.has_rollback_identity_history()
+        {
+            return replay(NativeCheckpointFallback::TransientSceneState);
+        }
+        if !self
+            .checkpoint_registry
+            .supports(stage, &stage.updater_manifest())
+        {
+            return replay(NativeCheckpointFallback::UnregisteredUpdater);
+        }
+        let active = match &self.active {
+            Some(ActiveSegment::Wait(wait)) => {
+                let checkpoint = scene
+                    .checkpoint_stepped_wait(wait)
+                    .map_err(execution_error)?;
+                let mut purity = EffectInventory::default();
+                purity.note(&checkpoint.purity);
+                Some(NativeWaitCursor {
+                    base_frame: checkpoint.base_frame,
+                    stepped: checkpoint.stepped,
+                    purity: purity.reasons,
+                })
+            }
+            Some(ActiveSegment::Play(_)) => {
+                return replay(NativeCheckpointFallback::UnsupportedSchedule);
+            }
+            None if self.frame == 0 && self.started_segments == 0 => None,
+            None => return replay(NativeCheckpointFallback::IncompleteContinuation),
+        };
+        let checkpoint = NativeProgramCheckpoint {
+            frame: self.frame,
+            frame_shape: stage.frame_shape().map(f64::to_bits),
+            started_segments: self.started_segments,
+            effects: self.effects.reasons,
+            active,
+        };
+        if self.checked_wait_cursor(&checkpoint).is_err() {
+            return replay(NativeCheckpointFallback::IncompleteContinuation);
+        }
+        Ok(CheckpointAdmission::Resume(checkpoint))
+    }
+
+    fn checked_wait_cursor(
+        &self,
+        checkpoint: &NativeProgramCheckpoint,
+    ) -> Result<Option<OpenWaitCheckpoint>, ServiceError> {
+        let schedule = self
+            .wait_schedule
+            .as_ref()
+            .ok_or_else(|| invalid("checkpoint factory has no declarative wait schedule"))?;
+        if checkpoint.frame > self.frame_limit
+            || checkpoint.started_segments > schedule.len()
+            || checkpoint.effects & !15 != 0
+            || checkpoint.frame_shape.iter().any(|&bits| {
+                let value = f64::from_bits(bits);
+                !value.is_finite() || value <= 0.0
+            })
+        {
+            return Err(invalid(
+                "native checkpoint frame, schedule or effects are invalid",
+            ));
+        }
+        let Some(active) = &checkpoint.active else {
+            if checkpoint.frame != 0 || checkpoint.started_segments != 0 {
+                return Err(invalid("a noninitial checkpoint requires an active wait"));
+            }
+            return Ok(None);
+        };
+        let index = checkpoint
+            .started_segments
+            .checked_sub(1)
+            .ok_or_else(|| invalid("native checkpoint omitted its active segment index"))?;
+        let fps = self.preview.scene().fps();
+        let mut base = 0_i64;
+        for &spec in &schedule[..index] {
+            base = base
+                .checked_add(spec.segment(fps)?.n_frames())
+                .ok_or_else(|| invalid("native checkpoint schedule overflows its clock"))?;
+        }
+        let segment = schedule[index].segment(fps)?;
+        if active.base_frame != base
+            || active.stepped <= 0
+            || active.stepped > segment.n_frames()
+            || base.checked_add(active.stepped) != i64::try_from(checkpoint.frame).ok()
+            || active.purity & !15 != 0
+            || checkpoint.effects & active.purity != active.purity
+        {
+            return Err(invalid(
+                "native checkpoint does not match its original wait grid",
+            ));
+        }
+        Ok(Some(OpenWaitCheckpoint {
+            segment,
+            base_frame: base,
+            stepped: active.stepped,
+            purity: purity_from_bits(active.purity)?,
+        }))
+    }
+
+    /// Install data into an independent fresh factory instance. All executable
+    /// callbacks come from its declared registry, never from the prior owner.
+    pub(super) fn restore_checkpoint(
+        &mut self,
+        bytes: &[u8],
+        checkpoint: &NativeProgramCheckpoint,
+    ) -> Result<(), ServiceError> {
+        self.require_healthy()?;
+        if self.frame != 0 || self.started_segments != 0 || self.active.is_some() {
+            return Err(invalid(
+                "native checkpoint needs an independent fresh factory",
+            ));
+        }
+        if !matches!(self.checkpoint_admission()?, CheckpointAdmission::Resume(_)) {
+            return Err(invalid(
+                "native factory cannot restore registered wait state",
+            ));
+        }
+        let active = self.checked_wait_cursor(checkpoint)?;
+        if checkpoint.effects & self.effects.reasons != self.effects.reasons {
+            return Err(invalid(
+                "native checkpoint lost its factory effect inventory",
+            ));
+        }
+        self.failed = true;
+        let scene = self.preview.scene_mut();
+        let decoded = scene.restore_state_bytes(bytes).map_err(execution_error)?;
+        scene
+            .stage_mut()
+            .set_frame_shape(checkpoint.frame_shape.map(f64::from_bits))
+            .map_err(execution_error)?;
+        self.checkpoint_registry.rebind(scene, &decoded.updaters)?;
+        if scene.time().frames().cast_unsigned() != checkpoint.frame
+            || scene.play_count()
+                != checkpoint
+                    .started_segments
+                    .saturating_sub(usize::from(active.is_some())) as u64
+            || !scene.can_resume_wait_checkpoint()
+            || !self
+                .checkpoint_registry
+                .supports(scene.stage(), &decoded.updaters)
+        {
+            return Err(invalid(
+                "native checkpoint scene does not match its continuation",
+            ));
+        }
+        let mut current = EffectInventory::default();
+        current.note(&classify_wait(scene.stage(), false));
+        if checkpoint.effects & current.reasons != current.reasons {
+            return Err(invalid(
+                "native checkpoint lost its current updater effects",
+            ));
+        }
+        self.active = active
+            .map(|wait| scene.resume_stepped_wait(wait).map(ActiveSegment::Wait))
+            .transpose()
+            .map_err(execution_error)?;
+        for _ in 0..checkpoint.started_segments {
+            self.segments
+                .pop_front()
+                .ok_or_else(|| invalid("native checkpoint continuation exceeds its schedule"))?;
+        }
+        self.started_segments = checkpoint.started_segments;
+        self.frame = checkpoint.frame;
+        self.effects.reasons = checkpoint.effects;
+        self.active_seekable = self.camera_rig.is_none();
+        self.validate_camera()?;
+        self.failed = false;
+        Ok(())
     }
 
     /// Execute the next ordinary native capture, retaining executable state for
