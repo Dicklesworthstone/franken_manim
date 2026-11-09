@@ -55,7 +55,7 @@ fsci-opt = { git = "https://github.com/Dicklesworthstone/frankenscipy", rev = "a
 fnx-classes = { git = "https://github.com/Dicklesworthstone/franken_networkx", rev = "9d710b1c33e99412c94de7fa4de2f7ce4954110f" }
 fp-types = { git = "https://github.com/Dicklesworthstone/frankenpandas", rev = "da85cf65df48965e027b2f5aa21b7d0ce6a7e29c", default-features = false }
 fp-frame = { git = "https://github.com/Dicklesworthstone/frankenpandas", rev = "da85cf65df48965e027b2f5aa21b7d0ce6a7e29c", default-features = false }
-ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "1c4febfb9c5cf7ffad3b1bde9996b847a4bb2810" }
+ft-kernel-metal = { git = "https://github.com/Dicklesworthstone/frankentorch", rev = "71bbe52e4a2ae41c9b23034ee566254175a40780" }
 fmn-core = { path = "crates/fmn-core" }
 fmn-dmath = { path = "crates/fmn-dmath" }
 fmn-hash = { path = "crates/fmn-hash" }
