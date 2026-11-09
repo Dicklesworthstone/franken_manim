@@ -78,6 +78,34 @@ FMTL and other captured preview artifacts still report no live adapter and
 return a typed refusal without disabling timeline controls. The capability is
 removed from browser history after asset startup and redacted from errors.
 
+## Builtin checkpoint recovery
+
+The existing CLI automatically restores eligible wait checkpoints for
+`interactive.v1`, `tex_span.v1`, `semantic_witness.v1`, and
+`semantic_witness_camera.v1`. A restart installs the saved native scene and its
+exact wait cursor, then executes the remaining journal suffix. Earlier frames
+and the current wait's opener do not run again.
+
+For a short scene, choose a small checkpoint cadence so committed timeline
+positions can become recovery points:
+
+```bash
+fmn studio --checkpoint-frames 4 @builtin tex_span.v1
+fmn studio --checkpoint-frames 15 @builtin interactive.v1
+```
+
+Releasing the timeline scrub commits its position. After **Restart**, inspector
+JSON reports the mechanism in `native_restore`: `mode: "checkpoint"` identifies
+direct restoration and includes the original frame. Committed editor input
+retains its full input transcript and uses `mode: "cold_verified"` with a
+fallback reason. Authored animation, deferred construction, sound-cue and
+animated camera scenes continue through verified reconstruction.
+
+Checkpoint identities include the scene's source, build, resolved inputs and
+original RNG root. The native worker validates its continuation before replacing
+the active owner. The [native worker guide](../NATIVE_STUDIO_WORKER.md) describes
+the same mechanism for custom factories and registered updater functions.
+
 ## Optional MJPEG browser preview
 
 PNG remains the default, including for the terminal preview and Python surfaces.
