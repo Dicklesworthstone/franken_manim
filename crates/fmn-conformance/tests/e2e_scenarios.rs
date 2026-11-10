@@ -1576,6 +1576,211 @@ fn documented_config_effects_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("documented_config_tool_calls", tool_calls))
 }
 
+/// A constrained Linux worker derives its actual plan from the filesystem
+/// capability and publishes the same moving scene at automatic and serial
+/// thread counts. The fixture deliberately exposes more host resources than
+/// its caller affinity and inherited cgroup budget permit.
+#[cfg(target_os = "linux")]
+fn linux_resource_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_config::config::{DeterminismMode, ThreadPolicy};
+    use fmn_platform::fs::VirtualFs;
+
+    struct MovingCircle;
+    impl fmn::SceneConstruct for MovingCircle {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.5).color(BLUE_C))?;
+            for shift in [[-0.75, 0.0, 0.0], [1.5, 0.0, 0.0], [-0.75, 0.75, 0.0]] {
+                stage.shift(circle, shift);
+                stage.wait_frames(1)?;
+            }
+            Ok(())
+        }
+    }
+
+    let fs = Arc::new(VirtualFs::new());
+    for (path, contents) in [
+        ("/sys/devices/system/cpu/online", "0-7\n"),
+        ("/proc/self/status", "Cpus_allowed_list:\t0-7\n"),
+        ("/proc/thread-self/status", "Cpus_allowed_list:\t2-5\n"),
+        ("/proc/meminfo", "MemTotal: 8388608 kB\n"),
+        ("/proc/self/cgroup", "0::/workload/renderer/job\n"),
+        (
+            "/proc/self/mountinfo",
+            "29 23 0:26 /workload /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+        ),
+        ("/sys/fs/cgroup/renderer/cpu.max", "200000 100000\n"),
+        ("/sys/fs/cgroup/renderer/memory.max", "8388608\n"),
+        ("/sys/fs/cgroup/renderer/job/cpu.max", "max 100000\n"),
+        ("/sys/fs/cgroup/renderer/job/memory.max", "max\n"),
+        ("/sys/devices/system/cpu/cpu2/cache/index0/level", "3\n"),
+        (
+            "/sys/devices/system/cpu/cpu2/cache/index0/type",
+            "Unified\n",
+        ),
+        (
+            "/sys/devices/system/cpu/cpu2/cache/index0/shared_cpu_list",
+            "0-7\n",
+        ),
+        ("/sys/devices/system/cpu/cpu2/cache/index0/size", "8M\n"),
+        ("/sys/devices/system/node/node0/cpulist", "0-7\n"),
+    ] {
+        fs.insert(path, contents.as_bytes().to_vec());
+    }
+    let topology = HardwareTopology::detect_linux(fs.as_ref())
+        .map_err(|error| fail(format!("constrained Linux topology: {error}")))?;
+    let allowed = vec![2, 3, 4, 5];
+    if topology.cpus.iter().map(|cpu| cpu.id).collect::<Vec<_>>() != allowed
+        || topology.physical_cores != 4
+        || topology.cpu_quota != Some(2)
+        || topology.cpu_thread_budget() != 2
+        || topology.total_memory_bytes != Some(8 * 1024 * 1024)
+        || topology.l3_domains.len() != 1
+        || topology.l3_domains[0].cpus != allowed
+        || topology.numa_nodes.len() != 1
+        || topology.numa_nodes[0].cpus != allowed
+    {
+        return Err(fail(format!(
+            "Linux limits failed to constrain host resources: {topology:?}"
+        )));
+    }
+    let mut unlimited = topology.clone();
+    unlimited.cpu_quota = None;
+    unlimited.total_memory_bytes = Some(8 * 1024 * 1024 * 1024);
+    let mut outcome = RunOutcome::ok();
+    let mut rendered_frames = 0;
+    for (name, certified) in [("standard", false), ("certified", true)] {
+        let request = if certified {
+            PlanRequest::certified(
+                RenderIntent::Offline,
+                SurfaceSpec::lumen(64, 40),
+                OutputPixelFormat::Rgba8,
+            )
+        } else {
+            PlanRequest::standard(
+                RenderIntent::Offline,
+                SurfaceSpec::lumen(64, 40),
+                OutputPixelFormat::Rgba8,
+            )
+        }
+        .with_max_frames_in_flight(4);
+        let constrained = ExecutionPlan::derive(request, &topology, None)
+            .map_err(|error| fail(format!("constrained {name} plan: {error}")))?;
+        let full = ExecutionPlan::derive(request, &unlimited, None)
+            .map_err(|error| fail(format!("unlimited {name} plan: {error}")))?;
+        let workers = |plan: &ExecutionPlan| {
+            plan.render_teams
+                .iter()
+                .map(|team| team.threads())
+                .sum::<usize>()
+        };
+        if workers(&constrained) != 2
+            || workers(&full) != 4
+            || constrained.encoder_threads() > 2
+            || constrained.frames_in_flight != 1
+            || full.frames_in_flight <= constrained.frames_in_flight
+            || constrained.topology_fingerprint == full.topology_fingerprint
+        {
+            return Err(fail(format!(
+                "{name} plan ignored effective CPU or memory limits"
+            )));
+        }
+
+        let mut expected_frames = None;
+        for (schedule, policy) in [
+            ("auto", ThreadPolicy::Auto),
+            ("serial", ThreadPolicy::Fixed(1)),
+        ] {
+            let expected_request = if policy == ThreadPolicy::Auto {
+                request
+            } else {
+                request.with_max_cpu_threads(1)
+            };
+            let expected_plan = ExecutionPlan::derive(expected_request, &topology, None)
+                .map_err(|error| fail(format!("{name}/{schedule} plan: {error}")))?;
+            let path = format!("/linux-limits-{name}-{schedule}");
+            let mut options = fmn::RenderOptions::new(&path)
+                .map_err(|error| fail(format!("Linux resource render options: {error}")))?;
+            options.config.camera.resolution = (64, 40);
+            options.config.camera.fps = 8;
+            options.config.sizes.frame_height = 4.0;
+            options.config.determinism.mode = if certified {
+                DeterminismMode::Certified
+            } else {
+                DeterminismMode::Standard
+            };
+            options.config.render.threads = policy;
+            options.config.directories.cache = "/linux-limits-cache".to_owned();
+            options.frames_in_flight = 4;
+            options.typeset_cache = false;
+            let report = fmn::render_with_fs(&mut MovingCircle, options, fs.clone())
+                .map_err(|error| fail(format!("{name}/{schedule} Linux render: {error}")))?;
+            let plan = &report.execution_plan;
+            if *plan != expected_plan
+                || plan
+                    .render_teams
+                    .iter()
+                    .flat_map(|team| team.cpu_ids.iter())
+                    .chain(plan.scene_team.cpu_ids.iter())
+                    .chain(plan.output_team.cpu_ids.iter())
+                    .any(|cpu| !allowed.contains(cpu))
+            {
+                return Err(fail(format!(
+                    "{name}/{schedule} render ignored the filesystem resource plan"
+                )));
+            }
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("Linux resource render omitted the frame pipeline"))?;
+            if report.artifact.frame_count != 3
+                || pipeline.submitted != 3
+                || pipeline.emitted != 3
+                || pipeline.outstanding_slots != 0
+                || pipeline.max_in_flight > plan.frames_in_flight
+            {
+                return Err(fail(
+                    "Linux resource render exceeded its queue or lost frames",
+                ));
+            }
+            let frames = (0..3)
+                .map(|index| {
+                    fs.read(&PathBuf::from(format!("{path}/frame_{index:06}.png")))
+                        .map_err(|error| fail(format!("Linux resource PNG: {error}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if frames[0] == frames[1] || frames[1] == frames[2] {
+                return Err(fail("Linux resource scene did not visibly move"));
+            }
+            if let Some(expected) = &expected_frames {
+                if *expected != frames {
+                    return Err(fail(format!(
+                        "{name} PNG bytes changed with resource scheduling"
+                    )));
+                }
+            } else {
+                outcome = outcome.with_artifact(&format!("{name}.png"), frames[0].clone());
+                expected_frames = Some(frames);
+            }
+            rendered_frames += 3;
+            ctx.event(
+                LogEvent::new("e2e.lifecycle.linux_resource_limits")
+                    .field("determinism", name)
+                    .field("schedule", schedule)
+                    .field("render_workers", workers(plan) as u64)
+                    .field("frames_in_flight", plan.frames_in_flight as u64)
+                    .field("cpu_quota", 2_u64)
+                    .field("effective_memory", 8_u64 * 1024 * 1024)
+                    .field("allowed_cpus", "2-5")
+                    .field("frames", 3_u64),
+            );
+        }
+    }
+    Ok(outcome
+        .with_counter("linux_resource_modes", 2)
+        .with_counter("linux_resource_schedules", 4)
+        .with_counter("linux_resource_frames", rendered_frames))
+}
+
 /// Native CLI job limits are admitted without spawning; invalid limits fail
 /// with stable identities before a tool or output generation is selected.
 fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -18791,6 +18996,29 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    #[cfg(target_os = "linux")]
+    specs.push(spec(
+        "lifecycle.linux_resource_limits.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(linux_resource_limits_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("linux_resource_modes", 2),
+            counter_eq("linux_resource_schedules", 4),
+            counter_eq("linux_resource_frames", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.linux_resource_limits",
+            vec![
+                FieldPred::str_eq("schedule", "auto"),
+                FieldPred::str_eq("allowed_cpus", "2-5"),
+                FieldPred::u64_eq("cpu_quota", 2),
+                FieldPred::u64_eq("render_workers", 2),
+                FieldPred::u64_eq("frames_in_flight", 1),
+            ],
+        )],
+    ));
     specs.push(spec(
         "lifecycle.journal_roundtrip_replay.v1",
         ScenarioClass::LifecycleDrill,
@@ -21156,6 +21384,17 @@ fn phase2_and_phase3_e2e_scenarios_pass() {
         let report = Runner::from_env().run(scenario);
         assert!(report.is_pass(), "{}", report.summary());
     }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_resource_limits_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.linux_resource_limits.v1")
+        .expect("Linux resource-limit lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
 }
 
 #[test]

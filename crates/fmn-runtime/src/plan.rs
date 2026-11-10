@@ -250,9 +250,10 @@ impl TopologyFingerprint {
     #[must_use]
     pub fn of(topology: &HardwareTopology) -> Self {
         let mut hash = StableHash::new();
-        hash.put_bytes(b"fmn-topology-fingerprint-v1");
+        hash.put_bytes(b"fmn-topology-fingerprint-v2");
         hash.put_u32(topology.logical_cores());
         hash.put_u32(topology.physical_cores);
+        hash.put_option_u32(topology.cpu_quota);
         hash.put_u32(topology.packages);
         hash.put_bytes(topology.simd_tier.name().as_bytes());
         hash.put_option_u64(topology.total_memory_bytes);
@@ -533,6 +534,10 @@ pub struct ExecutionPlan {
     pub render_teams: Vec<TeamPlan>,
     /// Conversion/output workers.
     pub output_team: TeamPlan,
+    /// Process CPU-bandwidth ceiling, distinct from allowed CPU identities.
+    /// Raster and encoder fan-out each remain within this ceiling. The scene
+    /// coordinator and output lane may overlap the same advisory CPUs.
+    pub cpu_quota: Option<u32>,
     /// Fine-tile edge in pixels.
     pub fine_tile: u32,
     /// Macrotile edge in pixels.
@@ -560,11 +565,14 @@ impl ExecutionPlan {
     /// depend on this count (fm-hyqz).
     #[must_use]
     pub fn encoder_threads(&self) -> usize {
-        self.render_teams
+        let planned = self
+            .render_teams
             .iter()
             .map(TeamPlan::threads)
             .sum::<usize>()
-            .saturating_add(self.output_team.threads())
+            .saturating_add(self.output_team.threads());
+        self.cpu_quota
+            .map_or(planned, |quota| planned.min(quota as usize))
     }
 
     /// Derive a plan. A cache is consulted only for standard mode.
@@ -615,6 +623,9 @@ impl ExecutionPlan {
         };
 
         let mut representatives = physical_representatives(topology);
+        if let Some(quota) = topology.cpu_quota {
+            representatives.truncate(quota as usize);
+        }
         if let Some(limit) = request.max_cpu_threads {
             representatives.truncate(limit.min(representatives.len()));
         }
@@ -728,6 +739,7 @@ impl ExecutionPlan {
             scene_team,
             render_teams,
             output_team,
+            cpu_quota: topology.cpu_quota,
             fine_tile,
             macro_tile,
             simd_tier: topology.simd_tier,
@@ -791,6 +803,9 @@ impl std::error::Error for PlanError {}
 fn validate_request(request: PlanRequest, topology: &HardwareTopology) -> Result<(), PlanError> {
     if topology.cpus.is_empty() || topology.physical_cores == 0 {
         return Err(PlanError::EmptyTopology);
+    }
+    if topology.cpu_quota == Some(0) {
+        return Err(PlanError::ZeroLimit("cpu_quota"));
     }
     if request.surface.width == 0
         || request.surface.height == 0
@@ -999,6 +1014,9 @@ fn build_output_team(
         .collect();
     siblings.sort_unstable();
     siblings.truncate(2);
+    if let Some(quota) = topology.cpu_quota {
+        siblings.truncate(quota as usize);
+    }
 
     if siblings.is_empty() {
         let fallback = topology
@@ -1266,6 +1284,80 @@ mod tests {
         let plan = ExecutionPlan::derive(offline(), &topology_96(), None).expect("plan");
         assert_eq!(plan.encoder_threads(), 96 + plan.output_team.threads());
         assert!(plan.encoder_threads() > plan.output_team.threads());
+    }
+
+    #[test]
+    fn process_cpu_quota_bounds_render_and_encoder_fanout() {
+        for quota in [1, 2, 3, 7, 32, 64] {
+            let mut topology = topology_96();
+            topology.cpu_quota = Some(quota);
+            for request in [
+                offline(),
+                PlanRequest::certified(RenderIntent::Offline, surface(), OutputPixelFormat::Rgba8),
+                PlanRequest::standard(RenderIntent::Preview, surface(), OutputPixelFormat::Nv12),
+            ] {
+                let plan = ExecutionPlan::derive(request, &topology, None).expect("limited plan");
+                assert_eq!(
+                    topology.logical_cores(),
+                    96,
+                    "a quota is not an affinity mask"
+                );
+                assert!(team_threads(&plan).iter().sum::<usize>() <= quota as usize);
+                assert!(plan.encoder_threads() <= quota as usize);
+                assert!(plan.output_team.threads() <= quota as usize);
+                assert_eq!(plan.cpu_quota, Some(quota));
+                let tighter =
+                    ExecutionPlan::derive(request.with_max_cpu_threads(2), &topology, None)
+                        .expect("caller cap remains binding");
+                assert!(team_threads(&tighter).iter().sum::<usize>() <= 2);
+            }
+        }
+        let mut topology = topology_96();
+        topology.cpu_quota = Some(0);
+        assert_eq!(
+            ExecutionPlan::derive(offline(), &topology, None),
+            Err(PlanError::ZeroLimit("cpu_quota")),
+        );
+    }
+
+    #[test]
+    fn process_limits_invalidate_host_autotuning_and_cap_matching_profiles() {
+        let host = topology_96();
+        let mut limited = host.clone();
+        limited.cpu_quota = Some(2);
+        limited.total_memory_bytes = Some(64 * 1024 * 1024);
+        let profile = |topology: &HardwareTopology| AutotuneProfile {
+            topology: TopologyFingerprint::of(topology),
+            threads_per_render_team: 32,
+            frames_in_flight: 6,
+            fine_tile: 8,
+            macro_tile: 64,
+            scratch_bytes_per_worker: 128 * 1024,
+        };
+        let mut cache = AutotuneCache::default();
+        cache.insert(profile(&host)).expect("host tuning");
+        let plan = ExecutionPlan::derive(offline(), &limited, Some(&cache)).expect("limited plan");
+        assert_eq!(plan.tuning_source, TuningSource::StandardBaseline);
+        assert_eq!(plan.frames_in_flight, 1);
+        assert_eq!(team_threads(&plan), vec![2]);
+        assert_eq!(plan.encoder_threads(), 2);
+
+        // Even a structurally valid profile measured with the same limits
+        // cannot request more simultaneous CPU work or frames than admitted.
+        cache.insert(profile(&limited)).expect("matching tuning");
+        let plan = ExecutionPlan::derive(offline(), &limited, Some(&cache)).expect("limited cache");
+        assert_eq!(plan.tuning_source, TuningSource::StandardAutotuneCache);
+        assert_eq!(plan.frames_in_flight, 1);
+        assert_eq!(team_threads(&plan), vec![2]);
+        assert_eq!(plan.encoder_threads(), 2);
+        assert_eq!(plan.fine_tile, 8);
+
+        let mut quota_only = host.clone();
+        quota_only.cpu_quota = Some(2);
+        assert_ne!(
+            TopologyFingerprint::of(&host),
+            TopologyFingerprint::of(&quota_only)
+        );
     }
 
     #[test]
