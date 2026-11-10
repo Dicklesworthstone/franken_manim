@@ -1083,6 +1083,20 @@ mod compressed {
                 native.inputs[0].report.pcm_digest,
             );
             assert!(Arc::ptr_eq(&receipt.inputs[0].bytes, &receipt.inputs[2].bytes));
+            assert!(Arc::ptr_eq(
+                &receipt.inputs[0].report,
+                &receipt.inputs[2].report,
+            ));
+            assert!(!Arc::ptr_eq(
+                &receipt.inputs[0].report,
+                &receipt.inputs[1].report,
+            ));
+            let input_invocation = receipt.inputs[0].report.invocation.as_ref().unwrap();
+            assert_eq!(input_invocation, &receipt.audio_decodes[0]);
+            assert_eq!(
+                input_invocation.stderr.as_slice(),
+                b"fixture decoded original source bytes",
+            );
             assert_eq!(
                 fixture.locates.lock().unwrap().as_slice(),
                 std::slice::from_ref(&fixture.tool),

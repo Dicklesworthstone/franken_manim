@@ -10,7 +10,7 @@ use fmn_anim::FramePacket;
 use fmn_codec::SampleFormat;
 use fmn_config::Config;
 use fmn_output::{
-    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DecodedAudio, DitherPolicy,
+    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy,
     InvocationReport, MixReport, MixerConfig, SoundCue, SoundMixer, WavPublicationConfig,
     WavPublicationReport, frames_to_samples, publish_wav_new,
 };
@@ -98,14 +98,15 @@ impl SoundtrackTimeline {
 
 /// Exact source bytes and native decode identity of one insertion-ordered cue.
 ///
-/// Shared bytes let several subdivision receipts name the same prepared input
-/// without copying its buffer. Provenance may use `report.source_digest`
-/// directly; it must not reopen the authored path after decoding.
+/// Shared bytes and reports let repeated cues and subdivision receipts name
+/// the same prepared input without copying its buffer or captured decoder log.
+/// Provenance may use `report.source_digest` directly; it must not reopen the
+/// authored path after decoding.
 #[derive(Clone, Debug)]
 pub struct SoundtrackInput {
     pub path: PathBuf,
     pub bytes: Arc<[u8]>,
-    pub report: AudioDecodeReport,
+    pub report: Arc<AudioDecodeReport>,
 }
 
 /// Cumulative admission limits for retained audio preparation, independent of
@@ -227,14 +228,14 @@ impl PreparedSceneSoundtrack {
         inputs
             .try_reserve_exact(requests.len())
             .map_err(|_| RenderError::InvalidOptions("soundtrack input allocation failed"))?;
-        let mut sources: BTreeMap<PathBuf, (Arc<[u8]>, DecodedAudio)> = BTreeMap::new();
+        let mut sources = BTreeMap::new();
         let mut invocations = Vec::new();
         for request in requests {
             let frame = match timeline {
                 Some(timeline) => timeline.output_frame(request.time.frames())?,
                 None => request.time.frames(),
             };
-            let (bytes, decoded) = match sources.entry(request.sound_file.clone()) {
+            let (bytes, audio, report) = match sources.entry(request.sound_file.clone()) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let bytes = fs
@@ -265,20 +266,21 @@ impl PreparedSceneSoundtrack {
                         limits.max_decoded_samples,
                         "soundtrack decoded-sample budget exceeded",
                     )?;
-                    if let Some(invocation) = decoded.report.invocation.clone() {
+                    let report = Arc::new(decoded.report);
+                    if let Some(invocation) = &report.invocation {
                         invocations.try_reserve(1).map_err(|_| {
                             RenderError::InvalidOptions("soundtrack invocation allocation failed")
                         })?;
-                        invocations.push(invocation);
+                        invocations.push(invocation.clone());
                     }
-                    entry.insert((Arc::from(bytes), decoded))
+                    entry.insert((Arc::<[u8]>::from(bytes), decoded.audio, report))
                 }
             };
             // Budget sizing only: the native mixer's resampler owns the actual
             // channel mapping and samples. Its output uses ceil(n * out / in).
-            let input_frames = decoded.audio.samples.len() / usize::from(decoded.audio.channels);
+            let input_frames = audio.samples.len() / usize::from(audio.channels);
             let output_frames = ((input_frames as u128) * u128::from(config.sample_rate))
-                .div_ceil(u128::from(decoded.audio.sample_rate));
+                .div_ceil(u128::from(audio.sample_rate));
             let count = output_frames
                 .checked_mul(u128::from(config.channels))
                 .and_then(|n| usize::try_from(n).ok())
@@ -293,7 +295,7 @@ impl PreparedSceneSoundtrack {
             )?;
             mixer
                 .add(SoundCue {
-                    audio: decoded.audio.clone(),
+                    audio: audio.clone(),
                     frame,
                     fps: request.time.fps(),
                     time_offset: request.time_offset,
@@ -304,7 +306,7 @@ impl PreparedSceneSoundtrack {
             inputs.push(SoundtrackInput {
                 path: request.sound_file.clone(),
                 bytes: Arc::clone(bytes),
-                report: decoded.report.clone(),
+                report: Arc::clone(report),
             });
         }
         Ok(Self {
@@ -829,6 +831,15 @@ mod tests {
         assert!(Arc::ptr_eq(
             &prepared.inputs()[0].bytes,
             &prepared.inputs()[1].bytes,
+        ));
+        assert!(Arc::ptr_eq(
+            &prepared.inputs()[0].report,
+            &prepared.inputs()[1].report,
+        ));
+        let retained_inputs = prepared.inputs().to_vec();
+        assert!(Arc::ptr_eq(
+            &prepared.inputs()[0].report,
+            &retained_inputs[1].report,
         ));
         assert_eq!(
             prepared.inputs()[0].report.source_digest,
