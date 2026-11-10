@@ -54,6 +54,8 @@ mod portal_texture;
 pub use portal_raster::{run_portal_gauntlet_asset_root, run_portal_gauntlet_image_inputs};
 use portal_texture::raster as portal_raster;
 mod portal_typography;
+#[cfg(feature = "gauntlet")]
+pub use portal_typography::run_portal_gauntlet_text_configuration;
 mod portal_video;
 #[cfg(any(test, feature = "gauntlet"))]
 mod structural_parity;

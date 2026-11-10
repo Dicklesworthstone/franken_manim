@@ -134,7 +134,7 @@ class TextAuthoringTests(unittest.TestCase):
         for source, options in cases:
             with self.subTest(options=tuple(options)), self.assertRaises((ValueError, TypeError)):
                 m.Text(source, **options)
-        with self.assertRaisesRegex(NotImplementedError, "Pango attributes"):
+        with self.assertRaisesRegex(NotImplementedError, "global_config.*letter_spacing"):
             m.Text("A", global_config={"letter_spacing": 10})
 
     def test_regex_composite_and_negative_range_maps_select_exact_unicode_occurrences(self):
@@ -342,8 +342,184 @@ class TextAuthoringTests(unittest.TestCase):
             self.assertNotEqual(frames[0], frames[1])
 
 
-suite = unittest.defaultTestLoader.loadTestsFromTestCase(TextAuthoringTests)
-assert suite.countTestCases() == 25
+class TextConfigurationTests(unittest.TestCase):
+    def test_global_attributes_select_native_faces_and_decorations(self):
+        text = m.Text("A", global_config={"font_family": "IBM Plex Sans", "font_weight": "bold",
+                                          "font_style": "italic", "foreground": m.RED})
+        expected = m.Text("A", font="IBM Plex Sans", weight="BOLD", slant="ITALIC")
+        np.testing.assert_array_equal(points(text), points(expected))
+        self.assertEqual(text[0].get_fill_color(), m.RED)
+        for key, value, markup in (("underline", "single", "<u>A</u>"),
+                                   ("strikethrough", "true", "<s>A</s>")):
+            decorated = m.Text("A", global_config={key: value})
+            np.testing.assert_array_equal(points(decorated), points(m.MarkupText(markup)))
+            self.assertGreater(len(decorated.submobjects), len(decorated._string_sub_spans))
+        both = m.Text("A", global_config={"underline": "single", "strikethrough": True})
+        self.assertEqual(len(both._string_sub_spans), 1)
+        self.assertEqual(len(both.submobjects), 3)
+
+    def test_nested_configs_use_specificity_and_identical_spans_use_later_values(self):
+        for configs in (
+            {"BCD": {"weight": "bold"}, "ABCDE": {"weight": "normal"}},
+            {"ABCDE": {"weight": "normal"}, "BCD": {"weight": "bold"}},
+        ):
+            text = m.Text("ABCDE", local_configs=configs)
+            for index, letter in enumerate("ABCDE"):
+                expected = m.Text(letter, weight="BOLD" if 1 <= index <= 3 else "NORMAL")
+                np.testing.assert_allclose(points(text[index].copy().center()), points(expected), atol=1e-6)
+        text = m.Text("ABC", local_configs={"B": {"weight": "bold"}, (1, 2): {"weight": "normal"}})
+        np.testing.assert_allclose(points(text[1].copy().center()), points(m.Text("B")), atol=1e-6)
+
+    def test_inline_markup_remains_inside_whole_element_configs(self):
+        source = "<b>A</b>"
+        outer = m.MarkupText(source, global_config={"weight": "bold"},
+                             local_configs={source: {"weight": "normal"}})
+        inner = m.MarkupText(source, local_configs={"A": {"weight": "normal"}})
+        np.testing.assert_array_equal(points(outer), points(m.Text("A", weight="BOLD")))
+        np.testing.assert_array_equal(points(inner), points(m.Text("A")))
+        overridden = m.MarkupText('<span weight="normal">A</span>', global_config={"weight": "bold"})
+        np.testing.assert_array_equal(points(overridden), points(m.Text("A")))
+        self.assertEqual(outer.get_string(), source)
+        self.assertEqual(outer._string_sub_spans, [(3, 4)])
+
+    def test_unicode_entities_and_isolation_keep_original_source_selections(self):
+        source = "é<b>A&amp;B</b> éB"
+        text = m.MarkupText(source, isolate=["&amp;", "é"],
+                            local_configs={"&amp;": {"weight": "normal"},
+                                           re.compile(r"B$"): {"face": "IBM Plex Sans"}})
+        plain = m.MarkupText(source, isolate=["&amp;", "é"])
+        self.assertEqual(text.get_string(), source)
+        self.assertEqual(text._string_sub_spans, plain._string_sub_spans)
+        np.testing.assert_allclose(points(text.get_part_by_text("&amp;").copy().center()), points(m.Text("&")), atol=1e-6)
+        np.testing.assert_allclose(points(text.get_parts_by_text("B")[-1].copy().center()),
+                                   points(m.Text("B", font="IBM Plex Sans")), atol=1e-6)
+        self.assertEqual(len(text.get_parts_by_text("é")), 2)
+
+    def test_absolute_and_relative_sizes_nest_without_compounding_on_rebuild(self):
+        text = m.Text("ABC", font_size=48, global_config={"font_size": "72pt"},
+                      local_configs={"ABC": {"size": "200%"}, "B": {"size": "24pt"}, "C": {"size": "50%"}})
+        for index, size in enumerate((144, 24, 72)):
+            expected = m.Text("ABC"[index], font_size=size)
+            np.testing.assert_allclose(points(text[index].copy().center()), points(expected), atol=2e-6)
+        before = points(text)
+        text.init_points()
+        np.testing.assert_allclose(points(text.copy().center()), before, atol=2e-6)
+        self.assertEqual(text.font_size, 48)
+
+    def test_partial_overlaps_compose_fields_instead_of_dropping_both_ranges(self):
+        text = m.Text("ABCDE", local_configs={(0, 3): {"weight": "bold"}, (2, 5): {"style": "italic"}})
+        for index, letter in enumerate("ABCDE"):
+            expected = m.Text(letter, weight="BOLD" if index <= 2 else "NORMAL",
+                               slant="ITALIC" if index >= 2 else "NORMAL")
+            np.testing.assert_allclose(points(text[index].copy().center()), points(expected), atol=1e-6)
+
+    def test_local_configs_override_equal_t2_faces_while_final_color_hooks_still_run(self):
+        text = m.Text("ABC", t2f={"B": "Computer Modern"}, t2w={"B": "BOLD"}, t2c={"B": m.GREEN},
+                      local_configs={"B": {"face": "IBM Plex Sans", "weight": "normal", "color": m.RED}})
+        np.testing.assert_allclose(points(text[1].copy().center()), points(m.Text("B", font="IBM Plex Sans")), atol=1e-6)
+        self.assertEqual(text[1].get_fill_color(), m.GREEN)
+
+    def test_live_config_edits_and_deepcopy_preserve_independent_recipes(self):
+        import copy
+        text = m.Text("AB", global_config={"weight": "bold"}, local_configs={"B": {"style": "italic"}})
+        original = points(text)
+        duplicate = copy.deepcopy(text)
+        duplicate.global_config["weight"] = "normal"
+        duplicate.local_configs["B"]["style"] = "normal"
+        duplicate.text = "éB"
+        duplicate.init_points()
+        np.testing.assert_allclose(points(duplicate.copy().center()), points(m.Text("éB")), atol=1e-6)
+        self.assertEqual(text.global_config, {"weight": "bold"})
+        self.assertEqual(text.local_configs, {"B": {"style": "italic"}})
+        self.assertEqual(text.string, "AB")
+        np.testing.assert_array_equal(points(text), original)
+
+    def test_failed_config_rebuild_does_not_replace_published_glyphs_or_source(self):
+        text = m.Text("AB", local_configs={"B": {"weight": "bold"}})
+        original, children, spans = records(text), tuple(text.submobjects), list(text._string_sub_spans)
+        text.text = "éZ"
+        for config, error in (({"Z": {"letter_spacing": 10}}, NotImplementedError),
+                               ({"Z": {"face": "a missing native font"}}, ValueError),
+                               ({"Z": {"size": "nanpt"}}, ValueError)):
+            text.local_configs = config
+            with self.assertRaises(error):
+                text.init_points()
+            self.assertEqual(text.string, "AB")
+            self.assertEqual(tuple(text.submobjects), children)
+            self.assertEqual(text._string_sub_spans, spans)
+            for actual, before in zip(records(text), original):
+                np.testing.assert_array_equal(actual, before)
+        text.local_configs = {"Z": {"weight": "bold"}}
+        text.init_points()
+        self.assertEqual(text.string, "éZ")
+
+    def test_composed_sizes_validate_scene_points_before_publishing_replacement(self):
+        text = m.Text("AB", local_configs={"B": {"weight": "bold"}})
+        original = records(text)
+        children, spans = tuple(text.submobjects), list(text._string_sub_spans)
+        text.text = "AZ"
+        text.local_configs = {
+            (0, 2): {"size": "1e32%"},
+            "Z": {"size": "1e32%", "underline": "single", "strikethrough": True},
+        }
+        with self.assertRaisesRegex(ValueError, "scene coordinates.*f32-representable"):
+            text.init_points()
+        self.assertEqual(text.string, "AB")
+        self.assertEqual(tuple(text.submobjects), children)
+        self.assertEqual(text._string_sub_spans, spans)
+        for actual, before in zip(records(text), original):
+            np.testing.assert_array_equal(actual, before)
+        text.local_configs = {"Z": {"weight": "bold"}}
+        text.init_points()
+        self.assertEqual(text.string, "AZ")
+
+        # Huge em factors are valid when the authored scene scale makes the
+        # actual glyph and both decoration rectangles representable.
+        decorations = {"underline": "single", "strikethrough": True}
+        scaled = m.Text("A", font_size=48e-60, global_config=decorations,
+                        local_configs={"A": {"size": "1e32%"}, (0, 1): {"size": "1e32%"}})
+        expected = m.Text("A", global_config=decorations)
+        np.testing.assert_allclose(points(scaled), points(expected), atol=1e-6)
+        self.assertEqual(len(scaled.submobjects), 3)
+
+    def test_global_line_height_and_ligature_switch_use_existing_native_layout(self):
+        text = m.Text("A\nA", global_config={"line_height": "2"})
+        expected = m.Text("A\nA", lsh=2)
+        np.testing.assert_array_equal(points(text), points(expected))
+        text.init_points()
+        np.testing.assert_allclose(points(text.copy().center()), points(expected), atol=1e-6)
+        for enabled in (False, True):
+            config = {"font_features": ",".join(f"{key}={int(enabled)}" for key in ("liga", "dlig", "clig", "hlig"))}
+            actual = m.Text("ffi", global_config=config)
+            expected = m.Text("ffi", disable_ligatures=not enabled)
+            np.testing.assert_array_equal(points(actual), points(expected))
+            self.assertEqual(actual._string_sub_spans, expected._string_sub_spans)
+
+    def test_configured_native_frames_are_thread_independent_and_visibly_styled(self):
+        def render(output, threads, configured):
+            scene = m.Scene()
+            with scene.render_session(output, format="png_sequence", resolution=(160, 90), fps=4, threads=threads):
+                kwargs = dict(global_config={"font_family": "IBM Plex Sans", "size": "125%"},
+                              local_configs={"A": {"weight": "bold", "color": m.RED},
+                                             "B": {"underline": "single"}}) if configured else {}
+                text = m.Text("AB", **kwargs)
+                scene.add(text)
+                scene.play(text.animate(rate_func=m.linear).shift(m.RIGHT), run_time=.5)
+            return [path.read_bytes() for path in sorted(Path(output).glob("*.png"))]
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root)
+            frames = render(path/"one", 1, True)
+            self.assertEqual(len(frames), 2)
+            self.assertEqual(frames, render(path/"four", 4, True))
+            self.assertNotEqual(frames, render(path/"plain", 1, False))
+            self.assertNotEqual(frames[0], frames[1])
+
+
+suite = unittest.TestSuite([
+    unittest.defaultTestLoader.loadTestsFromTestCase(TextAuthoringTests),
+    unittest.defaultTestLoader.loadTestsFromTestCase(TextConfigurationTests),
+])
+assert suite.countTestCases() == 37
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 gc.collect()
 if not result.wasSuccessful():

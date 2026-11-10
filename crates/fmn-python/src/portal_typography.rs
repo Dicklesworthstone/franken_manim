@@ -426,6 +426,171 @@ fn colors(
     Ok(result)
 }
 
+/// Own Python-provided strings until every borrowed native scope has finished
+/// shaping. The field set is deliberately smaller than arbitrary Pango markup.
+#[derive(Default)]
+struct ConfiguredTextFields {
+    color: Option<Srgb>,
+    family: Option<String>,
+    bold: Option<bool>,
+    italic: Option<bool>,
+    underline: Option<bool>,
+    strike: Option<bool>,
+    size: Option<fmn_library::text::SizeChange>,
+}
+
+impl ConfiguredTextFields {
+    fn native(&self) -> fmn_library::text::StyleFields<'_> {
+        fmn_library::text::StyleFields {
+            color: self.color,
+            family: self.family.as_deref(),
+            bold: self.bold,
+            italic: self.italic,
+            underline: self.underline,
+            strike: self.strike,
+            size: self.size,
+        }
+    }
+
+    fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let values = value.cast::<PyDict>().map_err(|_| {
+            PyTypeError::new_err("native text style fields must be a dictionary")
+        })?;
+        let mut fields = Self::default();
+        for (key, value) in values.iter() {
+            let key = key.extract::<String>()?;
+            match key.as_str() {
+                "color" => {
+                    let (r, g, b): (f64, f64, f64) = value.extract()?;
+                    if [r, g, b]
+                        .iter()
+                        .any(|v| !v.is_finite() || !(0.0..=1.0).contains(v))
+                    {
+                        return Err(PyValueError::new_err(
+                            "native text foreground must contain finite RGB channels in [0, 1]",
+                        ));
+                    }
+                    fields.color = Some(Srgb { r, g, b });
+                }
+                "family" => {
+                    let family: String = value.extract()?;
+                    if family.len() > 1024 {
+                        return Err(PyValueError::new_err(
+                            "native text font family exceeds 1024 UTF-8 bytes",
+                        ));
+                    }
+                    fields.family = Some(family);
+                }
+                "bold" => fields.bold = Some(value.extract()?),
+                "italic" => fields.italic = Some(value.extract()?),
+                "underline" => fields.underline = Some(value.extract()?),
+                "strike" => fields.strike = Some(value.extract()?),
+                "size" => fields.size = Some(configured_size(&value, "native text size")?),
+                _ => {
+                    return Err(PyTypeError::new_err(format!(
+                        "unknown native text style field: {key}"
+                    )));
+                }
+            }
+        }
+        Ok(fields)
+    }
+}
+
+fn configured_size(
+    value: &Bound<'_, PyAny>,
+    name: &str,
+) -> PyResult<fmn_library::text::SizeChange> {
+    let (kind, amount): (String, f64) = value.extract()?;
+    if !amount.is_finite() || amount <= 0.0 || amount > f64::from(f32::MAX) {
+        return Err(PyValueError::new_err(format!(
+            "{name} must be finite, positive and f32-representable"
+        )));
+    }
+    match kind.as_str() {
+        "absolute" => Ok(fmn_library::text::SizeChange::Absolute(amount)),
+        "relative" => Ok(fmn_library::text::SizeChange::Relative(amount)),
+        _ => Err(PyValueError::new_err(format!(
+            "{name} must be absolute or relative"
+        ))),
+    }
+}
+
+type ConfiguredTextScope = ((usize, usize), ConfiguredTextFields);
+
+fn configured_scopes(
+    options: &Bound<'_, PyDict>,
+    source: &str,
+    budget: &mut TextStyleBudget,
+) -> PyResult<Vec<ConfiguredTextScope>> {
+    let Some(value) = options.get_item("scoped_styles")? else {
+        return Ok(Vec::new());
+    };
+    if value.len()? > MAX_ITEMS {
+        return Err(PyValueError::new_err(
+            "Text scoped styles exceed the 4096-entry budget",
+        ));
+    }
+    if value.len()? > (MAX_BYTES + 1).saturating_sub(budget.ranges) {
+        return Err(PyValueError::new_err(
+            "Text selectors exceed the 262145-range budget",
+        ));
+    }
+    let mut scopes = Vec::new();
+    for item in value.try_iter()? {
+        if scopes.len() == MAX_ITEMS {
+            return Err(PyValueError::new_err(
+                "Text scoped styles exceed the 4096-entry budget",
+            ));
+        }
+        if budget.ranges == MAX_BYTES + 1 {
+            return Err(PyValueError::new_err(
+                "Text selectors exceed the 262145-range budget",
+            ));
+        }
+        let item = item?;
+        if item.len()? != 3 {
+            return Err(PyTypeError::new_err(
+                "native text scopes must be (start, end, fields) triples",
+            ));
+        }
+        let start: usize = item.get_item(0)?.extract()?;
+        let end: usize = item.get_item(1)?.extract()?;
+        if start > end || source.get(start..end).is_none() {
+            return Err(PyValueError::new_err(
+                "Text style scopes must be valid UTF-8 source byte ranges",
+            ));
+        }
+        let fields = item.get_item(2)?;
+        let parsed = ConfiguredTextFields::from_py(&fields)?;
+        budget.ranges += 1;
+        budget.charge((end - start).max(1).saturating_mul(fields.len()?.max(1)))?;
+        scopes.push(((start, end), parsed));
+    }
+    Ok(scopes)
+}
+
+/// Validate scene coordinates before the native family narrows its f64
+/// geometry to f32 records. Scoped relative sizes may multiply beyond one
+/// field's magnitude; the final scene scale decides whether they fit.
+fn validate_text_geometry(root: &fmn_library::VMobject) -> PyResult<()> {
+    let mut pending = vec![root];
+    while let Some(member) = pending.pop() {
+        if member
+            .points()
+            .iter()
+            .flatten()
+            .any(|coordinate| !coordinate.is_finite() || coordinate.abs() > f64::from(f32::MAX))
+        {
+            return Err(PyValueError::new_err(
+                "native Text scene coordinates must be finite and f32-representable",
+            ));
+        }
+        pending.extend(member.children());
+    }
+    Ok(())
+}
+
 #[pyfunction]
 fn _build_styled_text<'py>(
     slf: &Bound<'py, BridgeMobject>,
@@ -457,6 +622,9 @@ fn _build_styled_text<'py>(
             "t2g",
             "code_language",
             "code_style",
+            "global_style",
+            "scoped_styles",
+            "line_height",
         ]
         .contains(&key.as_str())
         {
@@ -481,6 +649,19 @@ fn _build_styled_text<'py>(
     let slants = pairs::<bool>(options, "t2s", text, &mut budget)?;
     let weights = pairs::<bool>(options, "t2w", text, &mut budget)?;
     let gradients = colors(options, text, &mut budget)?;
+    let global = options
+        .get_item("global_style")?
+        .map(|value| ConfiguredTextFields::from_py(&value))
+        .transpose()?
+        .unwrap_or_default();
+    let scopes = configured_scopes(options, text, &mut budget)?;
+    let scoped_styles: Vec<_> = scopes
+        .iter()
+        .map(|(range, fields)| fmn_library::text::ScopedStyle {
+            range: *range,
+            fields: fields.native(),
+        })
+        .collect();
     let count = families.len() + slants.len() + weights.len() + gradients.len();
     use fmn_library::text::SourceStyle;
     let mut source_styles = Vec::with_capacity(count);
@@ -535,21 +716,42 @@ fn _build_styled_text<'py>(
         }
         Vec::new()
     };
+    let mut inherited = fmn_library::text::CharStyle::base();
+    inherited.family = (!font.is_empty()).then_some(font);
+    inherited.bold = flag(options, "bold", false)?;
+    inherited.italic = flag(options, "italic", false)?;
+    global
+        .native()
+        .apply_to(&mut inherited)
+        .map_err(native_error)?;
+    let mut line_spacing = number(options, "line_spacing", 1., true)? * inherited.size_factor;
+    if let Some(height) = options.get_item("line_height")? {
+        line_spacing = match configured_size(&height, "native text line height")? {
+            fmn_library::text::SizeChange::Relative(factor) => factor * inherited.size_factor,
+            fmn_library::text::SizeChange::Absolute(height) => {
+                height / fmn_library::text::BASELINE_SKIP
+            }
+        };
+    }
+    if !line_spacing.is_finite() || line_spacing <= 0.0 || line_spacing > f64::from(f32::MAX) {
+        return Err(PyValueError::new_err(
+            "native text line spacing must be finite, positive and f32-representable",
+        ));
+    }
     let mut builder = if markup {
         fmn_library::Text::markup(text)
     } else {
         fmn_library::Text::new(text)
     }
     .font_size(number(options, "font_size", 48., true)?)
-    .font(&font)
-    .bold(flag(options, "bold", false)?)
-    .italic(flag(options, "italic", false)?)
+    .inherited_style(inherited)
     .align(align)
-    .line_spacing(number(options, "line_spacing", 1., true)?)
+    .line_spacing(line_spacing)
     .justify(flag(options, "justify", false)?)
     .indent(number(options, "indent", 0., false)?)
     .ligatures(!flag(options, "disable_ligatures", true)?)
     .source_styles(&source_styles)
+    .scoped_styles(&scoped_styles)
     .char_overrides(&code_styles);
     if options.contains("line_width")? {
         builder = builder.width(number(options, "line_width", 1., true)?);
@@ -558,8 +760,16 @@ fn _build_styled_text<'py>(
         for (_, family) in &families {
             book.family(family).map_err(native_error)?;
         }
+        // Validate families carried by native scopes even when those
+        // ranges contain no glyphs (for example, an empty or markup range).
+        for (_, fields) in &scopes {
+            if let Some(family) = &fields.family {
+                book.family(family).map_err(native_error)?;
+            }
+        }
         builder.build(book).map_err(native_error)
     })?;
+    validate_text_geometry(&built.vmob)?;
     let spans: Vec<(usize, usize)> = built.layout.glyphs.iter().map(|glyph| glyph.span).collect();
     let paths: Vec<Vec<usize>> = (0..spans.len()).map(|index| vec![index]).collect();
     let mut tree = fmn_mobject::Mobject::from(built.vmob);
@@ -585,9 +795,111 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     markdown::install(module)
 }
 
+/// Execute actual native text construction, regeneration, selection and frames.
+///
+/// Returns the number of successful unittest cases rather than a claimed
+/// scenario count. Each failure preserves the Python exception and diagnostics.
+///
+/// # Errors
+/// Returns a native text acceptance failure.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_text_configuration() -> Result<u64, String> {
+    crate::with_python_test_module("native text configuration", |py, _module, globals| {
+        let code = std::ffi::CString::new(include_str!("../tests/text_authoring.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("result")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "text acceptance result is absent".to_owned())?
+            .getattr("testsRun")
+            .and_then(|count| count.extract::<u64>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_text_configuration_and_regeneration() {
+        assert_eq!(run_portal_gauntlet_text_configuration().unwrap(), 37);
+    }
+
+    #[test]
+    fn text_geometry_validation_checks_every_actual_scene_coordinate() {
+        use fmn_library::VMobject;
+
+        let valid = VMobject::new().with_children(vec![VMobject::from_points(vec![
+            [f64::from(f32::MAX), 0.0, 0.0],
+        ])]);
+        assert!(validate_text_geometry(&valid).is_ok());
+        Python::initialize();
+        Python::attach(|_| {
+            for coordinate in [f64::INFINITY, f64::NAN, f64::from(f32::MAX) * 2.0] {
+                let invalid = VMobject::new().with_children(vec![
+                    VMobject::new().with_children(vec![VMobject::from_points(vec![
+                        [0.0, coordinate, 0.0],
+                    ])]),
+                ]);
+                assert!(validate_text_geometry(&invalid).is_err());
+            }
+        });
+    }
+
+    #[test]
+    fn configured_text_styles_admit_only_typed_fields_and_source_ranges() {
+        Python::initialize();
+        Python::attach(|py| {
+            let globals = PyDict::new(py);
+            py.run(
+                c"styles = {
+    'global_style': {'color': (1., 0., 0.), 'size': ('relative', 1.5)},
+    'scoped_styles': [(0, 2, {'bold': True}), (2, 3, {'underline': True})]
+}",
+                Some(&globals),
+                None,
+            )
+            .unwrap();
+            let styles = globals.get_item("styles").unwrap().unwrap();
+            let styles = styles.cast::<PyDict>().unwrap();
+            let scopes = configured_scopes(styles, "éA", &mut TextStyleBudget::default()).unwrap();
+            assert_eq!(scopes.len(), 2);
+            assert_eq!(scopes[0].0, (0, 2));
+            assert_eq!(scopes[0].1.bold, Some(true));
+            assert_eq!(scopes[1].1.underline, Some(true));
+            let bad = PyDict::new(py);
+            bad.set_item("size", ("relative", f64::INFINITY)).unwrap();
+            assert!(ConfiguredTextFields::from_py(bad.as_any()).is_err());
+            bad.clear();
+            bad.set_item("letter_spacing", 12).unwrap();
+            assert!(ConfiguredTextFields::from_py(bad.as_any()).is_err());
+            let invalid = PyDict::new(py);
+            let fields = PyDict::new(py);
+            fields.set_item("bold", true).unwrap();
+            invalid
+                .set_item(
+                    "scoped_styles",
+                    PyList::new(py, [(1usize, 2usize, fields)]).unwrap(),
+                )
+                .unwrap();
+            assert!(configured_scopes(&invalid, "éA", &mut TextStyleBudget::default()).is_err());
+            let excess = PyDict::new(py);
+            excess
+                .set_item(
+                    "scoped_styles",
+                    PyList::new(py, (0..MAX_ITEMS + 1).map(|_| (0usize, 1usize, PyDict::new(py))))
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(
+                configured_scopes(&excess, "A", &mut TextStyleBudget::default()).is_err()
+            );
+        });
+    }
 
     #[test]
     fn string_span_frontend_converts_unicode_and_preserves_native_ordinals() {

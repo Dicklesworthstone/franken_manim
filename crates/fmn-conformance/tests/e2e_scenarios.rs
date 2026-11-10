@@ -5922,6 +5922,14 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     python_portal_sequence_run(ctx, false)
 }
 
+/// Authored text configurations cross native layout, regeneration and rendering.
+fn python_text_configuration_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_text_configuration()
+        .map_err(|error| fail(format!("Python text configuration: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.text_configuration").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("text_configuration_cases", cases))
+}
+
 /// Live coefficients and matrix entries through actual native animation/output.
 fn python_live_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_live_tex")?;
@@ -18580,6 +18588,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_text_configuration.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_text_configuration_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("text_configuration_cases", 37),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.text_configuration",
+            vec![FieldPred::u64_eq("cases", 37)],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_surface_hooks.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -21085,6 +21107,16 @@ fn prismify_compound_cap_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.prismify_compound_cap.v1")
         .expect("native compound cap scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_text_configuration_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_text_configuration.v1")
+        .expect("native Python text configuration is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
