@@ -59,7 +59,7 @@ use fmn_core::constants::{
     RED, RIGHT, SMALL_BUFF, UP, YELLOW,
 };
 use fmn_core::types::Vec3;
-use fmn_geom::{QuadPath, space_ops};
+use fmn_geom::space_ops;
 use fmn_tex::TexEngine;
 use fmn_text::FontBook;
 
@@ -137,7 +137,7 @@ pub enum CoordsError {
     /// A Riemann range that decreases, has a non-positive step, or whose
     /// step cannot advance the bound (BN-20).
     InvalidRiemannRange(&'static str),
-    /// A live native chart no longer describes a finite affine frame.
+    /// A native chart or its geometric request cannot supply a valid affine frame.
     LiveFrame(CoordinateFrameError),
 }
 
@@ -253,11 +253,6 @@ fn sorted_contains_close(values: &[f64], target: f64) -> bool {
     values
         .get(index)
         .is_some_and(|&value| isclose(value, target))
-}
-
-/// The Reference's `inverse_interpolate`.
-fn inverse_interpolate(x0: f64, x1: f64, x: f64) -> f64 {
-    (x - x0) / (x1 - x0)
 }
 
 /// BN-20's Riemann bins over `[start, stop]`: `start + k·step` for
@@ -1835,57 +1830,42 @@ impl Axes {
         Ok(v_group(rects))
     }
 
-    /// `get_area_under_graph(graph, x_range, fill_color=BLUE,
-    /// fill_opacity=0.5)`.
+    /// Shade the drawn quadratic graph down to numeric y = 0.
     ///
-    /// `graph` is a built curve (e.g. from [`get_graph`](Self::get_graph))
-    /// and `graph_x_range` the x-range it was sampled over — the pair the
-    /// Reference keeps on the mobject itself. The curve is cut between
-    /// the alpha bounds `inverse_interpolate(graph_x_range, x)` (curve-index
-    /// space, as the Reference's `pointwise_become_partial`), then closed
-    /// through `c2p(x1, 0)` and `c2p(x0, 0)` back to its start.
-    #[must_use]
+    /// Bounds are data coordinates, not curve-index fractions. The same
+    /// clipping owner as [`CoordinateFrame::get_area_under_graph`] preserves
+    /// nonlinear parameterization, nonuniform samples and reversed paths.
+    /// Every continuous component closes independently to its baseline;
+    /// intervals outside the drawn domain and discontinuity gaps stay empty.
+    ///
+    /// No graph-range metadata or callback is needed. The result is a detached
+    /// static VMobject; rebuilding it is explicit when the graph changes.
+    ///
+    /// # Errors
+    /// Unbuilt or singular axes, invalid bounds or geometry, foldbacks, and
+    /// exhausted input/output point budgets return a typed [`CoordsError`].
     pub fn get_area_under_graph(
         &self,
         graph: &VMobject,
-        graph_x_range: [f64; 2],
         x_range: Option<[f64; 2]>,
-    ) -> VMobject {
-        self.area_under_graph_styled(graph, graph_x_range, x_range, BLUE, 0.5)
+    ) -> Result<VMobject, CoordsError> {
+        self.area_under_graph_styled(graph, x_range, BLUE, 0.5)
     }
 
     /// The styled form of [`get_area_under_graph`](Self::get_area_under_graph).
-    #[must_use]
+    ///
+    /// Projection uniforms and the source's style are preserved, with the
+    /// stroke width set to zero and the requested fill applied. The source's
+    /// points, children, style and uniforms are never mutated.
     pub fn area_under_graph_styled(
         &self,
         graph: &VMobject,
-        graph_x_range: [f64; 2],
         x_range: Option<[f64; 2]>,
         fill_color: Srgb,
         fill_opacity: f64,
-    ) -> VMobject {
-        let style = Style::default()
-            .stroke_width(0.0)
-            .fill(fill_color, fill_opacity);
-        let xr = x_range.unwrap_or_else(|| match (graph.points().first(), graph.points().last()) {
-            (Some(&s), Some(&e)) => [self.x_axis.p2n(s), self.x_axis.p2n(e)],
-            _ => [0.0, 0.0],
-        });
-        let a0 = inverse_interpolate(graph_x_range[0], graph_x_range[1], xr[0]);
-        let a1 = inverse_interpolate(graph_x_range[0], graph_x_range[1], xr[1]);
-        let Some((points, _, _)) = QuadPath::partial_points(graph.points(), a0, a1) else {
-            return VMobject::new().with_style(style);
-        };
-        let Ok(mut path) = QuadPath::from_points(points) else {
-            return VMobject::new().with_style(style);
-        };
-        let start = path.points().first().copied();
-        let _ = path.add_line_to(self.c2p(&[xr[1], 0.0]), true);
-        let _ = path.add_line_to(self.c2p(&[xr[0], 0.0]), true);
-        if let Some(s) = start {
-            let _ = path.add_line_to(s, true);
-        }
-        VMobject::from_path(&path).with_style(style)
+    ) -> Result<VMobject, CoordsError> {
+        self.coordinate_frame()?
+            .area_under_graph_styled(graph, x_range, fill_color, fill_opacity)
     }
 }
 
@@ -2232,6 +2212,7 @@ fn stroke_behind_deep(vmob: VMobject) -> VMobject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fmn_geom::QuadPath;
     use std::cell::Cell;
 
     fn book() -> FontBook {
@@ -3054,7 +3035,9 @@ mod tests {
             .use_smoothing(false)
             .build()
             .expect("default graph sampling is bounded");
-        let area = axes.get_area_under_graph(&graph, [-8.0, 8.0], Some([-1.0, 2.0]));
+        let area = axes
+            .get_area_under_graph(&graph, Some([-1.0, 2.0]))
+            .expect("bounded integral region");
         let points = area.points();
         assert!(points.len() > 6, "a partial curve plus the closing lines");
         // The Reference appends c2p(x1, 0), c2p(x0, 0), and the start.
@@ -3072,6 +3055,267 @@ mod tests {
         assert!((area.style().stroke_width - 0.0).abs() < 1e-15);
         assert!((area.style().fill_opacity - 0.5).abs() < 1e-15);
         assert_eq!(area.style().fill_color, BLUE);
+    }
+
+    fn area_graph_in_axes(axes: &Axes, points: &[Vec3]) -> VMobject {
+        VMobject::from_points(points.iter().map(|p| axes.c2p(&p[..2])).collect())
+    }
+
+    #[test]
+    fn detached_area_clips_exact_quadratics_in_data_x_after_placement() {
+        let axes = Axes::new()
+            .x_range([-1.0, 5.0, 1.0])
+            .y_range([-1.0, 4.0, 1.0])
+            .width(9.0)
+            .height(4.0)
+            .build(&book())
+            .unwrap()
+            .scaled_about(-1.25, [0.5, -0.25, 0.0])
+            .rotated_about(0.7, [1.0, 2.0, 3.0], ORIGIN)
+            .shifted([2.0, -3.0, 1.0]);
+        // x(t) = 4t² and y(t) = 1 + 2t. The requested x bounds
+        // intersect at t = 1/4 and 3/4, not at 1/16 and 9/16.
+        let graph = area_graph_in_axes(&axes, &[[0.0, 1.0, 0.0], [0.0, 2.0, 0.0], [4.0, 3.0, 0.0]]);
+        let area = axes
+            .get_area_under_graph(&graph, Some([0.25, 2.25]))
+            .unwrap();
+        assert_eq!(area.points().len(), 9);
+        for (actual, expected) in
+            area.points()[..3]
+                .iter()
+                .zip([[0.25, 1.5], [0.75, 2.0], [2.25, 2.5]])
+        {
+            assert_vec3_near(*actual, axes.c2p(&expected), 1e-8, "exact clipped control");
+        }
+        assert_vec3_near(
+            area.points()[4],
+            axes.c2p(&[2.25, 0.0]),
+            1e-8,
+            "right baseline",
+        );
+        assert_vec3_near(
+            area.points()[6],
+            axes.c2p(&[0.25, 0.0]),
+            1e-8,
+            "left baseline",
+        );
+        assert_vec3_near(area.points()[8], area.points()[0], 1e-8, "closed region");
+
+        // Unequally sized graph segments must receive unequal x coverage.
+        let nonuniform = area_graph_in_axes(
+            &axes,
+            &[
+                [0.0, 2.0, 0.0],
+                [0.5, 2.0, 0.0],
+                [1.0, 2.0, 0.0],
+                [2.5, 2.0, 0.0],
+                [4.0, 2.0, 0.0],
+            ],
+        );
+        let area = axes
+            .get_area_under_graph(&nonuniform, Some([0.25, 2.25]))
+            .unwrap();
+        for (actual, expected) in [area.points()[0], area.points()[2], area.points()[4]]
+            .into_iter()
+            .zip([[0.25, 2.0], [1.0, 2.0], [2.25, 2.0]])
+        {
+            assert_vec3_near(actual, axes.c2p(&expected), 1e-8, "nonuniform graph anchor");
+        }
+    }
+
+    #[test]
+    fn detached_area_closes_disconnected_and_reversed_components_independently() {
+        let axes = Axes::new().build(&book()).unwrap();
+        let mut path = QuadPath::new();
+        for points in [
+            [[0.0, 2.0, 0.0], [0.5, 2.0, 0.0], [1.0, 2.0, 0.0]],
+            [[4.0, 1.0, 0.0], [3.0, 1.0, 0.0], [2.0, 1.0, 0.0]],
+        ] {
+            path.add_subpath(area_graph_in_axes(&axes, &points).points())
+                .unwrap();
+        }
+        let graph = VMobject::from_path(&path);
+        let original_points = graph.points().to_vec();
+        let area = axes.get_area_under_graph(&graph, Some([0.5, 3.0])).unwrap();
+        let area_path = area.path().unwrap();
+        let components = area_path.subpaths();
+        assert_eq!(components.len(), 2, "the discontinuity stays open");
+        for (points, (left, right, height)) in components
+            .into_iter()
+            .zip([(0.5, 1.0, 2.0), (2.0, 3.0, 1.0)])
+        {
+            assert_eq!(points.len(), 9);
+            for (index, expected) in [
+                (0, [left, height]),
+                (2, [right, height]),
+                (4, [right, 0.0]),
+                (6, [left, 0.0]),
+                (8, [left, height]),
+            ] {
+                assert_vec3_near(points[index], axes.c2p(&expected), 1e-9, "component anchor");
+            }
+        }
+        let all = axes.get_area_under_graph(&graph, None).unwrap();
+        let broad = axes
+            .get_area_under_graph(&graph, Some([-100.0, 100.0]))
+            .unwrap();
+        assert_eq!(
+            all.points(),
+            broad.points(),
+            "bounds intersect the drawn domain"
+        );
+        for bounds in [[1.25, 1.75], [5.0, 6.0], [0.75, 0.75]] {
+            assert!(
+                axes.get_area_under_graph(&graph, Some(bounds))
+                    .unwrap()
+                    .points()
+                    .is_empty(),
+                "gap, exterior and zero-width intervals stay empty"
+            );
+        }
+        assert_eq!(graph.points(), original_points);
+    }
+
+    #[test]
+    fn detached_area_preserves_source_style_and_projection_uniforms() {
+        let axes = Axes::new().build(&book()).unwrap();
+        let graph = area_graph_in_axes(&axes, &[[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0]])
+            .with_style(Style::default().stroke(RED, 7.0, 0.75).fill(GREEN, 0.2))
+            .map_uniforms(|mut uniforms| {
+                uniforms.is_fixed_in_frame = 1.0;
+                uniforms.depth_test = true;
+                uniforms.clip_planes[0] = [1.0, 0.0, 0.0, -0.5];
+                uniforms.flat_stroke = true;
+                uniforms.stroke_behind = true;
+                uniforms
+            });
+        let source_points = graph.points().to_vec();
+        let source_style = graph.style();
+        let source_uniforms = graph.uniforms();
+        for bounds in [Some([0.25, 1.5]), Some([1.0, 1.0]), None] {
+            let area = axes
+                .area_under_graph_styled(&graph, bounds, YELLOW, 0.35)
+                .unwrap();
+            assert_eq!(
+                area.style(),
+                source_style.stroke_width(0.0).fill(YELLOW, 0.35)
+            );
+            assert_eq!(area.uniforms(), source_uniforms);
+            assert!(area.children().is_empty());
+        }
+        assert_eq!(graph.points(), source_points);
+        assert_eq!(graph.style(), source_style);
+        assert_eq!(graph.uniforms(), source_uniforms);
+        assert!(graph.children().is_empty());
+    }
+
+    #[test]
+    fn detached_area_rejects_invalid_requests_and_respects_point_budgets() {
+        let axes = Axes::new().build(&book()).unwrap();
+        let graph = area_graph_in_axes(&axes, &[[0.0, 1.0, 0.0], [1.0, 1.0, 0.0], [2.0, 1.0, 0.0]]);
+        let invalid_geometry = |result: Result<VMobject, CoordsError>| {
+            assert!(matches!(
+                result,
+                Err(CoordsError::LiveFrame(
+                    CoordinateFrameError::InvalidGeometry(_)
+                ))
+            ));
+        };
+        for bounds in [[2.0, 1.0], [f64::NAN, 1.0], [0.0, f64::INFINITY]] {
+            invalid_geometry(axes.get_area_under_graph(&graph, Some(bounds)));
+        }
+        for opacity in [f64::NAN, f64::INFINITY, -0.1, 1.1] {
+            invalid_geometry(axes.area_under_graph_styled(&graph, None, BLUE, opacity));
+        }
+        for invalid in [
+            VMobject::from_points(vec![[0.0, 0.0, 0.0]; 2]),
+            VMobject::from_points(vec![[f64::NAN, 0.0, 0.0]; 3]),
+            VMobject::from_points(vec![[f64::MAX, 0.0, 0.0]; 3]),
+            graph.clone().with_child(VMobject::new()),
+            area_graph_in_axes(&axes, &[[0.0, 1.0, 0.0], [2.0, 1.0, 0.0], [1.0, 2.0, 0.0]]),
+        ] {
+            invalid_geometry(axes.get_area_under_graph(&invalid, None));
+        }
+        assert!(
+            axes.get_area_under_graph(&VMobject::new(), None)
+                .unwrap()
+                .points()
+                .is_empty()
+        );
+        // Three input points need nine points once the baseline is closed.
+        for budget in [2, 8] {
+            assert!(matches!(
+                axes.clone()
+                    .sampling_budget(SamplingBudget::new(budget))
+                    .get_area_under_graph(&graph, None),
+                Err(CoordsError::Sampling(SamplingError::LimitExceeded { .. }))
+            ));
+        }
+    }
+
+    #[test]
+    fn detached_coordinate_frame_freezes_calibration_and_sampling_controls() {
+        let axes = Axes::new()
+            .x_range([-2.0, 5.0, 0.5])
+            .y_range([-3.0, 4.0, 1.0])
+            .width(12.0)
+            .height(5.0)
+            .axis_config(AxisConfig {
+                include_ticks: Some(false),
+                include_tip: Some(true),
+                ..AxisConfig::default()
+            })
+            .num_sampled_graph_points_per_tick(7.0)
+            .sampling_budget(SamplingBudget::new(1234))
+            .build(&book())
+            .unwrap()
+            .scaled_about(-1.5, [1.0, 2.0, 0.0])
+            .rotated_about(0.6, [1.0, 2.0, 3.0], ORIGIN)
+            .shifted([3.0, -2.0, 1.0]);
+        let frame = axes.coordinate_frame().unwrap();
+        assert_eq!(frame.all_ranges(), axes.all_ranges());
+        assert_eq!(frame.num_sampled_graph_points_per_tick(), 7.0);
+        assert_eq!(frame.graph_sampling_budget(), SamplingBudget::new(1234));
+        for coords in [[0.0, 0.0], [-1.25, 2.75], [6.0, -5.0]] {
+            let point = axes.c2p(&coords);
+            assert_vec3_near(frame.c2p(&coords), point, 1e-9, "frozen numeric map");
+            assert_vec3_near(
+                frame.p2c(point),
+                [coords[0], coords[1], 0.0],
+                1e-9,
+                "frozen full affine inverse",
+            );
+        }
+        let before = frame.c2p(&[1.0, 2.0]);
+        let moved = axes.shifted([10.0, 0.0, 0.0]);
+        assert_vec3_near(frame.c2p(&[1.0, 2.0]), before, 1e-12, "frame stays frozen");
+        assert_vec3_near(
+            moved.coordinate_frame().unwrap().c2p(&[1.0, 2.0]),
+            add(before, [10.0, 0.0, 0.0]),
+            1e-9,
+            "a new frame uses new placement",
+        );
+    }
+
+    #[test]
+    fn detached_coordinate_frame_refuses_unbuilt_or_invalid_axes() {
+        assert!(matches!(
+            Axes::new().coordinate_frame(),
+            Err(CoordsError::LiveFrame(CoordinateFrameError::UnbuiltChart))
+        ));
+        let axes = Axes::new().build(&book()).unwrap();
+        assert!(matches!(
+            axes.clone().scaled_about(0.0, ORIGIN).coordinate_frame(),
+            Err(CoordsError::LiveFrame(
+                CoordinateFrameError::DegenerateBasis
+            ))
+        ));
+        assert!(matches!(
+            axes.shifted([f64::INFINITY, 0.0, 0.0]).coordinate_frame(),
+            Err(CoordsError::LiveFrame(
+                CoordinateFrameError::InvalidAxis { .. }
+            ))
+        ));
     }
 
     #[test]

@@ -394,8 +394,9 @@ impl LiveCoordinateSystem {
 
 /// An immutable affine chart, suitable for graph, surface, and field builders.
 ///
-/// Obtained from [`LiveCoordinateSystem::snapshot`]. Later Stage mutations,
-/// copies, and deletions cannot change it. Its inverse uses the full affine
+/// Obtained from [`LiveCoordinateSystem::snapshot`] or [`Axes::coordinate_frame`].
+/// Later chart placement, Stage mutations, copies, and deletions cannot change
+/// it. Its inverse uses the full affine
 /// basis; it does not assume that axes are perpendicular or equally scaled.
 /// Like other [`CoordinateSystem`] implementations, direct trait conversions
 /// accept arbitrary floating-point inputs. The live conversion methods also
@@ -555,6 +556,61 @@ impl CoordinateFrame {
 }
 
 impl Axes {
+    /// Freeze this built chart's detached numeric map.
+    ///
+    /// The frame keeps the calibrated axes, sampling controls and point budget
+    /// at the time of this call. Later placement or rebuilding of this Axes, or
+    /// mutation of a separately registered Stage family, cannot change it.
+    /// Use [`Self::bind`] for a chart that follows Stage mutations instead.
+    ///
+    /// No Stage or mobject records are allocated. Unbuilt axes, non-finite
+    /// calibration, disconnected origins and a collapsed inverse return
+    /// [`CoordsError::LiveFrame`].
+    pub fn coordinate_frame(&self) -> Result<CoordinateFrame, CoordsError> {
+        if self.vmob.children().is_empty() {
+            return Err(CoordinateFrameError::UnbuiltChart.into());
+        }
+        let mut origin = [0.0; 3];
+        let mut basis = [[0.0; 3]; 3];
+        let mut origin_tolerance = 0.0;
+        for (axis, line) in [&self.x_axis, &self.y_axis].into_iter().enumerate() {
+            let invalid = |reason| CoordinateFrameError::InvalidAxis { axis, reason };
+            let range = line.x_range();
+            let span = range[1] - range[0];
+            if !range.iter().all(|n| n.is_finite()) || !span.is_finite() || span == 0.0 {
+                return Err(invalid("numeric axis range must be finite and nonzero").into());
+            }
+            // NumberLine's tracked endpoints retain the full numeric scale:
+            // arrow-tip trimming changes its drawn shaft, not its calibration.
+            let start = line.start_point();
+            let end = line.end_point();
+            basis[axis] = divide(sub(end, start), span);
+            let axis_origin = line.n2p(0.0);
+            if !finite(start) || !finite(end) || !finite(basis[axis]) || !finite(axis_origin) {
+                return Err(invalid("axis calibration produces non-finite coordinates").into());
+            }
+            let magnitude = max_abs(start)
+                .max(max_abs(end))
+                .max(max_abs(axis_origin))
+                .max(1.0);
+            let tolerance = 64.0 * f64::EPSILON * magnitude;
+            if axis == 0 {
+                origin = axis_origin;
+                origin_tolerance = tolerance;
+            } else if max_abs(sub(axis_origin, origin)) > origin_tolerance + tolerance {
+                return Err(CoordinateFrameError::DisconnectedOrigins { axis }.into());
+            }
+        }
+        Ok(CoordinateFrame {
+            origin,
+            basis,
+            dual: dual_basis(basis, 2)?,
+            ranges: vec![self.x_axis.x_range(), self.y_axis.x_range()],
+            samples_per_tick: self.num_sampled_graph_points_per_tick,
+            sampling_budget: self.sampling_budget,
+        })
+    }
+
     /// Bind this built chart's numeric map to its registered Stage family.
     /// The root must have the same `[x_axis, y_axis]` layout as `self.vmob()`.
     pub fn bind(&self, stage: &Stage, root: Mob) -> Result<LiveCoordinateSystem, CoordsError> {

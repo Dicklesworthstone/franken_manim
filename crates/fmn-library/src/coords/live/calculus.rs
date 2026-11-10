@@ -156,8 +156,9 @@ impl CoordinateFrame {
 
     /// Styled integral region from the source's own quadratic point run.
     /// Child-bearing groups must be flattened explicitly. Input and output
-    /// point counts share this chart's sampling budget. The source geometry,
-    /// styles and Stage are never modified.
+    /// point counts share this chart's sampling budget. Projection uniforms
+    /// and the source style are preserved, with zero stroke width and the
+    /// requested fill. The source geometry, styles and Stage are never modified.
     pub fn area_under_graph_styled(
         &self,
         graph: &VMobject,
@@ -185,9 +186,11 @@ impl CoordinateFrame {
             .path()
             .map_err(|_| invalid("area requires a shared-anchor quadratic path"))?;
         let mut result = QuadPath::new();
-        let style = Style::default().stroke_width(0.0).fill(color, opacity);
+        let style = graph.style().stroke_width(0.0).fill(color, opacity);
         if x_range.is_some_and(|[left, right]| left == right) {
-            return Ok(VMobject::new().with_style(style));
+            return Ok(VMobject::new()
+                .with_style(style)
+                .with_uniforms(graph.uniforms()));
         }
         for component in path.subpaths() {
             if component.len() < 3 {
@@ -285,7 +288,9 @@ impl CoordinateFrame {
                 .add_subpath(region.points())
                 .map_err(|_| invalid("could not join integral components"))?;
         }
-        Ok(VMobject::from_path(&result).with_style(style))
+        Ok(VMobject::from_path(&result)
+            .with_style(style)
+            .with_uniforms(graph.uniforms()))
     }
 }
 

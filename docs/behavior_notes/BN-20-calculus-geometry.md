@@ -89,9 +89,29 @@ bin formula as the portal's `_riemann_grid`, chart corners, `show_signed_area` â
 witnessed by `riemann_bins_follow_bn20` in `crates/fmn-library/src/coords.rs`.
 Both front doors default to the pinned Reference's `colors=(BLUE, GREEN)`, and
 the portal's `get_area_under_graph` to its `fill_color=BLUE`
-(`test_default_colors_are_the_references` in `live_graphing.py`). The native
-`get_area_under_graph` still cuts by curve index; it has not taken this note's
-data-coordinate clipping yet.
+(`test_default_colors_are_the_references` in `live_graphing.py`). Detached
+`Axes::get_area_under_graph` now uses the same data-coordinate clipping owner as
+the native live chart. Its result keeps the graph's projection uniforms and
+style, overriding only the requested fill and the zero-width outline.
+
+The detached Rust call now takes `(graph, x_range)` and returns
+`Result<VMobject, CoordsError>`. Remove the former `graph_x_range` argument and
+propagate the error:
+
+```rust
+let area = axes.get_area_under_graph(&graph, Some([0.25, 1.75]))?;
+```
+
+Sampling metadata no longer substitutes for the drawn domain. Invalid ranges,
+singular charts, off-plane points, foldbacks and exhausted record budgets return
+typed errors; a valid empty intersection still returns an empty path. The styled
+call follows the same signature, with color and opacity after `x_range`.
+
+`Axes::coordinate_frame()` freezes a detached chart for repeated queries using
+the same validated affine inverse as a live snapshot. Later changes to the axes
+do not alter that frame. The `render_matrix.native_detached_areas.v1` scenario
+compares public PNG output with independently constructed quadratic restrictions
+and disconnected polygons at one, four and sixteen threads.
 
 ## Native live charts
 
@@ -115,8 +135,8 @@ The new live-area API takes no `graph_x_range`: it clips the drawn quadratic
 geometry at actual data-x bounds, including nonlinear parameterization,
 nonuniform sampling, reversed subpaths and gaps. Each continuous component
 closes to its own baseline. It uses the existing quadratic evaluation and
-restriction primitives, not a resampled approximation. The legacy detached
-`Axes` area method above still retains its curve-index signature and behavior.
+restriction primitives, not a resampled approximation. The detached `Axes`
+methods now share this signature, validation and clipping implementation.
 
 A frozen `CoordinateFrame` keeps its original chart; a new call through a live
 binding samples the current Stage. Returned mobjects are detached snapshots,

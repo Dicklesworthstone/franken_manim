@@ -2901,6 +2901,145 @@ fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("native_shape_matching_thread_counts", checked))
 }
 
+/// Detached charts clip actual data-x bounds and keep discontinuity gaps empty.
+fn native_detached_areas_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_geom::QuadPath;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct AreaScene {
+        gaps: bool,
+        oracle: bool,
+    }
+    impl SceneConstruct for AreaScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let axes = Axes::new()
+                .x_range([-1.0, 4.0, 1.0])
+                .y_range([-1.0, 3.0, 1.0])
+                .width(5.0)
+                .height(4.0)
+                .axis_config(AxisConfig {
+                    include_tip: Some(false),
+                    include_ticks: Some(false),
+                    ..AxisConfig::default()
+                })
+                .build(&FontBook::bundled().unwrap())?;
+            let point = |x, y| axes.c2p(&[x, y]);
+            let mut source = QuadPath::new();
+            let (bounds, clipped) = if self.gaps {
+                source
+                    .add_subpath(&[point(0.0, 2.0), point(0.5, 2.0), point(1.0, 2.0)])
+                    .unwrap();
+                // The second component runs backwards and has a different
+                // sampling density. Neither fact can change the shaded domain.
+                source
+                    .add_subpath(&[point(4.0, 1.0), point(3.0, 1.0), point(2.0, 1.0)])
+                    .unwrap();
+                (
+                    [0.5, 3.0],
+                    vec![
+                        ([0.5, 1.0], [(0.5, 2.0), (0.75, 2.0), (1.0, 2.0)]),
+                        ([2.0, 3.0], [(2.0, 1.0), (2.5, 1.0), (3.0, 1.0)]),
+                    ],
+                )
+            } else {
+                source
+                    .add_subpath(&[point(0.0, 1.0), point(0.0, 2.0), point(4.0, 3.0)])
+                    .unwrap();
+                // x=4t², y=1+2t: x=.25..2.25 means t=.25...75.
+                (
+                    [0.25, 2.25],
+                    vec![([0.25, 2.25], [(0.25, 1.5), (0.75, 2.0), (2.25, 2.5)])],
+                )
+            };
+            let graph = VMobject::from_path(&source);
+            let area = if self.oracle {
+                let mut expected = QuadPath::new();
+                for ([left, right], curve) in clipped {
+                    let points = curve.map(|(x, y)| point(x, y));
+                    let mut component = QuadPath::from_points(points.to_vec()).unwrap();
+                    component.add_line_to(point(right, 0.0), false).unwrap();
+                    component.add_line_to(point(left, 0.0), false).unwrap();
+                    component.add_line_to(points[0], false).unwrap();
+                    expected.add_subpath(component.points()).unwrap();
+                }
+                VMobject::from_path(&expected)
+                    .with_style(Style::default().stroke_width(0.0).fill(BLUE, 0.5))
+            } else {
+                axes.get_area_under_graph(&graph, Some(bounds))?
+            };
+            stage.add(area)?;
+            Ok(())
+        }
+    }
+
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    let mut outcome = RunOutcome::ok();
+    let mut checked = 0;
+    for (name, gaps) in [("quadratic", false), ("gaps", true)] {
+        let expected_path = format!("/{name}-expected.png");
+        render_with_fs(
+            &mut AreaScene { gaps, oracle: true },
+            options(&expected_path, 1)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let expected = fs
+            .read(std::path::Path::new(&expected_path))
+            .map_err(|e| fail(e.to_string()))?;
+        let image = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+            .map_err(|e| fail(e.to_string()))?;
+        if !image
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel != &image.rgba[..4])
+        {
+            return Err(fail(
+                "the independent integral-region oracle rendered no ink",
+            ));
+        }
+        for threads in [1, 4, 16] {
+            let path = format!("/{name}-{threads}.png");
+            let report = render_with_fs(
+                &mut AreaScene {
+                    gaps,
+                    oracle: false,
+                },
+                options(&path, threads)?,
+                fs.clone(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            let actual = fs
+                .read(std::path::Path::new(&path))
+                .map_err(|e| fail(e.to_string()))?;
+            if actual != expected || report.artifact.frame_count != 1 {
+                return Err(fail(format!(
+                    "{name} integral region differs from analytic geometry at {threads} threads"
+                )));
+            }
+            checked += 1;
+        }
+        outcome = outcome.with_artifact(&format!("{name}.png"), expected);
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_detached_areas")
+            .field("cases", 2_u64)
+            .field("renders", checked),
+    );
+    Ok(outcome
+        .with_counter("native_detached_area_cases", 2)
+        .with_counter("native_detached_area_renders", checked))
+}
+
 /// Prelude-only animation families converge to independently authored geometry.
 fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::*;
@@ -16227,6 +16366,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_detached_areas.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_detached_areas_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_detached_area_cases", 2),
+            counter_eq("native_detached_area_renders", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_detached_areas",
+            vec![
+                FieldPred::u64_eq("cases", 2),
+                FieldPred::u64_eq("renders", 6),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.prelude_families.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -20564,6 +20721,16 @@ fn python_native_outputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
         .expect("Python native output scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_detached_areas_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_detached_areas.v1")
+        .expect("native detached area scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
