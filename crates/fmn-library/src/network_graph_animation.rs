@@ -130,6 +130,77 @@ pub struct NetworkGraphMobject {
 }
 
 impl NetworkGraph {
+    /// Visit the component reachable from `root` using the same schedule as
+    /// [`TraverseGraph`]. No layout or arena is required: hosts can bind the
+    /// returned labels to their existing visual objects without rebuilding
+    /// the graph or implementing a second traversal algorithm.
+    ///
+    /// Neighbors retain fnx's insertion order. Disconnected vertices are not
+    /// visited; an isolated root appears once.
+    ///
+    /// # Errors
+    /// [`NetworkGraphError::UnknownNode`] when `root` is absent.
+    pub fn traversal_order(
+        &self,
+        root: &str,
+        traversal: GraphTraversal,
+    ) -> Result<Vec<String>, NetworkGraphError> {
+        traversal_order(self, root, traversal)
+    }
+
+    /// Plan the normalized edge durations consumed by [`FlowAlongEdges`].
+    /// Each `(from, to, weight)` receives its positive weight's share of the
+    /// total duration, in authored order. Reversed and repeated edges are
+    /// allowed. This is the shared native timing planner for every front door.
+    ///
+    /// # Errors
+    /// An empty flow, missing edge, invalid weight, or a weight whose share
+    /// cannot occupy a distinct floating-point timeline interval.
+    pub fn flow_durations(
+        &self,
+        edges: &[(&str, &str, f64)],
+    ) -> Result<Vec<f64>, GraphAnimationError> {
+        if edges.is_empty() {
+            return Err(GraphAnimationError::EmptyFlow);
+        }
+        let mut largest_weight = 0.0_f64;
+        for &(from, to, weight) in edges {
+            positive(weight, "edge weight")?;
+            largest_weight = largest_weight.max(weight);
+            if !self
+                .graph
+                .neighbors(from)
+                .is_some_and(|neighbors| neighbors.contains(&to))
+            {
+                return Err(GraphAnimationError::MissingEdge {
+                    from: from.to_owned(),
+                    to: to.to_owned(),
+                });
+            }
+        }
+        // Normalize before summing: proportionally equivalent large weights
+        // remain usable even when their unscaled sum would overflow.
+        let total: f64 = edges
+            .iter()
+            .map(|(_, _, weight)| weight / largest_weight)
+            .sum();
+        let mut end = 0.0;
+        edges
+            .iter()
+            .map(|(_, _, weight)| {
+                let duration = (weight / largest_weight) / total;
+                let next = end + duration;
+                if !next.is_finite() || next <= end {
+                    return Err(GraphAnimationError::InvalidControl(
+                        "edge weight cannot occupy a timeline interval",
+                    ));
+                }
+                end = next;
+                Ok(duration)
+            })
+            .collect()
+    }
+
     /// Build the graph in an arena and retain label/edge identity for animation.
     /// This allocates the family without adding it to the scene's draw list.
     ///
@@ -542,7 +613,7 @@ impl TraverseGraph {
         graph.validate(stage)?;
         positive(config.run_time, "traversal run_time")?;
         let color = color_components(config.color)?;
-        let order = traversal_order(&graph.network, root, traversal)?;
+        let order = graph.network.traversal_order(root, traversal)?;
         let mut animations: Vec<Box<dyn Animation>> = Vec::with_capacity(order.len());
         for label in &order {
             let mut animation = fade_to_color(stage, graph.nodes[label], color)?;
@@ -699,11 +770,9 @@ impl FlowAlongEdges {
             ));
         }
         let color = color_components(config.color)?;
-        let mut largest_weight = 0.0_f64;
+        let durations = graph.network.flow_durations(edges)?;
         let mut sources = Vec::with_capacity(edges.len());
-        for &(from, to, weight) in edges {
-            positive(weight, "edge weight")?;
-            largest_weight = largest_weight.max(weight);
+        for (&(from, to, _), duration) in edges.iter().zip(durations) {
             let source =
                 graph
                     .oriented_edge(from, to)
@@ -711,24 +780,7 @@ impl FlowAlongEdges {
                         from: from.to_owned(),
                         to: to.to_owned(),
                     })?;
-            sources.push((source, weight));
-        }
-        // Normalize before summing: proportionally equivalent large weights
-        // remain usable even when their unscaled sum would overflow.
-        let total: f64 = sources
-            .iter()
-            .map(|(_, weight)| weight / largest_weight)
-            .sum();
-        let mut end = 0.0;
-        for (_, weight) in &mut sources {
-            *weight = (*weight / largest_weight) / total;
-            let next = end + *weight;
-            if !next.is_finite() || next <= end {
-                return Err(GraphAnimationError::InvalidControl(
-                    "edge weight cannot occupy a timeline interval",
-                ));
-            }
-            end = next;
+            sources.push((source, duration));
         }
         let overlay = stage.add(VMobject::new());
         let mut pulses = Vec::with_capacity(edges.len());

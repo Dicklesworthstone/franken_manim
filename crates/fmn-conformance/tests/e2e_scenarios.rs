@@ -12796,6 +12796,34 @@ fn native_prepared_images_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         .with_counter("prepared_image_receipts", 2))
 }
 
+/// The enhanced Python graph front door uses Atlas schedules and the ordinary
+/// animation lifecycle, including exact-frame groups and authored callbacks.
+fn python_graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_graph_animations")?;
+    ctx.record_asset(
+        "python/network_graph.py",
+        include_bytes!("../../fmn-python/python/fmn_python/network_graph.py"),
+    );
+    ctx.record_asset(
+        "python/network_graph_acceptance.py",
+        include_bytes!("../../fmn-python/tests/network_graph.py"),
+    );
+    let (cases, frames, thread_replays) =
+        manimlib::run_portal_gauntlet_network_animations(&root)
+            .map_err(|error| fail(format!("Python graph animations: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.graph_animations")
+            .field("cases", cases)
+            .field("frames", frames)
+            .field("thread_replays", thread_replays)
+            .field("mode", "standard"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_graph_animation_cases", cases)
+        .with_counter("python_graph_animation_frames", frames)
+        .with_counter("python_graph_animation_thread_replays", thread_replays))
+}
+
 /// Partial reveals must never rasterize the move between separate contours.
 fn partial_reveal_contours_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn_library::style::Style;
@@ -19163,6 +19191,22 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![FieldPred::str_eq("immutable_input", "true")],
         )],
     ));
+    specs.push(spec(
+        "lifecycle.python_graph_animations.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_graph_animations_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_graph_animation_cases", 9),
+            counter_eq("python_graph_animation_frames", 78),
+            counter_eq("python_graph_animation_thread_replays", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.graph_animations",
+            vec![FieldPred::str_eq("mode", "standard")],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.graph_animations.v1",
@@ -20593,6 +20637,16 @@ fn native_prepared_images_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.native_prepared_images.v1")
         .expect("native prepared image scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_graph_animations_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_graph_animations.v1")
+        .expect("Python graph animation scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

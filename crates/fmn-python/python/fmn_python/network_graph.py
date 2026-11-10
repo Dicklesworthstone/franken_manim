@@ -6,6 +6,7 @@ layout arithmetic and its seeded RNG; existing mobjects own all drawn records.
 from __future__ import annotations
 
 from collections.abc import Mapping
+import copy
 import itertools
 import math
 
@@ -106,6 +107,37 @@ def _edge(a, b, coordinates, style, radius):
     result.move_to(coordinates[a] + np.array([0, radius, 0]))
     result.add(m.VectorizedPoint(coordinates[a]))
     return result
+
+
+def _animation_binding(graph):
+    if not isinstance(graph, NetworkGraph):
+        raise TypeError('network animation requires a NetworkGraph')
+    graph._check_structure()
+    return (graph.node_names, graph.edge_pairs, graph._label_names,
+            tuple(graph.submobjects), tuple(graph._vertex_group),
+            tuple(graph._edge_group), tuple(graph._label_group))
+
+
+def _check_animation_binding(graph, binding):
+    if _animation_binding(graph) != binding:
+        raise RuntimeError('network topology changed after animation construction')
+
+
+def _positive(value, name):
+    value = float(value)
+    if not math.isfinite(value) or value <= 0:
+        raise ValueError(name + ' must be finite and positive')
+    return value
+
+
+def _animation_options(run_time, options):
+    options = dict(options)
+    if run_time is not None:
+        options['run_time'] = _positive(run_time, 'network animation run_time')
+    elif options.get('run_time_frames') is None:
+        options['run_time'] = 2.0
+    options.setdefault('lag_ratio', 1.0)
+    return options
 
 
 class NetworkGraph(m.VGroup):
@@ -324,6 +356,14 @@ class NetworkGraph(m.VGroup):
         target.change_layout(layout, layout_scale=layout_scale, center=center, **(layout_config or {}))
         return NetworkLayoutAnimation(self, target, **animation_config)
 
+    def animate_traversal(self, root, *, order='breadth_first', **animation_config):
+        """Highlight reachable vertices in the native BFS or DFS visit order."""
+        return TraverseGraph(self, root, order=order, **animation_config)
+
+    def animate_flow(self, steps, **animation_config):
+        """Pulse along directed ``(source, destination, weight)`` edge visits."""
+        return FlowAlongEdges(self, steps, **animation_config)
+
 
 class NetworkLayoutAnimation(m.Transform):
     """The normal Transform lifecycle, plus post-interpolation edge geometry."""
@@ -338,3 +378,106 @@ class NetworkLayoutAnimation(m.Transform):
     def interpolate_mobject(self, alpha):
         super().interpolate_mobject(alpha)
         self.mobject.refresh_edges()
+
+
+class TraverseGraph(m.AnimationGroup):
+    """Highlight reachable vertices in native insertion-ordered BFS or DFS.
+
+    ``visit_order`` exposes the native schedule. Each visited vertex retains
+    the highlight after its interval; disconnected vertices and edges retain
+    their styles. The ordinary group clock, easing, exact-frame duration and
+    authored lifecycle hooks apply. Geometry is sampled by FadeToColor at
+    begin, so moving the graph after construction does not undo that motion.
+    """
+    def __init__(self, graph, root, *, order='breadth_first', color=m.YELLOW,
+                 run_time=None, **kwargs):
+        self._binding = _animation_binding(graph)
+        self.graph = graph
+        self.visit_order = tuple(m._network_graph_traversal(
+            list(graph.node_names), list(graph.edge_pairs), root, order))
+        vertices = graph.vertices
+        children = [m.FadeToColor(vertices[name], color, suspend_mobject_updating=True)
+                    for name in self.visit_order]
+        super().__init__(*children, group=graph, **_animation_options(run_time, kwargs))
+
+    def begin(self):
+        _check_animation_binding(self.graph, self._binding)
+        return super().begin()
+
+
+class FlowAlongEdges(m.AnimationGroup):
+    """Directed weighted pulses over existing edges without changing the graph.
+
+    ``steps`` contains ``(source, destination, positive_weight)`` triples.
+    Native normalization allocates proportional durations without summing
+    overflowing raw weights. Reversed edges, repeats and self-loops work.
+    Live edge paths and rendering uniforms are frozen at begin. The temporary
+    ``pulses`` are removed at cleanup; graph geometry, styles and membership
+    remain intact. ``durations`` exposes the normalized native intervals.
+    """
+    def __init__(self, graph, steps, *, color=m.YELLOW, stroke_width=5.0,
+                 time_width=.25, run_time=None, **kwargs):
+        self._binding = _animation_binding(graph)
+        prepared = []
+        for step in _bounded(steps, _MAX_EDGES, 'network flow steps'):
+            row = _bounded(step, 3, 'network flow step')
+            if len(row) != 3:
+                raise ValueError('a network flow step requires source, destination and weight')
+            prepared.append(tuple(row))
+        self.durations = tuple(m._network_graph_flow_durations(
+            list(graph.node_names), list(graph.edge_pairs), prepared))
+        self.stroke_width = _positive(stroke_width, 'network flow stroke_width')
+        if self.stroke_width > np.finfo(np.float32).max:
+            raise ValueError('network flow stroke_width must be f32-representable')
+        self.time_width = _positive(time_width, 'network flow time_width')
+        self.graph = graph
+        self.color = color
+        edges = graph.edges
+        self._sources = tuple((graph.get_edge(a, b), (a, b) not in edges)
+                              for a, b, _ in prepared)
+        self.pulses = tuple(m.VMobject() for _ in prepared)
+        # Validate appearance on detached overlays before publishing any scene
+        # mutation. The source graph is never a target of these animations.
+        for pulse in self.pulses:
+            pulse.set_fill(opacity=0).set_stroke(color, self.stroke_width, opacity=1)
+        children = [m.AnimationGroup(
+            m.ShowPassingFlash(pulse, time_width=self.time_width,
+                               rate_func=m.linear, remover=False),
+            m.VFadeIn(pulse, rate_func=m.there_and_back),
+            group=pulse, run_time=duration,
+        ) for pulse, duration in zip(self.pulses, self.durations)]
+        super().__init__(*children, group=m.VGroup(*self.pulses),
+                         **_animation_options(run_time, kwargs))
+
+    def begin(self):
+        _check_animation_binding(self.graph, self._binding)
+        scene = getattr(self, '_composition_scene', None)
+        if scene is None and self.mobject._is_bound():
+            scene = self.mobject._scene
+        if self.graph._is_bound() and scene is not None and self.graph._scene is not scene:
+            raise RuntimeError('network flow and its graph must belong to the same scene')
+        sources = [(np.array(edge.get_points(), copy=True),
+                    copy.deepcopy(dict(edge.uniforms)), reverse)
+                   for edge, reverse in self._sources]
+        for pulse, (points, uniforms, reverse) in zip(self.pulses, sources):
+            pulse.set_points(points)
+            if reverse:
+                pulse.reverse_points()
+            pulse.uniforms.update(uniforms)
+            pulse.set_fill(opacity=0).set_stroke(self.color, self.stroke_width, opacity=1)
+        return super().begin()
+
+    def clean_up_from_scene(self, scene):
+        super().clean_up_from_scene(scene)
+        scene.remove(self.mobject)
+
+    def abort(self):
+        try:
+            return super().abort()
+        finally:
+            # A failing authored hook may interrupt a pulse between samples.
+            # Release the shared lifecycle first, then leave no visible trace.
+            for pulse in self.pulses:
+                pulse.set_opacity(0)
+            if self.mobject._is_bound():
+                self.mobject._scene.remove(self.mobject)

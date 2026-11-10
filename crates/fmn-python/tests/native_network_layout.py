@@ -52,6 +52,33 @@ class NativeNetworkTests(unittest.TestCase):
                 ([],[],{'layout':'shell','shells':[['x']*1025]})]:
             with self.assertRaises(ValueError):m._network_graph_layout(nodes,edges,**options)
 
+    def test_traversal_uses_native_insertion_order_and_reachable_component(self):
+        nodes=['r','z','a','m','b','isolated']
+        edges=[('r','z'),('r','a'),('z','m'),('a','b'),('m','b'),('r','r')]
+        self.assertEqual(m._network_graph_traversal(nodes,edges,'r'),['r','z','a','m','b'])
+        self.assertEqual(m._network_graph_traversal(nodes,edges,'r','depth_first'),
+                         ['r','z','m','b','a'])
+        self.assertEqual(m._network_graph_traversal(nodes,edges,'isolated'),['isolated'])
+        for root,order in [('missing','breadth_first'),('r','random')]:
+            with self.assertRaises(ValueError):m._network_graph_traversal(nodes,edges,root,order)
+
+    def test_flow_weights_are_native_bounded_and_overflow_safe(self):
+        nodes=['a','b'];edges=[('a','b'),('a','a')]
+        for weights in ((1.,3.),(1e308,1.5e308)):
+            expected=[weight/max(weights) for weight in weights]
+            total=sum(expected);expected=[weight/total for weight in expected]
+            self.assertEqual(m._network_graph_flow_durations(nodes,edges,
+                [('b','a',weights[0]),('a','a',weights[1])]),expected)
+        bad=[[],[('a','b',0)],[('a','b',-1)],[('a','b',float('nan'))],
+             [('a','b',float('inf'))],[('a','absent',1)],
+             [('a','b',1),('a','b',1e-300)],[('a','b')]]
+        for steps in bad:
+            with self.assertRaises(ValueError):m._network_graph_flow_durations(nodes,edges,steps)
+        with self.assertRaises(ValueError):
+            m._network_graph_flow_durations(nodes,edges,[('a','b',1)]*8193)
+        with self.assertRaises(ValueError):
+            m._network_graph_traversal(['n']*1025,[],'n')
+
 
 def run_network_layout_acceptance():
     stream=io.StringIO()

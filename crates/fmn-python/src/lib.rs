@@ -38,6 +38,8 @@ pub use portal_console::{
     run_portal_gauntlet_reference_flags, run_portal_gauntlet_worker_receipt_shutdown,
 };
 #[cfg(feature = "gauntlet")]
+pub use portal_network::run_portal_gauntlet_network_animations;
+#[cfg(feature = "gauntlet")]
 pub use portal_ode::run_portal_gauntlet_ode_solution;
 #[cfg(feature = "gauntlet")]
 pub use portal_rates::run_portal_gauntlet_exact_rates;

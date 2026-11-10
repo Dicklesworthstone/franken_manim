@@ -10,7 +10,9 @@ import unittest
 
 import numpy as np
 import manimlib as m
-from fmn_python.network_graph import NetworkGraph, NetworkLayoutAnimation
+from fmn_python.network_graph import (
+    FlowAlongEdges, NetworkGraph, NetworkLayoutAnimation, TraverseGraph,
+)
 
 
 class NetworkSceneTests(unittest.TestCase):
@@ -301,11 +303,239 @@ class NetworkSceneTests(unittest.TestCase):
             self.assertEqual(outputs[0],outputs[1])
 
 
-def run_network_scene_acceptance():
+class NetworkAnimationTests(unittest.TestCase):
+    def graph(self):
+        return NetworkGraph(
+            ['r','z','a','m','b','isolated'],
+            [('r','z'),('r','a'),('z','m'),('a','b'),('m','b'),('r','r')],
+            layout='circular', layout_scale=2,
+        )
+
+    def test_traversal_follows_native_order_without_moving_graph(self):
+        for order,expected in [('breadth_first',('r','z','a','m','b')),
+                               ('depth_first',('r','z','m','b','a'))]:
+            graph=self.graph();scene=m.Scene();scene.add(graph)
+            animation=graph.animate_traversal('r',order=order,color=m.RED)
+            self.assertIsInstance(animation,TraverseGraph)
+            self.assertEqual(animation.visit_order,expected)
+            self.assertIs(animation.mobject,graph)
+            graph.shift((1,.5,0))
+            points=[obj.get_points().copy() for obj in graph.get_family()]
+            edges=[obj.data.copy() for obj in graph.edges.values()]
+            animation.begin()
+            for completed in range(len(expected)+1):
+                animation.interpolate(completed/len(expected))
+                for index,name in enumerate(expected):
+                    self.assertEqual(graph.vertices[name].get_color(),
+                                     m.RED if index<completed else m.BLUE_D)
+                self.assertEqual(graph.vertices['isolated'].get_color(),m.BLUE_D)
+                for obj,before in zip(graph.get_family(),points):
+                    np.testing.assert_array_equal(obj.get_points(),before)
+                for obj,before in zip(graph.edges.values(),edges):
+                    np.testing.assert_array_equal(obj.data,before)
+            animation.finish();animation.clean_up_from_scene(scene)
+            self.assertEqual(tuple(scene.mobjects),(scene.frame,graph))
+            self.assertFalse(vars(graph).get('_is_animating',False))
+
+    def test_isolated_and_invalid_traversals(self):
+        graph=self.graph()
+        self.assertEqual(graph.animate_traversal('isolated').visit_order,('isolated',))
+        for root,order in [('missing','breadth_first'),('r','random')]:
+            with self.assertRaises(ValueError):graph.animate_traversal(root,order=order)
+        with self.assertRaises(TypeError):TraverseGraph(m.VGroup(),'r')
+
+    def test_flow_has_native_proportional_durations_and_owned_overlay(self):
+        graph=self.graph();scene=m.Scene();scene.add(graph)
+        family=tuple(graph.get_family());before=[obj.data.copy() for obj in family]
+        flow=graph.animate_flow([('z','r',1),('r','r',3)],run_time=4)
+        self.assertIsInstance(flow,FlowAlongEdges)
+        self.assertEqual(flow.durations,(.25,.75))
+        self.assertEqual([(start,end) for _,start,end in flow.anims_with_timings],
+                         [(0,.25),(.25,1)])
+        self.assertEqual(tuple(flow.mobject),flow.pulses)
+        scene.add(flow.mobject);flow.begin()
+        for alpha in (0,.125,.25,.5,.875,1):
+            flow.interpolate(alpha)
+            for obj,data in zip(family,before):np.testing.assert_array_equal(obj.data,data)
+        flow.finish();flow.clean_up_from_scene(scene)
+        self.assertEqual(tuple(scene.mobjects),(scene.frame,graph))
+        self.assertEqual(tuple(graph.get_family()),family)
+        for obj,data in zip(family,before):np.testing.assert_array_equal(obj.data,data)
+
+    def test_flow_freezes_live_reversed_paths_and_source_uniforms_at_begin(self):
+        graph=NetworkGraph(['a','b'],[('a','b'),('a','a')],
+                           layout={'a':(-2,0),'b':(2,0)},layout_scale=1)
+        edge=graph.get_edge('a','b');edge.uniforms['is_fixed_in_frame']=.5
+        edge.set_stroke(m.RED,3);edge.add(m.Square(.1))
+        flow=graph.animate_flow([('b','a',1),('a','a',1)],time_width=.25)
+        graph.shift((0,1,0));scene=m.Scene();scene.add(graph,flow.mobject)
+        flow.begin();flow.interpolate(.25)
+        pulse=flow.pulses[0]
+        self.assertEqual(len(pulse),0)
+        self.assertEqual(len(flow.pulses[1]),0)
+        self.assertEqual(pulse.uniforms['is_fixed_in_frame'],.5)
+        self.assertGreater(pulse.get_start()[0],pulse.get_end()[0])
+        np.testing.assert_allclose([pulse.get_start()[1],pulse.get_end()[1]],[1,1],atol=1e-6)
+        graph.shift((0,2,0));flow.interpolate(.25)
+        np.testing.assert_allclose([pulse.get_start()[1],pulse.get_end()[1]],[1,1],atol=1e-6)
+        self.assertEqual(edge.get_stroke_color(),m.RED)
+        flow.finish();flow.clean_up_from_scene(scene)
+
+    def test_animation_refuses_stale_topology_without_replacing_members(self):
+        for factory in (lambda g:g.animate_traversal('r'),
+                        lambda g:g.animate_flow([('r','z',1)])):
+            graph=self.graph();scene=m.Scene();scene.add(graph)
+            animation=factory(graph);graph.remove_vertices('b')
+            family=tuple(graph.get_family());before=[obj.data.copy() for obj in family]
+            with self.assertRaisesRegex(RuntimeError,'topology changed'):animation.begin()
+            self.assertEqual(tuple(graph.get_family()),family)
+            for obj,data in zip(family,before):np.testing.assert_array_equal(obj.data,data)
+
+    def test_flow_validates_before_graph_mutation_and_bounds_iterables(self):
+        graph=self.graph();family=tuple(graph.get_family());before=[obj.data.copy() for obj in family]
+        invalid=[[],[('r','z',0)],[('r','z',-1)],[('r','z',float('nan'))],
+                 [('r','z',float('inf'))],[('r','isolated',1)],
+                 [('r','z',1),('r','z',1e-300)],[('r','z')]]
+        for steps in invalid:
+            with self.assertRaises(ValueError):graph.animate_flow(steps)
+        for option in ({'run_time':0},{'stroke_width':float('inf')},{'time_width':0},
+                       {'run_time':1,'run_time_frames':2}):
+            with self.assertRaises(ValueError):graph.animate_flow([('r','z',1)],**option)
+        count=[]
+        def visits():
+            for i in itertools.count():count.append(i);yield ('r','z',1)
+        with self.assertRaises(ValueError):graph.animate_flow(visits())
+        self.assertEqual(len(count),8193)
+        for obj,data in zip(family,before):np.testing.assert_array_equal(obj.data,data)
+
+    def test_flow_refuses_foreign_scene_and_failure_releases_overlay(self):
+        graph=self.graph();owner=m.Scene();owner.add(graph)
+        foreign=m.Scene();flow=graph.animate_flow([('r','z',1)])
+        with self.assertRaisesRegex(RuntimeError,'same scene'):
+            foreign.play(flow,run_time_frames=3)
+        self.assertIs(graph._scene,owner)
+        self.assertEqual(tuple(foreign.mobjects),(foreign.frame,))
+        error=RuntimeError('the authored flow callback failed')
+        class BrokenFlow(FlowAlongEdges):
+            def interpolate(self,alpha):
+                super().interpolate(alpha)
+                if alpha>.1:raise error
+        broken=BrokenFlow(graph,[('r','z',1)])
+        with self.assertRaises(RuntimeError) as caught:owner.play(broken,run_time_frames=4)
+        self.assertIs(caught.exception,error)
+        self.assertEqual(tuple(owner.mobjects),(owner.frame,graph))
+        for obj in graph.get_family():
+            self.assertFalse(vars(obj).get('_is_animating',False))
+            self.assertFalse(obj._is_updating_suspended())
+        owner.play(graph.animate_flow([('r','z',1)]),run_time_frames=4)
+        self.assertEqual(tuple(owner.mobjects),(owner.frame,graph))
+
+    def test_exact_frame_overrides_and_authored_hooks_use_normal_group_lifecycle(self):
+        graph=self.graph();scene=m.Scene();scene.add(graph);events=[]
+        class AuthoredTraversal(TraverseGraph):
+            def begin(self):events.append('begin');return super().begin()
+            def finish(self):events.append('finish');return super().finish()
+            def clean_up_from_scene(self,scene):
+                events.append('cleanup');return super().clean_up_from_scene(scene)
+        animation=AuthoredTraversal(graph,'r',run_time_frames=11)
+        scene.play(m.AnimationGroup(animation),run_time_frames=7)
+        self.assertEqual(scene.get_time(),7/scene._frame_rate())
+        self.assertEqual(events,['begin','finish','cleanup'])
+        self.assertEqual(animation.run_time_frames,11)
+        self.assertEqual(graph.vertices['b'].get_color(),m.YELLOW)
+
+    def test_flow_cleanup_inside_default_groups_keeps_surviving_siblings(self):
+        graph=self.graph();other=m.Square(.3);scene=m.Scene();scene.add(graph,other)
+        flow=graph.animate_flow([('r','z',1)],run_time_frames=3)
+        for compose,frames in ((m.AnimationGroup,3),(m.Succession,6)):
+            before=scene.get_time()
+            scene.play(compose(flow,m.FadeToColor(other,m.RED,run_time_frames=3)))
+            self.assertAlmostEqual(scene.get_time()-before,frames/scene._frame_rate(),places=14)
+            self.assertEqual(tuple(scene.mobjects),(scene.frame,graph,other))
+            self.assertFalse(any(pulse in root.get_family()
+                                 for root in scene.mobjects for pulse in flow.pulses))
+
+
+def _run_tests(test_cases):
     stream=io.StringIO()
     result=unittest.TextTestRunner(stream=stream,verbosity=2).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(NetworkSceneTests))
+        unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromTestCase(case)
+                           for case in test_cases))
     if not result.wasSuccessful():raise AssertionError(stream.getvalue())
     print(stream.getvalue())
+    return result.testsRun
 
-if __name__=='__main__':run_network_scene_acceptance()
+
+def run_network_scene_acceptance():
+    return _run_tests((NetworkSceneTests,NetworkAnimationTests))
+
+
+def _render_network_animation(directory,threads,kind,reproducible):
+    scene=m.Scene();events=[];fps=24
+    graph=NetworkGraph(['a','b','c','isolated'],
+                       [('a','b'),('b','c'),('a','a')],layout='circular')
+    family=tuple(graph.get_family())
+    source={'network_graph.py':Path(__file__).read_bytes()} if reproducible else None
+    if kind=='flow':
+        class AuthoredFlow(FlowAlongEdges):
+            def begin(self):events.append('begin');return super().begin()
+            def finish(self):events.append('finish');return super().finish()
+            def clean_up_from_scene(self,scene):
+                events.append('cleanup');return super().clean_up_from_scene(scene)
+        animation=AuthoredFlow(graph,[('b','a',1),('a','a',2),('b','c',1)],
+                               run_time_frames=12,stroke_width=9,time_width=.5)
+        duration=12
+    else:
+        animation=graph.animate_traversal('a',order='depth_first',run_time_frames=10)
+        duration=10
+    with scene.render_session(directory,format='png_sequence',resolution=(128,72),
+                              fps=fps,threads=threads,reproducible=reproducible,
+                              sources=source) as session:
+        scene.add(graph);scene.wait(1/fps)
+        before=[obj.data.copy() for obj in family]
+        group=m.AnimationGroup(animation) if kind=='flow' else \
+            m.AnimationGroup(animation,group=animation.mobject)
+        scene.play(group)
+        scene.wait(1/fps)
+    frames=[path.read_bytes() for path in sorted(directory.glob('*.png'))]
+    assert session.result.certified is reproducible
+    assert session.result.frame_count==len(frames)==duration+2
+    assert scene.get_time()==(duration+2)/fps
+    assert len(set(frames))>2, 'the animation did not change rendered pixels'
+    assert tuple(scene.mobjects)==(scene.frame,graph)
+    assert tuple(graph.get_family())==family
+    if kind=='flow':
+        assert events==['begin','finish','cleanup'],events
+        assert frames[0]==frames[-1], 'pulse cleanup did not restore graph pixels'
+        for obj,data in zip(family,before):np.testing.assert_array_equal(obj.data,data)
+    else:
+        assert frames[0]!=frames[-1]
+        assert animation.visit_order==('a','b','c')
+        for name in animation.visit_order:assert graph.vertices[name].get_color()==m.YELLOW
+        assert graph.vertices['isolated'].get_color()==m.BLUE_D
+    return frames
+
+
+def run_network_animation_acceptance(root=None,reproducible=True):
+    """Installed wheels certify these PNGs; embedded Gauntlet uses standard mode."""
+    cases=_run_tests((NetworkAnimationTests,))
+    if root is None:
+        with tempfile.TemporaryDirectory() as directory:
+            return _network_animation_replays(Path(directory),reproducible,cases)
+    return _network_animation_replays(Path(root),reproducible,cases)
+
+
+def _network_animation_replays(root,reproducible,cases):
+    frame_count=0;replays=0
+    for kind in ('flow','traversal'):
+        baseline=None
+        for threads in (1,4,16):
+            frames=_render_network_animation(root/f'{kind}-{threads}',threads,kind,reproducible)
+            if baseline is None:baseline=frames
+            else:assert frames==baseline,(kind,threads)
+            frame_count+=len(frames);replays+=1
+    return cases,frame_count,replays
+
+if __name__=='__main__':
+    run_network_scene_acceptance()
+    run_network_animation_acceptance()
