@@ -22,9 +22,9 @@ use ft_kernel_metal::compute::{Gateway, Grid, MathMode, Pipeline, SharedBuffer};
 #[cfg(feature = "synthetic-input")]
 pub use ft_kernel_metal::presentation::SyntheticInput;
 pub use ft_kernel_metal::presentation::{
-    ButtonSet, INPUT_QUEUE_CAPACITY, InputEvent, LogicalPoint, Modifiers, PointerButton,
-    PresentOutcome, PresentationError, PresentationPipelineInfo, PresentationState, ScrollUnit,
-    SurfaceMetrics,
+    ButtonSet, INPUT_QUEUE_CAPACITY, InputEvent, LogicalPoint, Modifiers, PixelDensity,
+    PointerButton, PresentOutcome, PresentationError, PresentationPipelineInfo, PresentationState,
+    ScrollUnit, SurfaceMetrics,
 };
 use ft_kernel_metal::presentation::{NativePresenter, PresentationConfig};
 
@@ -1354,6 +1354,22 @@ impl NativePreviewRenderer {
     /// reported logical size to follow it.
     pub fn set_resizable(&mut self, resizable: bool) -> Result<(), NativePreviewError> {
         self.presenter.set_resizable(resizable).map_err(Into::into)
+    }
+
+    /// Choose how rendered frames map to the window. At
+    /// [`PixelDensity::Backing`] presenting never resizes the window: render
+    /// each frame at [`SurfaceMetrics::backing_size`] for one pixel per
+    /// device pixel on a high-DPI screen.
+    pub fn set_pixel_density(&mut self, density: PixelDensity) -> Result<(), NativePreviewError> {
+        self.presenter
+            .set_pixel_density(density)
+            .map_err(Into::into)
+    }
+
+    /// How rendered frames map to the window.
+    #[must_use]
+    pub fn pixel_density(&self) -> PixelDensity {
+        self.presenter.pixel_density()
     }
 
     /// Post one real AppKit event for this window into the application
