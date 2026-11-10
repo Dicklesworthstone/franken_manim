@@ -633,6 +633,12 @@ pub struct DoctorSnapshot {
     pub logical_cores: u32,
     /// Physical CPU count.
     pub physical_cores: u32,
+    /// CPU-bandwidth ceiling expressed as whole workers, when detected.
+    pub cpu_quota: Option<u32>,
+    /// Logical CPU parallelism after affinity and bandwidth limits.
+    pub cpu_thread_budget: u32,
+    /// Effective physical/cgroup memory capacity, when detected.
+    pub effective_memory_bytes: Option<u64>,
     /// Hardware-supported SIMD tier.
     pub hardware_supported_tier: String,
     /// Tier compiled into this binary.
@@ -2112,6 +2118,9 @@ pub fn collect_doctor_snapshot(
         topology_source,
         logical_cores: topology.logical_cores(),
         physical_cores: topology.physical_cores,
+        cpu_quota: topology.cpu_quota,
+        cpu_thread_budget: topology.cpu_thread_budget(),
+        effective_memory_bytes: topology.total_memory_bytes,
         hardware_supported_tier: topology.simd_tier.name().to_owned(),
         active_compiled_tier: active_compiled_tier(),
         plan,
@@ -2483,13 +2492,19 @@ impl DoctorSnapshot {
             out,
             "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"topology\",\
              \"source\":{},\"source_detail\":{},\"logical_cores\":{},\
-             \"physical_cores\":{},\"hardware_supported_tier\":{},\
+             \"physical_cores\":{},\"cpu_quota\":{},\"cpu_thread_budget\":{},\
+             \"effective_memory_bytes\":{},\"hardware_supported_tier\":{},\
              \"active_compiled_tier\":{}}}",
             ROBOT_SCHEMA_VERSION,
             json_string(source),
             json_option(source_detail),
             self.logical_cores,
             self.physical_cores,
+            self.cpu_quota
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+            self.cpu_thread_budget,
+            self.effective_memory_bytes
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
             json_string(&self.hardware_supported_tier),
             json_string(self.active_compiled_tier),
         );
@@ -2653,6 +2668,21 @@ impl DoctorSnapshot {
             "cores: {} logical / {} physical",
             self.logical_cores, self.physical_cores
         );
+        let quota = self.cpu_quota.map_or_else(
+            || "no detected quota".to_owned(),
+            |quota| format!("quota ceiling: {quota}"),
+        );
+        let _ = writeln!(
+            out,
+            "CPU thread budget: {} ({quota})",
+            self.cpu_thread_budget
+        );
+        match self.effective_memory_bytes {
+            Some(bytes) => {
+                let _ = writeln!(out, "effective memory capacity: {bytes} bytes");
+            }
+            None => out.push_str("effective memory capacity: unknown\n"),
+        }
         let _ = writeln!(
             out,
             "SIMD: hardware {} / active build {}",
@@ -8172,15 +8202,17 @@ fn execute_batch(
     };
     let (topology, _) = detect_topology(fs.as_ref());
     let physical_cores = usize::try_from(topology.physical_cores).unwrap_or(usize::MAX);
-    let logical_cores = usize::try_from(topology.logical_cores()).unwrap_or(usize::MAX);
-    let default_scenes = physical_cores.max(1).min(jobs.len());
+    let cpu_budget = usize::try_from(topology.cpu_thread_budget())
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let default_scenes = physical_cores.max(1).min(cpu_budget).min(jobs.len());
     let max_scenes = command
         .max_scenes
         .unwrap_or(default_scenes)
         .min(jobs.len())
         .max(1);
     if command.render.common.threads.is_none() {
-        let per_scene_threads = (logical_cores / max_scenes).max(1);
+        let per_scene_threads = (cpu_budget / max_scenes).max(1);
         for job in &mut jobs {
             job.command.common.threads = Some(per_scene_threads);
         }
@@ -11759,6 +11791,61 @@ mod tests {
         assert!(!human.contains("cache maintenance"));
     }
 
+    #[cfg(target_os = "linux")]
+    fn constrained_linux_fs() -> Arc<VirtualFs> {
+        let fs = Arc::new(VirtualFs::new());
+        for (path, contents) in [
+            ("/sys/devices/system/cpu/online", "0-7\n"),
+            ("/proc/thread-self/status", "Cpus_allowed_list:\t2-7\n"),
+            ("/proc/meminfo", "MemTotal: 8388608 kB\n"),
+            ("/proc/self/cgroup", "0::/tenant/job\n"),
+            (
+                "/proc/self/mountinfo",
+                "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+            ),
+            ("/sys/fs/cgroup/tenant/cpu.max", "200000 100000\n"),
+            ("/sys/fs/cgroup/tenant/memory.max", "8388608\n"),
+            ("/sys/fs/cgroup/tenant/job/cpu.max", "max 100000\n"),
+            ("/sys/fs/cgroup/tenant/job/memory.max", "max\n"),
+        ] {
+            fs.insert(path, contents.as_bytes().to_vec());
+        }
+        fs
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_reports_effective_resources_and_the_constrained_plan() {
+        let fs = constrained_linux_fs();
+        let Invocation::Doctor(command) = parse_args(["doctor", "--robot"]).unwrap() else {
+            panic!("doctor command expected");
+        };
+        let snapshot = collect_doctor_snapshot(
+            fs.as_ref(),
+            &fmn_platform::process::ScriptedRunner::new(),
+            &no_ffmpeg_locator(),
+            &command,
+        )
+        .unwrap();
+        assert_eq!(snapshot.topology_source, TopologySource::LinuxSysfs);
+        assert_eq!(snapshot.logical_cores, 6);
+        assert_eq!(snapshot.physical_cores, 6);
+        assert_eq!(snapshot.cpu_quota, Some(2));
+        assert_eq!(snapshot.cpu_thread_budget, 2);
+        assert_eq!(snapshot.effective_memory_bytes, Some(8 * 1024 * 1024));
+        assert_eq!(snapshot.plan.render_threads, 2);
+        assert_eq!(snapshot.plan.frames_in_flight, 1);
+        let robot = snapshot.to_ndjson().unwrap();
+        let topology = robot.lines().next().unwrap();
+        assert!(topology.contains("\"cpu_quota\":2,"));
+        assert!(topology.contains("\"cpu_thread_budget\":2,"));
+        assert!(topology.contains("\"effective_memory_bytes\":8388608,"));
+        let human = snapshot.to_human();
+        assert!(human.contains("cores: 6 logical / 6 physical"));
+        assert!(human.contains("CPU thread budget: 2 (quota ceiling: 2)"));
+        assert!(human.contains("effective memory capacity: 8388608 bytes"));
+    }
+
     fn synthetic_doctor() -> DoctorSnapshot {
         DoctorSnapshot {
             topology_source: TopologySource::Fallback {
@@ -11766,6 +11853,9 @@ mod tests {
             },
             logical_cores: 8,
             physical_cores: 4,
+            cpu_quota: None,
+            cpu_thread_budget: 8,
+            effective_memory_bytes: None,
             hardware_supported_tier: "x86-64-v4".to_owned(),
             active_compiled_tier: "portable",
             plan: ExecutionPlanReport {
@@ -11821,7 +11911,7 @@ mod tests {
     #[test]
     fn doctor_robot_output_is_a_bit_locked_ndjson_schema() {
         let expected = concat!(
-            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"cpu_quota\":null,\"cpu_thread_budget\":8,\"effective_memory_bytes\":null,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"execution_plan\",\"determinism\":\"certified\",\"engine\":\"certified-cpu\",\"frames_in_flight\":2,\"scene_threads\":1,\"render_teams\":2,\"render_threads\":4,\"output_threads\":1,\"fine_tile\":16,\"macro_tile\":128,\"estimated_in_flight_bytes\":4096,\"output_format\":\"rgba8\",\"tuning_source\":\"certified-profile\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":null,\"usable_hardware_encoders\":[],\"hardware_encoder_probes\":[{\"encoder\":\"h264_nvenc\",\"available\":false,\"detail\":\"Cannot load libcuda.so.1\"}]}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"typeset_max_bytes\":1073741824,\"typeset_bytes\":512,\"warning\":null}\n",
@@ -12522,6 +12612,69 @@ mod tests {
         {
             assert_eq!(output.code, 4);
             assert!(output.stdout.contains("disabled in this binary"));
+        }
+    }
+
+    #[cfg(all(feature = "batch", target_os = "linux"))]
+    #[test]
+    fn batch_automatic_scheduling_respects_resource_limits_and_explicit_overrides() {
+        let scenes = ["circle_shift.v1", "rectangle_shift.v1", "triangle_shift.v1"];
+        let mut expected_frames = None;
+        for (flags, expected_scenes, expected_threads) in [
+            (&[][..], 2, 1),
+            (&["--max-scenes", "1"][..], 1, 2),
+            (&["--max-scenes", "3"][..], 3, 1),
+            (&["--max-scenes", "3", "--threads", "2"][..], 3, 2),
+        ] {
+            let fs = constrained_linux_fs();
+            let output = run_with_capabilities(
+                [
+                    "batch",
+                    "--robot",
+                    "--reproducible",
+                    "--format",
+                    "png_sequence",
+                    "--resolution",
+                    "32x24",
+                    "--fps",
+                    "8",
+                    "--video_dir",
+                    "/out",
+                ]
+                .into_iter()
+                .chain(flags.iter().copied())
+                .chain([BUILTIN_SCENE_SOURCE])
+                .chain(scenes),
+                fs_capability(&fs),
+                Arc::new(fmn_platform::process::ScriptedRunner::new()),
+                &no_ffmpeg_locator(),
+            );
+            assert_eq!(output.code, 0, "{flags:?}: {}", output.stdout);
+            assert!(output.stderr.is_empty());
+            let records = output.stdout.lines().collect::<Vec<_>>();
+            assert_eq!(records.len(), 4);
+            assert!(records[3].contains("\"kind\":\"batch\""));
+            assert!(records[3].contains("\"succeeded\":3,"));
+            assert!(records[3].contains(&format!("\"max_scenes\":{expected_scenes},")));
+            let mut frames = Vec::new();
+            for (scene, record) in scenes.into_iter().zip(&records) {
+                assert!(record.contains(&format!("\"scene\":\"{scene}\"")));
+                assert!(record.contains(&format!("\"render_threads\":{expected_threads},")));
+                for index in 0..3 {
+                    frames.push(
+                        fs.read(&PathBuf::from(format!("/out/{scene}/frame_{index:06}.png")))
+                            .expect("batch publishes every scheduled PNG"),
+                    );
+                }
+            }
+            if let Some(expected) = &expected_frames {
+                assert_eq!(
+                    expected, &frames,
+                    "batch scheduling changed certified PNG bytes"
+                );
+            } else {
+                expected_frames = Some(frames);
+            }
         }
     }
 

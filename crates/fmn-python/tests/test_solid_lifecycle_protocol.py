@@ -67,7 +67,8 @@ def portal():
         def shift(self, delta):
             for name in ('point', 'd_normal_point'):
                 self.data[name] += delta
-        def _build_parametric_surface(self, factory, function, ur, vr, shape, epsilon, nudge):
+        def _build_parametric_surface(self, factory, function, ur, vr, shape, epsilon, nudge,
+                                      allow_undefined=False):
             calls.append('generic')
             self.set_points([function(u, v) for u in np.linspace(*ur, shape[0])
                              for v in np.linspace(*vr, shape[1])])
@@ -188,6 +189,20 @@ class SolidLifecycleProtocol(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(surface.native_shape, (2, 2))
         np.testing.assert_array_equal(surface.get_points(), [(1, 2, 3)] * 4)
+
+    def test_authored_uv_forwards_undefined_sample_policy(self):
+        m, _ = portal()
+        original, policies = m.Mobject._build_parametric_surface, []
+        def record_policy(self, *args):
+            policies.append(args[-1])
+            return original(self, *args)
+        m.Mobject._build_parametric_surface = record_policy
+        class Authored(m.Torus):
+            def uv_func(self, u, v):
+                return u, v, 0.
+        for allow_undefined in (False, True):
+            Authored(resolution=(2, 2), allow_undefined=allow_undefined)
+        self.assertEqual(policies, [False, True])
 
     def test_initialization_preserves_authored_schema_and_child_identity(self):
         m, _ = portal()

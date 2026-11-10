@@ -91,3 +91,33 @@ identities — bit-identity holds *within* a tier across the certified matrix,
 and tier-vs-scalar equivalence is proven per tier by the engine-equivalence
 harness (`Tier::ALL` holds every tier to the scalar definition byte-for-byte;
 ADR-0013/ADR-0016).
+
+## Resource limits on Linux workers
+
+`fmn doctor` reports the resources available to the caller. On Linux, CPU
+counts and cache/NUMA memberships are restricted to the calling thread's
+allowed online CPUs. Cgroup v1/v2 limits are resolved through the process's
+actual controller mounts, including visible ancestor limits and separate
+thread CPU memberships.
+
+The `topology` record from `fmn doctor --robot` includes these additional
+version-1 fields:
+
+| Field | Meaning |
+|---|---|
+| `cpu_quota` | Detected CPU-bandwidth ceiling in whole workers, rounded up for fractional CPUs; `null` when no finite quota is detected. |
+| `cpu_thread_budget` | The smaller of the allowed logical CPU count and the detected quota. Render teams additionally prefer one worker per physical core. |
+| `effective_memory_bytes` | The smaller of physical RAM and applicable visible cgroup hard limits; `null` when unknown. This is capacity, not currently free memory. |
+
+These limits constrain render-team sizing, per-plan encoder fan-out, and the
+existing frame-queue memory estimate. They also form part of the autotuning
+identity: a profile measured with a different affinity, quota, or memory
+ceiling is not reused. Queue planning reserves one eighth of detected memory
+and permits at least one frame slot; it does not impose a whole-process RSS
+limit or account for every scene and codec allocation.
+
+`fmn batch` uses the effective CPU budget for automatic scene concurrency and
+divides that budget among each scene's render workers. Explicit `--max-scenes`
+and `--threads` choices remain available, with each render plan still bounded
+by the detected process quota. Render and output stages can overlap, so these
+worker counts are not a single aggregate limit on all active process threads.
