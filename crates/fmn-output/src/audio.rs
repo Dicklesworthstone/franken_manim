@@ -345,9 +345,9 @@ impl AudioDecoder {
     pub fn with_boundary_resolver(
         limits: AudioDecodeLimits,
         resolver: impl FnMut(AudioInputFormat) -> Result<Boundary, AudioDecodeError>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) -> Result<Self, AudioDecodeError> {
         let mut decoder = Self::new(limits, None)?;
         decoder.boundary_resolver = Some(Box::new(resolver));
@@ -355,16 +355,41 @@ impl AudioDecoder {
     }
 
     pub fn decode(&mut self, bytes: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
-        if bytes.len() as u64 > self.limits.max_input_bytes {
+        let limits = self.limits.clone();
+        self.decode_with_limits(bytes, &limits)
+    }
+
+    /// Decode one source under the remaining budget of a larger preparation.
+    ///
+    /// The supplied bounds can only tighten this decoder's construction-time
+    /// limits. They apply before native allocation and to external expansion,
+    /// without replacing the retained executable identity or process policy.
+    /// Each call is independent: a refused source does not consume a future
+    /// source's allowance or disable native WAV decoding.
+    ///
+    /// # Errors
+    /// The same typed refusals as [`Self::decode`], including a zero effective
+    /// budget. No external capability is resolved before source admission.
+    pub fn decode_with_limits(
+        &mut self,
+        bytes: &[u8],
+        remaining: &AudioDecodeLimits,
+    ) -> Result<DecodedAudio, AudioDecodeError> {
+        let limits = AudioDecodeLimits {
+            max_input_bytes: self.limits.max_input_bytes.min(remaining.max_input_bytes),
+            max_samples: self.limits.max_samples.min(remaining.max_samples),
+        };
+        limits.decoded_byte_limit()?;
+        if bytes.len() as u64 > limits.max_input_bytes {
             return Err(AudioDecodeError::InputOversized {
                 bytes: bytes.len() as u64,
-                max: self.limits.max_input_bytes,
+                max: limits.max_input_bytes,
             });
         }
         match decode_wav(
             bytes,
             &WavLimits {
-                max_samples: self.limits.max_samples,
+                max_samples: limits.max_samples,
             },
         ) {
             Ok(audio) => return decoded_audio(bytes, audio, AudioInputFormat::Wav, None),
@@ -416,6 +441,6 @@ impl AudioDecoder {
         self.boundary
             .as_ref()
             .ok_or(AudioDecodeError::TranscoderRequired { format })?
-            .decode_audio_bytes(bytes, format, &self.limits)
+            .decode_audio_bytes(bytes, format, &limits)
     }
 }

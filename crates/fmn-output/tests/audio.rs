@@ -1,6 +1,8 @@
 //! Audio ingestion tests: native-only contracts plus real compressed fixtures.
 
-use fmn_codec::{SampleFormat, WavLimits, encode_wav};
+#[cfg(feature = "exact-process")]
+use fmn_codec::WavLimits;
+use fmn_codec::{SampleFormat, encode_wav};
 use fmn_output::audio::{AudioDecodeError, AudioDecodeLimits, AudioDecoder, AudioInputFormat};
 
 #[test]
@@ -122,7 +124,9 @@ fn audio_deferred_boundary_runs_only_after_native_and_byte_admission() {
     ));
     assert!(matches!(
         decoder.decode(&encode_wav(1, 8, SampleFormat::F32, &[0.0; 17])),
-        Err(AudioDecodeError::Native(fmn_codec::WavError::TooLarge { .. })),
+        Err(AudioDecodeError::Native(
+            fmn_codec::WavError::TooLarge { .. }
+        )),
     ));
     assert!(matches!(
         decoder.decode(&[0; 1025]),
@@ -230,6 +234,78 @@ fn audio_budgets_and_damaged_pcm_do_not_fall_through_to_ffmpeg() {
 }
 
 #[test]
+fn audio_per_source_budgets_tighten_without_replacing_decoder_policy() {
+    use std::sync::{Arc, Mutex};
+
+    let calls = Arc::new(Mutex::new(0));
+    let observed = Arc::clone(&calls);
+    let mut decoder = AudioDecoder::with_boundary_resolver(
+        AudioDecodeLimits {
+            max_input_bytes: 256,
+            max_samples: 4,
+        },
+        move |_| {
+            *observed.lock().unwrap() += 1;
+            Err(AudioDecodeError::Capability("one retained resolver".into()))
+        },
+    )
+    .unwrap();
+    let wav = encode_wav(1, 8, SampleFormat::F32, &[0.25, -0.125]);
+    assert!(matches!(
+        decoder.decode_with_limits(
+            &wav,
+            &AudioDecodeLimits {
+                max_input_bytes: wav.len() as u64 - 1,
+                max_samples: 4,
+            },
+        ),
+        Err(AudioDecodeError::InputOversized { .. }),
+    ));
+    assert!(matches!(
+        decoder.decode_with_limits(
+            &wav,
+            &AudioDecodeLimits {
+                max_input_bytes: 256,
+                max_samples: 1,
+            },
+        ),
+        Err(AudioDecodeError::Native(
+            fmn_codec::WavError::TooLarge { .. }
+        )),
+    ));
+    assert!(matches!(
+        decoder.decode_with_limits(
+            b"fLaCsource",
+            &AudioDecodeLimits {
+                max_input_bytes: 256,
+                max_samples: 0,
+            },
+        ),
+        Err(AudioDecodeError::InvalidLimits),
+    ));
+    assert_eq!(*calls.lock().unwrap(), 0);
+    // Larger per-call allowances cannot relax the original policy.
+    assert!(matches!(
+        decoder.decode_with_limits(
+            &encode_wav(1, 8, SampleFormat::F32, &[0.25; 5]),
+            &AudioDecodeLimits::default(),
+        ),
+        Err(AudioDecodeError::Native(
+            fmn_codec::WavError::TooLarge { .. }
+        )),
+    ));
+    let later = decoder.decode(&wav).unwrap();
+    assert_eq!(later.audio.samples, [0.25, -0.125]);
+    assert!(later.report.invocation.is_none());
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(matches!(
+        decoder.decode_with_limits(b"fLaCsource", &AudioDecodeLimits::default()),
+        Err(AudioDecodeError::Capability(ref message)) if message == "one retained resolver",
+    ));
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[test]
 fn audio_rejects_unknown_channel_layouts_and_nonfinite_pcm() {
     let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None).unwrap();
     for wav in [
@@ -251,6 +327,7 @@ fn audio_rejects_unknown_channel_layouts_and_nonfinite_pcm() {
     assert_eq!(plus.report.pcm_digest, minus.report.pcm_digest);
 }
 
+#[cfg(feature = "exact-process")]
 #[test]
 fn audio_real_compressed_decode_keeps_pcm_and_records_exact_source() {
     let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {
@@ -357,6 +434,7 @@ fn audio_missing_decoder_does_not_disable_native_wav() {
     assert!(result.report.invocation.is_none());
 }
 
+#[cfg(feature = "exact-process")]
 #[test]
 fn audio_real_file_cap_is_not_a_successfully_truncated_soundtrack() {
     let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {
