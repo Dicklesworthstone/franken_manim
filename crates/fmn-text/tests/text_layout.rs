@@ -4,8 +4,9 @@
 //! indexing per the Reference's conventions, and the QuadPath output seam.
 
 use fmn_core::color::Srgb;
-use fmn_text::layout::BASELINE_SKIP;
-use fmn_text::maps::{SourceSelector, SourceStyle};
+use fmn_text::layout::{BASELINE_SKIP, layout_text_with_style};
+use fmn_text::maps::{ScopedStyle, SizeChange, SourceSelector, SourceStyle, StyleFields};
+use fmn_text::markup::{CharStyle, parse_markup_with_scoped_styles, plain_chars_with_scoped_styles};
 use fmn_text::{
     Align, FontBook, LineBreaker, StyleMaps, TextError, TextLayout, TextRequest, glyph_quadpath,
     layout_text,
@@ -632,6 +633,505 @@ fn range_gradients_restart_per_occurrence_and_respect_whole_entities() {
     assert_eq!(glyphs[2].span, (entity, entity + 5));
     assert_eq!(glyphs[2].face.family, "Computer Modern");
     assert_eq!(glyphs[2].fill, None);
+}
+
+// ── Inherited and source-scoped configuration ───────────────────────────
+
+#[test]
+fn configured_markup_scopes_keep_utf8_entity_and_glyph_source_identity() {
+    let book = book();
+    let source = "é<b>AB</b>&amp;";
+    let a = source.find('A').unwrap();
+    let end = source.find("</b>").unwrap() + 4;
+    let entity = source.find("&amp;").unwrap();
+    let green = Srgb::from_rgb8(0, 255, 0);
+    let red = Srgb::from_rgb8(255, 0, 0);
+    let blue = Srgb::from_rgb8(0, 0, 255);
+    let mut inherited = CharStyle::base();
+    StyleFields {
+        color: Some(green),
+        family: Some("IBM Plex Sans"),
+        italic: Some(true),
+        ..StyleFields::default()
+    }
+    .apply_to(&mut inherited)
+    .unwrap();
+    let scopes = [
+        // A narrower scope wins even when it is declared before its parent.
+        ScopedStyle {
+            range: (a, a + 1),
+            fields: StyleFields {
+                color: Some(blue),
+                bold: Some(false),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (2, end),
+            fields: StyleFields {
+                color: Some(red),
+                bold: Some(false),
+                ..StyleFields::default()
+            },
+        },
+        // An entity's source span must be wholly covered to select it.
+        ScopedStyle {
+            range: (entity + 1, entity + 4),
+            fields: StyleFields {
+                bold: Some(true),
+                color: Some(blue),
+                ..StyleFields::default()
+            },
+        },
+    ];
+    let mut request = TextRequest::markup(source);
+    request.maps.scoped_styles = &scopes;
+    let layout = layout_text_with_style(&book, &request, &inherited).unwrap();
+    assert_eq!(
+        layout.glyphs.iter().map(|glyph| glyph.ch).collect::<String>(),
+        "éAB&"
+    );
+    assert_eq!(
+        layout.glyphs.iter().map(|glyph| glyph.span).collect::<Vec<_>>(),
+        [(0, 2), (a, a + 1), (a + 1, a + 2), (entity, entity + 5)]
+    );
+    assert_eq!(layout.select((a, a + 1)), [1]);
+    assert!(layout.glyphs.iter().all(|glyph| glyph.face.key.italic));
+    assert!(
+        layout
+            .glyphs
+            .iter()
+            .all(|glyph| glyph.face.family == "IBM Plex Sans")
+    );
+    assert!(!layout.glyphs[1].face.key.bold, "content scope overrides <b>");
+    assert!(layout.glyphs[2].face.key.bold, "<b> overrides element scope");
+    assert!(!layout.glyphs[3].face.key.bold, "partial entity is untouched");
+    assert_eq!(
+        layout.glyphs.iter().map(|glyph| glyph.fill).collect::<Vec<_>>(),
+        [Some(green), Some(blue), Some(red), Some(green)]
+    );
+}
+
+#[test]
+fn nested_scopes_precede_equal_range_declaration_order() {
+    let book = book();
+    let red = Srgb::from_rgb8(255, 0, 0);
+    let blue = Srgb::from_rgb8(0, 0, 255);
+    let green = Srgb::from_rgb8(0, 255, 0);
+    let scopes = [
+        ScopedStyle {
+            range: (2, 4),
+            fields: StyleFields {
+                color: Some(blue),
+                bold: Some(false),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (0, 6),
+            fields: StyleFields {
+                color: Some(red),
+                bold: Some(true),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (2, 4),
+            fields: StyleFields {
+                color: Some(green),
+                italic: Some(true),
+                ..StyleFields::default()
+            },
+        },
+    ];
+    let mut request = TextRequest::plain("abcdef");
+    request.maps.scoped_styles = &scopes;
+    let layout = lay(&book, &request);
+    for (index, glyph) in layout.glyphs.iter().enumerate() {
+        let inner = (2..4).contains(&index);
+        assert_eq!(glyph.face.key.bold, !inner);
+        assert_eq!(glyph.face.key.italic, inner);
+        assert_eq!(glyph.fill, Some(if inner { green } else { red }));
+    }
+}
+
+#[test]
+fn crossing_scopes_compose_only_supplied_fields_in_authored_order() {
+    let red = Srgb::from_rgb8(255, 0, 0);
+    let blue = Srgb::from_rgb8(0, 0, 255);
+    let scopes = [
+        ScopedStyle {
+            range: (0, 4),
+            fields: StyleFields {
+                color: Some(red),
+                bold: Some(true),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (2, 6),
+            fields: StyleFields {
+                color: Some(blue),
+                italic: Some(true),
+                ..StyleFields::default()
+            },
+        },
+    ];
+    let forward = plain_chars_with_scoped_styles("abcdef", &CharStyle::base(), &scopes).unwrap();
+    let reversed = [scopes[1].clone(), scopes[0].clone()];
+    let backward = plain_chars_with_scoped_styles("abcdef", &CharStyle::base(), &reversed).unwrap();
+    for (index, (first, second)) in forward.iter().zip(&backward).enumerate() {
+        assert_eq!(first.style.bold, index < 4);
+        assert_eq!(first.style.italic, index >= 2);
+        assert_eq!(second.style.bold, first.style.bold);
+        assert_eq!(second.style.italic, first.style.italic);
+        assert_eq!(first.style.color, Some(if index < 2 { red } else { blue }));
+        assert_eq!(second.style.color, Some(if index < 4 { red } else { blue }));
+        assert_eq!(first.span, (index, index + 1));
+    }
+}
+
+#[test]
+fn absolute_and_relative_sizes_compose_with_inherited_and_inline_sizes() {
+    let book = book();
+    let mut inherited = CharStyle::base();
+    StyleFields {
+        size: Some(SizeChange::Absolute(1.5)),
+        ..StyleFields::default()
+    }
+    .apply_to(&mut inherited)
+    .unwrap();
+    let scopes = [
+        ScopedStyle {
+            range: (2, 3),
+            fields: StyleFields {
+                size: Some(SizeChange::Relative(0.5)),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (1, 3),
+            fields: StyleFields {
+                size: Some(SizeChange::Absolute(0.75)),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (0, 4),
+            fields: StyleFields {
+                size: Some(SizeChange::Relative(2.0)),
+                ..StyleFields::default()
+            },
+        },
+    ];
+    let mut request = TextRequest::plain("abcd");
+    request.maps.scoped_styles = &scopes;
+    let layout = layout_text_with_style(&book, &request, &inherited).unwrap();
+    for (glyph, expected) in layout.glyphs.iter().zip([3.0, 0.75, 0.375, 3.0]) {
+        assert!((glyph.size - expected).abs() < EPS);
+    }
+
+    let source = "<big>A<small>B</small>C</big>D";
+    let b = source.find('B').unwrap();
+    let end = source.find("</big>").unwrap() + 6;
+    let scopes = [
+        ScopedStyle {
+            range: (b, b + 1),
+            fields: StyleFields {
+                size: Some(SizeChange::Relative(3.0)),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (0, end),
+            fields: StyleFields {
+                size: Some(SizeChange::Absolute(2.0)),
+                ..StyleFields::default()
+            },
+        },
+    ];
+    let mut request = TextRequest::markup(source);
+    request.maps.scoped_styles = &scopes;
+    let layout = layout_text_with_style(&book, &request, &inherited).unwrap();
+    for (glyph, expected) in layout.glyphs.iter().zip([2.4, 6.0, 2.4, 1.5]) {
+        assert!((glyph.size - expected).abs() < EPS);
+    }
+}
+
+#[test]
+fn enclosing_absolute_size_is_resolved_before_inline_relative_size() {
+    let source = "<big>A</big>";
+    let base = CharStyle {
+        size_factor: f64::MAX,
+        ..CharStyle::base()
+    };
+    let scopes = [ScopedStyle {
+        range: (0, source.len()),
+        fields: StyleFields {
+            size: Some(SizeChange::Absolute(1.0)),
+            ..StyleFields::default()
+        },
+    }];
+    let chars = parse_markup_with_scoped_styles(source, &base, &scopes).unwrap();
+    assert_eq!(chars.len(), 1);
+    assert!((chars[0].style.size_factor - 1.2).abs() < EPS);
+    assert_eq!(chars[0].span, (5, 6));
+}
+
+#[test]
+fn scoped_sizes_scale_real_glyph_paths_and_both_decorations() {
+    let book = book();
+    let blue = Srgb::from_rgb8(0, 0, 255);
+    let scopes = [ScopedStyle {
+        range: (1, 2),
+        fields: StyleFields {
+            color: Some(blue),
+            size: Some(SizeChange::Absolute(2.0)),
+            underline: Some(true),
+            strike: Some(true),
+            ..StyleFields::default()
+        },
+    }];
+    let mut request = TextRequest::plain("AA");
+    request.maps.scoped_styles = &scopes;
+    let layout = lay(&book, &request);
+    let first = &layout.glyphs[0];
+    let second = &layout.glyphs[1];
+    let first_path = glyph_quadpath(&book, first).unwrap();
+    let second_path = glyph_quadpath(&book, second).unwrap();
+    assert_eq!(first_path.num_points(), second_path.num_points());
+    assert!(first_path.has_points());
+    for (a, b) in first_path.points().iter().zip(second_path.points()) {
+        assert!((b[0] - second.x - 2.0 * (a[0] - first.x)).abs() < EPS);
+        assert!((b[1] - second.y - 2.0 * (a[1] - first.y)).abs() < EPS);
+    }
+    assert_eq!(layout.decorations.len(), 2);
+    assert!(layout.decorations.iter().any(|line| line.y < second.y));
+    assert!(layout.decorations.iter().any(|line| line.y > second.y));
+    let reference = lay(&book, &TextRequest::markup("<u><s>A</s></u>"));
+    assert_eq!(reference.decorations.len(), 2);
+    for (line, unscaled) in layout.decorations.iter().zip(&reference.decorations) {
+        assert_eq!(line.span, (1, 2));
+        assert_eq!(line.fill, Some(blue));
+        assert!((line.x - second.x).abs() < EPS);
+        assert!((line.width - 2.0 * unscaled.width).abs() < EPS);
+        assert!((line.height - 2.0 * unscaled.height).abs() < EPS);
+        assert!((line.y - second.y - 2.0 * unscaled.y).abs() < EPS);
+    }
+}
+
+#[test]
+fn decorations_split_at_configured_color_size_and_script_boundaries() {
+    let book = book();
+    let red = Srgb::from_rgb8(255, 0, 0);
+    let blue = Srgb::from_rgb8(0, 0, 255);
+    let scopes = [
+        ScopedStyle {
+            range: (0, 3),
+            fields: StyleFields {
+                color: Some(red),
+                underline: Some(true),
+                strike: Some(true),
+                ..StyleFields::default()
+            },
+        },
+        ScopedStyle {
+            range: (1, 2),
+            fields: StyleFields {
+                color: Some(blue),
+                size: Some(SizeChange::Absolute(2.0)),
+                ..StyleFields::default()
+            },
+        },
+    ];
+    let mut request = TextRequest::plain("AAA");
+    request.maps.scoped_styles = &scopes;
+    let layout = lay(&book, &request);
+    assert_eq!(layout.decorations.len(), 6);
+    for index in 0..3 {
+        let lines: Vec<_> = layout
+            .decorations
+            .iter()
+            .filter(|line| line.span == (index, index + 1))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert!(
+            lines
+                .iter()
+                .all(|line| line.fill == Some(if index == 1 { blue } else { red }))
+        );
+    }
+    let script = lay(&book, &TextRequest::markup("<u>A<sup>A</sup>A</u>"));
+    assert_eq!(script.decorations.len(), 3);
+    let raised = &script.glyphs[1];
+    let raised_line = script
+        .decorations
+        .iter()
+        .find(|line| line.span == raised.span)
+        .unwrap();
+    let baseline_line = &script.decorations[0];
+    assert!((raised_line.y - raised.y - baseline_line.y * raised.size).abs() < EPS);
+    assert!((raised_line.height - baseline_line.height * raised.size).abs() < EPS);
+}
+
+#[test]
+fn local_false_flags_can_remove_inherited_and_inline_decorations() {
+    let book = book();
+    let source = "<u><s>AB</s></u>C";
+    let a = source.find('A').unwrap();
+    let scopes = [ScopedStyle {
+        range: (a, a + 1),
+        fields: StyleFields {
+            underline: Some(false),
+            strike: Some(false),
+            ..StyleFields::default()
+        },
+    }];
+    let mut request = TextRequest::markup(source);
+    request.maps.scoped_styles = &scopes;
+    let layout = lay(&book, &request);
+    assert_eq!(layout.decorations.len(), 2);
+    assert!(
+        layout
+            .decorations
+            .iter()
+            .all(|line| line.span == (a + 1, a + 2))
+    );
+}
+
+#[test]
+fn existing_literal_and_source_maps_still_override_configured_scopes() {
+    let book = book();
+    let red = Srgb::from_rgb8(255, 0, 0);
+    let blue = Srgb::from_rgb8(0, 0, 255);
+    let scopes = [ScopedStyle {
+        range: (0, 9),
+        fields: StyleFields {
+            color: Some(blue),
+            bold: Some(false),
+            ..StyleFields::default()
+        },
+    }];
+    let weights = [("A", true)];
+    let colors = [("AB", red)];
+    let styles = [SourceStyle {
+        bold: Some(false),
+        family: Some("IBM Plex Sans"),
+        ..SourceStyle::new(SourceSelector::Literal("B"))
+    }];
+    let mut request = TextRequest::markup("<b>AB</b>");
+    request.maps = StyleMaps {
+        scoped_styles: &scopes,
+        t2c: &colors,
+        t2w: &weights,
+        source_styles: &styles,
+        ..StyleMaps::default()
+    };
+    let layout = lay(&book, &request);
+    assert!(layout.glyphs[0].face.key.bold);
+    assert!(!layout.glyphs[1].face.key.bold);
+    assert_eq!(layout.glyphs[1].face.family, "IBM Plex Sans");
+    assert!(layout.glyphs.iter().all(|glyph| glyph.fill == Some(red)));
+}
+
+#[test]
+fn malformed_scopes_and_invalid_sizes_return_named_errors_without_mutation() {
+    let source = "éA";
+    for range in [(1, 2), (0, 1), (2, 1), (0, 4), (0, usize::MAX)] {
+        let scopes = [ScopedStyle {
+            range,
+            fields: StyleFields::default(),
+        }];
+        let error = plain_chars_with_scoped_styles(source, &CharStyle::base(), &scopes)
+            .unwrap_err();
+        assert!(matches!(error, TextError::Style { .. }));
+        assert!(error.to_string().contains("UTF-8 source byte range"));
+    }
+    for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -1.0] {
+        let invalid_base = CharStyle {
+            size_factor: value,
+            ..CharStyle::base()
+        };
+        assert!(plain_chars_with_scoped_styles("A", &invalid_base, &[]).is_err());
+        assert!(parse_markup_with_scoped_styles("<b>A</b>", &invalid_base, &[]).is_err());
+        for size in [SizeChange::Absolute(value), SizeChange::Relative(value)] {
+            let fields = StyleFields {
+                bold: Some(true),
+                size: Some(size),
+                ..StyleFields::default()
+            };
+            let mut base = CharStyle::base();
+            let error = fields.apply_to(&mut base).unwrap_err();
+            assert!(matches!(error, TextError::Style { .. }));
+            assert_eq!(base, CharStyle::base(), "validation must precede mutation");
+        }
+    }
+    for (inherited, factor) in [(f64::MAX, 2.0), (f64::MIN_POSITIVE, f64::MIN_POSITIVE)] {
+        let mut base = CharStyle {
+            size_factor: inherited,
+            ..CharStyle::base()
+        };
+        let before = base.clone();
+        let fields = StyleFields {
+            color: Some(Srgb::from_rgb8(255, 0, 0)),
+            size: Some(SizeChange::Relative(factor)),
+            ..StyleFields::default()
+        };
+        assert!(fields.apply_to(&mut base).is_err());
+        assert_eq!(base, before);
+    }
+}
+
+#[test]
+fn scoped_style_resource_budgets_cover_layers_markup_and_range_work() {
+    use fmn_text::maps::{MAX_SCOPED_STYLE_LAYERS, MAX_SCOPED_STYLE_WORK};
+
+    let empty = ScopedStyle {
+        range: (0, 0),
+        fields: StyleFields::default(),
+    };
+    let too_many = vec![empty; MAX_SCOPED_STYLE_LAYERS + 1];
+    let error = plain_chars_with_scoped_styles("", &CharStyle::base(), &too_many).unwrap_err();
+    assert!(error.to_string().contains("4096-layer limit"));
+
+    let source = "<b>A</b>".repeat(MAX_SCOPED_STYLE_LAYERS);
+    let scopes = [ScopedStyle {
+        range: (0, source.len()),
+        fields: StyleFields::default(),
+    }];
+    let error = parse_markup_with_scoped_styles(&source, &CharStyle::base(), &scopes).unwrap_err();
+    assert!(error.to_string().contains("4096-layer limit"));
+
+    let source = "a".repeat(MAX_SCOPED_STYLE_WORK / 64 + 1);
+    let scopes = vec![
+        ScopedStyle {
+            range: (0, source.len()),
+            fields: StyleFields::default(),
+        };
+        64
+    ];
+    let error = plain_chars_with_scoped_styles(&source, &CharStyle::base(), &scopes).unwrap_err();
+    assert!(error.to_string().contains("16777216-byte-work limit"));
+
+    let too_long = "F".repeat(fmn_text::markup::MAX_ATTR_LEN + 1);
+    assert!(
+        StyleFields {
+            family: Some(&too_long),
+            ..StyleFields::default()
+        }
+        .validate()
+        .is_err()
+    );
+    for red in [f64::NAN, -0.1, 1.1] {
+        assert!(
+            StyleFields {
+                color: Some(Srgb { r: red, g: 0.0, b: 0.0 }),
+                ..StyleFields::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
 }
 
 // ── Submobject indexing (the Reference's conventions) ───────────────────

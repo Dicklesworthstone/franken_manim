@@ -8,9 +8,179 @@
 //! within one kind, later entries win (map-literal order), matching the
 //! Reference's dict-update behavior.
 
-use crate::markup::StyledChar;
+use crate::error::TextError;
+use crate::markup::{CharStyle, StyledChar};
 use fmn_core::color::Srgb;
 use std::borrow::Cow;
+
+/// Maximum configured and inline style layers in one scoped-style request.
+pub const MAX_SCOPED_STYLE_LAYERS: usize = 4096;
+/// Maximum sum of covered source bytes across configured and inline layers.
+pub const MAX_SCOPED_STYLE_WORK: usize = 16_777_216;
+
+/// A size change within the inherited style cascade.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SizeChange {
+    /// Set the size in unstyled request ems. An authoring front door converts
+    /// points to this ratio against the original constructor font size.
+    Absolute(f64),
+    /// Multiply the size inherited from enclosing configurations and tags.
+    Relative(f64),
+}
+
+/// Configured fields inherited by markup or by a source-range scope.
+///
+/// An absent field preserves its inherited value. Explicit `false` restores
+/// normal weight/slant or removes a decoration. Size changes are positive,
+/// finite ratios; a relative size composes with its enclosing size.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct StyleFields<'a> {
+    /// Fill color in sRGB, replacing any inherited gradient.
+    pub color: Option<Srgb>,
+    /// Requested font family; shaping reports unavailable families by name.
+    pub family: Option<&'a str>,
+    /// Bold or normal weight.
+    pub bold: Option<bool>,
+    /// Italic or normal slant.
+    pub italic: Option<bool>,
+    /// Underline enabled or disabled.
+    pub underline: Option<bool>,
+    /// Strikethrough enabled or disabled.
+    pub strike: Option<bool>,
+    /// Absolute or inherited-relative font size.
+    pub size: Option<SizeChange>,
+}
+
+impl StyleFields<'_> {
+    /// Validate the bounded fields independently of a source range.
+    ///
+    /// # Errors
+    /// Rejects nonfinite/out-of-range colors, oversized family names, and
+    /// nonpositive or nonfinite size changes.
+    pub fn validate(&self) -> Result<(), TextError> {
+        if let Some(color) = self.color
+            && [color.r, color.g, color.b]
+                .iter()
+                .any(|component| !component.is_finite() || !(0.0..=1.0).contains(component))
+        {
+            return Err(style_error("color components must be finite values in [0, 1]"));
+        }
+        if let Some(family) = self.family
+            && family.len() > crate::markup::MAX_ATTR_LEN
+        {
+            return Err(style_error("font family exceeds the 256-byte limit"));
+        }
+        if let Some(SizeChange::Absolute(size) | SizeChange::Relative(size)) = self.size
+            && (!size.is_finite() || size <= 0.0)
+        {
+            return Err(style_error("font size must be finite and positive"));
+        }
+        Ok(())
+    }
+
+    /// Apply a configured global style before parsing markup.
+    ///
+    /// This is also the shared operation for local scopes. Validation and
+    /// size composition finish before any inherited field is changed.
+    ///
+    /// # Errors
+    /// Returns the field validation error or a nonfinite/nonpositive result
+    /// from composing a relative size with its inherited size.
+    pub fn apply_to(&self, style: &mut CharStyle) -> Result<(), TextError> {
+        self.validate()?;
+        self.apply_validated(style)
+    }
+
+    pub(crate) fn apply_validated(&self, style: &mut CharStyle) -> Result<(), TextError> {
+        let size = match self.size {
+            Some(SizeChange::Absolute(size)) => size,
+            Some(SizeChange::Relative(factor)) => style.size_factor * factor,
+            None => style.size_factor,
+        };
+        if !size.is_finite() || size <= 0.0 {
+            return Err(style_error("composed font size must be finite and positive"));
+        }
+        if let Some(color) = self.color {
+            style.color = Some(color);
+            style.gradient = None;
+        }
+        if let Some(family) = self.family {
+            style.family = Some(family.to_owned());
+        }
+        if let Some(bold) = self.bold {
+            style.bold = bold;
+        }
+        if let Some(italic) = self.italic {
+            style.italic = italic;
+        }
+        if let Some(underline) = self.underline {
+            style.underline = underline;
+        }
+        if let Some(strike) = self.strike {
+            style.strike = strike;
+        }
+        style.size_factor = size;
+        Ok(())
+    }
+}
+
+/// A configured style scope over original UTF-8 source bytes.
+///
+/// Containing scopes apply before contained scopes regardless of declaration
+/// order. Equal ranges apply in declaration order. Partial overlaps compose
+/// field by field in stable declaration order after their containing scopes.
+/// Inline tags participate with their whole element spans: a configuration
+/// covering `<b>A</b>` is inherited by `<b>`, whereas one covering only `A`
+/// overrides it. Existing `t2*` and [`SourceStyle`] maps remain later overrides.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ScopedStyle<'a> {
+    /// Half-open original-source byte range, on UTF-8 character boundaries.
+    pub range: (usize, usize),
+    /// Fields applied within the scope.
+    pub fields: StyleFields<'a>,
+}
+
+pub(crate) fn style_error(what: impl Into<String>) -> TextError {
+    TextError::Style { what: what.into() }
+}
+
+pub(crate) fn validate_inherited_style(base: &CharStyle) -> Result<(), TextError> {
+    StyleFields {
+        color: base.color,
+        family: base.family.as_deref(),
+        size: Some(SizeChange::Absolute(base.size_factor)),
+        ..StyleFields::default()
+    }
+    .validate()
+}
+
+pub(crate) fn validate_scopes(
+    source: &str,
+    scopes: &[ScopedStyle<'_>],
+) -> Result<usize, TextError> {
+    if scopes.len() > MAX_SCOPED_STYLE_LAYERS {
+        return Err(style_error("scoped styles exceed the 4096-layer limit"));
+    }
+    let mut work = 0usize;
+    for (index, scope) in scopes.iter().enumerate() {
+        let (start, end) = scope.range;
+        if start > end
+            || end > source.len()
+            || !source.is_char_boundary(start)
+            || !source.is_char_boundary(end)
+        {
+            return Err(style_error(format!(
+                "scope {index} must be a valid UTF-8 source byte range"
+            )));
+        }
+        scope.fields.validate()?;
+        work = work.saturating_add((end - start).max(1));
+        if work > MAX_SCOPED_STYLE_WORK {
+            return Err(style_error("scoped styles exceed the 16777216-byte-work limit"));
+        }
+    }
+    Ok(work)
+}
 
 /// A literal source key or already-resolved UTF-8 source ranges.
 ///
@@ -72,6 +242,9 @@ impl<'a> SourceStyle<'a> {
 /// The five literal maps and ordered source-selector styles.
 #[derive(Clone, Debug, Default)]
 pub struct StyleMaps<'a> {
+    /// Configured range scopes inherited alongside markup, before all of the
+    /// literal and source-selector maps below. Source text is never rewritten.
+    pub scoped_styles: &'a [ScopedStyle<'a>],
     /// text→color.
     pub t2c: &'a [(&'a str, Srgb)],
     /// text→font family (resolved against the book at shaping; a miss is
@@ -98,6 +271,7 @@ impl StyleMaps<'_> {
             && self.t2s.is_empty()
             && self.t2w.is_empty()
             && self.source_styles.is_empty()
+            && self.scoped_styles.is_empty()
     }
 }
 

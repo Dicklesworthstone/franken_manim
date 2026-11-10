@@ -3,6 +3,11 @@
 /// Why a text request failed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TextError {
+    /// An invalid or over-budget configured text style.
+    Style {
+        /// The rejected field, range, or resource limit.
+        what: String,
+    },
     /// Malformed markup, with one-based line/column and what went wrong.
     Markup {
         /// What is wrong, in one clause.
@@ -55,6 +60,7 @@ pub enum TextError {
 impl core::fmt::Display for TextError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::Style { what } => write!(f, "invalid text style: {what}"),
             Self::Markup { what, line, col } => {
                 write!(f, "malformed markup at {line}:{col}: {what}")
             }

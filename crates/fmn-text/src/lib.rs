@@ -42,7 +42,7 @@ pub use font::{
 pub use layout::{
     Align, Decoration, Line, LineBreaker, PlacedTextGlyph, TextLayout, TextRequest, layout_text,
 };
-pub use maps::StyleMaps;
+pub use maps::{ScopedStyle, SizeChange, StyleFields, StyleMaps};
 
 use fmn_core::types::Vec3;
 use fmn_geom::QuadPath;
