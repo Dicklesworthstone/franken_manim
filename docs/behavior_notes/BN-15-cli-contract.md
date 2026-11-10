@@ -86,6 +86,52 @@ render. Single, batch, parallel, job-file and subdivided renders compute the nam
 once, so receipts, checkpoints and `--resume` name it the same. An explicit
 `--file_name` or `--output` still wins.
 
+### Live SceneFileWriter inserts
+
+The existing `scene.file_writer.begin_insert()` and `end_insert()` controls
+record a standalone clip from a populated scene through the native
+`RecordingSession` owner. The Reference's insert is a separate numbered file,
+`MOVIE_DIRECTORY/inserts/MOVIE_STEM_INDEX.EXT`; the original movie's path and
+contents remain intact. Naming starts at zero and chooses the first unused
+slot, including gaps. Path queries create no directories. Files, directories,
+and dangling symlinks occupy a slot; the search is bounded to 10,000 slots,
+and native no-clobber publication rejects a competing output created later.
+
+```python
+scene = Scene(file_writer_config={
+    "output_directory": "media", "file_name": "lesson",
+    "movie_file_extension": ".y4m",
+})
+square = Square(fill_opacity=1)
+scene.add(square)
+scene.file_writer.begin_insert()
+scene.play(square.animate.shift(RIGHT))
+scene.file_writer.end_insert()  # publishes media/inserts/lesson_0.y4m
+```
+
+The clip inherits the live frame clock, camera, arena, RNG and current geometry;
+begin/end do not rerun scene construction or reset time. Only sound cues added
+during the clip are included. An empty clip captures the current frame once.
+The writer's configured extension selects the existing recording formats and
+codec policy: MP4/MOV use negotiated ffmpeg, while GIF/Y4M/WAV and PNG sequences
+use their existing native paths. Existing programmatic-output capability
+checks still apply, including refusal of subdivision and host-open options.
+
+Begin/end must run between play/wait calls through the scene's attached writer.
+A nested recording or active native/Studio output cannot be stolen. Failed
+admission preserves the previous writer settings; successful begin sets
+`write_to_movie`, and finish or cancellation clears it. A failed play/wait
+discards the incomplete clip and releases ownership while preserving the
+scene's actual effects. Normal `EndScene` range termination keeps the recorded
+prefix available for `end_insert()`. Publication errors release ownership and
+preserve competing files. For automatic cancellation on exceptions elsewhere
+in authored Python, use the `record_scene(...)` context manager.
+
+Coverage: `tests/test_recording_protocol.py`, `tests/live_recording.py`, and
+`tests/test_scene_execution_protocol.py` under `crates/fmn-python`; the native
+acceptance independently reads Y4M frames, verifies motion and unchanged scene
+identity, and exercises failure recovery and publication races.
+
 ### fmn-python outcome for every Reference option
 
 Every option of the generated table (`docs/api/cli_flags.md`, Reference flags)

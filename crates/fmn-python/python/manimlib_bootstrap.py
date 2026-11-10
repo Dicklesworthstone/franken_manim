@@ -18522,11 +18522,10 @@ class SceneFileWriter:
         return self.get_output_file_rootname() + self._movie_extension()
 
     def get_insert_file_path(self, index):
-        return (
-            self.get_output_file_rootname()
-            + f"_{int(index)}"
-            + self._movie_extension()
-        )
+        movie = _pathlib.Path(self.get_movie_file_path())
+        return str(movie.parent / "inserts" / (
+            movie.stem + f"_{int(index)}" + self._movie_extension()
+        ))
 
     def get_next_partial_movie_path(self):
         # The clip the next play or wait publishes under subdivision (BN-15),
@@ -18615,17 +18614,8 @@ class SceneFileWriter:
         if self.should_open_file():
             self.open_file()
 
-    def begin_insert(self):
-        raise NotImplementedError(
-            "partial movie files are produced by the native render"
-            " pipeline; SceneFileWriter has no Python-side insert to open"
-        )
-
-    def end_insert(self):
-        raise NotImplementedError(
-            "partial movie files are produced by the native render"
-            " pipeline; SceneFileWriter has no Python-side insert to close"
-        )
+    # begin_insert/end_insert are installed by fmn_python.recording, sharing
+    # the live Scene's native clip owner and no-clobber Reel publication.
 
     def set_progress_display_description(
         self, file="", sub_desc=""

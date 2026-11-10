@@ -15,6 +15,9 @@ from typing import Any
 from .rendering import RenderResult, RenderSession
 
 _FORMATS = frozenset({"png_sequence", "gif", "y4m", "wav", "mp4", "mov"})
+_MAX_INSERT_FILES = 10_000
+_INSERT_OWNER = "_fmn_file_writer_insert"
+_MISSING = object()
 
 
 class RecordingSession(RenderSession):
@@ -125,3 +128,97 @@ def record_scene(
     """
     return RecordingSession(scene, destination, format=format, resolution=resolution,
                             fps=fps, threads=threads)
+
+
+class _InsertRecordingSession(RecordingSession):
+    """The ordinary native recording owner, with the writer's legacy flags."""
+
+    def __init__(self, writer: Any, destination: Path, native: Any) -> None:
+        self._writer = writer
+        super().__init__(writer.scene, destination, _native=native)
+
+    def _release(self) -> None:
+        try:
+            super()._release()
+        finally:
+            try:
+                namespace = vars(self.scene)
+                if namespace.get(_INSERT_OWNER) is self:
+                    namespace.pop(_INSERT_OWNER)
+            finally:
+                namespace = vars(self._writer)
+                if namespace.get(_INSERT_OWNER) is self:
+                    namespace.pop(_INSERT_OWNER)
+                    namespace["write_to_movie"] = False
+
+
+def install_file_writer_recording(native: Any) -> None:
+    """Complete Reference insert controls with the existing native clip owner.
+
+    Inserts are standalone, numbered clips beside the original movie, under
+    ``inserts/``. They neither replace nor concatenate into that movie. Path
+    queries create no directories; native output owns their creation. A
+    destination race never overwrites a competing file. Search is bounded to
+    10,000 numbered slots.
+    """
+    g = vars(native)
+    if g.get("_FMN_FILE_WRITER_RECORDING_INSTALLED", False):
+        return
+    Writer = g["SceneFileWriter"]
+
+    def begin_insert(self):
+        namespace = vars(self)
+        if namespace.get(_INSERT_OWNER) is not None or namespace.get("_fmn_insert_starting", False):
+            raise RuntimeError("this SceneFileWriter already has an active insert")
+        scene = self.scene
+        if getattr(scene, "file_writer", None) is not self:
+            raise RuntimeError("insert recording requires the Scene's attached SceneFileWriter")
+        namespace["_fmn_insert_starting"] = True
+        try:
+            # Freeze paths before camera/configuration getters can change cwd.
+            # lexists counts directories and dangling links as occupied, too;
+            # the native boundary rechecks the selected path without following
+            # links at admission and again at atomic no-clobber publication.
+            for index in range(_MAX_INSERT_FILES):
+                path = Path(os.path.abspath(self.get_insert_file_path(index)))
+                if not os.path.lexists(path):
+                    break
+            else:
+                raise ValueError("insert recording exhausted its 10,000 numbered output slots")
+            session = _InsertRecordingSession(self, path, native)
+            session.__enter__()
+            # No writer settings change before the native generation admits
+            # us. A failed or nested begin cannot steal another output owner.
+            previous_movie = namespace.get("write_to_movie", False)
+            previous_path = namespace.get("inserted_file_path", _MISSING)
+            try:
+                namespace[_INSERT_OWNER] = session
+                vars(scene)[_INSERT_OWNER] = session
+                namespace["inserted_file_path"] = session.destination
+                namespace["write_to_movie"] = True
+            except BaseException as error:
+                session._cancel_preserving(error)
+                namespace["write_to_movie"] = previous_movie
+                if previous_path is _MISSING:
+                    namespace.pop("inserted_file_path", None)
+                else:
+                    namespace["inserted_file_path"] = previous_path
+                raise
+        finally:
+            namespace.pop("_fmn_insert_starting", None)
+
+    def end_insert(self):
+        session = vars(self).get(_INSERT_OWNER)
+        if not isinstance(session, _InsertRecordingSession):
+            raise RuntimeError("this SceneFileWriter has no active insert")
+        # finish owns thread checks, clock checks, cancellation on error and
+        # native publication. Its release clears flags before any print hook.
+        result = session.finish()
+        self.print_file_ready_message(result.destination)
+
+    for name, method in {"begin_insert": begin_insert, "end_insert": end_insert}.items():
+        method.__name__ = name
+        method.__qualname__ = Writer.__qualname__ + "." + name
+        method.__module__ = Writer.__module__
+        setattr(Writer, name, method)
+    g["_FMN_FILE_WRITER_RECORDING_INSTALLED"] = True

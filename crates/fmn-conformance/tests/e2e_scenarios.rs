@@ -6674,6 +6674,13 @@ fn python_studio_editing_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     Ok(RunOutcome::ok().with_counter("studio_editing_checks", checks))
 }
 
+fn python_insert_recording_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_insert_recording()
+        .map_err(|error| fail(format!("Python insert recording: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.insert_recording").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("python_insert_recording_checks", checks))
+}
+
 fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     python_portal_sequence_run(ctx, true)
 }
@@ -18423,6 +18430,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    specs.push(spec(
+        "lifecycle.python_insert_recording.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_insert_recording_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_insert_recording_checks", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.insert_recording",
+            vec![FieldPred::u64_eq("checks", 4)],
+        )],
+    ));
     let mut portal_output_inventory = vec![
         "native_scene.py".to_owned(),
         "motion.gif".to_owned(),
@@ -21140,6 +21161,17 @@ fn python_studio_editing_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_studio_editing.v1")
         .expect("Python Studio editing is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Native numbered inserts, ownership, cancellation and atomic publication.
+#[test]
+fn python_insert_recording_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_insert_recording.v1")
+        .expect("Python insert recording is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

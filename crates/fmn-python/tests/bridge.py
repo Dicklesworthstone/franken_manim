@@ -14894,7 +14894,7 @@ writer_root = pathlib.Path("/tmp/out") / "demo"
 assert writer.get_output_file_rootname() == str(writer_root)
 assert writer.get_image_file_path() == str(writer_root) + ".png"
 assert writer.get_movie_file_path() == str(writer_root) + ".mp4"
-assert writer.get_insert_file_path(2) == str(writer_root) + "_2.mp4"
+assert writer.get_insert_file_path(2) == str(writer_root.parent / "inserts" / "demo_2.mp4")
 # Subdivided clips are DIRECTORY/SCENE/clips/segment-NNNNNN (BN-15); the
 # partial-movie helpers name that layout (fm-fxov).
 assert writer.init_partial_movie_directory() == str(writer_root / "clips")
@@ -23580,8 +23580,8 @@ _check("image path appends png suffix",
        _named.get_image_file_path() == str(_named_root) + ".png")
 _check("movie path normalizes extension dot",
        _named.get_movie_file_path() == str(_named_root) + ".mov")
-_check("insert path indexes per play",
-       _named.get_insert_file_path(3) == str(_named_root) + "_3.mov")
+_check("insert path numbers standalone clips under inserts",
+       _named.get_insert_file_path(3) == str(_named_root.parent / "inserts" / "custom_name_3.mov"))
 _check("partial movie path names the next subdivided clip (BN-15)",
        _named.get_next_partial_movie_path() == str(
            _named_root / "clips" / "segment-000000.mov"
@@ -23642,18 +23642,8 @@ except Exception as error:
     _finish_refused = "Reel" in str(error)
 _check("finish surfaces pipe refusal when writing movies",
        _finish_refused)
-_ins_refused = False
-try:
-    _fw.begin_insert()
-except NotImplementedError:
-    _ins_refused = True
-_end_ins_refused = False
-try:
-    _fw.end_insert()
-except NotImplementedError:
-    _end_ins_refused = True
-_check("insert family refuses toward native segmentation",
-       _ins_refused and _end_ins_refused)
+_check("inserts require the Scene's attached writer and an active owner to end",
+       _raises(_fw.begin_insert, RuntimeError) and _raises(_fw.end_insert, RuntimeError))
 _pd_scene = manimlib.Scene()
 _pd_writer = manimlib.SceneFileWriter(_pd_scene)
 _check("progress description is a silent host stub",

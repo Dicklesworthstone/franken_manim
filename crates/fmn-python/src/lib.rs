@@ -14227,6 +14227,29 @@ pub fn run_portal_gauntlet_video_options() -> Result<(), String> {
     })
 }
 
+/// Exercise standalone SceneFileWriter inserts through the production native
+/// recording owner, checking decoded motion, ownership and no-clobber failure.
+/// Returns the number of completed acceptance cases; no ffmpeg is required.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_insert_recording() -> Result<u64, String> {
+    with_python_test_module("insert recording Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_insert_only", true)
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(include_str!("../tests/live_recording.py"))
+            .expect("insert recording suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_fmn_insert_checks")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "insert recording suite emitted no case count".to_owned())?
+            .extract::<u64>()
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// What [`run_portal_gauntlet_planar_route`] observed (fm-sq8.11).
 #[cfg(feature = "gauntlet")]
 #[derive(Debug, Clone, PartialEq, Eq)]
