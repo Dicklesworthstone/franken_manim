@@ -3040,6 +3040,179 @@ fn native_detached_areas_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("native_detached_area_renders", checked))
 }
 
+/// Detached differential and integral helpers retain the chart's 3D geometry.
+fn native_detached_calculus_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct CalculusScene {
+        case: u8,
+        oracle: bool,
+    }
+    impl SceneConstruct for CalculusScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let axes = Axes::new()
+                .x_range([-2.0, 2.0, 1.0])
+                .y_range([-2.0, 2.0, 1.0])
+                .width(4.0)
+                .height(4.0)
+                .axis_config(AxisConfig {
+                    include_tip: Some(false),
+                    include_ticks: Some(false),
+                    ..AxisConfig::default()
+                })
+                .build(&FontBook::bundled().unwrap())?
+                .rotated_about(std::f64::consts::FRAC_PI_3, RIGHT, ORIGIN);
+            let point = |x, y| axes.c2p(&[x, y]);
+            let object = match self.case {
+                0 => {
+                    let style = Style::default().stroke(YELLOW, 4.0, 1.0);
+                    // Equal chart scales make the line y=x have world length
+                    // sqrt(2) per numeric x, before and after the rigid rotation.
+                    let extent = 3.0 / (2.0 * 2.0_f64.sqrt());
+                    let expected = Line::new(point(-extent, -extent), point(extent, extent))
+                        .style(style)
+                        .build()?;
+                    if self.oracle {
+                        expected
+                    } else {
+                        let actual =
+                            axes.tangent_line_styled(0.0, &|x| x, 3.0, 0.125, style)?;
+                        if actual.points().len() != expected.points().len()
+                            || actual.points().iter().zip(expected.points()).any(|(a, b)| {
+                                (0..3).any(|lane| (a[lane] - b[lane]).abs() > 1e-10)
+                            })
+                        {
+                            return Err(SceneError::InvalidLifecycle(
+                                "detached tangent does not retain the tilted chart's direction",
+                            )
+                            .into());
+                        }
+                        actual
+                    }
+                }
+                1 => {
+                    if self.oracle {
+                        // Midpoint samples of f(x)=2x on [-1,0], [0,1] and
+                        // the final partial bin [1,1.25], independently authored.
+                        let rectangles = [
+                            (-1.0, 0.0, -1.0, RED),
+                            (0.0, 1.0, 1.0, BLUE),
+                            (1.0, 1.25, 2.25, BLUE),
+                        ]
+                        .into_iter()
+                        .map(|(left, right, height, color)| {
+                            Polygon::new([
+                                point(left, 0.0),
+                                point(right, 0.0),
+                                point(right, height),
+                                point(left, height),
+                            ])
+                            .style(Style::default().stroke(BLACK, 0.0, 1.0).fill(color, 0.75))
+                            .build()
+                            .with_stroke_behind(true)
+                        });
+                        v_group(rectangles)
+                    } else {
+                        axes.riemann_rectangles_styled(
+                            &|x| 2.0 * x,
+                            Some([-1.0, 1.25]),
+                            Some(1.0),
+                            "center",
+                            &RiemannConfig {
+                                colors: vec![BLUE],
+                                stroke_width: 0.0,
+                                fill_opacity: 0.75,
+                                ..RiemannConfig::default()
+                            },
+                        )?
+                    }
+                }
+                _ => {
+                    if self.oracle {
+                        let start = point(-1.0, 1.0);
+                        let corner = point(0.5, 1.0);
+                        let end = point(0.5, 0.25);
+                        let mut lines = Vec::new();
+                        for (a, b, color) in [
+                            (start, corner, YELLOW),
+                            (corner, end, GREEN),
+                            (start, end, RED),
+                        ] {
+                            lines.push(
+                                Line::new(a, b)
+                                    .style(Style::default().stroke(color, 2.0, 1.0))
+                                    .build()?,
+                            );
+                        }
+                        v_group(lines)
+                    } else {
+                        axes.get_secant_slope_group(-1.0, &|x| x * x, 1.5, None)?
+                    }
+                }
+            };
+            stage.add(object)?;
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    let mut outcome = RunOutcome::ok();
+    let mut checked = 0;
+    for (case, name) in [(0, "tangent"), (1, "riemann"), (2, "secant")] {
+        let expected_path = format!("/{name}-expected.png");
+        render_with_fs(
+            &mut CalculusScene { case, oracle: true },
+            options(&expected_path, 1)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let expected = fs
+            .read(std::path::Path::new(&expected_path))
+            .map_err(|e| fail(e.to_string()))?;
+        let image = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+            .map_err(|e| fail(e.to_string()))?;
+        if !image.rgba.chunks_exact(4).any(|pixel| pixel != &image.rgba[..4]) {
+            return Err(fail(format!("{name} oracle rendered no ink")));
+        }
+        for threads in [1, 4, 16] {
+            let path = format!("/{name}-{threads}.png");
+            let report = render_with_fs(
+                &mut CalculusScene { case, oracle: false },
+                options(&path, threads)?,
+                fs.clone(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            let actual = fs
+                .read(std::path::Path::new(&path))
+                .map_err(|e| fail(e.to_string()))?;
+            if actual != expected || report.artifact.frame_count != 1 {
+                return Err(fail(format!(
+                    "{name} geometry differs from its independent oracle at {threads} threads"
+                )));
+            }
+            checked += 1;
+        }
+        outcome = outcome.with_artifact(&format!("{name}.png"), expected);
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_detached_calculus")
+            .field("cases", 3_u64)
+            .field("renders", checked),
+    );
+    Ok(outcome
+        .with_counter("native_detached_calculus_cases", 3)
+        .with_counter("native_detached_calculus_renders", checked))
+}
+
 /// Native legacy and preset constructors retain ordinary Scribe pixels.
 fn native_tex_constructors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::*;
@@ -16500,6 +16673,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_detached_calculus.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_detached_calculus_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_detached_calculus_cases", 3),
+            counter_eq("native_detached_calculus_renders", 9),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_detached_calculus",
+            vec![
+                FieldPred::u64_eq("cases", 3),
+                FieldPred::u64_eq("renders", 9),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_tex_constructors.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -20865,6 +21056,16 @@ fn native_detached_areas_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_detached_areas.v1")
         .expect("native detached area scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_detached_calculus_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_detached_calculus.v1")
+        .expect("native detached calculus scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

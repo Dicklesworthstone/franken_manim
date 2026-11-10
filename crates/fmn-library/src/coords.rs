@@ -32,9 +32,12 @@
 //!
 //! Deliberate divergences, all documented at their sites:
 //!
-//! * **`tick_offset` and `show_signed_area` are stored but unused** — the
-//!   Reference stores both and never reads them (`number_line.py:39,61`,
-//!   `coordinate_systems.py:375`). Kept for ctor parity.
+//! * **`tick_offset` is stored but unused** — the Reference stores it and
+//!   never reads it (`number_line.py:61`). `show_signed_area` is honored
+//!   under BN-20: negative bins keep ordinary colours when it is false.
+//! * **Calculus helpers use a validated frozen coordinate frame.** Tangents
+//!   retain their 3D direction, and Riemann geometry is checked before it
+//!   can enter native records. Invalid charts and requests are typed errors.
 //! * **The graph-taking calculus helpers take the function directly.**
 //!   The Reference reads `graph.underlying_function`; a built [`VMobject`]
 //!   here is plain geometry, so `input_to_graph_point` and friends take
@@ -52,7 +55,7 @@ pub(crate) mod placement;
 
 pub use live::{CoordinateFrame, CoordinateFrameError, LiveCoordinateSystem};
 
-use fmn_core::color::{Srgb, color_gradient};
+use fmn_core::color::Srgb;
 use fmn_core::constants::{
     BLACK, BLUE, DEFAULT_LIGHT_COLOR, DEFAULT_MOBJECT_COLOR, DEFAULT_MOBJECT_TO_EDGE_BUFF, DL,
     DOWN, DR, FRAME_X_RADIUS, FRAME_Y_RADIUS, GREEN, GREY_A, LEFT, MED_SMALL_BUFF, ORIGIN, OUT, PI,
@@ -67,7 +70,7 @@ use crate::graphs::{SamplingBudget, SamplingError, sampled_values};
 use crate::line::{DashedLine, Line};
 use crate::numbers::DecimalNumber;
 use crate::pointcloud::DotCloud;
-use crate::poly::{ArrowTip, Polygon};
+use crate::poly::ArrowTip;
 use crate::style::Style;
 use crate::tex::{Tex, TexMobjectError};
 use crate::text::{Text, TextMobjectError, text_style};
@@ -1622,7 +1625,8 @@ impl Axes {
     ///
     /// # Errors
     /// [`CoordsError::Sampling`] when the default search range exceeds the
-    /// axes' sampling budget.
+    /// axes' sampling budget, or [CoordsError::LiveFrame] when the chart or
+    /// projected tangent cannot supply a finite label normal.
     pub fn get_graph_label(
         &self,
         function: &dyn Fn(f64) -> f64,
@@ -1664,7 +1668,7 @@ impl Axes {
             }
         };
         let point = self.input_to_graph_point(x, function);
-        let angle = self.angle_of_tangent(x, function);
+        let angle = self.angle_of_tangent(x, function)?;
         let mut normal = space_ops::rotate_vector(RIGHT, angle + PI / 2.0, OUT);
         if normal[1] < 0.0 {
             normal = [-normal[0], -normal[1], -normal[2]];
@@ -1694,40 +1698,106 @@ impl Axes {
 
     // --- calculus -------------------------------------------------------------
 
-    /// `angle_of_tangent(x, graph, dx=EPSILON)`: the angle of the secant
-    /// from `x` to `x + dx` on the graph of `function`.
-    #[must_use]
-    pub fn angle_of_tangent(&self, x: f64, function: &dyn Fn(f64) -> f64) -> f64 {
-        self.angle_of_tangent_dx(x, function, EPSILON)
+    /// Unit world-space secant direction from x to x + dx, including z.
+    ///
+    /// The difference is formed in data coordinates before applying the chart's
+    /// basis, so large world translations cannot erase a small numeric probe.
+    /// Negative dx reverses the direction. Both samples are evaluated once.
+    ///
+    /// # Errors
+    /// Unbuilt or degenerate axes, invalid or non-advancing probes, non-finite
+    /// callback heights, and exhausted sampling budgets return typed errors.
+    pub fn tangent_direction(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+        dx: f64,
+    ) -> Result<Vec3, CoordsError> {
+        self.coordinate_frame()?.tangent_direction(x, function, dx)
     }
 
-    /// The `dx`-explicit form of [`angle_of_tangent`](Self::angle_of_tangent).
-    #[must_use]
-    pub fn angle_of_tangent_dx(&self, x: f64, function: &dyn Fn(f64) -> f64, dx: f64) -> f64 {
-        let p0 = self.input_to_graph_point(x, function);
-        let p1 = self.input_to_graph_point(x + dx, function);
-        space_ops::angle_of_vector(sub(p1, p0))
+    /// Angle of the world-XY tangent projection using the EPSILON probe.
+    ///
+    /// This is the displayed slope's angle, not the derivative in numeric
+    /// chart units. A tangent with no world-XY projection is a typed refusal.
+    pub fn angle_of_tangent(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+    ) -> Result<f64, CoordsError> {
+        self.coordinate_frame()?.angle_of_tangent(x, function)
     }
 
-    /// `slope_of_tangent`: `tan(angle_of_tangent(x))`.
-    #[must_use]
-    pub fn slope_of_tangent(&self, x: f64, function: &dyn Fn(f64) -> f64) -> f64 {
-        fmn_dmath::tan(self.angle_of_tangent(x, function))
+    /// The explicit-dx form of [Self::angle_of_tangent].
+    pub fn angle_of_tangent_dx(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+        dx: f64,
+    ) -> Result<f64, CoordsError> {
+        self.coordinate_frame()?
+            .angle_of_tangent_dx(x, function, dx)
     }
 
-    /// `get_tangent_line(x, graph, length=5)`: a `Line(LEFT, RIGHT)`
-    /// resized to `length`, rotated to the tangent angle, centred on the
-    /// graph point.
-    #[must_use]
-    pub fn get_tangent_line(&self, x: f64, function: &dyn Fn(f64) -> f64, length: f64) -> VMobject {
-        let line = Line::new(LEFT, RIGHT)
-            .build()
-            .expect("the tangent template is always a straight segment")
-            .with_width(length, false);
-        let angle = self.angle_of_tangent(x, function);
-        let center = line.center_point();
-        line.rotated_about(angle, OUT, center)
-            .moved_to(self.input_to_graph_point(x, function))
+    /// World dy/dx of the finite-difference tangent.
+    ///
+    /// Vertical or unrepresentable projected slopes are typed refusals.
+    pub fn slope_of_tangent(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+    ) -> Result<f64, CoordsError> {
+        self.coordinate_frame()?.slope_of_tangent(x, function)
+    }
+
+    /// Length-controlled 3D tangent centered on c2p(x, function(x)).
+    ///
+    /// Length is measured in world units. The direction uses the EPSILON
+    /// forward difference and retains the chart's out-of-plane component.
+    ///
+    /// # Errors
+    /// Invalid charts, lengths, samples or output geometry are refused, as by
+    /// [CoordinateFrame::get_tangent_line]. Requests are admitted before callbacks.
+    pub fn get_tangent_line(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+        length: f64,
+    ) -> Result<VMobject, CoordsError> {
+        self.coordinate_frame()?
+            .get_tangent_line(x, function, length)
+    }
+
+    /// Explicit-dx and styled variant of [Self::get_tangent_line].
+    ///
+    /// Length, style and the three-point budget are checked before callbacks.
+    /// No graph resampling or world-XY flattening is performed.
+    pub fn tangent_line_styled(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+        length: f64,
+        dx: f64,
+        style: Style,
+    ) -> Result<VMobject, CoordsError> {
+        self.coordinate_frame()?
+            .tangent_line_styled(x, function, length, dx, style)
+    }
+
+    /// Native numeric-run, numeric-rise and secant diagram, in that child order.
+    ///
+    /// The legs follow the chart axes, including tilted charts. None keeps
+    /// the exact graph chord; Some(length) extends it symmetrically to the
+    /// requested world length. Default colours are YELLOW, GREEN and RED.
+    pub fn get_secant_slope_group(
+        &self,
+        x: f64,
+        function: &dyn Fn(f64) -> f64,
+        dx: f64,
+        secant_length: Option<f64>,
+    ) -> Result<VMobject, CoordsError> {
+        self.coordinate_frame()?
+            .get_secant_slope_group(x, function, dx, secant_length)
     }
 
     /// `get_riemann_rectangles` with the Reference's default styling
@@ -1778,7 +1848,10 @@ impl Axes {
     /// `left | right | center`; [`CoordsError::Sampling`] for a non-finite
     /// bound or step, or more bins than the configured budget;
     /// [`CoordsError::InvalidRiemannRange`] for a decreasing range, a
-    /// non-positive step, or a step too small to advance the bound.
+    /// non-positive step, or a step too small to advance the bound. Invalid
+    /// charts, styles, callback heights and unrepresentable corners return
+    /// [CoordsError::LiveFrame]. Request and style admission precede callbacks;
+    /// effects performed inside a callback are not rolled back.
     pub fn riemann_rectangles_styled(
         &self,
         function: &dyn Fn(f64) -> f64,
@@ -1787,47 +1860,13 @@ impl Axes {
         input_sample_type: &str,
         config: &RiemannConfig,
     ) -> Result<VMobject, CoordsError> {
-        if !matches!(input_sample_type, "left" | "right" | "center") {
-            return Err(CoordsError::InvalidSampleType(input_sample_type.to_owned()));
-        }
-        let [start, stop] = x_range.unwrap_or([self.x_range[0], self.x_range[1]]);
-        let step = dx.unwrap_or(self.x_range[2]);
-        let bins = riemann_bins(start, stop, step, self.sampling_budget)?;
-        let gradient = if config.colors.len() >= 2 {
-            color_gradient(&config.colors, bins.len())
-        } else {
-            vec![config.colors.first().copied().unwrap_or(BLUE); bins.len()]
-        };
-        let mut rects = Vec::with_capacity(bins.len());
-        for (i, &(x0, x1)) in bins.iter().enumerate() {
-            let sample = match input_sample_type {
-                "right" => x1,
-                "center" => x0 + (x1 - x0) / 2.0,
-                _ => x0,
-            };
-            let height = function(sample);
-            let negative = height < 0.0;
-            let fill = if negative && config.show_signed_area {
-                config.negative_color
-            } else {
-                gradient.get(i).copied().unwrap_or(GREEN)
-            };
-            let style = Style::default()
-                .stroke(config.stroke_color, config.stroke_width, 1.0)
-                .fill(fill, config.fill_opacity);
-            let corners = [
-                self.c2p(&[x0, 0.0]),
-                self.c2p(&[x1, 0.0]),
-                self.c2p(&[x1, height]),
-                self.c2p(&[x0, height]),
-            ];
-            let rect = Polygon::new(corners)
-                .style(style)
-                .build()
-                .with_stroke_behind(config.stroke_behind);
-            rects.push(rect);
-        }
-        Ok(v_group(rects))
+        self.coordinate_frame()?.riemann_rectangles_styled(
+            function,
+            x_range,
+            dx,
+            input_sample_type,
+            config,
+        )
     }
 
     /// Shade the drawn quadratic graph down to numeric y = 0.
@@ -2212,8 +2251,9 @@ fn stroke_behind_deep(vmob: VMobject) -> VMobject {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fmn_core::color::color_gradient;
     use fmn_geom::QuadPath;
-    use std::cell::Cell;
+    use std::cell::{Cell, RefCell};
 
     fn book() -> FontBook {
         FontBook::bundled().expect("bundled faces parse")
@@ -3322,20 +3362,294 @@ mod tests {
     fn tangent_angle_slope_and_line_on_known_curves() {
         let axes = Axes::new().build(&book()).expect("build axes");
         // f(x) = x: 45° on unit axes, slope 1.
-        let angle = axes.angle_of_tangent(2.0, &|x| x);
+        let angle = axes.angle_of_tangent(2.0, &|x| x).unwrap();
         assert!((angle - PI / 4.0).abs() < 1e-6, "angle {angle} vs π/4");
-        assert!((axes.slope_of_tangent(2.0, &|x| x) - 1.0).abs() < 1e-6);
+        assert!((axes.slope_of_tangent(2.0, &|x| x).unwrap() - 1.0).abs() < 1e-6);
         // f(x) = x² at x = 0: horizontal tangent.
-        assert!(axes.angle_of_tangent(0.0, &|x| x * x).abs() < 1e-6);
+        assert!(axes.angle_of_tangent(0.0, &|x| x * x).unwrap().abs() < 1e-6);
         // f(x) = x² at x = 1: slope 2.
-        assert!((axes.slope_of_tangent(1.0, &|x| x * x) - 2.0).abs() < 1e-5);
+        assert!((axes.slope_of_tangent(1.0, &|x| x * x).unwrap() - 2.0).abs() < 1e-5);
         // The tangent line: length 5, centred on the graph point.
-        let line = axes.get_tangent_line(2.0, &|x| x, 5.0);
+        let line = axes.get_tangent_line(2.0, &|x| x, 5.0).unwrap();
         let points = line.points();
         let (first, last) = (points[0], points[points.len() - 1]);
         let span = space_ops::get_dist(first, last);
         assert!((span - 5.0).abs() < 1e-9, "tangent span {span} vs 5");
         assert_vec3_near(line.center_point(), [2.0, 2.0, 0.0], 1e-9, "tangent centre");
+    }
+
+    #[test]
+    fn detached_tangents_and_secant_diagrams_keep_the_chart_plane() {
+        let axes = Axes::new()
+            .x_range([-2.0, 2.0, 1.0])
+            .y_range([-2.0, 2.0, 1.0])
+            .width(4.0)
+            .height(8.0)
+            .axis_config(AxisConfig {
+                include_tip: Some(false),
+                include_ticks: Some(false),
+                ..AxisConfig::default()
+            })
+            .build(&book())
+            .unwrap()
+            .rotated_about(PI / 2.0, RIGHT, ORIGIN)
+            .shifted([0.5, -0.75, 0.25]);
+        let original = axes.vmob().clone();
+        // Independently known map: x has unit scale, y has scale two and
+        // points along world z after the quarter turn around world x.
+        let point = |x: f64, y: f64| [0.5 + x, -0.75, 0.25 + 2.0 * y];
+        let unit = [1.0 / 5.0_f64.sqrt(), 0.0, 2.0 / 5.0_f64.sqrt()];
+        let calls = RefCell::new(Vec::new());
+        let identity = |x: f64| {
+            calls.borrow_mut().push(x);
+            x
+        };
+        for dx in [0.25_f64, -0.25] {
+            let actual = axes.tangent_direction(0.5, &identity, dx).unwrap();
+            assert_vec3_near(actual, scale(unit, dx.signum()), 1e-12, "3D direction");
+            assert_eq!(*calls.borrow(), vec![0.5, 0.5 + dx]);
+            calls.borrow_mut().clear();
+        }
+        let tangent = axes.get_tangent_line(0.5, &identity, 5.0).unwrap();
+        assert_eq!(*calls.borrow(), vec![0.5, 0.5 + EPSILON]);
+        calls.borrow_mut().clear();
+        assert_vec3_near(
+            tangent.points()[0],
+            sub(point(0.5, 0.5), scale(unit, 2.5)),
+            1e-9,
+            "tangent start",
+        );
+        assert_vec3_near(
+            *tangent.points().last().unwrap(),
+            add(point(0.5, 0.5), scale(unit, 2.5)),
+            1e-9,
+            "tangent end",
+        );
+        assert!((tangent.points()[2][2] - tangent.points()[0][2]).abs() > 4.0);
+        let style = Style::default().stroke(RED, 3.0, 0.6);
+        let styled = axes
+            .tangent_line_styled(0.5, &identity, 2.5, -0.25, style)
+            .unwrap();
+        assert_eq!(*calls.borrow(), vec![0.5, 0.25]);
+        calls.borrow_mut().clear();
+        assert_eq!(styled.style(), style);
+        assert_vec3_near(
+            styled.points()[0],
+            add(point(0.5, 0.5), scale(unit, 1.25)),
+            1e-9,
+            "negative probe starts in reversed direction",
+        );
+
+        let parabola = |x: f64| {
+            calls.borrow_mut().push(x);
+            x * x
+        };
+        let group = axes
+            .get_secant_slope_group(0.5, &parabola, 0.5, None)
+            .unwrap();
+        assert_eq!(*calls.borrow(), vec![0.5, 1.0]);
+        calls.borrow_mut().clear();
+        assert_eq!(group.children().len(), 3);
+        for (child, (start, end, color)) in group.children().iter().zip([
+            (point(0.5, 0.25), point(1.0, 0.25), YELLOW),
+            (point(1.0, 0.25), point(1.0, 1.0), GREEN),
+            (point(0.5, 0.25), point(1.0, 1.0), RED),
+        ]) {
+            assert_vec3_near(child.points()[0], start, 1e-9, "secant child start");
+            assert_vec3_near(*child.points().last().unwrap(), end, 1e-9, "secant child end");
+            assert_eq!(child.style().stroke_color, color);
+        }
+        let extended = axes
+            .get_secant_slope_group(0.5, &parabola, 0.5, Some(4.0))
+            .unwrap();
+        assert_eq!(*calls.borrow(), vec![0.5, 1.0]);
+        let secant = &extended.children()[2];
+        assert!((space_ops::get_dist(secant.points()[0], secant.points()[2]) - 4.0).abs() < 1e-9);
+        assert_vec3_near(
+            secant.center_point(),
+            scale(add(point(0.5, 0.25), point(1.0, 1.0)), 0.5),
+            1e-9,
+            "extended secant midpoint",
+        );
+        assert_eq!(axes.vmob(), &original, "queries cannot mutate their chart");
+    }
+
+    #[test]
+    fn detached_differentials_keep_small_probes_after_large_world_translation() {
+        let axes = Axes::new()
+            .build(&book())
+            .unwrap()
+            .shifted([1e14, -1e14, 1e14]);
+        let original = axes.vmob().clone();
+        let function = |x: f64| 2.0 * x;
+        let dx = 1e-7;
+        // The old world-point subtraction loses both components of this probe.
+        assert_eq!(
+            axes.input_to_graph_point(0.0, &function),
+            axes.input_to_graph_point(dx, &function)
+        );
+        assert_vec3_near(
+            axes.tangent_direction(0.0, &function, dx).unwrap(),
+            [1.0 / 5.0_f64.sqrt(), 2.0 / 5.0_f64.sqrt(), 0.0],
+            1e-12,
+            "translated derivative",
+        );
+        assert!(
+            (axes.angle_of_tangent_dx(0.0, &function, dx).unwrap() - 2.0_f64.atan2(1.0))
+                .abs()
+                < 1e-12
+        );
+        assert!((axes.slope_of_tangent(0.0, &function).unwrap() - 2.0).abs() < 1e-12);
+        assert_eq!(axes.vmob(), &original);
+    }
+
+    #[test]
+    fn detached_differential_admission_precedes_callbacks_and_stops_on_bad_samples() {
+        let axes = Axes::new().build(&book()).unwrap();
+        let original = axes.vmob().clone();
+        let calls = Cell::new(0);
+        let function = |_: f64| {
+            calls.set(calls.get() + 1);
+            1.0
+        };
+        for (x, dx) in [
+            (0.0, 0.0),
+            (0.0, f64::NAN),
+            (f64::INFINITY, 0.5),
+            (1e300, 1.0),
+            (f64::MAX, f64::MAX),
+        ] {
+            assert!(axes.tangent_direction(x, &function, dx).is_err());
+            assert!(axes.get_secant_slope_group(x, &function, dx, None).is_err());
+        }
+        for length in [0.0, -1.0, f64::INFINITY, f64::NAN, f64::MAX] {
+            assert!(axes.get_tangent_line(0.0, &function, length).is_err());
+            assert!(
+                axes.get_secant_slope_group(0.0, &function, 0.5, Some(length))
+                    .is_err()
+            );
+        }
+        for style in [
+            Style::default().stroke_width(-1.0),
+            Style::default().stroke_width(f64::MAX),
+            Style::default().fill_opacity(f64::NAN),
+            Style::default().stroke(RED, 2.0, 1.1),
+        ] {
+            assert!(
+                axes.tangent_line_styled(0.0, &function, 2.0, 0.5, style)
+                    .is_err()
+            );
+        }
+        for invalid in [Axes::new(), axes.clone().scaled_about(0.0, ORIGIN)] {
+            assert!(invalid.get_tangent_line(0.0, &function, 2.0).is_err());
+        }
+        assert!(matches!(
+            axes.clone()
+                .sampling_budget(SamplingBudget::new(1))
+                .tangent_direction(0.0, &function, 0.5),
+            Err(CoordsError::Sampling(_))
+        ));
+        assert!(matches!(
+            axes.clone()
+                .sampling_budget(SamplingBudget::new(2))
+                .get_tangent_line(0.0, &function, 2.0),
+            Err(CoordsError::Sampling(_))
+        ));
+        assert!(matches!(
+            axes.clone()
+                .sampling_budget(SamplingBudget::new(8))
+                .get_secant_slope_group(0.0, &function, 0.5, None),
+            Err(CoordsError::Sampling(_))
+        ));
+        assert_eq!(calls.get(), 0, "invalid requests cannot invoke authored code");
+        let bad_first = |_: f64| {
+            calls.set(calls.get() + 1);
+            f64::NAN
+        };
+        assert!(axes.get_tangent_line(0.0, &bad_first, 2.0).is_err());
+        assert_eq!(calls.get(), 1);
+        let bad_second = |x: f64| {
+            calls.set(calls.get() + 1);
+            if x == 0.0 { 0.0 } else { f64::INFINITY }
+        };
+        assert!(axes.get_tangent_line(0.0, &bad_second, 2.0).is_err());
+        assert_eq!(calls.get(), 3);
+        assert_eq!(axes.vmob(), &original);
+    }
+
+    #[test]
+    fn detached_riemann_rejects_invalid_styles_and_nonfinite_geometry() {
+        let axes = Axes::new().build(&book()).unwrap();
+        let original = axes.vmob().clone();
+        let calls = Cell::new(0);
+        let function = |_: f64| {
+            calls.set(calls.get() + 1);
+            1.0
+        };
+        let invalid_geometry = |result: Result<VMobject, CoordsError>| {
+            assert!(matches!(
+                result,
+                Err(CoordsError::LiveFrame(CoordinateFrameError::InvalidGeometry(_)))
+            ));
+        };
+        for width in [-1.0, f64::NAN, f64::INFINITY, f64::MAX] {
+            let config = RiemannConfig {
+                stroke_width: width,
+                ..RiemannConfig::default()
+            };
+            for bounds in [[0.0, 1.0], [0.0, 0.0]] {
+                invalid_geometry(axes.riemann_rectangles_styled(
+                    &function, Some(bounds), Some(0.5), "left", &config,
+                ));
+            }
+        }
+        for opacity in [-0.1, 1.1, f64::NAN, f64::INFINITY] {
+            let config = RiemannConfig {
+                fill_opacity: opacity,
+                ..RiemannConfig::default()
+            };
+            invalid_geometry(axes.riemann_rectangles_styled(
+                &function, Some([0.0, 1.0]), Some(0.5), "left", &config,
+            ));
+        }
+        assert!(
+            Axes::new()
+                .get_riemann_rectangles(&function, Some([0.0, 1.0]), Some(0.5), "left")
+                .is_err()
+        );
+        assert!(matches!(
+            axes.clone()
+                .sampling_budget(SamplingBudget::new(2))
+                .get_riemann_rectangles(&function, Some([0.0, 1.0]), Some(0.5), "left"),
+            Err(CoordsError::Sampling(_))
+        ));
+        assert_eq!(calls.get(), 0);
+        for height in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::MAX] {
+            let before = calls.get();
+            let bad = |_: f64| {
+                calls.set(calls.get() + 1);
+                height
+            };
+            invalid_geometry(axes.get_riemann_rectangles(
+                &bad, Some([0.0, 1.0]), Some(0.5), "left",
+            ));
+            assert_eq!(calls.get(), before + 1, "stop at the first invalid height");
+        }
+        let before = calls.get();
+        let bad_second = |x: f64| {
+            calls.set(calls.get() + 1);
+            if x == 0.0 { 1.0 } else { f64::NAN }
+        };
+        invalid_geometry(axes.get_riemann_rectangles(
+            &bad_second, Some([0.0, 1.0]), Some(0.5), "left",
+        ));
+        assert_eq!(calls.get(), before + 2);
+        let empty = axes
+            .get_riemann_rectangles(&function, Some([0.0, 0.0]), Some(0.5), "left")
+            .unwrap();
+        assert!(empty.children().is_empty());
+        assert_eq!(calls.get(), before + 2, "empty domains invoke no callbacks");
+        assert_eq!(axes.vmob(), &original, "failed construction publishes no mutation");
     }
 
     // --- UnitInterval + Slider -----------------------------------------------------

@@ -308,7 +308,7 @@ mod tests {
             .unwrap();
         family_near(&area, &old_area.shifted(shift));
         near(
-            after.get_tangent_line(1.0, &f, 2.0).center_point(),
+            after.get_tangent_line(1.0, &f, 2.0).unwrap().center_point(),
             after.i2gp(1.0, &f),
         );
     }

@@ -146,3 +146,52 @@ off-plane graphs, invalid styles and unrepresentable points are typed errors.
 Riemann range and style admission precede callback evaluation; source graphs
 and chart membership are never changed. Input/output area record counts and
 Riemann bin counts retain the chart's existing sampling budget.
+
+
+## Native tangents and secant diagrams
+
+Detached `Axes` now delegates its differential helpers and Riemann rectangles
+to the same validated `CoordinateFrame` implementation used by live charts.
+A tangent follows the chart's full three-dimensional direction after rotation;
+it is no longer constructed by rotating a line in world XY. Differences are
+taken in data coordinates before applying the chart basis, so a large world
+translation cannot erase a small derivative probe.
+
+`Axes::tangent_direction(x, &function, dx)` returns the unit world-space
+finite-difference direction, including z. `tangent_line_styled` adds explicit
+probe spacing and style controls. `get_secant_slope_group` returns native
+children in the order `[numeric dx, numeric dy, secant]`; the run and rise
+follow the chart basis. An optional secant length is measured in world units
+and extends the chord symmetrically about its midpoint.
+
+The existing `angle_of_tangent`, `angle_of_tangent_dx`, `slope_of_tangent`
+and `get_tangent_line` methods now return `Result<_, CoordsError>`. Propagate
+their errors with `?`:
+
+```rust
+let tangent = axes.get_tangent_line(x, &function, 3.0)?;
+let direction = axes.tangent_direction(x, &function, 1e-4)?;
+let diagram = axes.get_secant_slope_group(x, &function, 0.2, None)?;
+```
+
+Angles and slopes retain their **world-XY projection** meaning; the slope is
+not the derivative in numeric chart units. A tangent perpendicular to world
+XY has no projected angle, and a vertical projected tangent has no finite
+slope. These cases now return named errors instead of an arbitrary angle or
+a huge finite approximation. Lengths, styles, sample budgets and advancing
+finite probe coordinates are checked before authored callbacks. Invalid
+callback heights and geometry that cannot fit native records are refused.
+Graph labels also propagate a failed tangent calculation.
+
+Riemann rectangles keep the existing range, partial-bin, signed-color and
+sampling-mode behavior. They now share live charts' early style admission and
+finite-height/record-coordinate checks. Stroke width must also fit a finite
+native record. An invalid request does not call the authored function;
+a callback that returns invalid geometry may already have performed effects,
+which are not rolled back. No partial mobject is published on failure.
+
+The `render_matrix.native_detached_calculus.v1` scenario compares public PNG
+output with independently authored tangent endpoints, midpoint Riemann
+polygons and secant triangles on a tilted chart at one, four and sixteen
+threads. Native tests cover translation-stable probes, 3D directions,
+callback admission, style preservation and the migrated fallible methods.

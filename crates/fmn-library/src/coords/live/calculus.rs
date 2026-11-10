@@ -82,8 +82,13 @@ impl CoordinateFrame {
         for &color in &config.colors {
             validate_fill(color, config.fill_opacity)?;
         }
-        if !config.stroke_width.is_finite() || config.stroke_width < 0.0 {
-            return Err(invalid("stroke width must be finite and nonnegative"));
+        if !config.stroke_width.is_finite()
+            || config.stroke_width < 0.0
+            || config.stroke_width > f64::from(f32::MAX)
+        {
+            return Err(invalid(
+                "stroke width must fit nonnegative finite f32 records",
+            ));
         }
         let [start, stop] = x_range.unwrap_or([self.ranges[0][0], self.ranges[0][1]]);
         let bins = riemann_bins(
