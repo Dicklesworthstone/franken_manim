@@ -3957,6 +3957,20 @@ fn is_top_left_edge(start: [f64; 2], end: [f64; 2]) -> bool {
     dy < 0.0 || (dy == 0.0 && dx > 0.0)
 }
 
+fn edge_covers_point(start: [f64; 2], end: [f64; 2], point: [f64; 2], weight: f64) -> bool {
+    // Reversed edges must use the same subtraction anchor. Evaluating each
+    // direction independently can round one to zero and the other negative,
+    // leaving a crack, or make both triangles cover a translucent sample.
+    // Reuse the existing determinant when its endpoints are already ordered;
+    // otherwise evaluate that same canonical edge and negate its result.
+    let coverage = if start[0] < end[0] || (start[0] == end[0] && start[1] <= end[1]) {
+        weight
+    } else {
+        -orient(end, start, point)
+    };
+    coverage > 0.0 || (coverage == 0.0 && is_top_left_edge(start, end))
+}
+
 fn barycentric(triangle: &RasterTriangle, point: [f64; 2]) -> Option<[f64; 3]> {
     let [a, b, c] = triangle.vertices.map(|vertex| vertex.screen);
     let area = orient(a, b, c);
@@ -3969,12 +3983,12 @@ fn barycentric(triangle: &RasterTriangle, point: [f64; 2]) -> Option<[f64; 3]> {
     if weights
         .into_iter()
         .zip(edges)
-        .any(|(weight, (start, end))| {
-            weight < 0.0 || (weight == 0.0 && !is_top_left_edge(start, end))
-        })
+        .any(|(weight, (start, end))| !edge_covers_point(start, end, point, weight))
     {
         return None;
     }
+    // Coverage alone uses canonical edge signs. Preserve the established
+    // interpolation arithmetic, including its bits at ordinary interior pixels.
     Some([weights[0] / area, weights[1] / area, weights[2] / area])
 }
 
@@ -8656,6 +8670,161 @@ mod tests {
             .filter(|triangle| barycentric(triangle, sample).is_some())
             .count();
         assert_eq!(accepted, 1, "a shared edge must composite exactly once");
+    }
+
+    fn shared_edge_camera() -> Camera {
+        let mut frame = crate::camera::CameraFrame::default();
+        frame.set_shape([6.0, 4.0]).unwrap();
+        Camera::new(crate::camera::CameraConfig {
+            resolution: (96, 64),
+            frame,
+            background: color("#000000", 0.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .unwrap()
+    }
+
+    fn shared_edge_quad() -> [SurfaceVertex; 4] {
+        let half = 25.0 / 16.0;
+        [
+            ([-half, half, 0.0], [0.0, 0.0]),
+            ([-half, -half, 0.0], [0.0, 1.0]),
+            ([half, half, 0.0], [1.0, 0.0]),
+            ([half, -half, 0.0], [1.0, 1.0]),
+        ]
+        .map(|(point, uv)| SurfaceVertex::textured(point, [0.0, 0.0, 1.0], uv, 0.5))
+    }
+
+    #[test]
+    fn projected_shared_edge_has_one_owner_without_changing_interior_weights() {
+        let camera = shared_edge_camera();
+        let projected = shared_edge_quad().map(|vertex| ProjectedVertex {
+            clip: camera.project(vertex.point, 0.0).clip,
+            attributes: Attributes {
+                world: vertex.point,
+                normal: vertex.normal,
+                color: rgba_array(vertex.color),
+                uv: vertex.uv,
+                opacity: vertex.opacity,
+            },
+        });
+        let make_triangle = |indices: [usize; 3]| {
+            raster_triangle(indices.map(|index| projected[index]), camera.pixel_shape()).unwrap()
+        };
+        let original = [[0, 1, 2], [3, 2, 1]];
+        let triangles = original.map(make_triangle);
+        let [ul, ur, dl] = triangles[0].vertices.map(|vertex| vertex.screen);
+        // This real image projection rounds only the left x coordinate up.
+        assert_eq!(ul, [23.0_f64.next_up(), 7.0]);
+        assert_eq!(ur, [73.0, 7.0]);
+        assert_eq!(dl, [23.0_f64.next_up(), 57.0]);
+        let formerly_missing = [35.5, 44.5];
+        assert_eq!(orient(ur, dl, formerly_missing), 0.0);
+        assert!(orient(dl, ur, formerly_missing) < 0.0);
+
+        // Keep the pre-fix interpolation bits at an ordinary interior sample.
+        assert_eq!(
+            barycentric(&triangles[0], [35.5, 19.5])
+                .unwrap()
+                .map(f64::to_bits),
+            [
+                0x3fe0_0000_0000_0000,
+                0x3fcf_ffff_ffff_fffd,
+                0x3fd0_0000_0000_0000
+            ]
+        );
+        for permutation in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 2, 0],
+            [1, 0, 2],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let triangles =
+                original.map(|indices| make_triangle(permutation.map(|index| indices[index])));
+            for x in 23..73 {
+                let y = f64::from(79 - x) + 0.5;
+                for y in [y.next_down(), y, y.next_up()] {
+                    let sample = [f64::from(x) + 0.5, y];
+                    assert_eq!(
+                        triangles
+                            .iter()
+                            .filter(|triangle| barycentric(triangle, sample).is_some())
+                            .count(),
+                        1,
+                        "shared sample {sample:?}, vertex order {permutation:?}"
+                    );
+                }
+            }
+            // No epsilon may expand the quad, even by one representable step.
+            for sample in [
+                [23.0, 19.5],
+                [73.0_f64.next_up(), 19.5],
+                [35.5, 7.0_f64.next_down()],
+                [35.5, 57.0_f64.next_up()],
+            ] {
+                assert!(
+                    triangles
+                        .iter()
+                        .all(|triangle| barycentric(triangle, sample).is_none()),
+                    "outside sample {sample:?}, vertex order {permutation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projected_shared_edge_composites_once_across_winding_order_and_threads() {
+        let camera = shared_edge_camera();
+        let texture =
+            Texture::from_rgba8(1, 1, &[255; 4], crate::texture::TextureEncoding::Linear).unwrap();
+        let mut expected = None;
+        for reverse_winding in [false, true] {
+            for reverse_order in [false, true] {
+                let mut triangles = [[0, 1, 2], [3, 2, 1]];
+                if reverse_winding {
+                    for triangle in &mut triangles {
+                        triangle.swap(1, 2);
+                    }
+                }
+                if reverse_order {
+                    triangles.swap(0, 1);
+                }
+                let mesh = SurfaceMesh::new(
+                    shared_edge_quad().to_vec(),
+                    triangles.into_iter().flatten().collect(),
+                )
+                .unwrap();
+                let draws = [ThreeDDraw::Surface(SurfaceDraw::image(&mesh, &texture))];
+                let job = ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+                let one = job.render(1).unwrap();
+                // A single half-opacity white quad over transparent black is
+                // exactly [1, 1, 1, .5]. A gap gives alpha 0; overlap gives .75.
+                for y in 0..64 {
+                    for x in 0..96 {
+                        let wanted = if (23..73).contains(&x) && (7..57).contains(&y) {
+                            [1.0, 1.0, 1.0, 0.5]
+                        } else {
+                            [0.0; 4]
+                        };
+                        assert_eq!(
+                            pixel(&one, x, y),
+                            wanted,
+                            "pixel {x},{y}, reversed winding {reverse_winding}, order {reverse_order}"
+                        );
+                    }
+                }
+                if let Some(expected) = &expected {
+                    assert_eq!(one.as_bytes(), expected);
+                } else {
+                    expected = Some(one.as_bytes().to_vec());
+                }
+                for threads in [4, 16] {
+                    assert_eq!(job.render(threads).unwrap().as_bytes(), one.as_bytes());
+                }
+            }
+        }
     }
 
     #[test]

@@ -25,7 +25,9 @@ struct Picture(ImageMobject);
 
 impl SceneConstruct for Picture {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
-        stage.add(self.0.clone().with_height(3.0))?;
+        // At 64px / 4 scene units, this exact height projects to 50px.
+        // The 2x2 texel centers then land on output pixel centers.
+        stage.add(self.0.clone().with_height(25.0 / 8.0))?;
         Ok(())
     }
 }
@@ -51,7 +53,9 @@ fn render_image_with_mode(
     let report = render_with_fs(&mut Picture(image), options, fs.clone()).unwrap();
     assert_eq!(report.artifact.frame_count, 1);
     let bytes = fs.read(Path::new(path)).unwrap();
-    decode_png(&bytes, &PngLimits::default()).unwrap().rgba
+    let decoded = decode_png(&bytes, &PngLimits::default()).unwrap();
+    assert_eq!((decoded.width, decoded.height), (96, 64));
+    decoded.rgba
 }
 
 fn pixel(image: &[u8], x: usize, y: usize) -> &[u8] {
@@ -103,15 +107,19 @@ fn prepared_file_retains_pixels_receipt_and_shared_storage_after_source_changes(
         "/expected.png",
     );
     assert_eq!(actual, expected);
-    assert_eq!(pixel(&actual, 28, 12), [255, 0, 0, 255]);
-    assert_eq!(pixel(&actual, 28, 52), [0, 0, 255, 255]);
-    let translucent = pixel(&actual, 68, 12);
+    // The quad spans x=23..73 / y=7..57. Its texture uses Repeat+bilinear
+    // sampling: outer-edge samples blend wrapped neighbors. These centers
+    // instead address exact UV (.25/.75), independently testing row order,
+    // linear-light alpha composition, and transparent RGB suppression.
+    assert_eq!(pixel(&actual, 35, 19), [255, 0, 0, 255]);
+    assert_eq!(pixel(&actual, 35, 44), [0, 0, 255, 255]);
+    let translucent = pixel(&actual, 60, 19);
     assert_eq!(
         (translucent[0], translucent[2], translucent[3]),
         (0, 0, 255)
     );
     assert!((187..=189).contains(&translucent[1]));
-    assert_eq!(pixel(&actual, 68, 52), [0, 0, 0, 255]);
+    assert_eq!(pixel(&actual, 60, 44), [0, 0, 0, 255]);
     assert!(matches!(
         loader.load_with_fs("/asset.data", fs.as_ref()),
         Err(ImageLoadError::Decode(ImageDecodeError::UnsupportedInput)),
@@ -198,6 +206,7 @@ fn native_jpeg_png_and_unknown_or_damaged_bytes_never_discover_ffmpeg() {
     let mut loader = ImageLoader::new(options).unwrap();
     loader.decode(&png()).unwrap();
     let jpeg = include_bytes!("../../fmn-codec/tests/fixtures/jpeg/orient6_le.jpg");
+    let reference = include_bytes!("../../fmn-codec/tests/fixtures/jpeg/orient6_le.rgb");
     let prepared = loader.decode(jpeg).unwrap();
     let expected = ImageMobject::from_jpeg(jpeg).unwrap();
     assert_eq!(prepared.mobject(), expected);
@@ -207,6 +216,22 @@ fn native_jpeg_png_and_unknown_or_damaged_bytes_never_discover_ffmpeg() {
         prepared.report().color_intent(),
         ImageColorIntent::AssumedSrgb
     );
+    let image = prepared.mobject();
+    assert_eq!((image.pixel_width(), image.pixel_height()), (48, 64));
+    assert_eq!(image.pixels().len() / 4, reference.len() / 3);
+    for (actual, expected) in image
+        .pixels()
+        .chunks_exact(4)
+        .zip(reference.chunks_exact(3))
+    {
+        assert_eq!(actual[3], 255);
+        // The existing codec fixture's reviewed libjpeg-turbo tolerance.
+        for lane in 0..3 {
+            assert!((i32::from(actual[lane]) - i32::from(expected[lane])).abs() <= 4);
+        }
+    }
+    let frame = render_image(Arc::new(VirtualFs::new()), image, "/jpeg.png");
+    assert!(frame.chunks_exact(4).any(|p| p[..3] != [0, 0, 0]));
     assert!(matches!(
         loader.decode(b"\x89PNG\r\n\x1a\n"),
         Err(ImageLoadError::Decode(ImageDecodeError::NativePng(_))),

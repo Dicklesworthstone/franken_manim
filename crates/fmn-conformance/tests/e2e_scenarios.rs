@@ -12691,7 +12691,9 @@ fn native_prepared_images_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
     struct Picture(ImageMobject);
     impl fmn::SceneConstruct for Picture {
         fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
-            stage.add(self.0.clone().with_height(3.0))?;
+            // A 50px quad puts all 2x2 texel centers on pixel centers under
+            // the 96x64 camera with a 4-unit frame height below.
+            stage.add(self.0.clone().with_height(25.0 / 8.0))?;
             Ok(())
         }
     }
@@ -12737,6 +12739,7 @@ fn native_prepared_images_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
             .map_err(|error| fail(format!("image render options: {error}")))?;
         options.config.camera.resolution = (96, 64);
+        options.config.camera.background_color = "#000000".into();
         options.config.sizes.frame_height = 4.0;
         options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
         options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
@@ -12775,9 +12778,19 @@ fn native_prepared_images_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
     let new = render(changed.mobject(), 1, "/replacement.png")?;
     let decoded = fmn_codec::decode_png(&first, &fmn_codec::PngLimits::default())
         .map_err(|error| fail(format!("decode image output: {error}")))?;
-    let at = (12 * 96 + 28) * 4;
+    if (decoded.width, decoded.height) != (96, 64) {
+        return Err(fail("prepared image output dimensions changed"));
+    }
+    // Default Repeat+bilinear sampling mixes opposite edges. At the four
+    // exact texel centers, the color/alpha oracle is independent of filtering.
+    let pixel = |x, y| &decoded.rgba[(y * 96 + x) * 4..(y * 96 + x + 1) * 4];
+    let translucent = pixel(60, 19);
     if first == new
-        || decoded.rgba[at..at + 4] != [255, 0, 0, 255]
+        || pixel(35, 19) != [255, 0, 0, 255]
+        || pixel(35, 44) != [0, 0, 255, 255]
+        || (translucent[0], translucent[2], translucent[3]) != (0, 0, 255)
+        || !(187..=189).contains(&translucent[1])
+        || pixel(60, 44) != [0, 0, 0, 255]
         || prepared.mobject().pixels() != pixels
     {
         return Err(fail(
