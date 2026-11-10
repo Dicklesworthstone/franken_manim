@@ -3561,6 +3561,158 @@ fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("studio_backend_journaled", 1))
 }
 
+/// Export an ordinary planar scene, then retain one production Studio worker
+/// while seeking both forward and backward through its FMTL frames.
+fn studio_compiled_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::{Square, Style};
+    use fmn_studio::{FramePayload, SupervisorRequest, WorkerResponse};
+
+    let mut stage = Stage::new();
+    let square = stage.add(Square::new().style(Style::default().fill_opacity(1.0)));
+    stage
+        .add_to_scene(square)
+        .map_err(|error| fail(error.to_string()))?;
+    stage
+        .add_dt_updater(
+            square,
+            |stage, mob, dt| {
+                stage.shift(mob, [2.0 * dt, 0.5 * dt, 0.0]);
+            },
+            false,
+        )
+        .map_err(|error| fail(error.to_string()))?;
+    let mut timeline = fmn::animation::Timeline::new(8)
+        .map_err(|error| fail(format!("preview timeline: {error}")))?;
+    timeline
+        .wait(0.5)
+        .map_err(|error| fail(error.to_string()))?;
+    let bundle =
+        fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(ctx.seed))
+            .map_err(|error| fail(format!("export planar preview: {error}")))?;
+    let fs = fmn_platform::fs::VirtualFs::new();
+    fs.insert("/retained_preview.fmtl", bundle);
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut frame_count = 0;
+    let mut refusals = 0;
+    for threads in ["1", "4", "16"] {
+        let mut args = vec![
+            "studio",
+            "--no-browser",
+            "--resolution",
+            "96x64",
+            "--threads",
+            threads,
+        ];
+        if CLI_CERTIFIED_PLATFORM {
+            args.push("--reproducible");
+        }
+        args.push("/retained_preview.fmtl");
+        let fmn_cli::Invocation::Studio(command) = fmn_cli::parse_args(args)
+            .map_err(|error| fail(format!("parse compiled preview: {error}")))?
+        else {
+            return Err(fail("compiled preview did not select Studio"));
+        };
+        let mut worker = fmn_cli::compose_studio_preview_worker(&fs, &command)
+            .map_err(|error| fail(format!("compose retained preview: {error}")))?;
+        let scene = worker
+            .active_scene()
+            .ok_or_else(|| fail("compiled worker omitted its active scene"))?
+            .to_owned();
+        let mut frames = Vec::new();
+        for index in [0, 3, 1, 1, 2, 0] {
+            let WorkerResponse::Frame(stream) = worker
+                .handle(SupervisorRequest::Scrub {
+                    scene: scene.clone(),
+                    frame: index,
+                })
+                .map_err(|error| fail(format!("compiled preview scrub: {error}")))?
+            else {
+                return Err(fail("compiled scrub omitted its frame"));
+            };
+            stream
+                .validate(fmn_studio::ProtocolLimits::default())
+                .map_err(|error| fail(format!("compiled preview protocol: {error}")))?;
+            let fresh = fmn_cli::compose_studio_preview_frame(&fs, &command, index)
+                .map_err(|error| fail(format!("fresh preview oracle: {error}")))?;
+            if stream.frame_index != index as u64
+                || stream.scene != scene
+                || stream.render_backends != fresh.render_backends
+                || (stream.width, stream.height) != (96, 64)
+            {
+                return Err(fail(
+                    "retained preview changed its frame or backend identity",
+                ));
+            }
+            let (
+                FramePayload::Pipe { bytes, .. },
+                FramePayload::Pipe {
+                    bytes: expected, ..
+                },
+            ) = (stream.payload, fresh.payload)
+            else {
+                return Err(fail("compiled preview omitted its bounded PNG payload"));
+            };
+            if bytes != expected {
+                return Err(fail(format!(
+                    "retained preview differs at frame {index}, threads={threads}"
+                )));
+            }
+            frames.push(bytes);
+            frame_count += 1;
+        }
+        if frames[0] == frames[1] || frames[2] != frames[3] || frames[0] != frames[5] {
+            return Err(fail(
+                "compiled preview lost motion or repeatable backward seeks",
+            ));
+        }
+        if worker
+            .handle(SupervisorRequest::Scrub {
+                scene: scene.clone(),
+                frame: 99,
+            })
+            .is_ok()
+        {
+            return Err(fail("compiled preview accepted an out-of-range frame"));
+        }
+        let WorkerResponse::Frame(recovered) = worker
+            .handle(SupervisorRequest::Scrub { scene, frame: 0 })
+            .map_err(|error| fail(format!("preview recovery: {error}")))?
+        else {
+            return Err(fail("preview recovery omitted its frame"));
+        };
+        let FramePayload::Pipe { bytes, .. } = recovered.payload else {
+            return Err(fail("preview recovery omitted its PNG"));
+        };
+        if bytes != frames[0] {
+            return Err(fail("refused scrub changed the next retained preview"));
+        }
+        frame_count += 1;
+        refusals += 1;
+        if let Some(expected) = &baseline {
+            if &frames != expected {
+                return Err(fail(format!(
+                    "compiled preview changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+    }
+    let frames = baseline.ok_or_else(|| fail("compiled preview rendered no frames"))?;
+    ctx.event(
+        LogEvent::new("e2e.studio.compiled_preview")
+            .field("thread_counts", 3_u64)
+            .field("frames", frame_count)
+            .field("refusal_recoveries", refusals),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("compiled_preview_first.png", frames[0].clone())
+        .with_artifact("compiled_preview_moved.png", frames[1].clone())
+        .with_counter("compiled_preview_thread_counts", 3)
+        .with_counter("compiled_preview_frames", frame_count)
+        .with_counter("compiled_preview_refusal_recoveries", refusals))
+}
+
 /// Exercise the live mixed 3D registration through the public Studio root.
 /// Surfaces, point clouds, images and vectors must reach the camera renderer,
 /// retain their motion, and produce identical pixels at either thread width.
@@ -16770,6 +16922,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_compiled_preview.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_compiled_preview_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "compiled_preview_first.png".into(),
+                "compiled_preview_moved.png".into(),
+            ]),
+            counter_eq("compiled_preview_thread_counts", 3),
+            counter_eq("compiled_preview_frames", 21),
+            counter_eq("compiled_preview_refusal_recoveries", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.compiled_preview",
+            vec![FieldPred::u64_eq("frames", 21)],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.studio_camera_preview.v1",
         ScenarioClass::RenderMatrix,
         Surface::StudioInProcess,
@@ -20139,6 +20311,16 @@ fn move_along_path_live_input_failure_scenario_passes() {
 }
 
 /// Focused entry for the same mandatory fast-tier production lifecycle row.
+#[test]
+fn studio_compiled_preview_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_compiled_preview.v1")
+        .expect("compiled Studio preview scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 #[test]
 fn studio_camera_preview_scenario_passes() {
     let scenario = catalog()
