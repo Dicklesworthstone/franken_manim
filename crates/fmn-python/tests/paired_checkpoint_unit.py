@@ -70,6 +70,7 @@ bundle = types.ModuleType(PACKAGE + ".bundle_export")
 bundle.BundleExportResult = type("BundleExportResult", (), {})
 bundle._validated_limits = bundle.export_bundle = bundle.require_bundle_capability = unavailable
 bundle._validated_audio_options = unavailable
+bundle._validated_bundle_output_options = unavailable
 sys.modules[bundle.__name__] = bundle
 paired = importlib.import_module(PACKAGE + ".paired_output")
 journal = importlib.import_module(PACKAGE + ".batch_checkpoint")

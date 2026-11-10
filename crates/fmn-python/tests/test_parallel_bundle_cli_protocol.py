@@ -86,6 +86,7 @@ class ParallelBundleCliTests(unittest.TestCase):
         self.names = ("Beta", "Alpha")
         self.discovery_error = None
         self.discovery_digest = None
+        self.discovery_directory = None
         self.process_calls = []
         parallel = types.ModuleType("fmn_python.parallel_batch")
         def render_source_scenes(*args, **kwargs):
@@ -109,6 +110,8 @@ class ParallelBundleCliTests(unittest.TestCase):
         self.loading = loading
         self.h.native._portal_cli_render_arguments = self.parse
         self.h.native._portal_cli_emit = self.emit
+        self.h.native._PORTAL_BUNDLE_AUDIO_FFMPEG = True
+        self.h.native._portal_validate_bundle_owner = lambda *args: None
 
     def behavior(self, **modes):
         (self.root / "behavior.json").write_text(json.dumps(modes))
@@ -118,15 +121,21 @@ class ParallelBundleCliTests(unittest.TestCase):
         self.discoveries.append((source, options))
         if self.discovery_error:
             raise self.discovery_error
-        yield types.SimpleNamespace(scenes=self.names,
-            source_digest=self.discovery_digest or hashlib.sha256(self.source.read_bytes()).hexdigest())
+        previous = Path.cwd()
+        try:
+            if self.discovery_directory is not None:
+                os.chdir(self.discovery_directory)
+            yield types.SimpleNamespace(scenes=self.names,
+                source_digest=self.discovery_digest or hashlib.sha256(self.source.read_bytes()).hexdigest())
+        finally:
+            os.chdir(previous)
 
     def parse(self, arguments):
         self.parses.append(list(arguments))
         names, options, index = [], {}, 0
         flags = {"--format": "format", "--video_dir": "video_dir", "--output": "output",
                  "--file_name": "file_name", "--fps": "fps", "--resolution": "resolution",
-                 "-r": "resolution", "--config_file": "config_file"}
+                 "-r": "resolution", "--config_file": "config_file", "--ffmpeg_bin": "ffmpeg_bin"}
         while index < len(arguments):
             token = arguments[index]
             if token in flags:
@@ -186,6 +195,106 @@ class ParallelBundleCliTests(unittest.TestCase):
             self.assertEqual(row["result"]["replay_resolution"], [128, 72])
         self.assertEqual(self.stdout.getvalue(), "")
         self.assertIn("succeeded", self.stderr.getvalue())
+
+    def test_decoder_override_stays_frozen_across_discovery_and_spawned_jobs(self):
+        # Deliberately perturb the discovery boundary's cwd. This is a protocol
+        # fixture, not authored source execution in the coordinator.
+        self.discovery_directory = self.root / "discovery-working-directory"
+        self.discovery_directory.mkdir()
+        self.configuration = {
+            "values": {"file_writer": {"ffmpeg_timeout": 7}},
+            "overrides": {}, "explicit_overrides": {},
+        }
+        original_configuration = json.loads(json.dumps(self.configuration))
+        previous = Path.cwd()
+        try:
+            os.chdir(self.root)
+            self.assertEqual(self.invoke("--bundle-audio", "--bundle-audio-ffmpeg",
+                                         "--ffmpeg_bin", "decoder bin/ffmpeg",
+                                         "--bundle-audio-max-bytes=8192"), 0)
+        finally:
+            os.chdir(previous)
+        decoder = str(self.root / "decoder bin" / "ffmpeg")
+        self.assertEqual(self.configuration, original_configuration)
+        self.assertEqual(self.discoveries[0][1]["working_directory"], self.root)
+        self.assertEqual(self.discoveries[0][1]["configuration"], original_configuration)
+        options = self.process_calls[0][1]
+        self.assertEqual(options["_output_options"], {"ffmpeg_bin": decoder})
+        self.assertEqual(options["_working_directory"], self.root)
+        self.assertEqual(options["_configuration"], original_configuration)
+        self.assertIs(options["bundle_audio_options"]["audio_ffmpeg"], True)
+        self.loading.SceneSource.assert_not_called()
+        self.h.batch.render_scenes.assert_not_called()
+        for name in ("Alpha", "Beta"):
+            job = json.loads((self.root / (name + ".job.json")).read_text())
+            self.assertEqual(job["working_directory"], str(self.root))
+            self.assertEqual(job["options"]["_output_options"], {"ffmpeg_bin": decoder})
+            self.assertIs(job["options"]["bundle_audio_options"]["audio_ffmpeg"], True)
+            self.assertEqual(job["options"]["bundle_audio_options"]["max_audio_bytes"], 8192)
+            self.assertEqual(job["options"]["_configuration"], original_configuration)
+        for row in self.records[-1]["batch"]["outcomes"]:
+            self.assertEqual(row["result"]["audio_inputs"][0]["decoder"], "native-wav")
+            self.assertEqual(row["result"]["ffmpeg_invocations"], [])
+            self.assertIn("ffmpeg_limits", row["result"])
+            self.assertFalse(row["result"]["certified_source"])
+
+    def test_decoder_checkpoint_reuses_metadata_and_refuses_changed_policy_before_spawn(self):
+        decoder = self.root / "decoder bin" / "ffmpeg"
+        base = ("--checkpoint", str(self.checkpoint), "--resume-key", "decoder-v1",
+                "--bundle-audio", "--keep-going")
+        flags = (*base, "--bundle-audio-ffmpeg")
+        self.behavior(Beta="fail")
+        self.assertEqual(self.invoke(*flags, "--ffmpeg_bin", str(decoder)), 5)
+        first = self.records[-1]["batch"]["outcomes"][0]["result"]
+        self.behavior()
+        self.assertEqual(self.invoke(*flags, "--ffmpeg_bin", str(decoder),
+                                     "--resume", "--workers=1", workers=False), 0)
+        self.assertEqual(self.records[-1]["batch"]["reused"], ["Alpha"])
+        self.assertEqual(self.records[-1]["batch"]["outcomes"][0]["result"], first)
+        self.assertIn("audio_inputs", first)
+        saved = json.loads(self.checkpoint.read_text())
+        self.assertIs(saved["plan"]["options"]["bundle_audio_options"]["audio_ffmpeg"], True)
+        self.assertEqual(saved["plan"]["options"]["_output_options"], {"ffmpeg_bin": str(decoder)})
+        attempts = {name: (self.root / (name + ".attempts")).read_bytes()
+                    for name in ("Alpha", "Beta")}
+        before = self.checkpoint.read_bytes()
+        with patch.object(self.h.coordinator, "run_process_jobs",
+                          side_effect=AssertionError("changed policy must not launch workers")):
+            for changed in (
+                (*flags, "--ffmpeg_bin", str(self.root / "different-ffmpeg"), "--resume"),
+                (*base, "--resume"),
+            ):
+                with self.subTest(changed=changed):
+                    self.assertEqual(self.invoke(*changed), 2)
+                    self.assertEqual(self.records[-1]["phase"], "batch")
+                    self.assertEqual(self.checkpoint.read_bytes(), before)
+        for name, previous in attempts.items():
+            self.assertEqual((self.root / (name + ".attempts")).read_bytes(), previous)
+
+    def test_decoder_usage_and_missing_marker_refuse_before_discovery(self):
+        cases = [
+            ("--bundle-audio-ffmpeg",),
+            ("--bundle-audio", "--bundle-audio-ffmpeg=false"),
+            ("--bundle-audio", "--bundle-audio-ffmpeg", "--bundle-audio-ffmpeg"),
+            ("--bundle-audio", "--ffmpeg_bin", "ffmpeg"),
+            ("--bundle-audio", "--bundle-audio-ffmpeg", "--ffmpeg_bin", ""),
+            ("--bundle-audio", "--bundle-audio-ffmpeg", "--ffmpeg_bin", "bad\0tool"),
+        ]
+        for flags in cases:
+            with self.subTest(flags=flags):
+                self.assertEqual(self.invoke(*flags), 2)
+                self.assertEqual(self.records[-1]["phase"], "options")
+                self.assertTrue(self.records[-1]["robot"])
+        for marker in (False, None, 1):
+            with self.subTest(marker=marker), patch.object(
+                    self.h.native, "_PORTAL_BUNDLE_AUDIO_FFMPEG", marker):
+                self.assertEqual(self.invoke("--bundle-audio", "--bundle-audio-ffmpeg"), 4)
+                self.assertEqual(self.records[-1]["identity"], "capability")
+        self.assertEqual(self.discoveries, [])
+        self.assertEqual(self.process_calls, [])
+        self.loading.SceneSource.assert_not_called()
+        self.assertFalse(self.output.exists())
+        self.assertFalse(self.checkpoint.exists())
 
     def test_write_all_and_explicit_order_are_preserved(self):
         self.assertEqual(self.invoke("--write_all", names=()), 0)
@@ -281,7 +390,8 @@ class ParallelBundleCliTests(unittest.TestCase):
     def test_changed_entry_after_discovery_is_refused_before_worker_launch(self):
         self.discovery_digest = "a" * 64
         with patch.object(self.h.coordinator, "run_process_jobs", side_effect=AssertionError("no launch")):
-            self.assertEqual(self.invoke(), 5)
+            self.assertEqual(self.invoke("--bundle-audio", "--bundle-audio-ffmpeg",
+                                         "--ffmpeg_bin", "ffmpeg"), 5)
         self.assertIn("changed after discovery", self.records[-1]["message"])
         self.assertFalse(self.output.exists())
 
@@ -324,9 +434,20 @@ class ParallelBundleCliTests(unittest.TestCase):
         self.assertEqual(self.invoke("--help"), 0)
         self.assertIn("--workers", self.records[-1]["help"])
         self.assertIn("--job-timeout", self.records[-1]["help"])
+        self.assertIn("--bundle-audio-ffmpeg", self.records[-1]["help"])
         self.assertIsNone(self.cli.try_bundle_cli(self.h.native, [str(self.source), "--format", "png", "--workers", "2"]))
         self.assertIsNone(self.cli.try_bundle_cli(self.h.native, [str(self.source), "--output", "fmtl"]))
         self.assertEqual(self.discoveries, [])
+
+    def test_decoder_switch_inside_config_value_does_not_enable_the_capability(self):
+        with patch.object(self.h.native, "_PORTAL_BUNDLE_AUDIO_FFMPEG", False):
+            self.assertEqual(self.invoke("--config_file", "--bundle-audio-ffmpeg"), 0)
+        self.assertNotIn("bundle_audio", self.process_calls[0][1])
+        self.assertNotIn("_output_options", self.process_calls[0][1])
+        self.assertIn("--bundle-audio-ffmpeg", self.parses[0])
+        for row in self.records[-1]["batch"]["outcomes"]:
+            self.assertNotIn("soundtrack", row["result"])
+            self.assertNotIn("ffmpeg_limits", row["result"])
 
     def test_parallel_option_text_inside_another_value_is_not_reinterpreted(self):
         self.assertEqual(self.invoke("--config_file", "--workers=63"), 0)

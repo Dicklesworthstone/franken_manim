@@ -14086,6 +14086,10 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
     })
 }
 
+/// Native Python soundtrack acceptance, available only to the Gauntlet.
+#[cfg(feature = "gauntlet")]
+pub use portal_studio::bundle::run_portal_gauntlet_bundle_audio;
+
 /// Production captured-preview seam, available only to the Gauntlet.
 #[cfg(feature = "gauntlet")]
 pub use portal_studio::{

@@ -77,7 +77,7 @@ class BundleProtocol(unittest.TestCase):
         self.assertEqual(arguments[1:4], (128, 72, 24))
         self.assertEqual(arguments[5:12],
                          (543, 234567, False, False, 123456, 3456, 9_000_000_000))
-        self.assertEqual(arguments[12:], (48000, 2, 1, 64 * 1024 * 1024))
+        self.assertEqual(arguments[12:], (48000, 2, 1, 64 * 1024 * 1024, False))
         self.assertEqual([event[0] for event in self.native.events],
                          ["compact", "wait", "wait", "finish"])
         self.assertEqual(session.result.storage, "compact")
@@ -96,12 +96,31 @@ class BundleProtocol(unittest.TestCase):
         self.assertEqual(arguments[7:9], (True, True))
         self.assertEqual(arguments[9:12],
                          (256 * 1024 * 1024, 64 * 1024 * 1024, 16 * 1024 * 1024 * 1024))
-        self.assertEqual(arguments[12:], (8000, 1, 3, 4096))
+        self.assertEqual(arguments[12:], (8000, 1, 3, 4096, False))
         receipt = session.result.as_dict()
         self.assertTrue(receipt["camera_track"])
         self.assertEqual(receipt["fmtl_minor"], 2)
         self.assertEqual(receipt["picture_fmtl_minor"], 3)
         self.assertEqual(receipt["soundtrack"], {"sample_rate": 8000, "channels": 1, "sample_frames": 80})
+
+    def test_compact_compressed_audio_uses_the_same_owner_and_receipt(self):
+        self.enable_compact()
+        self.native._PORTAL_BUNDLE_AUDIO_FFMPEG = True
+        finish = self.native._portal_finish_bundle
+        self.native._portal_finish_soundtrack_bundle = lambda scene: (finish(scene), (8000, 1, 80))
+        self.scene._render_audio_inputs = [{"decoder": "native-wav"}]
+        self.scene._render_invocations = []
+        self.scene._render_ffmpeg_limits = {"max_input_bytes": 4096}
+        with self.session(storage="compact", camera=True, audio=True, audio_ffmpeg=True,
+                          audio_sample_rate=8000, audio_channels=1,
+                          max_audio_bytes=4096) as session:
+            pass
+        self.assertTrue(self.native.events[0][1][-1])
+        receipt = session.result.as_dict()
+        self.assertEqual(receipt["fmtl_minor"], 2)
+        self.assertEqual(receipt["picture_fmtl_minor"], 3)
+        self.assertEqual(receipt["audio_inputs"], [{"decoder": "native-wav"}])
+        self.assertEqual(receipt["ffmpeg_invocations"], [])
 
     def test_compact_limits_and_missing_capability_fail_before_constructor(self):
         calls = []

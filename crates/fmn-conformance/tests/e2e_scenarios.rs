@@ -6039,6 +6039,28 @@ fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     python_portal_sequence_run(ctx, false)
 }
 
+/// Audible Python bundles retain PCM and decode receipts across every storage/camera route.
+fn python_bundle_audio_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (comparisons, compressed) = manimlib::run_portal_gauntlet_bundle_audio()
+        .map_err(|error| fail(format!("Python bundle audio capabilities: {error}")))?;
+    if !matches!((comparisons, compressed), (5, 0) | (39, 34)) {
+        return Err(fail(format!(
+            "incomplete Python bundle audio acceptance: {comparisons} total, {compressed} compressed"
+        )));
+    }
+    let native = comparisons - compressed;
+    ctx.event(
+        LogEvent::new("e2e.python.bundle_audio_capabilities")
+            .field("native_comparisons", native)
+            .field("compressed_comparisons", compressed)
+            .field("artifact_comparisons", comparisons),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_bundle_native_comparisons", native)
+        .with_counter("python_bundle_compressed_comparisons", compressed)
+        .with_counter("python_bundle_artifact_comparisons", comparisons))
+}
+
 /// Authored text configurations cross native layout, regeneration and rendering.
 fn python_text_configuration_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let cases = manimlib::run_portal_gauntlet_text_configuration()
@@ -18922,6 +18944,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_bundle_audio_capabilities.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_bundle_audio_capabilities_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_bundle_native_comparisons", 5),
+            counter_ge("python_bundle_artifact_comparisons", 5),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.bundle_audio_capabilities",
+            vec![
+                FieldPred::u64_eq("native_comparisons", 5),
+                FieldPred::u64_ge("artifact_comparisons", 5),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_text_configuration.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -21462,6 +21502,17 @@ fn prismify_compound_cap_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.prismify_compound_cap.v1")
         .expect("native compound cap scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Report actual native/compressed artifact coverage without inventing optional tool runs.
+#[test]
+fn python_bundle_audio_capabilities_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_bundle_audio_capabilities.v1")
+        .expect("Python bundle audio capabilities are registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -1,6 +1,6 @@
 //! Audio ingestion tests: native-only contracts plus real compressed fixtures.
 
-#[cfg(feature = "exact-process")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 use fmn_codec::WavLimits;
 use fmn_codec::{SampleFormat, encode_wav};
 use fmn_output::audio::{AudioDecodeError, AudioDecodeLimits, AudioDecoder, AudioInputFormat};
@@ -327,7 +327,7 @@ fn audio_rejects_unknown_channel_layouts_and_nonfinite_pcm() {
     assert_eq!(plus.report.pcm_digest, minus.report.pcm_digest);
 }
 
-#[cfg(feature = "exact-process")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 #[test]
 fn audio_real_compressed_decode_keeps_pcm_and_records_exact_source() {
     let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {
@@ -434,7 +434,7 @@ fn audio_missing_decoder_does_not_disable_native_wav() {
     assert!(result.report.invocation.is_none());
 }
 
-#[cfg(feature = "exact-process")]
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 #[test]
 fn audio_real_file_cap_is_not_a_successfully_truncated_soundtrack() {
     let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {

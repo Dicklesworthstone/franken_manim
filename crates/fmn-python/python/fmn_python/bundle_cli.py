@@ -13,7 +13,8 @@ from pathlib import Path
 import sys
 
 from .bundle_export import (BundleExportSession, _validated_audio_options,
-                            _validated_storage, require_bundle_capability)
+                            _validated_bundle_output_options, _validated_storage,
+                            require_bundle_capability)
 from .console_rendering import _tokens, _VALUE_FLAGS, _message, _MAX_SELECTED_SCENES, _output_paths, _single_destination
 from .batch_cli import _emit_result
 from .checkpoint_cli import CHECKPOINT_HELP, take_checkpoint_options
@@ -57,14 +58,19 @@ camera-less WASM player refuses this mode. Replay never executes scene code.
 --bundle-audio mixes native WAV cues into a self-contained minor-2 soundtrack,
 including in camera bundles. Audio-aware replay needs neither source WAVs nor
 scene code; picture-only consumers refuse rather than silently discarding sound.
+--bundle-audio-ffmpeg explicitly permits compressed cues through the governed
+decoder. It requires --bundle-audio; --ffmpeg_bin PATH selects its executable.
+The decoder and its resource limits are frozen before each scene runs. No-cue
+and native WAV scenes never locate or launch it. Decoded PCM travels inside the
+bundle, with source and decoder details retained in its publication receipt.
 Audio settings (require --bundle-audio; all values are unsigned decimal):
   --bundle-audio-sample-rate RATE  1..384000 Hz; default 48000.
   --bundle-audio-channels COUNT    1 (mono) or 2 (stereo); default 2.
   --bundle-audio-threads COUNT     1..64 native mixer workers; default 1.
   --bundle-audio-max-bytes BYTES   8..268435456; default 67108864 (64 MiB).
 The audio budget bounds per-scene audio work/storage; the complete bundle keeps
-its separate 256 MiB limit. No transcoder is invoked by bundle export. Compressed
-cues, partial playback and source certification remain explicit refusals.
+its separate 256 MiB limit. Compressed cues require --bundle-audio-ffmpeg;
+partial playback and source certification remain explicit refusals.
 Audio settings are bound into batch checkpoint identity. No-cue scenes retain
 ordinary picture-only bundles, even when --bundle-audio is selected.
 --bundle-storage compact stores the same observed frames in lossless minor-3
@@ -86,7 +92,7 @@ Use the same --resolution for exact replay; camera bundles also record aspect.
 """
 
 _ALLOWED = frozenset({"--format", "--resolution", "-r", "--fps", "--video_dir", "--output", "--file_name",
-                      "-c", "--color", "--config_file"})
+                      "-c", "--color", "--config_file", "--ffmpeg_bin"})
 _ALLOWED_SWITCHES = frozenset({"-l", "--low_quality", "-m", "--medium_quality", "--hd", "--uhd", "-q", "--quiet"})
 
 
@@ -111,7 +117,7 @@ def _take_capture_options(arguments):
     Keep malformed values as data until try_bundle_cli owns error/robot output.
     A missing number must not consume a following --robot or --help switch.
     """
-    remaining, switches, values, storage = [], [], [], []
+    remaining, switches, values, storage, transcoding = [], [], [], [], []
     index = 0
     while index < len(arguments):
         token = arguments[index]
@@ -128,10 +134,13 @@ def _take_capture_options(arguments):
         elif token == "--bundle-audio" or token.startswith("--bundle-audio="):
             switches.append(None if token == "--bundle-audio" else token.split("=", 1)[1])
             index += 1
+        elif token == "--bundle-audio-ffmpeg" or token.startswith("--bundle-audio-ffmpeg="):
+            transcoding.append(None if token == "--bundle-audio-ffmpeg" else token.split("=", 1)[1])
+            index += 1
         else:
             remaining.append(token)
             index += 1
-    return remaining, switches, values, storage
+    return remaining, switches, values, storage, transcoding
 
 
 def _storage_configuration(values):
@@ -153,12 +162,16 @@ def _storage_configuration(values):
     return mode, _validated_storage(mode, limits if limits else None)
 
 
-def _audio_configuration(switches, values):
+def _audio_configuration(switches, values, transcoding=()):
     if len(switches) > 1:
         raise ValueError("--bundle-audio must not be repeated")
     if any(value is not None for value in switches):
         raise ValueError("--bundle-audio does not take a value")
-    if values and not switches:
+    if len(transcoding) > 1:
+        raise ValueError("--bundle-audio-ffmpeg must not be repeated")
+    if any(value is not None for value in transcoding):
+        raise ValueError("--bundle-audio-ffmpeg does not take a value")
+    if (values or transcoding) and not switches:
         raise ValueError("bundle audio settings require --bundle-audio")
     options = {}
     for flag, value in values:
@@ -171,8 +184,11 @@ def _audio_configuration(switches, values):
         options[key] = int(value)
     if not switches:
         return {}
-    admitted = _validated_audio_options(audio=True, **options)
-    return dict(zip(_AUDIO_VALUE_FLAGS.values(), admitted))
+    rate, channels, workers, budget, decoder = _validated_audio_options(
+        audio=True, audio_ffmpeg=bool(transcoding), **options)
+    return {"audio_sample_rate": rate, "audio_channels": channels,
+            "audio_threads": workers, "max_audio_bytes": budget,
+            **({"audio_ffmpeg": True} if decoder else {})}
 
 
 def _bundle_options(arguments):
@@ -216,13 +232,14 @@ def try_bundle_cli(native, arguments):
     arguments, formats = _bundle_options(arguments)
     arguments, job_files = take_jobs_file_options(
         arguments, _VALUE_FLAGS | _AUDIO_VALUE_FLAGS.keys() | _STORAGE_VALUE_FLAGS.keys())
-    arguments, audio_switches, audio_values, storage_values = _take_capture_options(arguments)
+    arguments, audio_switches, audio_values, storage_values, transcoding = _take_capture_options(arguments)
     native_options, selectors, switches = _tokens(
         arguments, {"--robot", "--bundle-camera", "--write_all", "-a", "--keep-going"}
     )
     camera = "--bundle-camera" in switches
     audio = bool(audio_switches)
-    if "fmtl" not in formats and not camera and not audio and not audio_values and not storage_values:
+    if ("fmtl" not in formats and not camera and not audio and not audio_values
+            and not storage_values and not transcoding):
         return None
     robot = "--robot" in switches
     if "--help" in switches or "-h" in switches:
@@ -238,7 +255,7 @@ def try_bundle_cli(native, arguments):
             raise ValueError("bundle export requires exactly one --format fmtl")
         if switches.count("--robot") > 1 or switches.count("--bundle-camera") > 1:
             raise ValueError("--robot and --bundle-camera must not be repeated")
-        audio_options = _audio_configuration(audio_switches, audio_values)
+        audio_options = _audio_configuration(audio_switches, audio_values, transcoding)
         storage, compact_limits = _storage_configuration(storage_values)
         write_all = switches.count("--write_all") + switches.count("-a")
         keep_going = switches.count("--keep-going")
@@ -277,11 +294,18 @@ def try_bundle_cli(native, arguments):
         # Refuse unsupported semantics before importing or constructing source.
         # Unsupported modes cannot be silently ignored by a bundle export.
         index = 0
+        ffmpeg_requests = 0
         while index < len(native_options):
             token = native_options[index]
             if token in _VALUE_FLAGS:
                 if token not in _ALLOWED:
                     raise native._CapabilityError(f"{token} does not apply to FMTL export")
+                if token == "--ffmpeg_bin":
+                    ffmpeg_requests += 1
+                    if not audio_options.get("audio_ffmpeg"):
+                        raise ValueError("--ffmpeg_bin requires --bundle-audio-ffmpeg for FMTL export")
+                    if ffmpeg_requests > 1:
+                        raise ValueError("--ffmpeg_bin must not be repeated")
                 index += 2
             elif token in _ALLOWED_SWITCHES:
                 index += 1
@@ -289,13 +313,17 @@ def try_bundle_cli(native, arguments):
                 raise native._CapabilityError(
                     f"{token} is not supported for full-scene FMTL export; use the PNG/video path"
                 )
-        require_bundle_capability(native, camera=camera, audio=audio, storage=storage)
+        require_bundle_capability(native, camera=camera, audio=audio, storage=storage,
+                                  audio_ffmpeg=audio_options.get("audio_ffmpeg", False))
         parser_options = list(native_options)
         parser_options[parser_options.index("--format") + 1] = "png_sequence"
         # Only common syntax/config validation is delegated. Never render PNG.
         positionals, values, width, height, fps, _threads = native._portal_cli_render_arguments(
             (selectors[:1] if batch else selectors) + parser_options
         )
+        decoder_options = _validated_bundle_output_options(
+            None if values.get("ffmpeg_bin") is None else {"ffmpeg_bin": values["ffmpeg_bin"]},
+            audio=audio, audio_ffmpeg=audio_options.get("audio_ffmpeg", False))
         configuration, width, height, fps = resolve_render_configuration(native, values, width, height, fps)
         if width * height > 16_777_216 or (fps is not None and not 1 <= fps <= 240):
             raise ValueError("bundle export requires at most 16M pixels and 1..240 FPS")
@@ -363,6 +391,7 @@ def try_bundle_cli(native, arguments):
                     **({"bundle_storage": "compact", "bundle_compact_limits": compact_limits}
                        if storage == "compact" else {}),
                     **({"bundle_audio": True, "bundle_audio_options": audio_options} if audio else {}),
+                    **({"_output_options": decoder_options} if decoder_options else {}),
                     max_jobs=_MAX_SELECTED_SCENES, **recovery,
                     **({} if configuration is None else {"_configuration": configuration}),
                     on_result=None if values.get("quiet") else lambda outcome: print(
@@ -389,6 +418,7 @@ def try_bundle_cli(native, arguments):
                     camera=camera, _native=native,
                     storage=storage, compact_limits=compact_limits,
                     **({"audio": True, **audio_options} if audio else {}),
+                    **({"_output_options": decoder_options} if decoder_options else {}),
                 )
                 with session:
                     phase = "execute"

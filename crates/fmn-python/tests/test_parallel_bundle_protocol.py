@@ -93,6 +93,8 @@ def host_fixture():
         native = types.ModuleType("manimlib")
         native._CapabilityError = CapabilityError
         native.Scene = type("Scene", (), {})
+        native._PORTAL_BUNDLE_AUDIO_FFMPEG = True
+        native._portal_validate_bundle_owner = lambda *args: None
         for name in ("_portal_begin_bundle", "_portal_begin_camera_bundle",
                      "_portal_begin_compact_bundle",
                      "_portal_begin_soundtrack_bundle", "_portal_bundle_segment",
@@ -100,6 +102,7 @@ def host_fixture():
             setattr(native, name, lambda *args: None)
         rendering = types.ModuleType("fmn_python.rendering")
         rendering.RenderSession = object
+        rendering._apply_output_options = lambda scene, options: None
         rendering._FORMATS = {"png", "wav", "png_sequence"}
         rendering._positive_integer = lambda v, n, m=(1 << 32) - 1: positive_integer(v, n, m)
         execution = types.ModuleType("fmn_python.scene_execution")
@@ -166,6 +169,13 @@ def publish_bundle_job(job):
                        "channels": sound["audio_channels"], "sample_frames": 16})
         if options.get("bundle_storage") == "compact":
             receipt["picture_fmtl_minor"] = 3
+        if sound.get("audio_ffmpeg"):
+            from test_bundle_audio_batch_protocol import audio_receipt_metadata
+
+            metadata = audio_receipt_metadata(sound)
+            receipt.update(audio_inputs=list(metadata["audio_inputs"]),
+                           ffmpeg_invocations=list(metadata["ffmpeg_invocations"]),
+                           ffmpeg_limits=metadata["ffmpeg_limits"])
     if mode == "wrong_camera":
         receipt.update(camera_track=True, fmtl_minor=2 if "soundtrack" in receipt else 1)
     if mode == "wrong_rate":

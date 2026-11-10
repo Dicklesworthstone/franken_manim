@@ -140,7 +140,7 @@ these original audio assets. Open the artifact in the local browser player or
 use the native `render_bundle` video API described below.
 
 Defaults are `audio_sample_rate=48000`, `audio_channels=2`, `audio_threads=1`,
-and `max_audio_bytes=64*1024*1024`. Rates 1..384000, mono/stereo, 1..64 workers,
+`max_audio_bytes=64*1024*1024`, and `audio_ffmpeg=False`. Rates 1..384000, mono/stereo, 1..64 workers,
 and 8 bytes..256 MiB budgets are accepted; incompatible options are rejected
 before Scene class construction. Nondefault audio settings require `audio=True`.
 Browser audio devices may support fewer sample rates than the native export.
@@ -155,9 +155,49 @@ most 4096 cues. The complete pictures-plus-sound file still obeys
 `max_output_bytes`, and nothing is published until capture, mix and validation
 succeed. A competing destination writer is never overwritten.
 
-The Python export API still supports native WAV only. Compressed audio remains
-an explicit capability refusal there, even when ffmpeg is installed; the native
-opt-in above does not silently add process authority to the Python export API.
+Compressed source cues require the explicit `audio_ffmpeg=True` option in
+addition to `audio=True`. The byte-recognized formats are the same as ordinary
+Python audio rendering: FLAC, MP3, ADTS AAC, M4A/MP4, Ogg Vorbis/Opus, AIFF and
+supported non-PCM WAV. The source can have any filename extension. The default
+remains native WAV only, even if ffmpeg is installed.
+
+```python
+class CompressedNarration(Scene):
+    def construct(self):
+        self.add(Square())
+        self.add_sound("narration.mp3", gain=-3)
+        self.wait(5)
+
+receipt = export_bundle(
+    CompressedNarration, "compressed.fmtl",
+    audio=True, audio_ffmpeg=True, camera=True, storage="compact",
+    scene_kwargs={"file_writer_config": {
+        "ffmpeg_bin": "/opt/media tools/ffmpeg",
+        "ffmpeg_timeout": 900,
+    }},
+)
+print(receipt.audio_inputs)
+print(receipt.ffmpeg_invocations)
+```
+
+Both recorded and compact storage support this opt-in, with planar or camera
+capture. The decoder freezes `SceneFileWriter.ffmpeg_bin`,
+`ffmpeg_timeout`, `ffmpeg_max_log_bytes`, `ffmpeg_max_artifact_bytes`,
+and `ffmpeg_max_input_bytes` when the export generation opens. Invalid policy
+is refused before setup/construct/tear-down. The existing decoder snapshots its
+host search path, working directory and temporary-directory root at that point;
+later callbacks cannot redirect the executable request or replace its policy.
+No-cue exports and native PCM WAV never locate, probe or launch ffmpeg.
+Malformed PCM and unknown containers also fail before external discovery.
+
+The first recognized source requiring external decode resolves one bounded,
+fingerprinted tool. Later distinct sources retain that tool identity; repeated
+source paths reuse their decoded PCM and immutable report. Each cue still has
+its own timing, gain and ducking request. Source reads and decompression obey the
+remaining cumulative budgets before allocation. The independent process artifact
+limit remains in force even when the native sample allowance is larger. Missing
+capabilities, decode failures and exhausted limits leave no published bundle.
+
 Scene setup/construct/tear-down run once; audio capture does not rerun Python
 callbacks. Offsets, gains, ducking and resampling are performed by the existing
 native mixer. Short cues pad through the picture grid; long tails are retained.
@@ -166,16 +206,51 @@ Static scenes get one terminal still without advancing authored time.
 rather than silently moving later cues. Skip/range/presenter modes remain
 unsupported. Use ordinary play/wait playback for audible bundles.
 
-No-cue exports retain the exact minor-0/minor-1 bytes and existing receipt keys,
-even with `audio=True`. A sound-bearing receipt adds `fmtl_minor=2` and a
-`soundtrack` object containing sample rate, channels and sample-frame count;
-`receipt.soundtrack` exposes the corresponding immutable attributes. The
-snapshot is not certification of arbitrary Python source effects. CLI and batch
-soundtrack-option wiring remain separate from this Python single-scene API.
+No-cue exports retain the exact picture-only bytes and existing receipt keys,
+including compact storage and `audio_ffmpeg=True`. A sound-bearing receipt adds
+`fmtl_minor=2` and a `soundtrack` object containing sample rate, channels and
+sample-frame count; `receipt.soundtrack` exposes the corresponding immutable
+attributes. Default native-only exports retain their existing receipt keys.
+
+Opted-in, sound-bearing exports additionally expose `audio_inputs`,
+`ffmpeg_invocations` and `ffmpeg_limits`, using the ordinary render receipt
+schema. Source facts are in cue order and contain path, source SHA-256,
+normalized PCM SHA-256, container, source rate/channels/frame count and decoder
+identity. Invocation facts appear once per decoded source in first-use order;
+a repeated compressed cue does not produce a duplicate invocation. Native WAV
+with an offered capability records its source facts and admitted policy with an
+empty invocation list. `as_dict()` returns independent nested copies.
+These facts do not certify arbitrary Python effects or external decoding;
+`certified_source` remains false.
+
+The console exposes the same opt-in for single scenes, sequential batches and
+spawned-worker batches:
+
+```bash
+fmn-python lesson.py NarratedScene --format fmtl --bundle-audio --bundle-audio-ffmpeg \
+  --ffmpeg_bin '/opt/media tools/ffmpeg' --output narrated.fmtl
+fmn-python lesson.py First Second --format fmtl --bundle-audio --bundle-audio-ffmpeg \
+  --bundle-camera --bundle-storage compact --workers 2 --video_dir bundles
+```
+
+The explicit console executable override is frozen before authored source or
+constructors can change its relative path or value, then applied before native
+decoder capture. Other writer, camera and text settings retain their existing
+precedence. Batch checkpoint identity includes the compressed-audio opt-in and
+explicit decoder override; resumed completed artifacts retain validated source,
+decoder and policy receipts without decoding their assets again.
 
 The native acceptance fixture `fmn-python/tests/soundtrack_bundle_export.py`
 compares analytic PCM, direct WAV output, planar/camera replay at 1/4/16 workers,
 source-independent replay, exact budgets and failure/publication ownership.
+It also compares eight real encoded fixture formats with independently decoded
+native WAV through every recorded/compact and planar/camera combination,
+checks one-decode repeated paths, retained policy, caller mutations, private
+decoder overrides and failed publication. The acceptance helper reports actual
+completed artifact comparisons separately from compressed-source comparisons.
+Without an installed optional decoder the external count is zero;
+`FMN_REQUIRE_FFMPEG=1` requires that coverage.
+
 Run it through `cargo test -p fmn-python --lib portal_studio::bundle::tests`.
 Host-protocol tests use explicit native-boundary spies and are separate from
 that real-engine evidence.

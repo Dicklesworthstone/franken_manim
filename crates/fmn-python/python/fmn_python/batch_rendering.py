@@ -18,7 +18,7 @@ from typing import Any
 from .batch_checkpoint import BatchCheckpoint
 from .batch_provenance import BatchProvenance, has_provenance, validate_batch_mode
 from .bundle_export import (
-    BundleExportResult, _validated_audio_options, export_bundle,
+    BundleExportResult, _validated_audio_options, _validated_bundle_output_options, export_bundle,
     require_bundle_capability,
 )
 from .render_selection import animation_range as _animation_range, output_stem, planned_destination
@@ -225,7 +225,7 @@ def render_scenes(
     bundle_camera: bool = False,
     bundle_limits: Mapping[str, int] | None = None,
     bundle_audio: bool = False,
-    bundle_audio_options: Mapping[str, int] | None = None,
+    bundle_audio_options: Mapping[str, int | bool] | None = None,
     bundle_storage: str = "recorded",
     bundle_compact_limits: Mapping[str, int] | None = None,
 ) -> BatchRenderResult:
@@ -295,7 +295,10 @@ def render_scenes(
 
     bundle_audio=True includes native WAV cues through the existing bounded
     soundtrack exporter. bundle_audio_options may set audio_sample_rate,
-    audio_channels, audio_threads and max_audio_bytes per scene. Those settings
+    audio_channels, audio_threads and max_audio_bytes per scene. audio_ffmpeg=True
+    explicitly admits compressed sources through the scene's governed decoder
+    configuration; decoder work remains lazy and the bundle embeds mixed PCM.
+    Those settings
     are validated and copied before planning any jobs and bound into checkpoint
     identity. A no-cue scene retains its ordinary picture-only receipt; an
     attached soundtrack retains rate/channel/frame metadata through recovery.
@@ -325,10 +328,11 @@ def render_scenes(
         raise ValueError("bundle_audio_options require bundle_audio=True")
     audio_options = {}
     if bundle_audio:
-        rate, channels, audio_threads, budget = _validated_audio_options(
+        rate, channels, audio_threads, budget, decoder = _validated_audio_options(
             audio=True, **({} if bundle_audio_options is None else dict(bundle_audio_options)))
         audio_options = {"audio_sample_rate": rate, "audio_channels": channels,
-                         "audio_threads": audio_threads, "max_audio_bytes": budget}
+                         "audio_threads": audio_threads, "max_audio_bytes": budget,
+                         **({"audio_ffmpeg": True} if decoder else {})}
     if not isinstance(save_last_frame, bool):
         raise TypeError("save_last_frame must be bool")
     if not isinstance(subdivide, bool):
@@ -363,10 +367,16 @@ def render_scenes(
         limits, storage_options = _validated_batch_storage(
             storage=bundle_storage, compact_limits=bundle_compact_limits, limits=bundle_limits)
         require_bundle_capability(native, camera=bundle_camera, audio=bundle_audio,
-                                  storage=bundle_storage)
+                                  storage=bundle_storage,
+                                  audio_ffmpeg=audio_options.get("audio_ffmpeg", False))
+        decoder_options = _validated_bundle_output_options(
+            _output_options, audio=bundle_audio,
+            audio_ffmpeg=audio_options.get("audio_ffmpeg", False))
+        if _output_options is not None:
+            _output_options = decoder_options
         if (threads is not None or selection is not None or subdivide or save_last_frame
                 or reproducible or sources is not None
-                or runtime_identities is not None or _output_options):
+                or runtime_identities is not None):
             raise native._CapabilityError(
                 "FMTL batches require complete scene capture without pixel-output options, "
                 "threads, subdivision, paired output or source certification"
@@ -435,7 +445,9 @@ def render_scenes(
                                                 **({"storage": "compact", "compact_limits":
                                                     storage_options["bundle_compact_limits"]}
                                                    if storage_options else {}),
-                                                **({"audio": True, **audio_options} if bundle_audio else {}))
+                                                **({"audio": True, **audio_options} if bundle_audio else {}),
+                                                **({"_output_options": _output_options}
+                                                   if _output_options else {}))
                     else:
                         receipt = render(job.scene, path, format=format, resolution=resolution,
                                            fps=fps, threads=threads, scene_kwargs=kwargs,

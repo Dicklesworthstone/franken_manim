@@ -5,13 +5,17 @@
 //! No callback, animation law, serializer, or frame clock is reimplemented.
 
 use super::*;
-use crate::portal_audio::BundleAudioOptions;
+use crate::portal_audio::{BundleAudioCapture, BundleAudioOptions};
 use fmn_anim::SegmentKind;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_scene::recording::{CompactRecordingLimits, RecordingError, SceneBundleRecorder};
 use fmn_scene::{BundleExportLimits, CaptureReason, LifecycleEvent, LifecyclePhase, SceneSink};
 
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
+    // API admission marker, not executable discovery. Native WAV and silent
+    // exports remain usable without an installed optional media decoder.
+    module.setattr("_PORTAL_BUNDLE_AUDIO_FFMPEG", true)?;
+    module.add_function(wrap_pyfunction!(_portal_validate_bundle_owner, module)?)?;
     module.setattr(
         "_portal_begin_bundle",
         wrap_pyfunction!(_portal_begin_bundle, module)?,
@@ -43,13 +47,20 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Validate an existing owner before Python applies its explicit writer override.
+#[pyfunction]
+fn _portal_validate_bundle_owner(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+    portal_recording::check_available(scene)?;
+    portal_video::check_scene_ownership(scene)
+}
+
 pub(super) struct BundleCapture {
     recorder: SceneBundleRecorder,
     destination: PathBuf,
     max_output_bytes: usize,
     expected_camera: Camera,
     camera_track: bool,
-    audio: Option<BundleAudioOptions>,
+    audio: Option<BundleAudioCapture>,
     saw_show: bool,
     active: Option<(SegmentKind, u64)>,
     failure: Option<String>,
@@ -213,12 +224,14 @@ fn _portal_begin_soundtrack_bundle(
     channels: u16,
     workers: usize,
     max_audio_bytes: usize,
+    audio_ffmpeg: bool,
 ) -> PyResult<()> {
     let audio = BundleAudioOptions {
         sample_rate,
         channels,
         workers,
         max_bytes: max_audio_bytes,
+        allow_ffmpeg: audio_ffmpeg,
     }
     .validate()?;
     begin_bundle(
@@ -257,6 +270,7 @@ fn _portal_begin_compact_bundle(
     channels: u16,
     workers: usize,
     max_audio_bytes: usize,
+    audio_ffmpeg: bool,
 ) -> PyResult<()> {
     let audio_options = if audio {
         Some(
@@ -265,11 +279,15 @@ fn _portal_begin_compact_bundle(
                 channels,
                 workers,
                 max_bytes: max_audio_bytes,
+                allow_ffmpeg: audio_ffmpeg,
             }
             .validate()?,
         )
     } else {
-        if (sample_rate, channels, workers, max_audio_bytes) != (48_000, 2, 1, 64 * 1024 * 1024) {
+        if audio_ffmpeg
+            || (sample_rate, channels, workers, max_audio_bytes)
+                != (48_000, 2, 1, 64 * 1024 * 1024)
+        {
             return Err(PyValueError::new_err("audio settings require audio=True"));
         }
         None
@@ -340,6 +358,11 @@ fn begin_bundle(
     let config = portal_autotune::camera_snapshot(scene.py())?;
     portal_recording::check_available(scene)?;
     portal_video::check_scene_ownership(scene)?;
+    let audio = audio.map(|options| options.capture(scene)).transpose()?;
+    // Opted-in writer descriptors can execute arbitrary Python. Never replace
+    // an arena or recording owner they changed while supplying configuration.
+    portal_recording::check_available(scene)?;
+    portal_video::check_scene_ownership(scene)?;
     let limits = BundleExportLimits {
         max_frames,
         max_capture_bytes,
@@ -397,6 +420,10 @@ fn begin_bundle(
     }
     crate::install_pristine_arena(scene, Rc::new(EngineState::new(replacement)))?;
     *slot = Some(PortalRenderSession::Preview(Box::new(capture)));
+    let mut owner = scene.try_borrow_mut()?;
+    owner.render_audio_inputs.clear();
+    owner.render_invocations.clear();
+    owner.render_ffmpeg_limits = None;
     Ok(())
 }
 
@@ -577,10 +604,13 @@ fn finish_bundle(
     drop(live);
     let audio_facts = soundtrack
         .as_ref()
-        .map(|pcm| (pcm.sample_rate(), pcm.channels(), pcm.sample_frames()));
-    let artifact = match soundtrack {
-        Some(pcm) => artifact
-            .with_soundtrack(&pcm, bundle.max_output_bytes)
+        .map(|mixed| {
+            let pcm = &mixed.soundtrack;
+            (pcm.sample_rate(), pcm.channels(), pcm.sample_frames())
+        });
+    let artifact = match &soundtrack {
+        Some(mixed) => artifact
+            .with_soundtrack(&mixed.soundtrack, bundle.max_output_bytes)
             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?,
         None => artifact,
     };
@@ -597,6 +627,9 @@ fn finish_bundle(
         .begin_atomic_file(&bundle.destination)
         .map_err(native_error)?;
     writer.write(&artifact.bytes).map_err(native_error)?;
+    // Acquire the receipt owner before publication, so an ownership failure
+    // cannot leave an artifact that Python was unable to report as completed.
+    let mut owner = scene.try_borrow_mut()?;
     writer
         .prepare()
         .map_err(native_error)?
@@ -611,10 +644,28 @@ fn finish_bundle(
             }
             _ => native_error(error),
         })?;
+    if let Some(mixed) = soundtrack {
+        owner.render_audio_inputs = mixed.inputs;
+        owner.render_invocations = mixed.invocations;
+        owner.render_ffmpeg_limits = mixed.ffmpeg_limits;
+    }
     Ok((result, audio_facts))
 }
 
-#[cfg(test)]
+/// Exercise real bundle capture, native mixing and optional compressed sources.
+///
+/// Returns completed artifact comparisons and the subset that actually decoded
+/// compressed sources. Missing optional ffmpeg produces no external-coverage
+/// claim; FMN_REQUIRE_FFMPEG makes that missing test capability a failure.
+///
+/// # Errors
+/// Returns any Python/native acceptance or shared-receipt ownership failure.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_bundle_audio() -> Result<(u64, u64), String> {
+    tests::run_soundtrack_python_scene_bundle_export()
+}
+
+#[cfg(any(test, feature = "gauntlet"))]
 mod tests {
     use super::*;
 
@@ -701,6 +752,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(test)]
     #[pyfunction]
     fn _test_png_pixels(path: &str) -> PyResult<Vec<u8>> {
         let bytes = std::fs::read(path).map_err(native_error)?;
@@ -725,48 +777,62 @@ mod tests {
             .map_err(native_error)
     }
 
-    #[test]
-    fn soundtrack_python_scene_bundle_export() {
+    pub(super) fn run_soundtrack_python_scene_bundle_export() -> Result<(u64, u64), String> {
         crate::with_python_test_module("Audible Python bundle export", |py, module, globals| {
-            globals
-                .set_item(
+            let run = || -> PyResult<(u64, u64)> {
+                globals.set_item(
                     "_test_bundle_frames",
-                    wrap_pyfunction!(_test_bundle_frames, module).unwrap(),
-                )
-                .unwrap();
-            globals
-                .set_item(
+                    wrap_pyfunction!(_test_bundle_frames, module)?,
+                )?;
+                globals.set_item(
                     "_test_camera_bundle_frames",
-                    wrap_pyfunction!(_test_camera_bundle_frames, module).unwrap(),
-                )
-                .unwrap();
-            globals
-                .set_item(
+                    wrap_pyfunction!(_test_camera_bundle_frames, module)?,
+                )?;
+                globals.set_item(
                     "_test_bundle_pcm",
-                    wrap_pyfunction!(_test_bundle_pcm, module).unwrap(),
-                )
-                .unwrap();
-            globals
-                .set_item(
-                    "_test_wav_pcm",
-                    wrap_pyfunction!(_test_wav_pcm, module).unwrap(),
-                )
-                .unwrap();
-            globals
-                .set_item(
+                    wrap_pyfunction!(_test_bundle_pcm, module)?,
+                )?;
+                globals.set_item("_test_wav_pcm", wrap_pyfunction!(_test_wav_pcm, module)?)?;
+                globals.set_item(
                     "__file__",
                     concat!(
                         env!("CARGO_MANIFEST_DIR"),
                         "/tests/soundtrack_bundle_export.py"
                     ),
-                )
-                .unwrap();
-            let source =
-                CString::new(include_str!("../../tests/soundtrack_bundle_export.py")).unwrap();
-            py.run(source.as_c_str(), Some(globals), Some(globals))
+                )?;
+                let source = CString::new(include_str!("../../tests/soundtrack_bundle_export.py"))
+                    .map_err(|error| PyValueError::new_err(error.to_string()))?;
+                py.run(source.as_c_str(), Some(globals), Some(globals))?;
+                let shared = globals
+                    .get_item("_shared_bundle_receipt_scene")?
+                    .ok_or_else(|| PyRuntimeError::new_err("shared receipt scene is absent"))?;
+                let shared = shared.cast::<PyScene>()?;
+                if !crate::portal_audio::shared_bundle_input_reports(shared)? {
+                    return Err(pyo3::exceptions::PyAssertionError::new_err(
+                        "repeated bundle cues copied their immutable decoder report",
+                    ));
+                }
+                let count = |name: &str| -> PyResult<u64> {
+                    globals
+                        .get_item(name)?
+                        .ok_or_else(|| PyRuntimeError::new_err("bundle acceptance count is absent"))?
+                        .extract()
+                };
+                Ok((
+                    count("bundle_audio_verified_exports")?,
+                    count("bundle_audio_compressed_exports")?,
+                ))
+            };
+            run()
                 .inspect_err(|error| error.print(py))
-                .expect("real Python audio capture, native PCM/picture replay and fail-closed publication");
-        });
+                .map_err(|error| error.to_string())
+        })
+    }
+
+    #[test]
+    fn soundtrack_python_scene_bundle_export() {
+        let counts = run_portal_gauntlet_bundle_audio().unwrap();
+        assert!(matches!(counts, (5, 0) | (39, 34)));
     }
 
     #[test]

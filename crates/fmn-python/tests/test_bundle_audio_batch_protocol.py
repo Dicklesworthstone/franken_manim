@@ -37,9 +37,33 @@ class Second(Scene):
     pass
 
 
+def audio_receipt_metadata(options):
+    """Native-shaped observation fixture; no real source is read or decoded."""
+    if options.get("audio_ffmpeg") is not True:
+        return {}
+    return {
+        "audio_inputs": ({
+            "path": str(Path.cwd() / "narration-protocol-fixture.wav"),
+            "source_sha256": "a" * 64, "pcm_sha256": "b" * 64, "container": "wav",
+            "sample_rate": options.get("audio_sample_rate", 48_000),
+            "channels": options.get("audio_channels", 2), "sample_frames": 8,
+            "decoder": "native-wav", "decoder_sha256": None,
+        },),
+        "ffmpeg_invocations": (),
+        "ffmpeg_limits": {
+            "timeout_seconds": 7, "timeout_nanoseconds": 0,
+            "max_log_bytes": 1024, "max_artifact_bytes": 64 * 1024 * 1024,
+            "max_input_bytes": options.get("max_audio_bytes", 64 * 1024 * 1024),
+            "keep_workdir": False,
+        },
+    }
+
+
 def native_boundary():
     return types.SimpleNamespace(
         Scene=Scene, _CapabilityError=CapabilityError,
+        _PORTAL_BUNDLE_AUDIO_FFMPEG=True,
+        _portal_validate_bundle_owner=lambda *args: None,
         _portal_begin_bundle=lambda *args: None,
         _portal_begin_camera_bundle=lambda *args: None,
         _portal_begin_soundtrack_bundle=lambda *args: None,
@@ -83,7 +107,8 @@ class AudioBatchProtocol(unittest.TestCase):
             soundtrack = BundleSoundtrackInfo(options["audio_sample_rate"], options["audio_channels"], 8)
         return BundleExportResult(path, 12, 2, len(data), hashlib.sha256(data).hexdigest(),
                                   options.get("fps") or 24, options.get("resolution") or (64, 36),
-                                  options.get("camera", False), soundtrack)
+                                  options.get("camera", False), soundtrack,
+                                  **(audio_receipt_metadata(options) if soundtrack is not None else {}))
 
     def render(self, **options):
         return batch.render_scenes({"First": First, "Second": Second}, self.directory,
@@ -107,6 +132,62 @@ class AudioBatchProtocol(unittest.TestCase):
             self.assertEqual(row["result"]["fmtl_minor"], 2)
             self.assertIs(row["result"]["certified_source"], False)
 
+    def test_decoder_optin_and_explicit_override_are_frozen_for_each_scene(self):
+        settings = {"audio_ffmpeg": True, "max_audio_bytes": 8192}
+        override = {"ffmpeg_bin": "./decoder-tools/ffmpeg"}
+        expected = str(Path.cwd() / "decoder-tools" / "ffmpeg")
+        def mutate():
+            settings["audio_ffmpeg"] = False
+            override["ffmpeg_bin"] = "changed-by-constructor"
+        self.mutate = mutate
+        result = self.render(bundle_audio=True, bundle_audio_options=settings,
+                             _output_options=override)
+        self.assertTrue(result.ok)
+        for _, options in self.calls:
+            self.assertIs(options["audio_ffmpeg"], True)
+            self.assertEqual(options["_output_options"], {"ffmpeg_bin": expected})
+        for outcome in result.outcomes:
+            self.assertEqual(outcome.result.audio_inputs[0]["decoder"], "native-wav")
+            self.assertEqual(outcome.result.ffmpeg_invocations, ())
+
+    def test_decoder_choice_and_optin_are_bound_to_checkpoint_reuse(self):
+        settings = {"bundle_audio": True, "bundle_audio_options": {"audio_ffmpeg": True},
+                    "_output_options": {"ffmpeg_bin": "ffmpeg-fixture-a"}}
+        original = self.render(checkpoint=self.checkpoint, resume_key="decoder-v1", **settings)
+        saved = json.loads(self.checkpoint.read_text())["plan"]["options"]
+        self.assertIs(saved["bundle_audio_options"]["audio_ffmpeg"], True)
+        self.assertEqual(saved["output_options"], {"ffmpeg_bin": "ffmpeg-fixture-a"})
+        self.calls.clear()
+        Scene.constructions.clear()
+        restored = self.render(checkpoint=self.checkpoint, resume=True, resume_key="decoder-v1", **settings)
+        self.assertEqual(restored.as_dict(), original.as_dict())
+        self.assertEqual(self.calls, [])
+        before = self.checkpoint.read_bytes()
+        for changed in (
+            {**settings, "_output_options": {"ffmpeg_bin": "ffmpeg-fixture-b"}},
+            {"bundle_audio": True},
+        ):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "plan|options"):
+                self.render(checkpoint=self.checkpoint, resume=True, resume_key="decoder-v1", **changed)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(Scene.constructions, [])
+        self.assertEqual(self.checkpoint.read_bytes(), before)
+
+    def test_decoder_marker_and_narrow_override_refuse_before_construction(self):
+        with patch.object(self.native, "_PORTAL_BUNDLE_AUDIO_FFMPEG", False):
+            with self.assertRaises(CapabilityError):
+                self.render(bundle_audio=True, bundle_audio_options={"audio_ffmpeg": True})
+        for override in ({"vcodec": "h264"}, {"ffmpeg_bin": ""}, {"ffmpeg_bin": "bad\0path"},
+                         {"ffmpeg_bin": True}, {"ffmpeg_bin": "ffmpeg", "pix_fmt": "rgba"}):
+            with self.subTest(override=override), self.assertRaises((TypeError, ValueError)):
+                self.render(bundle_audio=True, bundle_audio_options={"audio_ffmpeg": True},
+                            _output_options=override)
+        with self.assertRaises(ValueError):
+            self.render(bundle_audio=True, _output_options={"ffmpeg_bin": "ffmpeg"})
+        self.assertEqual(self.calls, [])
+        self.assertEqual(Scene.constructions, [])
+        self.assertFalse(self.directory.exists())
+
     def test_default_picture_path_keeps_legacy_kwargs_and_checkpoint_plan(self):
         result = self.render(checkpoint=self.checkpoint, resume_key="v1")
         self.assertTrue(result.ok)
@@ -122,7 +203,8 @@ class AudioBatchProtocol(unittest.TestCase):
         for key, values in {
             "audio_sample_rate": (0, -1, True, 384_001, 48_000.0, "48000"),
             "audio_channels": (0, 3, True), "audio_threads": (0, 65, False),
-            "max_audio_bytes": (0, 7, 268_435_457, True), "unknown": (1,),
+            "max_audio_bytes": (0, 7, 268_435_457, True),
+            "audio_ffmpeg": (0, "yes", None), "unknown": (1,),
         }.items():
             invalid.extend({"bundle_audio": True, "bundle_audio_options": {key: value}} for value in values)
         for options in invalid:
@@ -243,6 +325,90 @@ class AudioReceiptProtocol(unittest.TestCase):
         return BundleExportResult(Path.cwd() / "scene.fmtl", 12, 2, 2048, "a" * 64,
                                   24, (64, 36), camera,
                                   BundleSoundtrackInfo(32_000, 1, 16) if audio else None).as_dict()
+
+    def observed_receipt(self, *, external=True):
+        data = self.receipt()
+        metadata = audio_receipt_metadata({"audio_ffmpeg": True, "audio_sample_rate": 32_000,
+                                          "audio_channels": 1})
+        metadata["audio_inputs"] = list(metadata["audio_inputs"])
+        metadata["ffmpeg_invocations"] = []
+        if external:
+            metadata["audio_inputs"][0].update(container="flac", decoder="ffmpeg", decoder_sha256="c" * 64)
+            metadata["ffmpeg_invocations"] = [{
+                "tool_path": "/decoder/ffmpeg", "tool_sha256": "c" * 64,
+                "tool_version": "ffmpeg version protocol-fixture", "bound_tool_path": "/cleaned/job/ffmpeg",
+                "process_mechanism": "scripted.process_runner", "process_policy_version": 1,
+                "native_image": {"format": "elf64", "architecture": "x86_64",
+                                 "file_bytes": 4096, "policy_version": 1},
+                "encoder": "pcm_f32le", "hardware_encoder_probe": None,
+                "argv": ["-i", "/cleaned/job/source.audio", "-c:a", "pcm_f32le", "/cleaned/job/decoded.wav"],
+            }]
+        metadata["audio_inputs"].append(deepcopy(metadata["audio_inputs"][0]))
+        data.update(metadata)
+        return data
+
+    def audio_plan(self, *, opted_in=True, budget=8192):
+        return {"bundle_camera": False, "fps": 24, "resolution": (64, 36),
+                "bundle_limits": {"max_frames": 100, "max_output_bytes": 4096},
+                "bundle_audio": True, "bundle_audio_options": {
+                    "audio_sample_rate": 32_000, "audio_channels": 1,
+                    "max_audio_bytes": budget, "audio_ffmpeg": opted_in}}
+
+    def test_decoder_observations_round_trip_without_reopening_sources(self):
+        for external in (False, True):
+            with self.subTest(external=external):
+                data = self.observed_receipt(external=external)
+                restored = restore_bundle_receipt(data, options=self.audio_plan())
+                self.assertEqual(restored.as_dict(), data)
+                self.assertEqual(len(restored.audio_inputs), 2)
+                self.assertEqual(len(restored.ffmpeg_invocations), int(external))
+                data["audio_inputs"][0]["source_sha256"] = "d" * 64
+                self.assertEqual(restored.audio_inputs[0]["source_sha256"], "a" * 64)
+                encoded = restored.as_dict()
+                encoded["ffmpeg_limits"]["max_log_bytes"] = 1
+                self.assertEqual(restored.ffmpeg_limits["max_log_bytes"], 1024)
+        plain = self.receipt(audio=False)
+        self.assertEqual(restore_bundle_receipt(plain, options=self.audio_plan()).as_dict(), plain)
+
+    def test_alias_paths_and_high_source_sample_rates_preserve_valid_observations(self):
+        data = self.observed_receipt()
+        data["audio_inputs"][0]["path"] = "/audio/./voice.flac"
+        data["audio_inputs"][1]["path"] = "/audio/voice.flac"
+        for item in data["audio_inputs"]:
+            item["sample_rate"] = (1 << 32) - 1
+        restored = restore_bundle_receipt(data, options=self.audio_plan())
+        self.assertEqual(restored.as_dict(), data)
+        self.assertEqual(len(restored.ffmpeg_invocations), 1)
+
+    def test_invalid_decoder_observations_and_missing_capability_are_refused(self):
+        for mutate in (
+            lambda data: data.pop("ffmpeg_limits"),
+            lambda data: data["audio_inputs"][0].update(container=[]),
+            lambda data: data["audio_inputs"][0].update(source_sha256="Z" * 64),
+            lambda data: data["audio_inputs"][1].update(pcm_sha256="d" * 64),
+            lambda data: data["audio_inputs"][0].update(channels=True),
+            lambda data: data["audio_inputs"][0].update(decoder_sha256="d" * 64),
+            lambda data: data.update(ffmpeg_invocations=[]),
+            lambda data: data["ffmpeg_invocations"].append(deepcopy(data["ffmpeg_invocations"][0])),
+            lambda data: data["ffmpeg_invocations"][0].update(process_mechanism={}),
+            lambda data: data["ffmpeg_invocations"][0]["native_image"].update(architecture=[]),
+            lambda data: data["ffmpeg_invocations"][0].update(encoder="aac"),
+            lambda data: data["ffmpeg_invocations"][0].update(argv=["bad\0argument"]),
+            lambda data: data["ffmpeg_limits"].update(max_log_bytes=True),
+            lambda data: data["ffmpeg_limits"].update(timeout_nanoseconds=1_000_000_000),
+        ):
+            data = self.observed_receipt()
+            mutate(data)
+            with self.subTest(data=data), self.assertRaises(ValueError):
+                restore_bundle_receipt(data, options=self.audio_plan())
+        with self.assertRaisesRegex(ValueError, "capability"):
+            restore_bundle_receipt(self.observed_receipt(), options=self.audio_plan(opted_in=False))
+        with self.assertRaisesRegex(ValueError, "missing"):
+            restore_bundle_receipt(self.receipt(), options=self.audio_plan())
+        oversized = self.observed_receipt()
+        oversized["soundtrack"]["sample_frames"] = 4
+        with self.assertRaisesRegex(ValueError, "decoded source"):
+            restore_bundle_receipt(oversized, options=self.audio_plan(budget=16))
 
     def test_all_picture_camera_audio_receipts_round_trip_without_certification(self):
         for camera in (False, True):

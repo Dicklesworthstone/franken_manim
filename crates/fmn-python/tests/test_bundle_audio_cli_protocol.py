@@ -7,6 +7,7 @@ from contextlib import contextmanager, redirect_stderr
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
 from fmn_python import batch_rendering as batch
 from fmn_python import bundle_cli as cli
 from fmn_python.bundle_export import BundleExportResult, BundleSoundtrackInfo
+from test_bundle_audio_batch_protocol import audio_receipt_metadata
 
 
 class CapabilityError(RuntimeError):
@@ -39,6 +41,7 @@ class AudioCliProtocol(unittest.TestCase):
         self.loads, self.constructions, self.runs = [], [], []
         self.sessions, self.exports, self.records, self.parses = [], [], [], []
         self.run_error, self.finish_error, self.silent = None, None, False
+        self.load_directory = None
         owner = self
 
         class Scene:
@@ -66,6 +69,8 @@ class AudioCliProtocol(unittest.TestCase):
             _portal_bundle_segment=lambda *args: None,
             _portal_finish_bundle=lambda *args: None,
             _portal_finish_soundtrack_bundle=lambda *args: None,
+            _PORTAL_BUNDLE_AUDIO_FFMPEG=True,
+            _portal_validate_bundle_owner=lambda *args: None,
             _portal_cli_render_arguments=self.parse, _portal_cli_emit=self.emit,
         )
 
@@ -95,7 +100,8 @@ class AudioCliProtocol(unittest.TestCase):
                 self.result = BundleExportResult(
                     self.destination, 12, 2, len(data), hashlib.sha256(data).hexdigest(),
                     self.options.get("fps") or 24, self.options.get("resolution") or (64, 36),
-                    self.options.get("camera", False), soundtrack)
+                    self.options.get("camera", False), soundtrack,
+                    **(audio_receipt_metadata(self.options) if soundtrack is not None else {}))
                 return False
 
         self.session_type = Session
@@ -113,7 +119,13 @@ class AudioCliProtocol(unittest.TestCase):
     @contextmanager
     def load(self, source, base, **options):
         self.loads.append((source, base, options))
-        yield types.SimpleNamespace(scenes=self.scenes)
+        previous = Path.cwd()
+        try:
+            if self.load_directory is not None:
+                os.chdir(self.load_directory)
+            yield types.SimpleNamespace(scenes=self.scenes)
+        finally:
+            os.chdir(previous)
 
     def export(self, scene, destination, **options):
         self.exports.append((scene.__name__, dict(options)))
@@ -131,7 +143,7 @@ class AudioCliProtocol(unittest.TestCase):
         flags = {"--format": "format", "--resolution": "resolution", "-r": "resolution",
                  "--fps": "fps", "--video_dir": "video_dir", "--output": "output",
                  "--file_name": "file_name", "-c": "color", "--color": "color",
-                 "--config_file": "config_file"}
+                 "--config_file": "config_file", "--ffmpeg_bin": "ffmpeg_bin"}
         while index < len(arguments):
             token = arguments[index]
             if token in flags:
@@ -199,6 +211,94 @@ class AudioCliProtocol(unittest.TestCase):
         self.assertFalse(receipt["certified_source"])
         self.assertTrue(self.records[-1]["robot"])
         self.assertFalse(any(token.startswith("--bundle") for token in self.parses[0]))
+
+    def test_decoder_override_is_frozen_before_loading_and_reaches_the_single_owner(self):
+        self.load_directory = self.root / "source-working-directory"
+        self.load_directory.mkdir()
+        previous = Path.cwd()
+        try:
+            os.chdir(self.root)
+            self.assertEqual(self.invoke("--bundle-camera", "--bundle-audio-ffmpeg",
+                                         "--ffmpeg_bin", "tools with spaces/ffmpeg"), 0)
+        finally:
+            os.chdir(previous)
+        options = self.sessions[0].options
+        self.assertIs(options["audio_ffmpeg"], True)
+        self.assertEqual(options["_output_options"],
+                         {"ffmpeg_bin": str(self.root / "tools with spaces" / "ffmpeg")})
+        self.assertIsNone(self.loads[0][2]["configuration"])
+        self.assertEqual(self.constructions, [("First", {})])
+        self.assertIn("--ffmpeg_bin", self.parses[0])
+        self.assertNotIn("--bundle-audio-ffmpeg", self.parses[0])
+        receipt = self.records[-1]["bundle"]
+        self.assertEqual(receipt["audio_inputs"][0]["decoder"], "native-wav")
+        self.assertEqual(receipt["ffmpeg_invocations"], [])
+        self.assertIn("ffmpeg_limits", receipt)
+        self.assertFalse(receipt["certified_source"])
+
+    def test_decoder_usage_and_capability_errors_precede_source_loading(self):
+        cases = [
+            (("--bundle-audio-ffmpeg",), False),
+            (("--bundle-audio-ffmpeg=true",), True),
+            (("--bundle-audio-ffmpeg=false",), True),
+            (("--bundle-audio-ffmpeg", "--bundle-audio-ffmpeg"), True),
+            (("--ffmpeg_bin", "ffmpeg"), True),
+            (("--bundle-audio-ffmpeg", "--ffmpeg_bin", ""), True),
+            (("--bundle-audio-ffmpeg", "--ffmpeg_bin", "bad\0tool"), True),
+            (("--bundle-audio-ffmpeg", "--ffmpeg_bin", "one",
+              "--ffmpeg_bin", "two"), True),
+        ]
+        for arguments, audio in cases:
+            with self.subTest(arguments=arguments, audio=audio):
+                self.assertEqual(self.invoke(*arguments, audio=audio), 2)
+                self.assertEqual(self.records[-1]["phase"], "options")
+                self.assertTrue(self.records[-1]["robot"])
+        for marker in (False, None, 1):
+            with self.subTest(marker=marker), patch.object(
+                    self.native, "_PORTAL_BUNDLE_AUDIO_FFMPEG", marker):
+                self.assertEqual(self.invoke("--bundle-audio-ffmpeg"), 4)
+                self.assertEqual(self.records[-1]["identity"], "capability")
+        self.assert_no_execution()
+
+    def test_decoder_batch_checkpoint_reuses_receipts_and_binds_explicit_path(self):
+        checkpoint = self.root / "decoder-progress.json"
+        decoder = self.root / "decoder bin" / "ffmpeg"
+        base = ("--write_all", "--checkpoint", str(checkpoint), "--resume-key", "decoder-v1")
+        flags = (*base, "--bundle-audio-ffmpeg")
+        self.run_error = ValueError("fixture scene failed")
+        self.assertEqual(self.invoke(*flags, "--ffmpeg_bin", str(decoder), names=()), 5)
+        first = self.records[-1]["batch"]["outcomes"][0]["result"]
+        saved = json.loads(checkpoint.read_text())
+        self.assertIs(saved["plan"]["options"]["bundle_audio_options"]["audio_ffmpeg"], True)
+        self.assertEqual(saved["plan"]["options"]["output_options"],
+                         {"ffmpeg_bin": str(decoder)})
+        for _, options in self.exports:
+            self.assertIs(options["audio_ffmpeg"], True)
+            self.assertEqual(options["_output_options"], {"ffmpeg_bin": str(decoder)})
+        self.run_error = None
+        self.runs.clear()
+        self.constructions.clear()
+        self.exports.clear()
+        self.assertEqual(self.invoke(*flags, "--ffmpeg_bin", str(decoder),
+                                     "--resume", names=()), 0)
+        self.assertEqual(self.runs, ["Second"])
+        self.assertEqual(self.constructions, [("Second", {})])
+        self.assertEqual(self.records[-1]["batch"]["outcomes"][0]["result"], first)
+        self.assertIn("audio_inputs", first)
+        before = checkpoint.read_bytes()
+        self.runs.clear()
+        self.constructions.clear()
+        self.exports.clear()
+        for changed in (
+            (*flags, "--ffmpeg_bin", str(self.root / "different-ffmpeg"), "--resume"),
+            (*base, "--resume"),
+        ):
+            with self.subTest(changed=changed):
+                self.assertEqual(self.invoke(*changed, names=()), 2)
+                self.assertEqual(self.runs, [])
+                self.assertEqual(self.constructions, [])
+                self.assertEqual(self.exports, [])
+                self.assertEqual(checkpoint.read_bytes(), before)
 
     def test_explicit_batch_order_uses_real_audio_batch_dispatch(self):
         self.assertEqual(self.invoke("--bundle-audio-sample-rate=44100", names=("Second", "First")), 0)
@@ -297,7 +397,8 @@ class AudioCliProtocol(unittest.TestCase):
         self.assert_no_execution()
 
     def test_option_values_that_spell_audio_flags_do_not_activate_bundle_mode(self):
-        for value in ("--bundle-audio", "--bundle-audio-sample-rate", "--bundle-audio=true", "fmtl"):
+        for value in ("--bundle-audio", "--bundle-audio-sample-rate", "--bundle-audio=true",
+                      "--bundle-audio-ffmpeg", "--bundle-audio-ffmpeg=true", "fmtl"):
             for args in (["--file_name", value], ["--file_name=" + value]):
                 with self.subTest(args=args):
                     self.assertIsNone(cli.try_bundle_cli(self.native, [str(self.source), *args]))
@@ -322,6 +423,8 @@ class AudioCliProtocol(unittest.TestCase):
         for flag in cli._AUDIO_VALUE_FLAGS:
             self.assertIn(flag, text)
         self.assertIn("Compressed", text)
+        self.assertIn("--bundle-audio-ffmpeg", text)
+        self.assertIn("--ffmpeg_bin", text)
         self.assertIn("picture-only", text)
         self.assert_no_execution()
 
@@ -364,6 +467,18 @@ class AudioCliProtocol(unittest.TestCase):
         self.assertEqual(receipt["fmtl_minor"], 1)
         self.assertTrue(receipt["camera_track"])
         self.assertIs(self.sessions[0].options["audio"], True)
+
+    def test_opted_in_no_cue_export_keeps_the_legacy_picture_receipt(self):
+        self.silent = True
+        self.assertEqual(self.invoke("--bundle-camera", "--bundle-audio-ffmpeg",
+                                     "--ffmpeg_bin", "ffmpeg"), 0)
+        receipt = self.records[-1]["bundle"]
+        self.assertEqual(receipt["fmtl_minor"], 1)
+        self.assertNotIn("soundtrack", receipt)
+        for field in ("audio_inputs", "ffmpeg_invocations", "ffmpeg_limits"):
+            self.assertNotIn(field, receipt)
+        self.assertIs(self.sessions[0].options["audio_ffmpeg"], True)
+        self.assertEqual(self.sessions[0].options["_output_options"], {"ffmpeg_bin": "ffmpeg"})
 
     def test_later_batch_collision_prevents_all_constructors(self):
         self.directory.mkdir()

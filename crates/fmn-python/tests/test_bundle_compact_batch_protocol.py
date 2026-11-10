@@ -25,7 +25,9 @@ class CompactBundleBatchProtocol(unittest.TestCase):
         self.silent = False
 
         def begin(scene, path, width, height, fps, seed, max_frames, max_output_bytes,
-                  camera, audio, retained, snapshot, work, rate, channels, workers, audio_bytes):
+                  camera, audio, retained, snapshot, work, rate, channels, workers, audio_bytes,
+                  audio_ffmpeg):
+            self.assertIs(audio_ffmpeg, False)
             self.requests.append((type(scene).__name__, max_frames, max_output_bytes,
                                   camera, audio, retained, snapshot, work))
             self.fixture.begin(camera, scene, path, width, height, fps, seed,

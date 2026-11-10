@@ -1,6 +1,9 @@
 """Real Python scenes -> native mixer -> self-contained FMTL; no mocked engine."""
 from pathlib import Path
 import hashlib
+import os
+import runpy
+import shutil
 import struct
 import tempfile
 import wave
@@ -14,6 +17,252 @@ def write_wav(path, channels, rate, samples):
         output.setsampwidth(2)
         output.setframerate(rate)
         output.writeframes(struct.pack("<" + "h" * len(samples), *(round(x * 32768) for x in samples)))
+
+
+
+def write_float_wav(path, channels, rate, payload):
+    fmt = struct.pack("<HHIIHH", 3, channels, rate, rate * channels * 4, channels * 4, 32)
+    path.write_bytes(b"RIFF" + struct.pack("<I", 36 + len(payload)) + b"WAVEfmt " +
+                     struct.pack("<I", 16) + fmt + b"data" + struct.pack("<I", len(payload)) + payload)
+
+
+def verify_opted_soundtrack_exports(root, native_source):
+    """Count completed artifact comparisons, keeping external coverage explicit."""
+    global _shared_bundle_receipt_scene
+    verified, compressed = 0, 0
+    missing = str(root / "no installed decoder")
+
+    class Silent(m.Scene):
+        def construct(self):
+            self.construct_calls = getattr(self, "construct_calls", 0) + 1
+            self.add(m.Square())
+            self.wait(0.25)
+
+    for storage in ("recorded", "compact"):
+        for camera in (False, True):
+            options = dict(storage=storage, camera=camera, resolution=(64, 36), fps=8)
+            plain = root / f"opt-silent-{storage}-{camera}.fmtl"
+            offered = root / f"opt-silent-offered-{storage}-{camera}.fmtl"
+            export_bundle(Silent, plain, **options)
+            result = export_bundle(Silent, offered, audio=True, audio_ffmpeg=True,
+                                   _output_options={"ffmpeg_bin": missing}, **options)
+            assert plain.read_bytes() == offered.read_bytes()
+            assert result.soundtrack is None
+            assert result.audio_inputs == result.ffmpeg_invocations == ()
+            assert result.ffmpeg_limits is None
+            assert not {"audio_inputs", "ffmpeg_invocations", "ffmpeg_limits"} & result.as_dict().keys()
+            verified += 1
+
+    def voiced(asset, camera=False):
+        class Voiced(m.Scene):
+            default_file_writer_config = {"ffmpeg_bin": missing}
+            def construct(self):
+                self.construct_calls = getattr(self, "construct_calls", 0) + 1
+                # Constructor defaults and later live edits must not replace
+                # the explicit console/API override captured for this owner.
+                self.file_writer.ffmpeg_bin = missing
+                self.file_writer.ffmpeg_timeout = 0
+                self.add(m.Square(side_length=0.5, fill_opacity=1))
+                self.add_sound(str(asset), gain=-3)
+                self.wait(0.125)
+                self.add_sound(str(asset), time_offset=-1 / 48000,
+                               gain=-6, gain_to_background=-3)
+                if camera:
+                    self.camera.frame.shift(0.125 * m.RIGHT)
+                self.wait(0.375)
+        return Voiced
+
+    expected_path = root / "opt-native-baseline.fmtl"
+    native_path = root / "opt-native-offered.fmtl"
+    export_bundle(voiced(native_source), expected_path, audio=True, fps=8, resolution=(64, 36))
+    _shared_bundle_receipt_scene = voiced(native_source)(
+        file_writer_config={"ffmpeg_bin": missing, "ffmpeg_timeout": 37})
+    result = export_bundle(_shared_bundle_receipt_scene, native_path, audio=True, audio_ffmpeg=True,
+                           fps=8, resolution=(64, 36))
+    assert native_path.read_bytes() == expected_path.read_bytes()
+    assert len(result.audio_inputs) == 2 and result.ffmpeg_invocations == ()
+    assert result.audio_inputs[0] == result.audio_inputs[1]
+    assert result.audio_inputs[0]["decoder"] == "native-wav"
+    assert result.audio_inputs[0]["decoder_sha256"] is None
+    assert result.audio_inputs[0]["source_sha256"] == hashlib.sha256(native_source.read_bytes()).hexdigest()
+    assert result.ffmpeg_limits["timeout_seconds"] == 37
+    detached = result.as_dict()
+    detached["audio_inputs"][0]["source_sha256"] = "mutated"
+    detached["ffmpeg_limits"]["timeout_seconds"] = 1
+    assert result.audio_inputs[0]["source_sha256"] != "mutated"
+    assert result.ffmpeg_limits["timeout_seconds"] == 37
+    verified += 1
+
+    for index, (field, value) in enumerate((
+            ("ffmpeg_bin", ""), ("ffmpeg_bin", "\0bad"), ("ffmpeg_timeout", 0),
+            ("ffmpeg_timeout", True), ("ffmpeg_max_input_bytes", 0),
+            ("ffmpeg_max_artifact_bytes", 0), ("ffmpeg_max_log_bytes", 0))):
+        scene = None
+        destination = root / f"opt-invalid-policy-{index}.fmtl"
+        try:
+            scene = Silent(file_writer_config={field: value})
+            export_bundle(scene, destination, audio=True, audio_ffmpeg=True, fps=8)
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AssertionError(f"invalid decoder policy {field} was admitted")
+        if scene is not None:
+            assert getattr(scene, "construct_calls", 0) == 0
+            assert "_fmn_owned_render_session" not in vars(scene)
+        assert not destination.exists()
+
+    descriptor_scene = m.Scene()
+    class MutatingWriter:
+        @property
+        def ffmpeg_bin(self):
+            descriptor_scene.add_sound(str(native_source))
+            return missing
+    descriptor_scene.file_writer = MutatingWriter()
+    try:
+        with BundleExportSession(descriptor_scene, root / "opt-descriptor.fmtl",
+                                 audio=True, audio_ffmpeg=True):
+            raise AssertionError("writer callback's native state was replaced")
+    except RuntimeError as error:
+        assert "mutates engine state" in str(error), error
+    assert len(descriptor_scene._sound_request_facts()) == 1
+    assert not (root / "opt-descriptor.fmtl").exists()
+
+    for name, payload, expected_error in (
+            ("playlist", b"#EXTM3U\nhttps://example.invalid/voice.mp3", ValueError),
+            ("damaged", native_source.read_bytes()[:-1], ValueError),
+            ("missing-capability", b"fLaCbroken", m._CapabilityError)):
+        asset = root / f"opt-{name}.asset"
+        asset.write_bytes(payload)
+        destination = root / f"opt-{name}.fmtl"
+        try:
+            export_bundle(voiced(asset), destination, audio=True, audio_ffmpeg=True,
+                          _output_options={"ffmpeg_bin": missing}, fps=8)
+        except expected_error:
+            pass
+        else:
+            raise AssertionError(f"{name} silently published a soundtrack")
+        assert not destination.exists()
+
+    ffmpeg = os.environ.get("FMN_AUDIO_FFMPEG") or shutil.which("ffmpeg")
+    if not ffmpeg:
+        assert not os.environ.get("FMN_REQUIRE_FFMPEG"), "required compressed bundle decoder is unavailable"
+        print("bundle audio: native opt-in and refusals verified; external decode unavailable")
+        return verified, compressed
+
+    fixtures = root / "compressed fixtures"
+    generator = Path(__file__).resolve().parents[2] / "fmn-output/tests/make_audio_fixtures.py"
+    runpy.run_path(str(generator))["make"](fixtures)
+    explicit = root / "decoder with spaces"
+    shutil.copyfile(ffmpeg, explicit)
+    explicit.chmod(0o700)
+    tool_hash = hashlib.sha256(explicit.read_bytes()).hexdigest()
+    rows = [line.split("\t") for line in (fixtures / "manifest.tsv").read_text().splitlines()]
+    assert len(rows) == 8, "compressed format coverage changed"
+    references = {}
+    for asset_name, reference_name, source_channels, source_rate in rows:
+        asset = fixtures / asset_name
+        payload = (fixtures / reference_name).read_bytes()
+        source_channels, source_rate = int(source_channels), int(source_rate)
+        reference = root / f"{asset_name}.native.wav"
+        write_float_wav(reference, source_channels, source_rate, payload)
+        references[asset_name] = reference
+        for storage in ("recorded", "compact"):
+            for camera in (False, True):
+                options = dict(audio=True, storage=storage, camera=camera,
+                               fps=8, resolution=(64, 36), audio_sample_rate=48000)
+                baseline = root / f"{asset_name}-{storage}-{camera}-native.fmtl"
+                destination = root / f"{asset_name}-{storage}-{camera}-compressed.fmtl"
+                export_bundle(voiced(reference, camera), baseline, audio_threads=1, **options)
+                scene = voiced(asset, camera)(file_writer_config={"ffmpeg_timeout": 37})
+                result = export_bundle(scene, destination, audio_ffmpeg=True, audio_threads=4,
+                                       _output_options={"ffmpeg_bin": str(explicit)}, **options)
+                assert destination.read_bytes() == baseline.read_bytes(), (asset_name, storage, camera)
+                assert scene.construct_calls == 1 and result.frame_count == 4
+                assert len(result.audio_inputs) == 2 and len(result.ffmpeg_invocations) == 1
+                assert result.audio_inputs[0] == result.audio_inputs[1]
+                fact = result.audio_inputs[0]
+                assert fact["decoder"] == "ffmpeg" and fact["decoder_sha256"] == tool_hash
+                assert fact["source_sha256"] == hashlib.sha256(asset.read_bytes()).hexdigest()
+                assert (fact["channels"], fact["sample_rate"], fact["sample_frames"]) == (
+                    source_channels, source_rate, len(payload) // 4 // source_channels)
+                assert result.ffmpeg_limits["timeout_seconds"] == 37
+                invocation = result.ffmpeg_invocations[0]
+                assert Path(invocation["tool_path"]).samefile(explicit)
+                assert invocation["tool_sha256"] == tool_hash
+                assert invocation["encoder"] == "pcm_f32le"
+                assert str(asset) not in invocation["argv"]
+                assert "-ar" not in invocation["argv"] and "-ac" not in invocation["argv"]
+                replay = _test_camera_bundle_frames if camera else _test_bundle_frames
+                assert replay(destination.read_bytes(), [0, 3], 64, 36, 4) == replay(
+                    baseline.read_bytes(), [0, 3], 64, 36, 1)
+                assert _test_bundle_pcm(destination.read_bytes()) == _test_bundle_pcm(baseline.read_bytes())
+                verified += 1
+                compressed += 1
+
+    # One retained tool handles distinct source layouts; a repeated source
+    # still produces cue-ordered facts without another decoder invocation.
+    def multiple(first, second):
+        class Multiple(m.Scene):
+            def construct(self):
+                for asset in (first, second, first):
+                    self.add_sound(str(asset))
+                    self.wait(0.125)
+        return Multiple
+    first, second = fixtures / "flac.asset", fixtures / "mono.asset"
+    baseline, destination = root / "opt-multiple-native.fmtl", root / "opt-multiple-compressed.fmtl"
+    export_bundle(multiple(references["flac.asset"], references["mono.asset"]),
+                  baseline, audio=True, fps=8)
+    result = export_bundle(multiple(first, second), destination, audio=True, audio_ffmpeg=True,
+                           _output_options={"ffmpeg_bin": str(explicit)}, fps=8)
+    assert destination.read_bytes() == baseline.read_bytes()
+    assert len(result.audio_inputs) == 3 and len(result.ffmpeg_invocations) == 2
+    assert result.audio_inputs[0] == result.audio_inputs[2]
+    verified += 1
+    compressed += 1
+
+    # Host cwd/PATH edits after generation acquisition cannot redirect the
+    # explicit relative executable path or its admitted process policy.
+    previous_cwd, previous_path = Path.cwd(), os.environ.get("PATH")
+    elsewhere = root / "changed host context"
+    elsewhere.mkdir()
+    class ChangedContext(m.Scene):
+        def construct(self):
+            self.file_writer.ffmpeg_bin = missing
+            os.chdir(elsewhere)
+            os.environ["PATH"] = str(elsewhere)
+            self.add_sound(str(first))
+            self.wait(0.125)
+    try:
+        os.chdir(root)
+        result = export_bundle(ChangedContext, root / "opt-frozen-host.fmtl", audio=True,
+                               audio_ffmpeg=True, fps=8,
+                               _output_options={"ffmpeg_bin": "./decoder with spaces"})
+    finally:
+        os.chdir(previous_cwd)
+        if previous_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = previous_path
+    assert result.audio_inputs[0]["decoder_sha256"] == tool_hash
+    assert len(result.ffmpeg_invocations) == 1
+    verified += 1
+    compressed += 1
+
+    for name, settings, allowed in (
+            ("default-native-only", {}, False),
+            ("source-limit", {"ffmpeg_max_input_bytes": 1}, True),
+            ("expansion-limit", {"ffmpeg_max_artifact_bytes": 1}, True)):
+        destination = root / f"opt-refused-{name}.fmtl"
+        overrides = {"_output_options": {"ffmpeg_bin": str(explicit)}} if allowed else {}
+        try:
+            export_bundle(voiced(first), destination, audio=True, audio_ffmpeg=allowed,
+                          scene_kwargs={"file_writer_config": settings}, fps=8, **overrides)
+        except (m._CapabilityError, RuntimeError, ValueError, OSError):
+            pass
+        else:
+            raise AssertionError(f"{name} published despite its admission policy")
+        assert not destination.exists()
+    return verified, compressed
 
 
 with tempfile.TemporaryDirectory(prefix="fmn-python-audible-") as temporary:
@@ -197,7 +446,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-python-audible-") as temporary:
     pristine = m.Scene()
     try:
         m._portal_begin_soundtrack_bundle(pristine, str(root / "invalid.fmtl"), 64, 36, 8, 0,
-                                         100, 65536, 65536, False, 0, 2, 1, 65536)
+                                         100, 65536, 65536, False, 0, 2, 1, 65536, False)
     except ValueError:
         pass
     else:
@@ -259,6 +508,7 @@ with tempfile.TemporaryDirectory(prefix="fmn-python-audible-") as temporary:
     else:
         raise AssertionError("soundtrack publication replaced a concurrent output")
     assert dest.read_bytes() == b"concurrent winner"
+    bundle_audio_verified_exports, bundle_audio_compressed_exports = verify_opted_soundtrack_exports(root, lead)
     background.unlink()
     lead.unlink()
     # Original sources are irrelevant to portable replay.
