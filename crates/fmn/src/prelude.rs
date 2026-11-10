@@ -11,6 +11,10 @@ pub use crate::controls::{
 pub use crate::exporting::{
     export_camera_bundle, export_camera_bundle_bytes, export_camera_bundle_with_fs,
 };
+pub use crate::images::{
+    ImageColorIntent, ImageDecodeError, ImageDecodeLimits, ImageDecodeReport, ImageInputFormat,
+    ImageLoadError, ImageLoadOptions, ImageLoadReport, ImageLoader, PreparedImage,
+};
 pub use crate::{
     BundleExportError, BundleExportOptions, BundleExportReport, BundleStorage,
     CompactRecordingLimits, CompletedScene, Error, ErrorKind, FfmpegCapability, LibraryError,

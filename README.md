@@ -127,6 +127,33 @@ The `Tex` mobject above is laid out by fmd-math from bundled Computer Modern (sa
 
 For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
 
+For raster assets, prepare an image once before constructing the scene:
+
+```rust,no_run
+use fmn::prelude::*;
+
+struct Photo(PreparedImage);
+
+impl SceneConstruct for Photo {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        stage.add(self.0.mobject().with_height(3.0))?;
+        Ok(())
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut loader = ImageLoader::new(ImageLoadOptions::default())?;
+    let image = loader.load("assets/photo.png")?;
+    println!("source SHA-256: {}", image.report().decode().source_digest);
+    let mut options = RenderOptions::with_format("media/photo.png", RenderFormat::Png)?;
+    options.camera = Some(options.camera_config()?);
+    render(&mut Photo(image), options)?;
+    Ok(())
+}
+```
+
+`ImageLoader::load_with_fs(path, &fs)` accepts a host-supplied or virtual filesystem; `decode(&bytes)` accepts already-owned bytes. Files are read once under the input budget (64 MiB by default), and the prepared image shares immutable pixels across copies while preserving orientation, alpha, and PNG gamma intent. PNG/JPEG decoding is native. GIF/BMP/WebP/TIFF require an explicit `ImageLoadOptions::ffmpeg` capability; animated inputs select their first frame. With the `ffmpeg` feature, callers may explicitly set `Some(FfmpegCapability::host())`. Native inputs never discover or run that tool. Set `ImageLoadOptions::determinism` to the render's determinism mode: certified preparation refuses external decoding before discovery. Retain `image.report()` for the exact source and decoded-raster digests and any tool invocation; this receipt is not a complete scene input-closure manifest and is not automatically added to the render report.
+
 For a standalone WAV soundtrack, call `render_soundtrack(&mut scene, SoundtrackRenderOptions::new("media/soundtrack.wav")?)`. The ordinary scene and its updaters execute once; `scene_mut().add_sound(…)` cues retain their offsets, gains, background ducking, and tails, with skipped time removed from the output clock. A cue-free scene produces silence of the correct duration. This route uses native PCM source decoding and canonical signed 16-bit WAV publication without a pixel renderer or ffmpeg. `SoundtrackRenderOptions` exposes the sample rate/channel matrix, mixer worker ceiling, scene duration, source/decoded/prepared audio budgets, and a 64 MiB default artifact ceiling. Existing destinations are preserved, and the report includes actual sample frames, clipping counts, and the exact inputs decoded. Compressed source files return a named decoder-capability error.
 
 ```rust,no_run

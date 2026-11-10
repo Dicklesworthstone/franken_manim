@@ -72,6 +72,7 @@ use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionRep
 pub mod autotune;
 pub mod controls;
 pub mod exporting;
+pub mod images;
 pub mod prelude;
 pub mod rendering;
 mod typesetting;
@@ -82,6 +83,11 @@ pub use exporting::{
     CompactRecordingLimits, SceneBundleExport, export_bundle, export_bundle_bytes,
     export_bundle_with_fs, export_camera_bundle, export_camera_bundle_bytes,
     export_camera_bundle_with_fs,
+};
+
+pub use images::{
+    ImageColorIntent, ImageDecodeError, ImageDecodeLimits, ImageDecodeReport, ImageInputFormat,
+    ImageLoadError, ImageLoadOptions, ImageLoadReport, ImageLoader, PreparedImage,
 };
 
 pub use rendering::{

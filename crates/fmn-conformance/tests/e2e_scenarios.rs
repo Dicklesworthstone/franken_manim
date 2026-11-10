@@ -12680,6 +12680,122 @@ fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("graph_animation_frames", rendered_frames))
 }
 
+/// Native image preparation retains the consumed bytes' receipt and immutable
+/// pixels while the source changes, then reaches the real camera renderer.
+fn native_prepared_images_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::{ImageLoadOptions, ImageLoader};
+    use fmn_library::ImageMobject;
+
+    struct Picture(ImageMobject);
+    impl fmn::SceneConstruct for Picture {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(self.0.clone().with_height(3.0))?;
+            Ok(())
+        }
+    }
+
+    let pixels = [
+        255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 0, 0,
+    ];
+    let source = fmn_codec::encode_rgba8(2, 2, &pixels, fmn_codec::CompressionLevel::Fast);
+    ctx.record_asset("images/source.png", &source);
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fs.insert("/source.image", source.clone());
+    let mut loader = ImageLoader::new(ImageLoadOptions {
+        determinism: fmn_config::config::DeterminismMode::Certified,
+        ..ImageLoadOptions::default()
+    })
+    .map_err(|error| fail(format!("image loader: {error}")))?;
+    let prepared = loader
+        .load_with_fs("/source.image", fs.as_ref())
+        .map_err(|error| fail(format!("prepare native image: {error}")))?;
+    let receipt = prepared.report();
+    if receipt.decode().source_digest != sha256(&source)
+        || receipt.source_bytes() != source.len() as u64
+        || receipt.decode().invocation.is_some()
+        || prepared.mobject().pixels() != pixels
+    {
+        return Err(fail(
+            "prepared image receipt does not identify its native input",
+        ));
+    }
+    let replacement = fmn_codec::encode_rgba8(2, 2, &[255; 16], fmn_codec::CompressionLevel::Fast);
+    fs.insert("/source.image", replacement);
+    let changed = loader
+        .load_with_fs("/source.image", fs.as_ref())
+        .map_err(|error| fail(format!("prepare changed image: {error}")))?;
+    if changed.report().decode().source_digest == receipt.decode().source_digest
+        || changed.report().decode().pixel_digest == receipt.decode().pixel_digest
+    {
+        return Err(fail(
+            "image receipts failed to distinguish replacement source content",
+        ));
+    }
+    let render = |image: ImageMobject, threads, path: &str| -> Result<Vec<u8>, ScenarioError> {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
+            .map_err(|error| fail(format!("image render options: {error}")))?;
+        options.config.camera.resolution = (96, 64);
+        options.config.sizes.frame_height = 4.0;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.typeset_cache = false;
+        options.camera = Some(
+            options
+                .camera_config()
+                .map_err(|error| fail(format!("image camera: {error}")))?,
+        );
+        let report = fmn::render_with_fs(&mut Picture(image), options, fs.clone())
+            .map_err(|error| fail(format!("prepared image render: {error}")))?;
+        if report.artifact.frame_count != 1 {
+            return Err(fail("prepared still image did not emit exactly one frame"));
+        }
+        fs.read(Path::new(path))
+            .map_err(|error| fail(error.to_string()))
+    };
+    let mut baseline = None;
+    for threads in [1, 4, 16] {
+        let bytes = render(
+            prepared.mobject(),
+            threads,
+            &format!("/prepared-{threads}.png"),
+        )?;
+        if let Some(expected) = &baseline {
+            if &bytes != expected {
+                return Err(fail(format!(
+                    "prepared image pixels changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(bytes);
+        }
+    }
+    let first = baseline.ok_or_else(|| fail("prepared image rendered no frames"))?;
+    let new = render(changed.mobject(), 1, "/replacement.png")?;
+    let decoded = fmn_codec::decode_png(&first, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode image output: {error}")))?;
+    let at = (12 * 96 + 28) * 4;
+    if first == new
+        || decoded.rgba[at..at + 4] != [255, 0, 0, 255]
+        || prepared.mobject().pixels() != pixels
+    {
+        return Err(fail(
+            "source replacement altered prepared pixels or the native image did not render",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.native.prepared_images")
+            .field("thread_counts", 3_u64)
+            .field("frames", 4_u64)
+            .field("immutable_input", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("prepared_image.png", first)
+        .with_artifact("replacement_image.png", new)
+        .with_counter("prepared_image_thread_counts", 3)
+        .with_counter("prepared_image_frames", 4)
+        .with_counter("prepared_image_receipts", 2))
+}
+
 /// Partial reveals must never rasterize the move between separate contours.
 fn partial_reveal_contours_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn_library::style::Style;
@@ -19027,6 +19143,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     );
+    specs.push(spec(
+        "lifecycle.native_prepared_images.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(native_prepared_images_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "prepared_image.png".into(),
+                "replacement_image.png".into(),
+            ]),
+            counter_eq("prepared_image_thread_counts", 3),
+            counter_eq("prepared_image_frames", 4),
+            counter_eq("prepared_image_receipts", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.native.prepared_images",
+            vec![FieldPred::str_eq("immutable_input", "true")],
+        )],
+    ));
     specs.push(
         spec(
             "lifecycle.graph_animations.v1",
@@ -20447,6 +20583,16 @@ fn live_bar_chart_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.live_bar_chart.v1")
         .expect("live native bar chart scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_prepared_images_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.native_prepared_images.v1")
+        .expect("native prepared image scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
