@@ -43,9 +43,16 @@ use crate::vmobject::VMobject;
 
 /// A tex-bridge failure: fmd-math's precise, tier-tagged construct
 /// errors pass through untouched (never a blank render); the bridge
-/// itself only names its own two faults.
+/// itself names constructor validation, calibration and contour failures.
 #[derive(Debug)]
 pub enum TexMobjectError {
+    /// A native constructor parameter cannot describe finite geometry.
+    InvalidParameter {
+        /// The constructor setting that was refused.
+        name: &'static str,
+        /// The constraint the setting must satisfy.
+        reason: &'static str,
+    },
     /// The fmn-tex pipeline's precise error, verbatim.
     Tex(TexError),
     /// The calibration probe found no measurable "0" — the math face
@@ -63,6 +70,9 @@ pub enum TexMobjectError {
 impl core::fmt::Display for TexMobjectError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::InvalidParameter { name, reason } => {
+                write!(f, "invalid TeX {name}: {reason}")
+            }
             Self::Tex(e) => e.fmt(f),
             Self::Calibration => write!(
                 f,
@@ -1155,6 +1165,452 @@ impl<'a> TexText<'a> {
     }
 }
 
+/// The legacy one-string TeX constructor (old_tex_mobject.py).
+///
+/// Unlike [OldTex], this builds a flat primitive family. Fragment repairs
+/// are local to this constructor: ordinary [Tex] remains strict. The
+/// authored string is available through [Self::get_tex]; the returned
+/// [TexMobject::typeset] retains the normalized source actually typeset,
+/// so source selection and matching retain valid byte spans.
+///
+/// The supplied [TexEngine] selects the native preamble pack. There is no
+/// SVG round trip or external TeX process.
+#[derive(Debug, Clone)]
+pub struct SingleStringTex<'a> {
+    inner: Tex<'a>,
+    height: Option<f64>,
+    organize_left_to_right: bool,
+    text_align: LineAlign,
+}
+
+impl<'a> SingleStringTex<'a> {
+    /// Display mathematics at font size 48, with no explicit height.
+    #[must_use]
+    pub fn new(source: &'a str) -> Self {
+        Self {
+            inner: Tex::new(source),
+            height: None,
+            organize_left_to_right: false,
+            text_align: LineAlign::Center,
+        }
+    }
+
+    /// The original string, before legacy fragment repair.
+    #[must_use]
+    pub fn get_tex(&self) -> &'a str {
+        self.inner.source
+    }
+
+    /// Select display mathematics or text mainland with math islands.
+    #[must_use]
+    pub fn math_mode(mut self, math_mode: bool) -> Self {
+        self.inner.mode = if math_mode {
+            Mode::Math(MathStyle::Display)
+        } else {
+            Mode::Text
+        };
+        self
+    }
+
+    /// The Reference's font-size setting.
+    #[must_use]
+    pub fn font_size(mut self, font_size: f64) -> Self {
+        self.inner.font_size = font_size;
+        self
+    }
+
+    /// Native font-size calibration, in font units per scene unit.
+    #[must_use]
+    pub fn font_size_for_unit_height(mut self, value: f64) -> Self {
+        self.inner.font_size_for_unit_height = value;
+        self
+    }
+
+    /// Explicit uniform height. Zero collapses ink; empty fragments stay empty.
+    #[must_use]
+    pub fn height(mut self, height: f64) -> Self {
+        self.height = Some(height);
+        self
+    }
+
+    /// Native macro declarations for this request.
+    #[must_use]
+    pub fn preamble(mut self, preamble: &'a str) -> Self {
+        self.inner.preamble = preamble;
+        self
+    }
+
+    /// Replace the base fill/stroke style.
+    #[must_use]
+    pub fn style(mut self, style: Style) -> Self {
+        self.inner.style = style;
+        self
+    }
+
+    /// Colour native source spans in the normalized expression.
+    #[must_use]
+    pub fn t2c(mut self, t2c: &'a [(&'a str, Srgb)]) -> Self {
+        self.inner.t2c = t2c;
+        self
+    }
+
+    /// Text-line alignment. Display mathematics ignores the Reference's
+    /// outer text declaration and retains its left alignment.
+    #[must_use]
+    pub fn line_align(mut self, align: LineAlign) -> Self {
+        self.text_align = align;
+        self
+    }
+
+    /// Stable-sort primitives by horizontal centre after construction.
+    /// Source spans and serialized emission order move with the geometry.
+    #[must_use]
+    pub fn organize_left_to_right(mut self, organize: bool) -> Self {
+        self.organize_left_to_right = organize;
+        self
+    }
+
+    /// Normalize an independently typeset legacy fragment.
+    ///
+    /// Empty input, a lone substack command, and orphan array markers have
+    /// the Reference's explicit blank-fragment behavior. Other unsupported
+    /// constructs still reach the native parser and retain its named error.
+    #[must_use]
+    pub fn get_modified_expression(&self, source: &str) -> String {
+        Self::modify_special_strings(source)
+    }
+
+    /// The legacy fragment-repair rules, without invoking a typesetter.
+    #[must_use]
+    pub fn modify_special_strings(source: &str) -> String {
+        let mut tex = source.trim().to_owned();
+        if matches!(tex.as_str(), r"\over" | r"\overline" | r"\sqrt" | r"\sqrt{")
+            || tex.ends_with('_')
+            || tex.ends_with('^')
+            || tex.ends_with("dot")
+        {
+            tex.push_str(r"{\quad}");
+        }
+        if tex == r"\overset" {
+            tex.push_str(r"{\quad}{\quad}");
+        }
+        if tex.is_empty() || tex == r"\substack" {
+            tex = r"\quad".to_owned();
+        }
+        if tex.starts_with(r"\\") {
+            tex = tex.replace(r"\\", r"\quad\\");
+        }
+        tex = Self::balance_braces(&tex);
+        tex = Self::repair_unpaired_delimiters(tex);
+        if tex.contains(r"\begin{array}") != tex.contains(r"\end{array}") {
+            tex.clear();
+        }
+        tex
+    }
+
+    fn repair_unpaired_delimiters(tex: String) -> String {
+        let mut markers = Vec::new();
+        let mut lefts = 0;
+        let mut rights = 0;
+        let mut cursor = 0;
+        while let Some(ch) = tex[cursor..].chars().next() {
+            if ch != '\\' {
+                cursor += ch.len_utf8();
+                continue;
+            }
+            let tail = &tex[cursor..];
+            let marker = if tail.starts_with(r"\left") {
+                Some((5, true))
+            } else if tail.starts_with(r"\right") {
+                Some((6, false))
+            } else {
+                None
+            };
+            if let Some((len, left)) = marker.filter(|&(len, _)| {
+                tail[len..]
+                    .chars()
+                    .next()
+                    .is_some_and(|next| "(){}[]|.\\".contains(next))
+            }) {
+                markers.push((cursor, cursor + len));
+                if left {
+                    lefts += 1;
+                } else {
+                    rights += 1;
+                }
+                cursor += len;
+            } else {
+                // Consume an escaped control symbol as a unit, so a doubled
+                // backslash does not start a delimiter command.
+                cursor += 1;
+                if let Some(escaped) = tex[cursor..].chars().next() {
+                    cursor += escaped.len_utf8();
+                }
+            }
+        }
+        if lefts == rights {
+            return tex;
+        }
+        let mut repaired = String::with_capacity(tex.len());
+        let mut copied = 0;
+        for (start, end) in markers {
+            repaired.push_str(&tex[copied..start]);
+            repaired.push_str(r"\big");
+            copied = end;
+        }
+        repaired.push_str(&tex[copied..]);
+        repaired
+    }
+
+    /// Balance grouping braces without mutating the string being scanned.
+    /// Escaped braces stay literal; a doubled backslash does not escape the
+    /// following brace. The implementation is linear in the input size.
+    #[must_use]
+    pub fn balance_braces(source: &str) -> String {
+        let mut depth = 0;
+        let mut missing_open = 0;
+        let mut escaped = false;
+        for ch in source.chars() {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            match ch {
+                '\\' => escaped = true,
+                '{' => depth += 1,
+                '}' if depth > 0 => depth -= 1,
+                '}' => missing_open += 1,
+                _ => {}
+            }
+        }
+        let mut balanced = String::new();
+        balanced.extend(std::iter::repeat_n('{', missing_open));
+        balanced.push_str(source);
+        balanced.extend(std::iter::repeat_n('}', depth));
+        balanced
+    }
+
+    /// Typeset the repaired fragment and build its flat native family.
+    ///
+    /// # Errors
+    ///
+    /// Invalid dimensions or an over-budget source fail before layout.
+    /// Resulting coordinates must fit the native f32 record representation.
+    /// Other failures are the precise native errors from [Tex::build].
+    pub fn build(&self, engine: &TexEngine) -> Result<TexMobject, TexMobjectError> {
+        validate_tex_size(self.inner.font_size, self.inner.font_size_for_unit_height)?;
+        if self
+            .height
+            .is_some_and(|height| !height.is_finite() || height < 0.0)
+        {
+            return Err(TexMobjectError::InvalidParameter {
+                name: "height",
+                reason: "must be finite and non-negative",
+            });
+        }
+        if self.inner.source.len() > fmn_tex::TEX_PREAMBLE_SOURCE_MAX_BYTES {
+            return Err(TexMobjectError::InvalidParameter {
+                name: "source",
+                reason: "exceeds the native TeX source-size budget",
+            });
+        }
+        let source = self.get_modified_expression(self.inner.source);
+        if source.len() > fmn_tex::TEX_PREAMBLE_SOURCE_MAX_BYTES {
+            return Err(TexMobjectError::InvalidParameter {
+                name: "source",
+                reason: "fragment repairs exceed the native TeX source-size budget",
+            });
+        }
+        let request = Tex {
+            source: &source,
+            align: if matches!(self.inner.mode, Mode::Text) {
+                self.text_align
+            } else {
+                LineAlign::Left
+            },
+            ..self.inner.clone()
+        };
+        let mut built = request.build(engine)?;
+        validate_tex_geometry(&built.vmob)?;
+        if let Some(height) = self.height {
+            built.vmob = built.vmob.with_height(height, false);
+            validate_tex_geometry(&built.vmob)?;
+        }
+        if self.organize_left_to_right {
+            // Reordering only geometry would corrupt source selection and
+            // matching. The codec also requires subs and order to agree.
+            let mut rows: Vec<_> = built
+                .vmob
+                .children()
+                .iter()
+                .cloned()
+                .zip(std::mem::take(&mut built.typeset.subs))
+                .zip(std::mem::take(&mut built.typeset.layout.order))
+                .collect();
+            rows.sort_by(|((a, _), _), ((b, _), _)| {
+                a.center_point()[0]
+                    .partial_cmp(&b.center_point()[0])
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut children = Vec::with_capacity(rows.len());
+            for ((child, sub), placed) in rows {
+                children.push(child);
+                built.typeset.subs.push(sub);
+                built.typeset.layout.order.push(placed);
+            }
+            built.vmob = VMobject::new()
+                .with_style(built.vmob.style())
+                .with_children(children);
+        }
+        Ok(built)
+    }
+}
+
+/// A preset-string TexText constructor (Appendix A, mobject/svg/special_tex).
+///
+/// The Reference supplies the string and colour as subclass attributes.
+/// [Self::from_preset] supplies those same values explicitly in Rust;
+/// subsequent [Self::color] or [Self::style] calls override the default.
+/// Text/math source spans, flat child indexing and preambles remain those
+/// of [TexText]. Checkmark and Exmark keep their native drawn constructors.
+#[derive(Debug, Clone)]
+pub struct TexTextFromPresetString<'a> {
+    inner: TexText<'a>,
+}
+
+impl<'a> Default for TexTextFromPresetString<'a> {
+    fn default() -> Self {
+        Self::new("")
+    }
+}
+
+impl<'a> TexTextFromPresetString<'a> {
+    /// A preset with the Reference base class's white default colour.
+    #[must_use]
+    pub fn new(source: &'a str) -> Self {
+        Self {
+            inner: TexText::new(source),
+        }
+    }
+
+    /// Supply the preset's tex and default_color attributes.
+    #[must_use]
+    pub fn from_preset(source: &'a str, default_color: Srgb) -> Self {
+        Self::new(source).color(default_color)
+    }
+
+    /// The preset source, before native layout.
+    #[must_use]
+    pub fn get_tex(&self) -> &'a str {
+        self.inner.inner.source
+    }
+
+    /// Override the preset colour, retaining other style settings.
+    #[must_use]
+    pub fn color(mut self, color: Srgb) -> Self {
+        self.inner.inner.style = self.inner.inner.style.color(color);
+        self
+    }
+
+    /// Replace the base style, overriding the preset's defaults.
+    #[must_use]
+    pub fn style(mut self, style: Style) -> Self {
+        self.inner = self.inner.style(style);
+        self
+    }
+
+    /// The Reference's font-size setting.
+    #[must_use]
+    pub fn font_size(mut self, font_size: f64) -> Self {
+        self.inner = self.inner.font_size(font_size);
+        self
+    }
+
+    /// Native font-size calibration, in font units per scene unit.
+    #[must_use]
+    pub fn font_size_for_unit_height(mut self, value: f64) -> Self {
+        self.inner = self.inner.font_size_for_unit_height(value);
+        self
+    }
+
+    /// Native macro declarations applied only to this request.
+    #[must_use]
+    pub fn preamble(mut self, preamble: &'a str) -> Self {
+        self.inner = self.inner.preamble(preamble);
+        self
+    }
+
+    /// Alignment of explicit lines in the text mainland.
+    #[must_use]
+    pub fn line_align(mut self, align: LineAlign) -> Self {
+        self.inner = self.inner.line_align(align);
+        self
+    }
+
+    /// Source-span colours, applied after the preset's base colour.
+    #[must_use]
+    pub fn t2c(mut self, t2c: &'a [(&'a str, Srgb)]) -> Self {
+        self.inner = self.inner.t2c(t2c);
+        self
+    }
+
+    /// Build through the same native text/math path as [TexText].
+    ///
+    /// # Errors
+    ///
+    /// Invalid dimensions or nonfinite/out-of-range coordinates refuse;
+    /// other failures are the precise native errors from [TexText::build].
+    pub fn build(&self, engine: &TexEngine) -> Result<TexMobject, TexMobjectError> {
+        validate_tex_size(
+            self.inner.inner.font_size,
+            self.inner.inner.font_size_for_unit_height,
+        )?;
+        let built = self.inner.build(engine)?;
+        validate_tex_geometry(&built.vmob)?;
+        Ok(built)
+    }
+}
+
+fn validate_tex_size(font_size: f64, calibration: f64) -> Result<(), TexMobjectError> {
+    for (name, value) in [
+        ("font_size", font_size),
+        ("font_size_for_unit_height", calibration),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(TexMobjectError::InvalidParameter {
+                name,
+                reason: "must be finite and positive",
+            });
+        }
+    }
+    let scale = font_size / calibration;
+    if !scale.is_finite() || scale == 0.0 {
+        return Err(TexMobjectError::InvalidParameter {
+            name: "font_size_for_unit_height",
+            reason: "must give a finite positive font-size calibration ratio",
+        });
+    }
+    Ok(())
+}
+
+fn validate_tex_geometry(vmob: &VMobject) -> Result<(), TexMobjectError> {
+    if vmob
+        .points()
+        .iter()
+        .flatten()
+        .any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX))
+    {
+        return Err(TexMobjectError::InvalidParameter {
+            name: "geometry",
+            reason: "font size or height produces coordinates outside finite native f32 records",
+        });
+    }
+    for child in vmob.children() {
+        validate_tex_geometry(child)?;
+    }
+    Ok(())
+}
+
 /// `OldTex` / `OldTexText` (old_tex_mobject.py): the legacy multi-argument
 /// Tex whose submobjects are **one group per argument** — `old_tex[1]` is
 /// the whole second argument, not its first glyph (contrast `Tex`'s flat
@@ -1168,7 +1624,8 @@ impl<'a> TexText<'a> {
 /// start, the native provenance (§11.3). Arguments are first split around
 /// every `isolate` / `tex_to_color_map` substring, as the Reference's
 /// `break_up_tex_strings` does; arguments that are blank or draw nothing
-/// form no group. A single argument is one group of every glyph.
+/// form no group when there are multiple arguments. A single argument is
+/// one group of every glyph, including an empty group when it draws no ink.
 ///
 /// `math_mode` true is `OldTex` (display mathematics, the Reference's
 /// `align*`); false is `OldTexText` (text mainland with `$…$` islands).
@@ -1310,6 +1767,9 @@ impl<'a> OldTex<'a> {
             .chain(self.t2c.iter().map(|(needle, _)| *needle))
             .filter(|needle| !needle.is_empty())
             .collect();
+        if needles.is_empty() {
+            return self.strings.clone();
+        }
         let mut pieces = Vec::new();
         for &string in &self.strings {
             let mut rest = string;
@@ -1382,7 +1842,7 @@ impl<'a> OldTex<'a> {
         let mut tex_strings = Vec::new();
         for (piece, children) in pieces.iter().zip(members) {
             let stripped = piece.trim();
-            if stripped.is_empty() || children.is_empty() {
+            if pieces.len() != 1 && (stripped.is_empty() || children.is_empty()) {
                 continue;
             }
             let mut group = VMobject::new()
@@ -1402,6 +1862,88 @@ impl<'a> OldTex<'a> {
             tex_strings,
             typeset: built.typeset,
         })
+    }
+}
+
+/// The legacy grouped text constructor (old_tex_mobject.py).
+///
+/// This is [OldTex]'s text-mainland preset, preserving one direct child per
+/// argument and the same substring grouping/colouring. It is distinct from
+/// [TexText], whose children are the flat glyph/rule/path sequence.
+#[derive(Debug, Clone)]
+pub struct OldTexText<'a> {
+    inner: OldTex<'a>,
+}
+
+impl<'a> OldTexText<'a> {
+    /// Grouped prose with math islands, no separator and font size 48.
+    #[must_use]
+    pub fn new(strings: &[&'a str]) -> Self {
+        Self {
+            inner: OldTex::text(strings),
+        }
+    }
+
+    /// The Reference permits this text preset to opt into mathematics.
+    #[must_use]
+    pub fn math_mode(mut self, math_mode: bool) -> Self {
+        self.inner.math_mode = math_mode;
+        self
+    }
+
+    /// Text inserted between arguments before the one native layout pass.
+    #[must_use]
+    pub fn arg_separator(mut self, separator: &'a str) -> Self {
+        self.inner = self.inner.arg_separator(separator);
+        self
+    }
+
+    /// Substrings split out as independent argument groups.
+    #[must_use]
+    pub fn isolate(mut self, isolate: &[&'a str]) -> Self {
+        self.inner = self.inner.isolate(isolate);
+        self
+    }
+
+    /// Colour whole isolated groups, using the legacy selection contract.
+    #[must_use]
+    pub fn t2c(mut self, t2c: &'a [(&'a str, Srgb)]) -> Self {
+        self.inner = self.inner.t2c(t2c);
+        self
+    }
+
+    /// The Reference's font-size setting.
+    #[must_use]
+    pub fn font_size(mut self, font_size: f64) -> Self {
+        self.inner = self.inner.font_size(font_size);
+        self
+    }
+
+    /// Native macro declarations for the joined source.
+    #[must_use]
+    pub fn preamble(mut self, preamble: &'a str) -> Self {
+        self.inner = self.inner.preamble(preamble);
+        self
+    }
+
+    /// Replace the complete base style.
+    #[must_use]
+    pub fn style(mut self, style: Style) -> Self {
+        self.inner = self.inner.style(style);
+        self
+    }
+
+    /// Build the grouped family through [OldTex]'s native implementation.
+    ///
+    /// # Errors
+    ///
+    /// Invalid font size or nonfinite/out-of-range coordinates refuse;
+    /// other failures are the precise native errors from [OldTex::build].
+    pub fn build(&self, engine: &TexEngine) -> Result<OldTexMobject, TexMobjectError> {
+        validate_tex_size(self.inner.font_size, DEFAULT_FONT_SIZE_FOR_UNIT_HEIGHT)?;
+        let built = self.inner.build(engine)?;
+        validate_tex_geometry(&built.vmob)?;
+        Ok(built)
     }
 }
 
@@ -1531,6 +2073,376 @@ mod tests {
 
     fn engine() -> TexEngine {
         TexEngine::new("fmd-math/pack/default", None).expect("engine")
+    }
+
+    #[test]
+    fn single_string_tex_repairs_only_the_legacy_fragment_surface() {
+        for (source, expected) in [
+            ("  x^2  ", "x^2"),
+            ("", r"\quad"),
+            (r"\sqrt", r"\sqrt{\quad}"),
+            (r"\sqrt{", r"\sqrt{{\quad}}"),
+            ("x_", r"x_{\quad}"),
+            ("x^", r"x^{\quad}"),
+            (r"\dot", r"\dot{\quad}"),
+            (r"\overset", r"\overset{\quad}{\quad}"),
+            (r"\substack", r"\quad"),
+            (r"\\x\\y", r"\quad\\x\quad\\y"),
+            (r"\left(x", r"\big(x"),
+            (r"x\right)", r"x\big)"),
+            (r"\left(x\right)", r"\left(x\right)"),
+            (
+                r"\left(\leftarrow x\rightarrow",
+                r"\big(\leftarrow x\rightarrow",
+            ),
+            (r"\begin{array}{c}", ""),
+            (r"x\end{array}", ""),
+        ] {
+            assert_eq!(
+                SingleStringTex::modify_special_strings(source),
+                expected,
+                "{source:?}"
+            );
+        }
+        for (source, expected) in [
+            ("{{x", "{{x}}"),
+            ("x}}", "{{x}}"),
+            ("}α{", "{}α{}"),
+            (r"\{x\}", r"\{x\}"),
+            (r"\\{x", r"\\{x}"),
+        ] {
+            assert_eq!(SingleStringTex::balance_braces(source), expected);
+        }
+        let engine = engine();
+        let authored = "  x^  ";
+        let builder = SingleStringTex::new(authored);
+        assert_eq!(builder.get_tex(), authored);
+        let repaired = builder.build(&engine).expect("legacy repair");
+        let explicit = Tex::new(r"x^{\quad}")
+            .build(&engine)
+            .expect("explicit formula");
+        assert_eq!(repaired.typeset.source, r"x^{\quad}");
+        assert_eq!(dump_family(&repaired.vmob), dump_family(&explicit.vmob));
+        assert_eq!(repaired.occurrences("x"), explicit.occurrences("x"));
+        assert!(
+            SingleStringTex::new(" \t ")
+                .build(&engine)
+                .unwrap()
+                .is_empty()
+        );
+        let ordinary = TexTextFromPresetString::new(r"\not_a_native_command")
+            .build(&engine)
+            .expect_err("modern presets do not hide unsupported constructs");
+        assert!(matches!(ordinary, TexMobjectError::Tex(_)));
+    }
+
+    #[test]
+    fn single_string_tex_matches_native_modes_style_size_and_placement() {
+        let engine = engine();
+        let colors = [("x", BLUE)];
+        let single = SingleStringTex::new(r"area $x^2$")
+            .math_mode(false)
+            .font_size(36.0)
+            .style(text_style().color(RED))
+            .t2c(&colors)
+            .build(&engine)
+            .expect("text mainland");
+        let modern = TexText::new(r"area $x^2$")
+            .font_size(36.0)
+            .style(text_style().color(RED))
+            .t2c(&colors)
+            .build(&engine)
+            .expect("modern text");
+        assert_eq!(dump_family(&single.vmob), dump_family(&modern.vmob));
+        assert_eq!(
+            single.typeset.to_bytes().unwrap(),
+            modern.typeset.to_bytes().unwrap()
+        );
+        let x = single.occurrences("x")[0][0];
+        assert_eq!(single.vmob.children()[x].style().fill_color, BLUE);
+        assert_eq!(single.vmob.style().fill_color, RED);
+
+        let short = SingleStringTex::new("Ag")
+            .height(2.0)
+            .build(&engine)
+            .unwrap();
+        let large = SingleStringTex::new("Ag")
+            .font_size(96.0)
+            .height(2.0)
+            .build(&engine)
+            .unwrap();
+        assert!((short.vmob.length_over_dim(1) - 2.0).abs() < 1e-12);
+        assert!((large.vmob.length_over_dim(1) - 2.0).abs() < 1e-12);
+        let mut stage = Stage::new();
+        let mob = stage.add(short);
+        assert!(
+            stage
+                .get_center(mob)
+                .iter()
+                .all(|coordinate| coordinate.abs() < 1e-6)
+        );
+        let collapsed = SingleStringTex::new("x")
+            .height(0.0)
+            .build(&engine)
+            .unwrap();
+        assert_eq!(collapsed.vmob.length_over_dim(1), 0.0);
+    }
+
+    #[test]
+    fn single_string_tex_keeps_unicode_spans_and_text_line_alignment() {
+        let engine = engine();
+        let authored = "\u{2003}α + β \t";
+        let builder = SingleStringTex::new(authored);
+        assert_eq!(builder.get_tex(), authored);
+        let built = builder.build(&engine).unwrap();
+        assert_eq!(built.typeset.source, "α + β");
+        for sub in &built.typeset.subs {
+            assert!(
+                built
+                    .typeset
+                    .source
+                    .get(sub.span.start..sub.span.end)
+                    .is_some()
+            );
+        }
+        for needle in ["α", "β"] {
+            let ordinals: Vec<_> = built.occurrences(needle).into_iter().flatten().collect();
+            assert!(!ordinals.is_empty(), "{needle} retains ink");
+            for ordinal in ordinals {
+                assert!(!built.vmob.children()[ordinal].points().is_empty());
+            }
+        }
+        for align in [LineAlign::Left, LineAlign::Center, LineAlign::Right] {
+            let single = SingleStringTex::new(r"long line\\x")
+                .math_mode(false)
+                .line_align(align)
+                .build(&engine)
+                .unwrap();
+            let ordinary = TexText::new(r"long line\\x")
+                .line_align(align)
+                .build(&engine)
+                .unwrap();
+            assert_eq!(dump_family(&single.vmob), dump_family(&ordinary.vmob));
+        }
+    }
+
+    #[test]
+    fn single_string_tex_sort_keeps_geometry_spans_and_codec_in_one_order() {
+        let engine = engine();
+        let colors = [("z", RED), ("a", BLUE)];
+        let ordinary = SingleStringTex::new(r"\frac{z}{ab}")
+            .t2c(&colors)
+            .build(&engine)
+            .unwrap();
+        let sorted = SingleStringTex::new(r"\frac{z}{ab}")
+            .t2c(&colors)
+            .organize_left_to_right(true)
+            .build(&engine)
+            .unwrap();
+        let xs: Vec<_> = sorted
+            .vmob
+            .children()
+            .iter()
+            .map(|child| child.center_point()[0])
+            .collect();
+        assert!(xs.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(sorted.len(), ordinary.len());
+        for (sub, child) in sorted.typeset.subs.iter().zip(sorted.vmob.children()) {
+            let ordinal = ordinary
+                .typeset
+                .subs
+                .iter()
+                .position(|original| original == sub)
+                .unwrap();
+            assert_eq!(child.points(), ordinary.vmob.children()[ordinal].points());
+            assert_eq!(
+                child.style().fill_color,
+                ordinary.vmob.children()[ordinal].style().fill_color
+            );
+        }
+        let encoded = sorted
+            .typeset
+            .to_bytes()
+            .expect("canonical reordered table");
+        let decoded = Typeset::from_bytes(&encoded).expect("canonical round trip");
+        assert_eq!(decoded.subs, sorted.typeset.subs);
+        for (needle, color) in colors {
+            let ordinal = sorted
+                .occurrences(needle)
+                .into_iter()
+                .flatten()
+                .next()
+                .unwrap();
+            assert_eq!(sorted.vmob.children()[ordinal].style().fill_color, color);
+            assert_eq!(decoded.occurrences(needle), sorted.occurrences(needle));
+        }
+        let before = SingleStringTex::new(r"\frac{x}{x}").build(&engine).unwrap();
+        let after = SingleStringTex::new(r"\frac{x}{x}")
+            .organize_left_to_right(true)
+            .build(&engine)
+            .unwrap();
+        let original_x: Vec<_> = before.occurrences("x").into_iter().flatten().collect();
+        assert_eq!(original_x.len(), 2);
+        assert_eq!(
+            before.vmob.children()[original_x[0]].center_point()[0],
+            before.vmob.children()[original_x[1]].center_point()[0],
+        );
+        let sorted_x: Vec<_> = after.typeset.subs.iter().filter(|sub| {
+            matches!(sub.prim, Prim::Glyph(index) if after.typeset.layout.glyphs[index].ch == 'x')
+        }).copied().collect();
+        assert_eq!(
+            sorted_x,
+            original_x
+                .iter()
+                .map(|&index| before.typeset.subs[index])
+                .collect::<Vec<_>>(),
+            "equal horizontal centres preserve original emission order",
+        );
+    }
+
+    #[test]
+    fn preset_text_preserves_defaults_overrides_macros_and_flat_spans() {
+        let engine = engine();
+        let source = r"Area $\answer$";
+        let preamble = r"\newcommand{\answer}{42}";
+        let colors = [("Area", RED)];
+        let preset = TexTextFromPresetString::from_preset(source, RED)
+            .color(BLUE)
+            .preamble(preamble)
+            .t2c(&colors);
+        assert_eq!(preset.get_tex(), source);
+        let built = preset.build(&engine).expect("native preset");
+        let ordinary = TexText::new(source)
+            .style(text_style().color(BLUE))
+            .preamble(preamble)
+            .t2c(&colors)
+            .build(&engine)
+            .expect("same native text request");
+        assert_eq!(dump_family(&built.vmob), dump_family(&ordinary.vmob));
+        assert_eq!(
+            built.typeset.to_bytes().unwrap(),
+            ordinary.typeset.to_bytes().unwrap()
+        );
+        assert_eq!(built.vmob.style().fill_color, BLUE);
+        assert_eq!(built.vmob.children().len(), built.len());
+        assert!(
+            built
+                .vmob
+                .children()
+                .iter()
+                .all(|glyph| glyph.children().is_empty())
+        );
+        for ordinal in built.occurrences("Area").into_iter().flatten() {
+            assert_eq!(built.vmob.children()[ordinal].style().fill_color, RED);
+        }
+        assert!(
+            TexTextFromPresetString::default()
+                .build(&engine)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn legacy_constructors_refuse_invalid_parameters_before_layout() {
+        let engine = engine();
+        for value in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
+            assert!(matches!(
+                SingleStringTex::new(r"\bad")
+                    .font_size(value)
+                    .build(&engine),
+                Err(TexMobjectError::InvalidParameter {
+                    name: "font_size",
+                    ..
+                })
+            ));
+            assert!(matches!(
+                TexTextFromPresetString::new(r"\bad")
+                    .font_size_for_unit_height(value)
+                    .build(&engine),
+                Err(TexMobjectError::InvalidParameter {
+                    name: "font_size_for_unit_height",
+                    ..
+                })
+            ));
+        }
+        for value in [f64::NAN, f64::INFINITY, -1.0] {
+            assert!(matches!(
+                SingleStringTex::new(r"\bad").height(value).build(&engine),
+                Err(TexMobjectError::InvalidParameter { name: "height", .. })
+            ));
+        }
+        let oversized = " ".repeat(fmn_tex::TEX_PREAMBLE_SOURCE_MAX_BYTES + 1);
+        assert!(matches!(
+            SingleStringTex::new(&oversized).build(&engine),
+            Err(TexMobjectError::InvalidParameter { name: "source", .. })
+        ));
+        let expanding = "{".repeat(fmn_tex::TEX_PREAMBLE_SOURCE_MAX_BYTES / 2 + 1);
+        assert!(matches!(
+            SingleStringTex::new(&expanding).build(&engine),
+            Err(TexMobjectError::InvalidParameter { name: "source", .. })
+        ));
+        for builder in [
+            SingleStringTex::new("x").height(f64::MAX),
+            SingleStringTex::new("x").font_size(f64::MAX),
+            SingleStringTex::new("x").font_size(f64::from_bits(1)),
+            SingleStringTex::new("x").font_size_for_unit_height(f64::MIN_POSITIVE),
+        ] {
+            assert!(matches!(
+                builder.build(&engine),
+                Err(TexMobjectError::InvalidParameter { .. })
+            ));
+        }
+        assert!(matches!(
+            TexTextFromPresetString::new("x")
+                .font_size(f64::MAX)
+                .build(&engine),
+            Err(TexMobjectError::InvalidParameter { .. })
+        ));
+        assert!(matches!(
+            OldTexText::new(&["x"]).font_size(f64::MAX).build(&engine),
+            Err(TexMobjectError::InvalidParameter { .. })
+        ));
+    }
+
+    #[test]
+    fn old_tex_text_preserves_grouped_prose_and_single_empty_argument() {
+        let engine = engine();
+        let colors = [("$x^2$", BLUE)];
+        let built = OldTexText::new(&["Area", "$x^2$"])
+            .arg_separator(" ")
+            .t2c(&colors)
+            .build(&engine)
+            .unwrap();
+        assert_eq!(built.tex_strings, ["Area", "$x^2$"]);
+        assert_eq!(built.vmob.children().len(), 2);
+        assert_eq!(built.vmob.children()[0].children().len(), 4);
+        assert_eq!(built.vmob.children()[1].style().fill_color, BLUE);
+        let math = OldTexText::new(&["x^2"])
+            .math_mode(true)
+            .build(&engine)
+            .unwrap();
+        let ordinary = OldTex::new(&["x^2"]).build(&engine).unwrap();
+        assert_eq!(
+            math.typeset.to_bytes().unwrap(),
+            ordinary.typeset.to_bytes().unwrap()
+        );
+        for source in ["", " ", r"\quad"] {
+            let empty = OldTex::new(&[source]).build(&engine).unwrap();
+            assert_eq!(empty.tex_strings, [source.trim()]);
+            assert_eq!(empty.vmob.children().len(), 1);
+            assert!(empty.vmob.children()[0].children().is_empty());
+        }
+        let multiple = OldTexText::new(&["", "text", " "]).build(&engine).unwrap();
+        assert_eq!(multiple.tex_strings, ["text"]);
+        assert!(
+            OldTexText::new(&[])
+                .build(&engine)
+                .unwrap()
+                .vmob
+                .children()
+                .is_empty()
+        );
     }
 
     #[test]

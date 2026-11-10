@@ -211,8 +211,9 @@ pub use svg::{
     svg_document_mobject, svg_mobject, svg_reference_frame, vmobject_from_svg_path,
 };
 pub use tex::{
-    LineAlign, OldTex, OldTexMobject, Tex, TexBindingError, TexMobject, TexMobjectError,
-    TexNumberBinding, TexSpanBinding, TexText,
+    LineAlign, OldTex, OldTexMobject, OldTexText, SingleStringTex, Tex, TexBindingError,
+    TexMobject, TexMobjectError, TexNumberBinding, TexSpanBinding, TexText,
+    TexTextFromPresetString,
 };
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use text_matching::{

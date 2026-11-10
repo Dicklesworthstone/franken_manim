@@ -99,6 +99,48 @@ ligature is one submobject), so scene code indexes identically.
   `x\;=y` loses the relation spacing around `=`, and `a\!\!b` does not
   compile. A formula that asks for a space gets it.
 
+## Native legacy and preset TeX constructors
+
+The native Rust facade and `fmn::prelude` expose `SingleStringTex`,
+`OldTexText` and `TexTextFromPresetString` alongside `Tex`, `TexText` and
+`OldTex`. They use the same bundled `TexEngine`, geometry and source-span
+tables as the modern constructors; no external typesetter is involved.
+
+`SingleStringTex` is the legacy single-string surface. It trims the authored
+string and repairs the legacy incomplete-expression cases before native
+layout: unmatched braces, incomplete trailing scripts and a small set of
+partial commands, and unbalanced `\left`/`\right` delimiters. Delimiter repair
+recognizes the delimiter commands and leaves names such as `\leftarrow`
+intact. `get_tex()` returns the authored string, while the built mobject's
+source and spans refer to the normalized expression that was actually laid
+out. Modern `Tex` continues to report malformed input rather than applying
+these legacy repairs.
+
+The builder accepts math or text mode, ordinary size and style controls,
+optional height, and `organize_left_to_right`. Ordering changes move glyph
+geometry, source-span entries and layout order together, so subsequent source
+selection still refers to the displayed glyph. Font size and explicit height
+must be finite and nonnegative; calibration must be finite and positive.
+Unrepresentable scales or geometry return `TexMobjectError::InvalidParameter`
+instead of publishing nonfinite records. Both authored and normalized source
+remain subject to the native input budget.
+
+`OldTexText::new(&["Old ", "$x^2$"])` is `OldTex`'s text-mode constructor:
+it joins arguments for one layout and then restores legacy argument groups.
+A single empty argument retains its empty group; empty arguments in a
+multi-argument construction are omitted. Modern text and inline math semantics
+are shared with `TexText`. `TexTextFromPresetString::from_preset(source, color)`
+provides the Reference's preset-string pattern without Python subclassing;
+`.new(source)` uses the ordinary white default, and `.color(...)` or
+`.style(...)` explicitly overrides the preset style. Preset strings use modern
+text parsing and do not inherit legacy expression repair.
+
+The `render_matrix.native_tex_constructors.v1` scenario exercises all three
+through the public Rust facade and compares their PNG output to independently
+authored modern constructors at one, four and sixteen threads. Native unit
+tests cover normalization, size admission, group identity, preset precedence
+and span-preserving ordering.
+
 ## TeX constructs beyond the 3b1b corpus
 
 fmd-math's first vocabulary was ranked by 3b1b's own videos. These constructs from the

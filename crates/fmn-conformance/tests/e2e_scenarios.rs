@@ -3040,6 +3040,122 @@ fn native_detached_areas_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("native_detached_area_renders", checked))
 }
 
+/// Native legacy and preset constructors retain ordinary Scribe pixels.
+fn native_tex_constructors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct TexScene {
+        oracle: bool,
+    }
+    impl SceneConstruct for TexScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let single = if self.oracle {
+                Tex::new("{x^2}")
+                    .font_size(40.0)
+                    .build(stage.tex_engine()?)?
+            } else {
+                SingleStringTex::new("  {x^2  ")
+                    .font_size(40.0)
+                    .build(stage.tex_engine()?)?
+            };
+            let single = stage.add(single)?;
+            stage.shift(single, [0.0, 1.0, 0.0]);
+
+            let preset = if self.oracle {
+                TexText::new("Area $A$")
+                    .font_size(32.0)
+                    .style(fmn_library::text::text_style().color(RED))
+                    .build(stage.tex_engine()?)?
+            } else {
+                TexTextFromPresetString::from_preset("Area $A$", RED)
+                    .font_size(32.0)
+                    .build(stage.tex_engine()?)?
+            };
+            stage.add(preset)?;
+
+            // The modern oracle has flat children. Legacy argument grouping
+            // must change indexing without changing layout or painter order.
+            let grouped = if self.oracle {
+                let tex = TexText::new("Old $x^2$")
+                    .font_size(32.0)
+                    .build(stage.tex_engine()?)?;
+                stage.add(tex)?
+            } else {
+                let tex = OldTexText::new(&["Old ", "$x^2$"])
+                    .font_size(32.0)
+                    .build(stage.tex_engine()?)?;
+                if tex.tex_strings.len() != 2 || tex.vmob.children().len() != 2 {
+                    return Err(fmn::scene::SceneError::InvalidLifecycle(
+                        "legacy text must retain its two argument groups",
+                    )
+                    .into());
+                }
+                stage.add(tex)?
+            };
+            stage.shift(grouped, [0.0, -1.0, 0.0]);
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (128, 96);
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    render_with_fs(
+        &mut TexScene { oracle: true },
+        options("/native-tex-expected.png", 1)?,
+        fs.clone(),
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/native-tex-expected.png"))
+        .map_err(|e| fail(e.to_string()))?;
+    let image = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    let row_height = usize::try_from(image.height / 3).unwrap();
+    let row_bytes = usize::try_from(image.width).unwrap() * 4;
+    for band in image.rgba.chunks_exact(row_height * row_bytes) {
+        if !band.chunks_exact(4).any(|pixel| pixel != &band[..4]) {
+            return Err(fail("a native TeX constructor's reference row has no ink"));
+        }
+    }
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-tex-{threads}.png");
+        let report = render_with_fs(
+            &mut TexScene { oracle: false },
+            options(&path, threads)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|e| fail(e.to_string()))?;
+        if actual != expected || report.artifact.frame_count != 1 {
+            return Err(fail(format!(
+                "native TeX constructors differ from native layout at {threads} threads"
+            )));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_tex_constructors")
+            .field("classes", 3_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("native-tex.png", expected)
+        .with_counter("native_tex_constructor_classes", 3)
+        .with_counter("native_tex_constructor_thread_counts", checked))
+}
+
 /// Prelude-only animation families converge to independently authored geometry.
 fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::*;
@@ -16384,6 +16500,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_tex_constructors.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_tex_constructors_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_tex_constructor_classes", 3),
+            counter_eq("native_tex_constructor_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_tex_constructors",
+            vec![
+                FieldPred::u64_eq("classes", 3),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.prelude_families.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -20731,6 +20865,16 @@ fn native_detached_areas_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_detached_areas.v1")
         .expect("native detached area scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_tex_constructors_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_tex_constructors.v1")
+        .expect("native TeX constructor scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
