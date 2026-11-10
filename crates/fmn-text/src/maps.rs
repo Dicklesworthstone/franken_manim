@@ -63,7 +63,9 @@ impl StyleFields<'_> {
                 .iter()
                 .any(|component| !component.is_finite() || !(0.0..=1.0).contains(component))
         {
-            return Err(style_error("color components must be finite values in [0, 1]"));
+            return Err(style_error(
+                "color components must be finite values in [0, 1]",
+            ));
         }
         if let Some(family) = self.family
             && family.len() > crate::markup::MAX_ATTR_LEN
@@ -98,7 +100,9 @@ impl StyleFields<'_> {
             None => style.size_factor,
         };
         if !size.is_finite() || size <= 0.0 {
-            return Err(style_error("composed font size must be finite and positive"));
+            return Err(style_error(
+                "composed font size must be finite and positive",
+            ));
         }
         if let Some(color) = self.color {
             style.color = Some(color);
@@ -176,7 +180,9 @@ pub(crate) fn validate_scopes(
         scope.fields.validate()?;
         work = work.saturating_add((end - start).max(1));
         if work > MAX_SCOPED_STYLE_WORK {
-            return Err(style_error("scoped styles exceed the 16777216-byte-work limit"));
+            return Err(style_error(
+                "scoped styles exceed the 16777216-byte-work limit",
+            ));
         }
     }
     Ok(work)

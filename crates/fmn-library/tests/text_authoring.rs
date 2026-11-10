@@ -227,5 +227,10 @@ fn configured_source_scopes_refuse_invalid_utf8_without_a_partial_text() {
         },
     }];
     assert!(Text::new("éA").scoped_styles(&scopes).build(&book).is_err());
-    assert!(MarkupText::new("éA").scoped_styles(&scopes).build(&book).is_err());
+    assert!(
+        MarkupText::new("éA")
+            .scoped_styles(&scopes)
+            .build(&book)
+            .is_err()
+    );
 }

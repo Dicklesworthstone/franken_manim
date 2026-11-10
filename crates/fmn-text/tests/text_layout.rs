@@ -6,7 +6,9 @@
 use fmn_core::color::Srgb;
 use fmn_text::layout::{BASELINE_SKIP, layout_text_with_style};
 use fmn_text::maps::{ScopedStyle, SizeChange, SourceSelector, SourceStyle, StyleFields};
-use fmn_text::markup::{CharStyle, parse_markup_with_scoped_styles, plain_chars_with_scoped_styles};
+use fmn_text::markup::{
+    CharStyle, parse_markup_with_scoped_styles, plain_chars_with_scoped_styles,
+};
 use fmn_text::{
     Align, FontBook, LineBreaker, StyleMaps, TextError, TextLayout, TextRequest, glyph_quadpath,
     layout_text,
@@ -688,11 +690,19 @@ fn configured_markup_scopes_keep_utf8_entity_and_glyph_source_identity() {
     request.maps.scoped_styles = &scopes;
     let layout = layout_text_with_style(&book, &request, &inherited).unwrap();
     assert_eq!(
-        layout.glyphs.iter().map(|glyph| glyph.ch).collect::<String>(),
+        layout
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.ch)
+            .collect::<String>(),
         "éAB&"
     );
     assert_eq!(
-        layout.glyphs.iter().map(|glyph| glyph.span).collect::<Vec<_>>(),
+        layout
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.span)
+            .collect::<Vec<_>>(),
         [(0, 2), (a, a + 1), (a + 1, a + 2), (entity, entity + 5)]
     );
     assert_eq!(layout.select((a, a + 1)), [1]);
@@ -703,11 +713,24 @@ fn configured_markup_scopes_keep_utf8_entity_and_glyph_source_identity() {
             .iter()
             .all(|glyph| glyph.face.family == "IBM Plex Sans")
     );
-    assert!(!layout.glyphs[1].face.key.bold, "content scope overrides <b>");
-    assert!(layout.glyphs[2].face.key.bold, "<b> overrides element scope");
-    assert!(!layout.glyphs[3].face.key.bold, "partial entity is untouched");
+    assert!(
+        !layout.glyphs[1].face.key.bold,
+        "content scope overrides <b>"
+    );
+    assert!(
+        layout.glyphs[2].face.key.bold,
+        "<b> overrides element scope"
+    );
+    assert!(
+        !layout.glyphs[3].face.key.bold,
+        "partial entity is untouched"
+    );
     assert_eq!(
-        layout.glyphs.iter().map(|glyph| glyph.fill).collect::<Vec<_>>(),
+        layout
+            .glyphs
+            .iter()
+            .map(|glyph| glyph.fill)
+            .collect::<Vec<_>>(),
         [Some(green), Some(blue), Some(red), Some(green)]
     );
 }
@@ -1042,8 +1065,8 @@ fn malformed_scopes_and_invalid_sizes_return_named_errors_without_mutation() {
             range,
             fields: StyleFields::default(),
         }];
-        let error = plain_chars_with_scoped_styles(source, &CharStyle::base(), &scopes)
-            .unwrap_err();
+        let error =
+            plain_chars_with_scoped_styles(source, &CharStyle::base(), &scopes).unwrap_err();
         assert!(matches!(error, TextError::Style { .. }));
         assert!(error.to_string().contains("UTF-8 source byte range"));
     }
@@ -1125,7 +1148,11 @@ fn scoped_style_resource_budgets_cover_layers_markup_and_range_work() {
     for red in [f64::NAN, -0.1, 1.1] {
         assert!(
             StyleFields {
-                color: Some(Srgb { r: red, g: 0.0, b: 0.0 }),
+                color: Some(Srgb {
+                    r: red,
+                    g: 0.0,
+                    b: 0.0
+                }),
                 ..StyleFields::default()
             }
             .validate()

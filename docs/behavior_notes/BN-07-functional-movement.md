@@ -4,8 +4,9 @@
 
 **Scope:** the optional Python wheel's `Homotopy`,
 `SmoothedVectorizedHomotopy`, `ComplexHomotopy`, `PhaseFlow`, and
-`MoveAlongPath`. The native Rust mechanisms are unchanged. Related contract:
-plan sections 7.3, 8.6, 9.1–9.4 and 15.2; task `fm-5wq.4.143`.
+`MoveAlongPath`, plus the native Rust vector-field updater helpers. Related
+contract: plan sections 7.3, 8.6, 9.1–9.4, 12.4 and 15.2; task
+`fm-5wq.4.143`.
 
 ## Family-aware deformation
 
@@ -34,6 +35,40 @@ Geometry is reconstructed from the starting copy at each sample, so an
 absolute deformation can be sampled backward without accumulating prior
 maps. This is not a claim that an arbitrary authored callback is pure or
 eligible for frame-parallel execution.
+
+## Native vector-field advection
+
+`move_points_along_vector_field` advances every point-bearing member of the
+receiver's family in world coordinates, including children of a point-less
+group. Retained translations, rotations and scales are respected before the
+coordinate system converts points and velocities. A shared descendant is
+mapped once. Auxiliary pointlike records, including surface normal control
+points, use the same mapping; invalid surface samples remain holes and are
+not passed to the field callback.
+
+The point update is
+`p + (c2p(function(p2c(p))) - origin) * dt`, using the supplied coordinate
+system's units. It retains the existing per-tick forward-Euler semantics.
+
+All three native helpers—`move_along_vector_field`,
+`move_submobjects_along_vector_field`, and
+`move_points_along_vector_field`—register fallible updaters. Invalid time
+deltas, non-finite callback results and unrepresentable mapped geometry
+produce the existing typed updater failure, which scene playback propagates.
+Every affected family is checked before publication, so a bad later sample
+cannot partially advance earlier members. Submobject motion retains its
+sequential semantics when children share descendants, including the f32
+baking required by attached record views. Authored callback side effects
+outside the geometry are not rolled back.
+
+The checked operations are also available directly as
+`Stage::try_apply_points_function` and `Stage::try_shift`. The existing
+infallible methods retain their API.
+
+Regression coverage lives in `fmn-library/src/fields.rs` and
+`fmn-mobject/tests/pointlike_transforms.rs`. The
+`render_matrix.native_field_advection.v1` scenario compares a moving, placed
+group against independently positioned native geometry at 1, 4 and 16 workers.
 
 ## PhaseFlow restart and explicit zero
 

@@ -3035,6 +3035,123 @@ fn native_conditional_waits_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         .with_counter("native_wait_thread_counts", checked))
 }
 
+/// Native point flow moves a placed group through the chart's actual units.
+fn native_field_advection_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct FlowScene {
+        oracle: bool,
+        center: Vec3,
+        frame: i64,
+    }
+    impl SceneConstruct for FlowScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let offset = if self.oracle {
+                [0.5, -0.25, 0.0]
+            } else {
+                ORIGIN
+            };
+            let children = [(-0.75, BLUE), (0.75, YELLOW)].map(|(x, color)| {
+                Square::new()
+                    .side_length(0.5)
+                    .style(Style::default().fill(color, 1.0).stroke_width(0.0))
+                    .build()
+                    .shifted([x + offset[0], offset[1], 0.0])
+            });
+            let group = stage.add(v_group(children))?;
+            if !self.oracle {
+                // Retained family placement must survive the first update.
+                stage.shift(group, [0.25, -0.5, 0.0]);
+                let axes = Axes::new()
+                    .x_range([-2.0, 2.0, 1.0])
+                    .y_range([-2.0, 2.0, 1.0])
+                    .width(8.0)
+                    .height(4.0)
+                    .build(&FontBook::bundled().unwrap())?
+                    .shifted([2.0, -1.0, 0.0]);
+                // The chart converts (.25, .5) to world velocity (.5, .5).
+                // Four ticks at 8 fps add (.25, .25), independently encoded
+                // in the oracle's literal child coordinates above.
+                fmn_library::fields::move_points_along_vector_field(
+                    stage.arena_mut(),
+                    group,
+                    |_, _| [0.25, 0.5],
+                    axes,
+                )?;
+                stage.wait_frames(4)?;
+            }
+            self.center = stage.get_center(group);
+            self.frame = stage.scene().time().frames();
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|error| fail(error.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    let mut oracle = FlowScene {
+        oracle: true,
+        center: ORIGIN,
+        frame: 0,
+    };
+    render_with_fs(&mut oracle, options("/field-expected.png", 1)?, fs.clone())
+        .map_err(|error| fail(error.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/field-expected.png"))
+        .map_err(|error| fail(error.to_string()))?;
+    let decoded = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(error.to_string()))?;
+    if !decoded
+        .rgba
+        .chunks_exact(4)
+        .any(|pixel| pixel != &decoded.rgba[..4])
+    {
+        return Err(fail("field-advection oracle rendered no ink"));
+    }
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/field-{threads}.png");
+        let mut program = FlowScene {
+            oracle: false,
+            center: ORIGIN,
+            frame: 0,
+        };
+        let report = render_with_fs(&mut program, options(&path, threads)?, fs.clone())
+            .map_err(|error| fail(error.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(error.to_string()))?;
+        if actual != expected
+            || program.center != [0.5, -0.25, 0.0]
+            || program.frame != 4
+            || report.scene.play_count != 1
+            || report.artifact.frame_count != 1
+        {
+            return Err(fail(format!(
+                "grouped native field motion disagrees with independent geometry at {threads} threads"
+            )));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_field_advection")
+            .field("nominal_ticks", 4_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("field-advection.png", expected)
+        .with_counter("native_field_ticks", 4)
+        .with_counter("native_field_thread_counts", checked))
+}
+
 /// Detached charts clip actual data-x bounds and keep discontinuity gaps empty.
 fn native_detached_areas_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::*;
@@ -17100,6 +17217,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     ));
 
     specs.push(spec(
+        "render_matrix.native_field_advection.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_field_advection_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_field_ticks", 4),
+            counter_eq("native_field_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_field_advection",
+            vec![
+                FieldPred::u64_eq("nominal_ticks", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_detached_areas.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -21639,6 +21774,17 @@ fn python_native_outputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
         .expect("Python native output scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Grouped field motion keeps placement and reaches native rendered output.
+#[test]
+fn native_field_advection_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_field_advection.v1")
+        .expect("native field advection is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

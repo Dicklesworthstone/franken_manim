@@ -699,7 +699,8 @@ fn invalid_export_policy_and_unrecognized_sources_precede_decoder_resolution() {
         }
         let mut program = Explanation::new(true);
         assert!(
-            export_bundle_with_soundtrack_bytes(&mut program, opts, &settings, fs.as_ref()).is_err()
+            export_bundle_with_soundtrack_bytes(&mut program, opts, &settings, fs.as_ref())
+                .is_err()
         );
         assert_eq!(program.calls.get(), 0);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -780,7 +781,12 @@ mod compressed {
     fn source_assets(compressed: bool) -> Arc<VirtualFs> {
         let fs = Arc::new(VirtualFs::new());
         let pcm = lead();
-        let wav = encode_wav(pcm.channels, pcm.sample_rate, SampleFormat::F32, &pcm.samples);
+        let wav = encode_wav(
+            pcm.channels,
+            pcm.sample_rate,
+            SampleFormat::F32,
+            &pcm.samples,
+        );
         fs.insert(
             "/voice.asset",
             if compressed {
@@ -789,7 +795,10 @@ mod compressed {
                 wav.clone()
             },
         );
-        fs.insert("/chime.asset", if compressed { CHIME.to_vec() } else { wav });
+        fs.insert(
+            "/chime.asset",
+            if compressed { CHIME.to_vec() } else { wav },
+        );
         fs
     }
 
@@ -836,7 +845,11 @@ mod compressed {
             if spec.argv == ["-version"] {
                 outcome.stdout = b"ffmpeg version bundle-audio-fixture\n".to_vec();
             } else {
-                assert!(spec.argv.windows(2).any(|pair| pair == ["-c:a", "pcm_f32le"]));
+                assert!(
+                    spec.argv
+                        .windows(2)
+                        .any(|pair| pair == ["-c:a", "pcm_f32le"])
+                );
                 assert!(
                     spec.argv
                         .windows(2)
@@ -1035,7 +1048,12 @@ mod compressed {
 
     fn decoded_wav() -> Vec<u8> {
         let pcm = lead();
-        encode_wav(pcm.channels, pcm.sample_rate, SampleFormat::F32, &pcm.samples)
+        encode_wav(
+            pcm.channels,
+            pcm.sample_rate,
+            SampleFormat::F32,
+            &pcm.samples,
+        )
     }
 
     #[test]
@@ -1055,9 +1073,13 @@ mod compressed {
             )
             .unwrap();
             let mut program = Narration::new();
-            let result =
-                export_bundle_with_soundtrack_bytes(&mut program, opts, &fixture.audio(), fs.as_ref())
-                    .unwrap();
+            let result = export_bundle_with_soundtrack_bytes(
+                &mut program,
+                opts,
+                &fixture.audio(),
+                fs.as_ref(),
+            )
+            .unwrap();
             assert_eq!(program.calls.get(), 1);
             assert_eq!(result.bundle.bytes, reference.bundle.bytes);
             let receipt = result.soundtrack.unwrap();
@@ -1082,7 +1104,10 @@ mod compressed {
                 receipt.inputs[0].report.pcm_digest,
                 native.inputs[0].report.pcm_digest,
             );
-            assert!(Arc::ptr_eq(&receipt.inputs[0].bytes, &receipt.inputs[2].bytes));
+            assert!(Arc::ptr_eq(
+                &receipt.inputs[0].bytes,
+                &receipt.inputs[2].bytes
+            ));
             assert!(Arc::ptr_eq(
                 &receipt.inputs[0].report,
                 &receipt.inputs[2].report,

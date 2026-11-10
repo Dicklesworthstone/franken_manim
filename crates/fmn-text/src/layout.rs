@@ -536,7 +536,11 @@ fn append_deco(
     baseline: f64,
     strike: bool,
 ) {
-    if !(if strike { glyph.strike } else { glyph.underline }) {
+    if !(if strike {
+        glyph.strike
+    } else {
+        glyph.underline
+    }) {
         flush_deco(layout, run, x, strike);
         return;
     }

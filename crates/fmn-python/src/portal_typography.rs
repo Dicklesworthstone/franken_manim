@@ -453,9 +453,9 @@ impl ConfiguredTextFields {
     }
 
     fn from_py(value: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let values = value.cast::<PyDict>().map_err(|_| {
-            PyTypeError::new_err("native text style fields must be a dictionary")
-        })?;
+        let values = value
+            .cast::<PyDict>()
+            .map_err(|_| PyTypeError::new_err("native text style fields must be a dictionary"))?;
         let mut fields = Self::default();
         for (key, value) in values.iter() {
             let key = key.extract::<String>()?;
@@ -833,18 +833,19 @@ mod tests {
     fn text_geometry_validation_checks_every_actual_scene_coordinate() {
         use fmn_library::VMobject;
 
-        let valid = VMobject::new().with_children(vec![VMobject::from_points(vec![
-            [f64::from(f32::MAX), 0.0, 0.0],
-        ])]);
+        let valid = VMobject::new().with_children(vec![VMobject::from_points(vec![[
+            f64::from(f32::MAX),
+            0.0,
+            0.0,
+        ]])]);
         assert!(validate_text_geometry(&valid).is_ok());
         Python::initialize();
         Python::attach(|_| {
             for coordinate in [f64::INFINITY, f64::NAN, f64::from(f32::MAX) * 2.0] {
-                let invalid = VMobject::new().with_children(vec![
-                    VMobject::new().with_children(vec![VMobject::from_points(vec![
-                        [0.0, coordinate, 0.0],
-                    ])]),
-                ]);
+                let invalid = VMobject::new()
+                    .with_children(vec![VMobject::new().with_children(vec![
+                        VMobject::from_points(vec![[0.0, coordinate, 0.0]]),
+                    ])]);
                 assert!(validate_text_geometry(&invalid).is_err());
             }
         });
@@ -891,13 +892,14 @@ mod tests {
             excess
                 .set_item(
                     "scoped_styles",
-                    PyList::new(py, (0..MAX_ITEMS + 1).map(|_| (0usize, 1usize, PyDict::new(py))))
-                        .unwrap(),
+                    PyList::new(
+                        py,
+                        (0..MAX_ITEMS + 1).map(|_| (0usize, 1usize, PyDict::new(py))),
+                    )
+                    .unwrap(),
                 )
                 .unwrap();
-            assert!(
-                configured_scopes(&excess, "A", &mut TextStyleBudget::default()).is_err()
-            );
+            assert!(configured_scopes(&excess, "A", &mut TextStyleBudget::default()).is_err());
         });
     }
 
