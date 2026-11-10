@@ -1,8 +1,9 @@
 """Streamline callback admission and live paint over the native RK45 builder.
 
 Atlas integrates and smooths the paths; Chisel measures their true arc lengths;
-Atlas's bundled gradient supplies RGB values. This adapter only dispatches Python
-fields and publishes validated style columns through Marionette's live records.
+Atlas's bundled gradient or an authored color map supplies RGB values. This
+adapter only dispatches Python fields and color callbacks, then publishes
+validated style columns through Marionette's live records.
 """
 from __future__ import annotations
 
@@ -21,6 +22,66 @@ def _finite(value, name, *, nonnegative=False):
     if not math.isfinite(result) or (nonnegative and result < 0):
         raise ValueError(name + " must be finite" + (" and nonnegative" if nonnegative else ""))
     return result
+
+
+def _magnitude_gradient(np, native_gradient, min_value, max_value, color_map):
+    """Map bounded magnitudes to owned RGB rows without a host palette library.
+
+    The named bundled map retains Atlas's interpolation. An authored callable
+    receives clipped normalized magnitudes and returns RGB or RGBA rows, like
+    VectorField's color-map protocol. StreamLines controls opacity separately,
+    as the Reference's gradient helpers do, so the fourth column is ignored.
+    """
+    low = _finite(min_value, "field gradient minimum")
+    high = _finite(max_value, "field gradient maximum")
+    if high < low:
+        raise ValueError("field gradient range must be ordered")
+    custom = callable(color_map)
+    if not custom and not (isinstance(color_map, str) and color_map == "3b1b_colormap"):
+        raise NotImplementedError(
+            "field gradients support the bundled '3b1b_colormap' or a callable "
+            "color map; other names require non-bundled matplotlib data"
+        )
+
+    def gradient(values):
+        array = np.asarray(values)
+        if array.size > _MAX_POINTS:
+            raise ValueError("field gradient exceeds the 65536-value resource budget")
+        if array.dtype.kind not in "biuf":
+            raise TypeError("field gradient values must be real numeric magnitudes")
+        flat = np.array(array, dtype=float, copy=True).reshape(-1)
+        if not np.isfinite(flat).all():
+            raise ValueError("field gradient values must be finite")
+        if not len(flat):
+            return np.empty((0, 3))
+        if custom:
+            if high == low:
+                alphas = np.zeros(len(flat))
+            else:
+                # A finite range can span opposite near-limit floats. Halve
+                # before subtracting in that case to keep normalization finite.
+                span = high - low
+                with np.errstate(over="ignore", invalid="ignore"):
+                    alphas = ((flat - low) / span if math.isfinite(span) else
+                              (flat * .5 - low * .5) / (high * .5 - low * .5))
+                alphas = np.clip(alphas, 0., 1.)
+            colors = np.asarray(color_map(alphas))
+            if (colors.ndim != 2 or colors.shape[0] != len(flat)
+                    or colors.shape[1] not in (3, 4)):
+                raise ValueError("field color map must return one RGB or RGBA row per magnitude")
+            if colors.dtype.kind not in "biuf":
+                raise TypeError("field color map must return real numeric RGB or RGBA rows")
+            colors = colors[:, :3]
+        else:
+            colors = native_gradient(low, high, flat.tolist())
+        # A callback may reuse its scratch array on the next line. Freeze its
+        # RGB now so a later call cannot rewrite an earlier line's paint plan.
+        rgb = np.array(colors, dtype=float, copy=True).reshape((len(flat), 3))
+        if not np.isfinite(rgb).all() or np.any(np.abs(rgb) > np.finfo(np.float32).max):
+            raise ValueError("field gradient colors must be finite and f32-representable")
+        return rgb
+
+    return gradient
 
 
 def _rows(np, values, name, *, count=None):
@@ -94,8 +155,11 @@ def _style_plan(g, owner):
     low, high = (_finite(value, "StreamLines magnitude_range") for value in owner.magnitude_range)
     if high < low:
         raise ValueError("StreamLines magnitude_range must be ordered")
-    if owner.color_map not in (None, "3b1b_colormap"):
-        raise NotImplementedError("StreamLines supports the bundled 3b1b_colormap")
+    color_map = owner.color_map
+    gradient = _magnitude_gradient(
+        np, g["_BridgeMobject"]._vector_field_gradient, low, high,
+        "3b1b_colormap" if color_map is None else color_map,
+    )
     function, by_magnitude = owner.func, bool(owner.color_by_magnitude)
     taper = bool(owner.taper_stroke_width)
     members, plan, total = tuple(owner.submobjects), [], 0
@@ -118,7 +182,7 @@ def _style_plan(g, owner):
                 norms = [g["get_norm"](row) for row in outputs]
             if not all(math.isfinite(value) for value in norms):
                 raise ValueError("StreamLines field magnitudes must be finite")
-            rgb = g["_BridgeMobject"]._vector_field_gradient(low, high, norms)
+            rgb = gradient(norms)
         else:
             color = owner.stroke_color
             rgb = np.tile(g["color_to_rgb"](g["WHITE"] if color is None else color), (len(points), 1))

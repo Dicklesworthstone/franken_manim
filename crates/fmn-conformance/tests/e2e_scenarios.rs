@@ -6689,6 +6689,20 @@ fn python_insert_recording_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
     Ok(RunOutcome::ok().with_counter("python_insert_recording_checks", checks))
 }
 
+fn python_streamline_colors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_streamline_colors()
+        .map_err(|error| fail(format!("Python streamline colors: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.streamline_colors").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("python_streamline_color_checks", checks))
+}
+
+fn python_time_varying_copies_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_time_varying_copies()
+        .map_err(|error| fail(format!("Python time-varying field copies: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.time_varying_copies").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("python_time_field_copy_checks", checks))
+}
+
 fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     python_portal_sequence_run(ctx, true)
 }
@@ -7452,15 +7466,11 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
         },
         ..BundleSoundtrackOptions::default()
     };
-    let legacy = export_bundle_bytes(&mut Score(None), options.clone())
-        .map_err(|e| fail(e.to_string()))?;
-    let silent = export_bundle_with_soundtrack_bytes(
-        &mut Score(None),
-        options.clone(),
-        &audio,
-        fs.as_ref(),
-    )
-    .map_err(|e| fail(e.to_string()))?;
+    let legacy =
+        export_bundle_bytes(&mut Score(None), options.clone()).map_err(|e| fail(e.to_string()))?;
+    let silent =
+        export_bundle_with_soundtrack_bytes(&mut Score(None), options.clone(), &audio, fs.as_ref())
+            .map_err(|e| fail(e.to_string()))?;
     if silent.bundle.bytes != legacy.bundle.bytes || silent.soundtrack.is_some() {
         return Err(fail("audio opt-in changed a no-cue recording"));
     }
@@ -7521,12 +7531,16 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
     if !matches!(
         refused,
         BundleExportError::Soundtrack(RenderError::SoundDecode {
-            error: AudioDecodeError::TranscoderRequired { format: AudioInputFormat::Flac },
+            error: AudioDecodeError::TranscoderRequired {
+                format: AudioInputFormat::Flac
+            },
             ..
         })
     ) || fs.read(Path::new("/unavailable.fmtl")).is_ok()
     {
-        return Err(fail("compressed capability refusal was untyped or published output"));
+        return Err(fail(
+            "compressed capability refusal was untyped or published output",
+        ));
     }
     options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
     let refused = export_bundle_with_soundtrack_with_fs(
@@ -7545,7 +7559,9 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
         }) if message.contains("certified")
     ) || fs.read(Path::new("/certified.fmtl")).is_ok()
     {
-        return Err(fail("certified compressed refusal was untyped or published output"));
+        return Err(fail(
+            "certified compressed refusal was untyped or published output",
+        ));
     }
     ctx.event(
         LogEvent::new("e2e.bundle.soundtrack_capabilities")
@@ -7554,7 +7570,10 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
             .field("prepublication_refusals", 2_u64),
     );
     Ok(RunOutcome::ok()
-        .with_artifact("soundtrack.fmtl", artifact.ok_or_else(|| fail("no audio recording"))?)
+        .with_artifact(
+            "soundtrack.fmtl",
+            artifact.ok_or_else(|| fail("no audio recording"))?,
+        )
         .with_counter("bundle_audio_thread_counts", checked)
         .with_counter("bundle_audio_source_receipts", 2)
         .with_counter("bundle_audio_refusals", 2)
@@ -18604,6 +18623,34 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![FieldPred::u64_eq("checks", 4)],
         )],
     ));
+    specs.push(spec(
+        "render_matrix.python_streamline_colors.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_streamline_colors_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_streamline_color_checks", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.streamline_colors",
+            vec![FieldPred::u64_eq("checks", 4)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_time_varying_copies.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_time_varying_copies_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_time_field_copy_checks", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.time_varying_copies",
+            vec![FieldPred::u64_eq("checks", 2)],
+        )],
+    ));
     let mut portal_output_inventory = vec![
         "native_scene.py".to_owned(),
         "motion.gif".to_owned(),
@@ -21387,6 +21434,28 @@ fn python_insert_recording_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_insert_recording.v1")
         .expect("Python insert recording is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Authored streamline colors reach native frames and retain atomic restyling.
+#[test]
+fn python_streamline_colors_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_streamline_colors.v1")
+        .expect("Python streamline colors are registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Time-varying field copies and targets sample their own clocks.
+#[test]
+fn python_time_varying_copies_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_time_varying_copies.v1")
+        .expect("Python time-varying copies are registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

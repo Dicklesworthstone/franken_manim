@@ -36,3 +36,41 @@ Evidence: `crates/fmn-python/tests/functional_color.py` exercises real native
 record layouts, bound views, mixed families, shared children, override dispatch,
 invalid-input recovery and actual rendered stroke pixels. Full fill pixel and
 animation witnesses are described in `BN-06-analytic-fill.md`.
+
+## StreamLines magnitude color maps
+
+`StreamLines(..., color_map=callable)` supports authored magnitude coloring
+during construction, `init_style()`, and `draw_lines()`. The same callable
+protocol is available through `get_rgb_gradient_function` and
+`get_vectorized_rgb_gradient_function`. The bundled
+`"3b1b_colormap"` continues to use Atlas's native interpolation.
+
+The callback receives a one-dimensional NumPy array of magnitudes normalized
+to `magnitude_range` and clipped to `[0, 1]`. It returns one RGB or RGBA row
+per value. RGB controls color; `stroke_opacity` controls opacity even when
+the callback returns four columns. A constant magnitude range maps to zero,
+and an empty input returns an empty RGB table without calling user code.
+
+```python
+def speed_colors(alpha):
+    return np.column_stack((alpha, 1 - alpha, np.zeros_like(alpha)))
+
+lines = StreamLines(
+    field, axes,
+    magnitude_range=(0, 2),
+    color_map=speed_colors,
+    stroke_opacity=0.8,
+)
+```
+
+Colors must be real, finite and representable in the native f32 record.
+Returned RGB arrays are copied before evaluating the next line, so a callback
+can safely reuse scratch storage. All lines' colors are validated before
+publication: a late callback failure preserves the displayed family and its
+paint. `color_by_magnitude=False` uses the uniform stroke without invoking
+the color callback. Unknown named palettes still produce a capability refusal.
+
+Coverage is in `test_streamline_animation_protocol.py` and
+`streamline_authoring.py` under `crates/fmn-python/tests`. The native
+acceptance includes live restyling, redraw, animated-flow cleanup, failure
+recovery, and rendered comparisons with independently colored geometry.

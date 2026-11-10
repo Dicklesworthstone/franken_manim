@@ -7,13 +7,23 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 import unittest
+
+import numpy as np
 
 SOURCE = Path(__file__).resolve().parents[1] / "python/fmn_python/streamline_animation.py"
 spec = importlib.util.spec_from_file_location("streamline_animation_under_test", SOURCE)
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
+python_dir = str(SOURCE.parents[1])
+if python_dir not in sys.path:
+    sys.path.insert(0, python_dir)
+color_spec = importlib.util.spec_from_file_location(
+    "fmn_python.streamline_authoring_under_test", SOURCE.with_name("streamline_authoring.py"))
+color_module = importlib.util.module_from_spec(color_spec)
+color_spec.loader.exec_module(color_module)
 
 
 def environment():
@@ -302,6 +312,147 @@ class StreamlineProtocolTests(unittest.TestCase):
         self.native.VGroup.update = override
         animated.update(.25)
         self.assertEqual(calls, [.25])
+
+
+class StreamlineColorProtocolTests(unittest.TestCase):
+    """Color dispatch and all-or-nothing planning; no native geometry claim."""
+
+    def gradient(self, mapping, low=0., high=2., native=None):
+        def forbidden(*args):
+            raise AssertionError("a callable map must not invoke the native palette")
+        return color_module._magnitude_gradient(np, native or forbidden, low, high, mapping)
+
+    def owner(self, mapping):
+        class Line:
+            def __init__(self, offset):
+                self.points = np.array([[offset, 0., 0.], [offset + .5, 0., 0.], [offset + 1., 0., 0.]])
+                self.rgba = np.tile([.2, .3, .4, .8], (3, 1))
+            def get_points(self):
+                return self.points
+        native = dict(_np=np, VMobject=Line, WHITE="white",
+                      get_norm=lambda row: float(np.linalg.norm(row)),
+                      color_to_rgb=lambda color: np.array([1., 1., 1.]),
+                      _BridgeMobject=SimpleNamespace(_vector_field_gradient=lambda a, b, xs: [[.1, .2, .3]] * len(xs)))
+        chart = SimpleNamespace(dimension=2, p2c=lambda point: point[:2])
+        owner = SimpleNamespace(coordinate_system=chart, stroke_width=3., stroke_opacity=.6,
+                                magnitude_range=(0., 2.), color_map=mapping,
+                                func=lambda rows: np.tile([1., 0.], (len(rows), 1)),
+                                color_by_magnitude=True, taper_stroke_width=False,
+                                stroke_color="white", submobjects=[Line(0.), Line(2.)])
+        return native, owner
+
+    def test_callable_receives_clipped_normalized_magnitudes_without_truth_or_equality(self):
+        seen = []
+        class Map:
+            __hash__ = None
+            def __bool__(self):
+                raise AssertionError("truth hook must not run")
+            def __eq__(self, other):
+                raise AssertionError("equality hook must not run")
+            def __call__(self, alphas):
+                seen.append(alphas.copy())
+                return np.column_stack([alphas, 1 - alphas, np.full(len(alphas), .25), np.zeros(len(alphas))])
+        result = self.gradient(Map(), low=2., high=4.)([0., 2., 3., 4., 9.])
+        np.testing.assert_array_equal(seen, [[0., 0., .5, 1., 1.]])
+        np.testing.assert_array_equal(result[:, 0], [0., 0., .5, 1., 1.])
+        np.testing.assert_array_equal(result[:, 2], [.25] * 5)
+        self.assertEqual(result.shape, (5, 3))
+
+    def test_named_map_delegates_to_atlas_without_reimplementing_interpolation(self):
+        calls = []
+        def native(low, high, values):
+            calls.append((low, high, values))
+            return [[.1, .2, .3]] * len(values)
+        result = self.gradient("3b1b_colormap", native=native)([-2., .5, 4.])
+        self.assertEqual(calls, [(0., 2., [-2., .5, 4.])])
+        np.testing.assert_array_equal(result, [[.1, .2, .3]] * 3)
+
+    def test_zero_range_empty_input_and_extreme_finite_range_are_defined(self):
+        seen = []
+        def mapping(alphas):
+            seen.append(alphas.copy())
+            return np.column_stack([alphas, alphas, alphas])
+        np.testing.assert_array_equal(self.gradient(mapping, 2., 2.)([0., 8.]), np.zeros((2, 3)))
+        self.assertEqual(self.gradient(mapping)([]).shape, (0, 3))
+        self.assertEqual(len(seen), 1, "empty input must not invoke authored code")
+        edge = np.finfo(float).max
+        colors = self.gradient(mapping, -edge, edge)([-edge, 0., edge])
+        np.testing.assert_array_equal(colors[:, 0], [0., .5, 1.])
+
+    def test_callback_scratch_is_copied_before_another_line_reuses_it(self):
+        scratch = np.zeros((3, 4))
+        def mapping(alphas):
+            scratch[:] += .2
+            return scratch
+        native, owner = self.owner(mapping)
+        plan = color_module._style_plan(native, owner)
+        np.testing.assert_allclose(plan[0][2][:, :3], .2)
+        np.testing.assert_allclose(plan[1][2][:, :3], .4)
+        np.testing.assert_allclose(plan[0][2][:, 3], .6)
+        self.assertFalse(np.shares_memory(plan[0][2], plan[1][2]))
+        scratch[:] = 9
+        np.testing.assert_allclose(plan[0][2][:, :3], .2)
+
+    def test_late_color_failure_leaves_every_published_line_untouched(self):
+        failure, calls = LookupError("second color evaluation failed"), []
+        def mapping(alphas):
+            calls.append(len(alphas))
+            if len(calls) == 2:
+                raise failure
+            return np.tile([1., 0., 0.], (len(alphas), 1))
+        native, owner = self.owner(mapping)
+        before = [line.rgba.copy() for line in owner.submobjects]
+        with self.assertRaises(LookupError) as caught:
+            color_module._style_plan(native, owner)
+        self.assertIs(caught.exception, failure)
+        for line, original in zip(owner.submobjects, before):
+            np.testing.assert_array_equal(line.rgba, original)
+
+    def test_invalid_outputs_values_and_budgets_refuse_before_publication(self):
+        bad_outputs = [np.zeros((2, 3)), np.zeros((3, 2)), np.zeros((3, 3), complex),
+                       np.full((3, 3), np.nan), np.full((3, 3), np.inf), np.full((3, 3), 1e100)]
+        for output in bad_outputs:
+            with self.subTest(shape=output.shape, dtype=output.dtype):
+                native, owner = self.owner(lambda alphas: output)
+                with self.assertRaises((TypeError, ValueError)):
+                    color_module._style_plan(native, owner)
+        seen = []
+        def mapping(alphas):
+            seen.append(alphas)
+            return np.zeros((len(alphas), 3))
+        gradient = self.gradient(mapping)
+        for values in ([np.nan], [np.inf], [1j], np.zeros(65_537)):
+            with self.assertRaises((TypeError, ValueError)):
+                gradient(values)
+        self.assertEqual(seen, [])
+        for low, high in ((2., 1.), (np.nan, 1.), (0., np.inf)):
+            with self.assertRaises(ValueError):
+                self.gradient(mapping, low, high)
+        with self.assertRaises(NotImplementedError):
+            self.gradient("viridis")
+
+    def test_uniform_style_does_not_evaluate_a_custom_color_map(self):
+        def forbidden(alphas):
+            raise AssertionError("uniform style called a magnitude map")
+        native, owner = self.owner(forbidden)
+        owner.color_by_magnitude = False
+        plan = color_module._style_plan(native, owner)
+        for _, _, colors, _ in plan:
+            np.testing.assert_array_equal(colors[:, :3], np.ones((3, 3)))
+
+    def test_callback_geometry_or_family_mutation_invalidates_paint(self):
+        for family in (False, True):
+            with self.subTest(family=family):
+                native, owner = self.owner(None)
+                def mapping(alphas):
+                    if family:
+                        owner.submobjects = []
+                    else:
+                        owner.submobjects[0].points[0, 0] += .5
+                    return np.zeros((len(alphas), 3))
+                owner.color_map = mapping
+                with self.assertRaisesRegex(RuntimeError, "changed"):
+                    color_module._style_plan(native, owner)
 
 
 if __name__ == "__main__":

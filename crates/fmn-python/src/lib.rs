@@ -14252,6 +14252,53 @@ pub fn run_portal_gauntlet_insert_recording() -> Result<u64, String> {
     })
 }
 
+/// Exercise authored StreamLines color maps through native flow geometry,
+/// live redraw, failure recovery and independent rendered color oracles.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_streamline_colors() -> Result<u64, String> {
+    with_python_test_module("streamline colors Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_streamline_colors_only", true)
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(include_str!("../tests/streamline_authoring.py"))
+            .expect("streamline color suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_fmn_streamline_color_checks")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "streamline color suite emitted no case count".to_owned())?
+            .extract::<u64>()
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Verify that copied time-varying fields evaluate their own clocks, using
+/// independent native vector-field geometry and actual captured pixels.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_time_varying_copies() -> Result<u64, String> {
+    with_python_test_module(
+        "time-varying field copies Gauntlet",
+        |py, _module, globals| {
+            globals
+                .set_item("_fmn_time_fields_only", true)
+                .map_err(|error| error.to_string())?;
+            let source = CString::new(include_str!("../tests/live_vector_fields.py"))
+                .expect("time-varying field suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .map_err(|error| error.to_string())?;
+            globals
+                .get_item("_fmn_time_field_checks")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "time-varying field suite emitted no case count".to_owned())?
+                .extract::<u64>()
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
 /// What [`run_portal_gauntlet_planar_route`] observed (fm-sq8.11).
 #[cfg(feature = "gauntlet")]
 #[derive(Debug, Clone, PartialEq, Eq)]

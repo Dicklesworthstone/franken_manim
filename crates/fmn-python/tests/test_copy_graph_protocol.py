@@ -12,7 +12,7 @@ from creation_protocol_support import BOOTSTRAP
 
 
 def environment():
-    g = {"_copy": copy, "_FamilyCycleError": ValueError,
+    g = {"_copy": copy, "_types": types, "_FamilyCycleError": ValueError,
          "_CameraFrameCore": type("CameraFrameCore", (), {})}
     wanted = {"_family_preorder", "_copy_mobject_graph", "_copy_member_state",
               "_COPY_RELATIONSHIP_ATTRIBUTES"}
@@ -56,6 +56,37 @@ def environment():
 
     g.update(_BridgeMobject=Node, _install_live_state=install)
     return Node, g["_copy_mobject_graph"]
+
+
+def time_field_environment():
+    """Real time-field/copy dispatch over a non-rendering native-shell fixture."""
+    Node, clone = environment()
+    namespace = {}
+
+    class VectorField(Node):
+        def __init__(self, function, coordinate_system, **kwargs):
+            super().__init__("field")
+            self.func = function
+            self.coordinate_system = coordinate_system
+
+        def add_updater(self, callback):
+            self.updaters.append(callback)
+            return self
+
+        @property
+        def always(self):
+            return namespace["_UpdaterBuilder"](self)
+
+        def update_vectors(self):
+            self.observation = self.func([[0., 0.], [1., 0.]])
+            return self
+
+    namespace["VectorField"] = VectorField
+    names = {"TimeVaryingVectorField", "_UpdaterBuilder"}
+    nodes = [node for node in ast.parse(BOOTSTRAP.read_text()).body
+             if isinstance(node, ast.ClassDef) and node.name in names]
+    exec(compile(ast.Module(nodes, []), str(BOOTSTRAP), "exec"), namespace)
+    return namespace["TimeVaryingVectorField"], clone
 
 
 class CopyGraphTests(unittest.TestCase):
@@ -143,6 +174,52 @@ class CopyGraphTests(unittest.TestCase):
         self.assertIsNot(duplicate.alias, leaf)
         self.assertIs(duplicate.external, external)
         self.assertIs(duplicate.nested, root.nested)
+
+    def test_bound_method_attributes_follow_the_copied_family(self):
+        for bound in (False, True):
+            leaf, external = self.Node("leaf", bound=bound), self.Node("external")
+            root = self.Node("root", leaf, bound=bound)
+            read_name = lambda receiver: receiver.name
+            root.own = types.MethodType(read_name, root)
+            root.child_method = types.MethodType(read_name, leaf)
+            leaf.owner_method = root.own
+            root.external_method = types.MethodType(read_name, external)
+            callback = lambda obj: None
+            root.callback = callback
+            root.updaters.append(root.own)
+            duplicate = self.clone(root, False, {})
+            self.assertIs(duplicate.own.__self__, duplicate)
+            self.assertIs(duplicate.child_method.__self__, duplicate.submobjects[0])
+            self.assertIs(duplicate.submobjects[0].owner_method.__self__, duplicate)
+            self.assertIs(duplicate.child_method.__func__, read_name)
+            self.assertIs(duplicate.external_method, root.external_method)
+            self.assertIs(duplicate.callback, callback)
+            self.assertIs(duplicate.updaters[0], root.updaters[0])
+            duplicate.submobjects[0].name = "copied leaf"
+            self.assertEqual(duplicate.child_method(), "copied leaf")
+            self.assertEqual(root.child_method(), "leaf")
+
+    def test_time_varying_copies_sample_their_own_clock(self):
+        Field, clone = time_field_environment()
+        callback = lambda rows, time: (len(rows), time)
+        for bound in (False, True):
+            for deep in (False, True):
+                with self.subTest(bound=bound, deep=deep):
+                    field = Field(callback, object())
+                    field.bound = bound
+                    field.increment_time(.25)
+                    duplicate = clone(field, deep, {})
+                    # Exercise the real constructor's two registered updaters:
+                    # advance the receiver's clock, then resample its field.
+                    duplicate.updaters[0](duplicate, .5)
+                    duplicate.updaters[1](duplicate)
+                    self.assertEqual(duplicate.observation, (2, .75))
+                    self.assertEqual(field.time, .25)
+                    field.increment_time(1.)
+                    duplicate.update_vectors()
+                    self.assertEqual(duplicate.observation, (2, .75))
+                    self.assertIs(duplicate.time_func, callback)
+                    self.assertIs(duplicate.func.__self__, duplicate)
 
 
 if __name__ == "__main__":

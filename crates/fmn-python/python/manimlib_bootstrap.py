@@ -917,12 +917,20 @@ def _copy_member_state(old, new, mapping, deep, memo):
     if deep:
         attributes = _copy.deepcopy(attributes, memo)
     else:
-        attributes = {
-            key: mapping.get(value, value)
-            if isinstance(value, _BridgeMobject)
-            else value
-            for key, value in attributes.items()
-        }
+        def remap(value):
+            if isinstance(value, _BridgeMobject):
+                return mapping.get(value, value)
+            if (isinstance(value, _types.MethodType)
+                    and isinstance(value.__self__, _BridgeMobject)):
+                receiver = mapping.get(value.__self__)
+                if receiver is not None:
+                    return _types.MethodType(value.__func__, receiver)
+            return value
+        # A stored bound method is also a family-internal reference. Sharing
+        # its receiver would make a copied field read the original's clock or
+        # a generated target edit the original child. Ordinary functions and
+        # the updater list below retain the established shared-callable rule.
+        attributes = {key: remap(value) for key, value in attributes.items()}
     new.__dict__.update(attributes)
     # A CameraFrame's pose lives in its camera core. A shallow attribute copy
     # would share it, so a saved copy would move with the live frame; give
@@ -10923,12 +10931,17 @@ class TimeVaryingVectorField(VectorField):
         self.time = 0.0
         self.time_func = time_func
         super().__init__(
-            lambda coords: self.time_func(coords, self.time),
+            self._evaluate_at_current_time,
             coordinate_system,
             **kwargs,
         )
         self.add_updater(lambda m, dt: m.increment_time(dt))
         self.always.update_vectors()
+
+    def _evaluate_at_current_time(self, coords):
+        # A bound method participates in the family-copy remap. A closure
+        # capturing self would keep every copy tied to the original clock.
+        return self.time_func(coords, self.time)
 
     def increment_time(self, dt):
         self.time += float(dt)
@@ -21183,22 +21196,11 @@ def _install_vector_field_functions():
     native_ode_solution_points = _FMN_MODULE._ode_solution_points
 
     def get_vectorized_rgb_gradient_function(min_value, max_value, color_map):
-        if color_map != "3b1b_colormap":
-            raise NotImplementedError(
-                "field gradients support the bundled '3b1b_colormap'; "
-                f"{color_map!r} requires non-bundled matplotlib data"
-            )
-
-        def gradient(values):
-            flat = _np.asarray(values, dtype=float).reshape(-1)
-            return _np.asarray(
-                _BridgeMobject._vector_field_gradient(
-                    float(min_value), float(max_value), flat.tolist()
-                ),
-                dtype=float,
-            )
-
-        return gradient
+        from fmn_python.streamline_authoring import _magnitude_gradient
+        return _magnitude_gradient(
+            _np, _BridgeMobject._vector_field_gradient,
+            min_value, max_value, color_map,
+        )
 
     def get_rgb_gradient_function(min_value, max_value, color_map):
         gradient = get_vectorized_rgb_gradient_function(
