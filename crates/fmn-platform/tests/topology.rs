@@ -88,6 +88,85 @@ fn x86_smt_ccd_tree_parses_fully() {
 }
 
 #[test]
+fn linux_affinity_filters_cpu_identity_and_every_locality_domain() {
+    let fs = load_tree("sysfs_x86_smt_ccd.tsv");
+    fs.insert(
+        "/proc/thread-self/status",
+        b"Name:\tfmn\nCpus_allowed_list:\t2,10,13\n".to_vec(),
+    );
+    // A library may run on a thread whose inherited mask is narrower than
+    // the process leader's. New raster workers inherit the caller's mask.
+    fs.insert("/proc/self/status", b"Cpus_allowed_list:\t0-15\n".to_vec());
+    let t = HardwareTopology::detect_linux(&fs).expect("restricted topology");
+    let allowed = vec![2, 10, 13];
+    assert_eq!(t.cpus.iter().map(|cpu| cpu.id).collect::<Vec<_>>(), allowed);
+    assert_eq!(t.logical_cores(), 3);
+    assert_eq!(t.physical_cores, 2);
+    assert!(t.smt_active());
+    assert_eq!(t.cpu_thread_budget(), 3);
+    assert_eq!(t.l3_domains[0].cpus, vec![2, 10]);
+    assert_eq!(t.l3_domains[1].cpus, vec![13]);
+    assert_eq!(t.numa_nodes[0].cpus, vec![2, 10]);
+    assert_eq!(t.numa_nodes[1].cpus, vec![13]);
+    assert_eq!(t.processor_groups[0].cpus, allowed);
+    for members in t.l2_domains.iter().map(|domain| &domain.cpus) {
+        assert!(!members.is_empty());
+        assert!(members.iter().all(|id| allowed.contains(id)));
+    }
+}
+
+#[test]
+fn linux_affinity_never_reintroduces_offline_cpus_or_empty_domains() {
+    let fs = load_tree("sysfs_x86_smt_ccd.tsv");
+    fs.insert("/proc/self/status", b"Cpus_allowed_list:\t13,31\n".to_vec());
+    let t = HardwareTopology::detect_linux(&fs).expect("online intersection");
+    assert_eq!(t.logical_cores(), 1);
+    assert_eq!(t.cpus[0].id, 13);
+    assert_eq!(t.physical_cores, 1);
+    assert_eq!(t.l2_domains.len(), 1);
+    assert_eq!(t.l3_domains.len(), 1);
+    assert_eq!(t.numa_nodes.len(), 1);
+    assert_eq!(t.numa_nodes[0].id, 1);
+    assert_eq!(t.numa_nodes[0].cpus, vec![13]);
+    fs.insert("/proc/self/status", b"Cpus_allowed_list:\t31\n".to_vec());
+    assert!(matches!(
+        HardwareTopology::detect_linux(&fs),
+        Err(TopologyError::Invalid { .. })
+    ));
+}
+
+#[test]
+fn linux_cgroup_ancestors_bound_capacity_without_inventing_cpu_ids() {
+    let fs = load_tree("sysfs_x86_smt_ccd.tsv");
+    fs.insert("/proc/self/cgroup", b"0::/jobs/scene\n".to_vec());
+    fs.insert(
+        "/proc/self/mountinfo",
+        b"31 20 0:27 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n".to_vec(),
+    );
+    fs.insert(
+        "/sys/fs/cgroup/jobs/scene/cpu.max",
+        b"max 100000\n".to_vec(),
+    );
+    fs.insert("/sys/fs/cgroup/jobs/cpu.max", b"250000 100000\n".to_vec());
+    fs.insert("/sys/fs/cgroup/jobs/scene/memory.max", b"max\n".to_vec());
+    fs.insert("/sys/fs/cgroup/jobs/memory.max", b"67108864\n".to_vec());
+    let t = HardwareTopology::detect_linux(&fs).expect("ancestor constraints");
+    assert_eq!(t.logical_cores(), 16);
+    assert_eq!(t.physical_cores, 8);
+    assert_eq!(t.cpu_quota, Some(3));
+    assert_eq!(t.cpu_thread_budget(), 3);
+    assert_eq!(t.total_memory_bytes, Some(64 * 1024 * 1024));
+    assert!(t.snapshot_text().contains("cpu_quota\t3\n"));
+
+    fs.insert(
+        "/sys/fs/cgroup/jobs/memory.max",
+        b"1099511627776\n".to_vec(),
+    );
+    let t = HardwareTopology::detect_linux(&fs).expect("physical memory ceiling");
+    assert_eq!(t.total_memory_bytes, Some(32_768_000 * 1024));
+}
+
+#[test]
 fn aarch64_biglittle_tree_derives_perf_classes() {
     let fs = load_tree("sysfs_aarch64_biglittle.tsv");
     let t = HardwareTopology::detect_linux(&fs).expect("detect");
