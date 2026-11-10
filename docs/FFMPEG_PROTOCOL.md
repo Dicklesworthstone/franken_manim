@@ -38,9 +38,23 @@ bytes/frame against NV12's 12,441,600 — 2.67× less pipe payload
 (~1.99 GB/s vs ~746 MB/s at 60 fps) before counting copies.
 
 Refused negotiations are typed and named: transparent MOV on an
-opaque wire, CRF on a non-CRF encoder, an encoder the installed
-ffmpeg does not offer, a payload that is not a whole number of
-frames, zero dimensions or frame rate.
+opaque wire or with an encoder outside its qtrle profile, CRF on a
+non-CRF encoder, an encoder the installed ffmpeg does not offer, a payload
+that is not a whole number of frames, zero dimensions or frame rate.
+
+Transparent MOV's qtrle/argb contract is enforced by the shared
+`VideoJob::resolved_encoder` owner, including direct Reel and `Boundary`
+callers. `Auto`, named qtrle and configured qtrle remain valid with RGBA/BGRA
+input. Other explicit encoders receive a negotiation error before encoder
+probes, encode workdir allocation, audio lookup or process startup. Select
+`auto`/`qtrle`, or request opaque MOV when transparency is not needed.
+Advertising an alpha-bearing input pixel format alone does not establish
+that an encoder and profile preserve alpha in the output. Opaque MOV/MP4
+encoder selection is unchanged.
+
+`failure_path.transparent_video_encoder.v1` exercises this shared public
+admission with both alpha wire formats; the boundary regression also checks
+that a refused request cannot start process work or publish an artifact.
 
 ### 1.1 Native transfer ruling, 10-bit P010, and NV12 passthrough
 

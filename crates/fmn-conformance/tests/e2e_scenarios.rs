@@ -3213,6 +3213,95 @@ fn native_detached_calculus_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
         .with_counter("native_detached_calculus_renders", checked))
 }
 
+/// A shared Reel job cannot claim transparency with an unadmitted encoder.
+fn transparent_video_encoder_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::path::Path;
+
+    use fmn_output::negotiate::{VideoQuality, encode_argv, encode_argv_with_formats};
+    use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
+
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for wire in [WireFormat::Rgba8, WireFormat::Bgra8] {
+        let mut job = VideoJob {
+            width: 64,
+            height: 36,
+            fps: (30000, 1001),
+            wire,
+            color: ColorDescription::for_native_wire(wire),
+            container: Container::MovTransparent,
+            encoder: EncoderChoice::Auto,
+            crf: None,
+        };
+        for encoder in [
+            EncoderChoice::Auto,
+            EncoderChoice::Named("qtrle".into()),
+            EncoderChoice::Configured {
+                name: "qtrle".into(),
+                quality: VideoQuality::default(),
+            },
+        ] {
+            job.encoder = encoder;
+            let resolved = job.resolved_encoder().map_err(|e| fail(e.to_string()))?;
+            let argv = encode_argv(&job, Path::new("/alpha.mov"))
+                .map_err(|e| fail(e.to_string()))?;
+            let formats: Vec<_> = argv
+                .windows(2)
+                .filter(|pair| pair[0] == "-pix_fmt")
+                .map(|pair| pair[1].as_str())
+                .collect();
+            if resolved.as_deref() != Some("qtrle")
+                || formats != [wire.ffmpeg_pix_fmt(), "argb"]
+            {
+                return Err(fail("transparent MOV lost its explicit qtrle/argb contract"));
+            }
+            accepted += 1;
+        }
+        for name in ["libx264", "hevc_nvenc", "prores_ks"] {
+            for encoder in [
+                EncoderChoice::Named(name.into()),
+                EncoderChoice::Configured {
+                    name: name.into(),
+                    quality: VideoQuality::default(),
+                },
+            ] {
+                job.encoder = encoder;
+                job.container = Container::MovTransparent;
+                let error = match job.resolved_encoder() {
+                    Err(error) => error,
+                    Ok(_) => return Err(fail("an unsupported transparent encoder was accepted")),
+                };
+                if !error.to_string().contains("requires the qtrle encoder")
+                    || encode_argv(&job, Path::new("/alpha.mov")).is_ok()
+                    || encode_argv_with_formats(
+                        &job,
+                        Path::new("/alpha.mov"),
+                        &["argb".into(), "rgba".into(), "yuva444p10le".into()],
+                    )
+                    .is_ok()
+                {
+                    return Err(fail("advertised input alpha bypassed transparent admission"));
+                }
+                job.container = Container::Mov;
+                if job.resolved_encoder().map_err(|e| fail(e.to_string()))?.as_deref()
+                    != Some(name)
+                {
+                    return Err(fail("transparent admission changed opaque encoder selection"));
+                }
+                rejected += 1;
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.failure_path.transparent_video_encoder")
+            .field("accepted", accepted)
+            .field("rejected", rejected),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("transparent_encoder_accepted", accepted)
+        .with_counter("transparent_encoder_rejected", rejected))
+}
+
 /// Native legacy and preset constructors retain ordinary Scribe pixels.
 fn native_tex_constructors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::*;
@@ -16691,6 +16780,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "failure_path.transparent_video_encoder.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(transparent_video_encoder_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("transparent_encoder_accepted", 6),
+            counter_eq("transparent_encoder_rejected", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure_path.transparent_video_encoder",
+            vec![
+                FieldPred::u64_eq("accepted", 6),
+                FieldPred::u64_eq("rejected", 12),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_tex_constructors.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -21066,6 +21173,16 @@ fn native_detached_calculus_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_detached_calculus.v1")
         .expect("native detached calculus scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn transparent_video_encoder_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.transparent_video_encoder.v1")
+        .expect("transparent video encoder scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

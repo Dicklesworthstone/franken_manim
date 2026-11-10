@@ -580,6 +580,70 @@ mod tests {
         assert_eq!(runner.specs.lock().unwrap().len(), 1);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn transparent_encoder_refusal_precedes_probes_workdirs_and_process_start() {
+        let tool = help_probe_tool();
+        let runner = Arc::new(HelpOutcomeRunner {
+            outcome: ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            },
+            specs: std::sync::Mutex::default(),
+        });
+        let caps = EncoderCapabilities::parse(
+            "Encoders:\n ------\n V....D qtrle fixture\n V....D libx264 fixture\n V....D hevc_nvenc fixture\n V....D prores_ks fixture\n",
+        );
+        let boundary = Boundary::new(
+            tool.clone(),
+            runner.clone(),
+            JobLimits::default(),
+            tool.session.parent.clone(),
+        )
+        .unwrap();
+        let destination = tool.session.root.path.join("alpha.mov");
+        let missing_audio = tool.session.root.path.join("missing.wav");
+        for wire in [WireFormat::Rgba8, WireFormat::Bgra8] {
+            for name in ["libx264", "hevc_nvenc", "prores_ks"] {
+                for choice in [
+                    EncoderChoice::Named(name.into()),
+                    EncoderChoice::Configured {
+                        name: name.into(),
+                        quality: crate::negotiate::VideoQuality::default(),
+                    },
+                ] {
+                    let mut job = format_job(wire);
+                    job.container = Container::MovTransparent;
+                    job.encoder = choice;
+                    job.crf = None;
+                    let error = caps
+                        .require_video_job(&tool, runner.as_ref(), &job)
+                        .unwrap_err();
+                    assert!(matches!(error, BoundaryError::Negotiation(_)));
+                    assert!(error.to_string().contains("requires the qtrle encoder"));
+                    let result = boundary.start_encode(
+                        &job,
+                        &caps,
+                        &destination,
+                        Some(&missing_audio),
+                        ProcessCancellation::new(),
+                        ProcessStdinLimits::new(16 * 1024, 16 * 1024),
+                    );
+                    let error = match result {
+                        Err(error) => error,
+                        Ok(_) => panic!("an unadmitted alpha profile started an encode"),
+                    };
+                    assert!(matches!(error, BoundaryError::Negotiation(_)));
+                    assert!(error.to_string().contains("requires the qtrle encoder"));
+                }
+            }
+        }
+        assert!(runner.specs.lock().unwrap().is_empty());
+        assert_eq!(boundary.next_job.load(Ordering::Relaxed), 0);
+        assert!(!destination.exists());
+    }
+
     fn format_job(wire: WireFormat) -> VideoJob {
         VideoJob {
             width: 64,

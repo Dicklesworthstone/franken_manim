@@ -80,6 +80,70 @@ fn configured_auto_negotiates_real_opaque_and_alpha_encoder_arguments() {
     }
 }
 
+#[test]
+fn transparent_mov_admits_default_and_explicit_qtrle_for_both_alpha_wires() {
+    for wire in [WireFormat::Rgba8, WireFormat::Bgra8] {
+        for choice in [
+            EncoderChoice::Auto,
+            EncoderChoice::Named("qtrle".into()),
+            EncoderChoice::Configured {
+                name: "qtrle".into(),
+                quality: VideoQuality::default(),
+            },
+        ] {
+            let mut alpha = job("qtrle", wire, Container::MovTransparent);
+            alpha.encoder = choice;
+            alpha.color = ColorDescription::for_native_wire(wire);
+            assert_eq!(alpha.resolved_encoder().unwrap().as_deref(), Some("qtrle"));
+            let argv = encode_argv(&alpha, Path::new("/alpha.mov")).unwrap();
+            assert_eq!(formats(&argv), [wire.ffmpeg_pix_fmt(), "argb"]);
+            assert!(argv.windows(2).any(|pair| pair == ["-c:v", "qtrle"]));
+            assert!(argv.windows(2).any(|pair| pair == ["-colorspace", "rgb"]));
+        }
+    }
+}
+
+#[test]
+fn transparent_mov_refuses_other_encoder_profiles_even_with_alpha_input_formats() {
+    use fmn_output::negotiate::encode_argv_with_formats;
+
+    for wire in [WireFormat::Rgba8, WireFormat::Bgra8] {
+        for name in ["libx264", "hevc_nvenc", "prores_ks"] {
+            for choice in [
+                EncoderChoice::Named(name.into()),
+                EncoderChoice::Configured {
+                    name: name.into(),
+                    quality: VideoQuality::default(),
+                },
+            ] {
+                let mut alpha = job(name, wire, Container::MovTransparent);
+                alpha.encoder = choice;
+                let error = alpha.resolved_encoder().unwrap_err();
+                assert!(error.to_string().contains("requires the qtrle encoder"));
+                assert!(error.to_string().contains("preserve alpha"));
+                assert!(error.to_string().contains("opaque MOV"));
+                assert!(encode_argv(&alpha, Path::new("/alpha.mov")).is_err());
+                // An accepted input layout does not establish a codec's
+                // output-alpha or profile contract.
+                let advertised = vec!["argb".into(), "rgba".into(), "yuva444p10le".into()];
+                assert!(
+                    encode_argv_with_formats(&alpha, Path::new("/alpha.mov"), &advertised)
+                        .is_err()
+                );
+                assert!(
+                    alpha
+                        .clone()
+                        .with_quality(VideoQuality::default())
+                        .is_err()
+                );
+                // The same explicit codec remains eligible for opaque MOV.
+                alpha.container = Container::Mov;
+                assert_eq!(alpha.resolved_encoder().unwrap().as_deref(), Some(name));
+            }
+        }
+    }
+}
+
 #[cfg(unix)]
 fn probe_formats_retaining_failure(
     caps: &fmn_output::EncoderCapabilities,
