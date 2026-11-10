@@ -76,6 +76,8 @@ mod studio_mjpeg;
 mod studio_native_resume;
 #[path = "support/studio_pure_seek.rs"]
 mod studio_pure_seek;
+#[path = "support/studio_wait_tail.rs"]
+mod studio_wait_tail;
 
 // fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
 // (crates/fmn/examples/hoeffding_d), compiled here from its own sources so
@@ -17161,6 +17163,39 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_wait_tail_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_wait_tail::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_wait_tail_checkpoint.bin".into(),
+                "native_wait_tail_next.png".into(),
+                "native_wait_tail_continued.png".into(),
+            ]),
+            counter_eq("studio_wait_tail_checkpoint_restores", 1),
+            counter_eq("studio_wait_tail_checkpoint_frames", 5),
+            counter_eq("studio_wait_tail_checkpoint_prefix_replays", 0),
+            counter_eq("studio_wait_tail_checkpoint_restore_updaters", 0),
+            counter_eq("studio_wait_tail_checkpoint_suffix_hashes", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.wait_tail_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_frame", 600),
+                FieldPred::u64_eq("work_budget", 5),
+                FieldPred::u64_eq("prefix_builds", 1),
+                FieldPred::u64_eq("prefix_finishes", 1),
+                FieldPred::u64_eq("prefix_replays", 0),
+                FieldPred::u64_eq("restore_updater_calls", 0),
+                FieldPred::u64_eq("matching_frames", 5),
+                FieldPred::str_eq("restore_mode", "checkpoint"),
+                FieldPred::str_eq("state_and_pixels_equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_mjpeg_preview.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -20547,6 +20582,16 @@ fn studio_registered_checkpoint_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_registered_checkpoint.v1")
         .expect("registered native checkpoint scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_wait_tail_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_wait_tail_checkpoint.v1")
+        .expect("completed native prefix checkpoint scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

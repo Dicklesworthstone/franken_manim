@@ -267,12 +267,19 @@ The policy selects how that factory recovers an interrupted program:
 | --- | --- |
 | `Disabled` | Callback recovery and durable input refuse. |
 | `ColdVerified` | Reconstruct from frame zero, then compare complete state bytes before installing the replacement owner. |
-| `Checkpointed` | Restore admitted wait programs directly; use verified cold reconstruction for other programs. |
+| `Checkpointed` | Restore admitted waits directly, including final waits after completed animation/construction; use verified cold reconstruction for other captures. |
 
 ### Restore registered wait programs
 
 `Checkpointed` can restore a schedule consisting entirely of `Wait` and
-`WaitFrames` segments, including zero-duration waits. Updaters must be registered
+`WaitFrames` segments, including zero-duration waits. It also restores captures
+inside the original trailing wait suffix of a mixed schedule, after all earlier
+`Play` and deferred `Build` steps have finished. For example, a program with
+`play_with(...)` followed by `WaitFrames { frames: 870 }` can restore directly
+during that final hold: its completed animation, generated objects and RNG state
+come from the snapshot, and its earlier callbacks are not executed again.
+
+Updaters must be registered
 through a fresh `NativeUpdaterRegistry` in each factory. Its registration
 methods accept function pointers, and all mutable callback state must live in
 durable Stage records or trackers. Registration does not run an initial update.
@@ -304,11 +311,22 @@ worker_config.replay = NativeReplayPolicy::Checkpointed;
 
 `register_no_dt` supports ordinary scene updaters with signature
 `fn(&mut Stage, Mob)`. Unregistered callbacks, replaced bindings and native
-`updater_state` attributes require cold reconstruction. A schedule containing
-`Play` or deferred `Build` segments also retains that path. Custom preflight
-hooks, sound requests, input history, live event ingress and edited source spans
-cannot be silently discarded by a direct restore. Dormant event listeners may
-be recreated by the fresh factory when no input has run.
+`updater_state` attributes require cold reconstruction. An open `Play`, including
+its final nominal capture before the finish lifecycle, also retains that path.
+So do earlier waits with pending executable steps; only the original final
+declarative wait suffix is eligible. A generated wait inside deferred work does
+not become an independent durable continuation.
+
+Custom preflight hooks, sound requests, input history, live event ingress and
+edited source spans cannot be discarded by a direct restore. Deferred access
+to `NativeBuildContext::spans_mut` or `event_dispatcher_mut` requires cold
+reconstruction because the fresh factory has not installed those bindings.
+Dormant listeners installed by the initial factory remain eligible for complete
+all-wait schedules when no input has run. Mixed schedules require the default
+editor listeners only: an author listener could share mutable captures with an
+earlier animation or build, even without changing its registration. Existing
+native-attribute, padding-link and rollback-identity refusals also apply after
+completed animation.
 
 An admitted checkpoint uses the versioned `FMNR` envelope. It binds the original
 root RNG seed separately from the serial RNG stream, the source/input closure,
@@ -319,6 +337,13 @@ these identities on an independent factory instance, installs the data and
 rebinds the registered functions under their original updater identities.
 It does not evaluate the preceding frames, rerun the current wait's zero-dt
 opener, or emit its pre-play lifecycle again.
+
+The original all-wait envelope remains readable and keeps its canonical bytes.
+Mixed schedules use a separate `FMNR` record that also binds the wait's suffix
+index and the completed prefix's frame, segment and play counters. These counts
+remain distinct: deferred constructors and empty plays can consume schedule
+entries without incrementing the scene's play count. No executable prefix is
+decoded or resumed, and its stateful effect evidence remains in the journal.
 
 The next sample retains its original segment alpha, global frame index and
 frame-indexed RNG. A checkpoint on the wait's last capture still has a pending
@@ -341,7 +366,8 @@ Run the complete portable example:
 cargo run --locked -p fmn-studio --example native_checkpoint
 ```
 
-It commits frame 600, restores it in an independent worker whose frame-work
+It performs a one-second deferred native rotation, enters a 29-second wait with
+a registered updater, commits frame 600, and restores it in an independent worker whose frame-work
 budget is only **one frame**, and verifies that frame 601's encoded PNG equals
 the uninterrupted worker's PNG. Replaying the prefix could not fit that budget.
 The example uses the real worker service and renderer in-process and prints the

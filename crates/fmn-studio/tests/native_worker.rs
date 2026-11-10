@@ -30,6 +30,7 @@ thread_local! {
     // Write-only execution witnesses: these counters never affect authored
     // state or callback behavior. The model's actual counter is a Stage tracker.
     static REGISTERED_CALLS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    static TAIL_PREFIX_CALLS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
 }
 
 const CHECKPOINT_WAIT_SCHEDULE: [u64; 3] = [350, 450, 100];
@@ -132,6 +133,521 @@ fn checkpoint_observation(
         program.at_segment_boundary(),
         scene.stage().frame_shape().map(f64::to_bits),
     )
+}
+
+// Instrument the real native lifecycle. The counters are write-only witnesses;
+// all model state remains in the Stage and its one snapshotted RNG stream.
+struct CountedTailAnimation(Box<dyn fmn_anim::Animation>);
+
+impl fmn_anim::Animation for CountedTailAnimation {
+    fn state(&self) -> &fmn_anim::AnimState {
+        self.0.state()
+    }
+
+    fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+        self.0.state_mut()
+    }
+
+    fn begin(&mut self, stage: &mut Stage) -> Result<(), fmn_anim::AnimError> {
+        TAIL_PREFIX_CALLS.with(|calls| {
+            let (builds, begins, finishes) = calls.get();
+            calls.set((builds, begins + 1, finishes));
+        });
+        self.0.begin(stage)
+    }
+
+    fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], alpha: f64) {
+        self.0.interpolate_submobject(stage, mobs, alpha);
+    }
+
+    fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        self.0.interpolate(stage, alpha);
+    }
+
+    fn finish(&mut self, stage: &mut Stage) {
+        self.0.finish(stage);
+        TAIL_PREFIX_CALLS.with(|calls| {
+            let (builds, begins, finishes) = calls.get();
+            calls.set((builds, begins, finishes + 1));
+        });
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.0.abort(stage);
+    }
+}
+
+fn wait_tail_program(transient: u8, hold: f64) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            default_wait_time: hold,
+            ..RuntimeConfig::default()
+        },
+        71,
+    )
+    .unwrap();
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 9).unwrap();
+    for (index, point) in [
+        [-0.5_f32, -0.5, 0.0],
+        [0.0, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+        [-0.5, 0.0, 0.0],
+        [-0.5, -0.5, 0.0],
+    ]
+    .iter()
+    .enumerate()
+    {
+        buffer.write(index, "point", point);
+        buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 1.0]);
+        buffer.write(index, "stroke_width", &[0.0]);
+    }
+    let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+    let counter = scene.stage_mut().add_value_tracker(0.0);
+    scene.stage_mut().attach(root, counter).unwrap();
+    scene.add(&[root]).unwrap();
+    let mut registry = NativeUpdaterRegistry::new();
+    registry.register_dt(
+        scene.stage_mut(),
+        root,
+        protocol_digest(b"registered-tail-counter-v1"),
+        registered_counter_update,
+    )?;
+    if transient == 5 {
+        scene
+            .stage_mut()
+            .add_updater(root, |_, _| {}, false)
+            .unwrap();
+    }
+    let listener_state = Rc::new(Cell::new(0.0));
+    if transient == 6 {
+        let captured = Rc::clone(&listener_state);
+        scene
+            .event_dispatcher_mut()
+            .add_listener(fmn_scene::EventListener::new(
+                fmn_scene::EventType::KeyPress,
+                fmn_scene::EventTarget::Global,
+                move |_, _, _, stage| {
+                    stage.shift(root, [captured.get(), 0.0, 0.0]);
+                    fmn_scene::EventPropagation::Continue
+                },
+            ))
+            .unwrap();
+    }
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            // This earlier wait is not resumable: executable work still lies
+            // ahead. The original tail starts only after the deferred prefix.
+            NativeSegment::WaitFrames { frames: 3 },
+            NativeSegment::defer(move |context| {
+                TAIL_PREFIX_CALLS.with(|calls| {
+                    let (builds, begins, finishes) = calls.get();
+                    calls.set((builds + 1, begins, finishes));
+                });
+                let displacement = (context.rng_mut().next_u64() % 13) as f64 / 16.0;
+                context.stage_mut().shift(root, [displacement, 0.0, 0.0]);
+                let buffer = context.stage().get(root).unwrap().buffer.deep_clone();
+                let later = context.stage_mut().add(Mobject::from_buffer(buffer));
+                context.stage_mut().shift(later, [1.5, 0.0, 0.0]);
+                context.stage_mut().add_to_scene(later)?;
+                match transient {
+                    1 => {
+                        context
+                            .spans_mut()
+                            .register(later, "x".into(), 0, 1, fmn_studio::SpanKind::MathGlyph)
+                            .unwrap();
+                    }
+                    2 => {
+                        context
+                            .event_dispatcher_mut()
+                            .add_listener(fmn_scene::EventListener::new(
+                                fmn_scene::EventType::KeyPress,
+                                fmn_scene::EventTarget::Global,
+                                |_, _, _, _| fmn_scene::EventPropagation::Continue,
+                            ))
+                            .unwrap();
+                    }
+                    3 => context.add_sound("cue.wav", 0.0, None, None)?,
+                    4 => {
+                        context
+                            .stage_mut()
+                            .add_updater(
+                                root,
+                                |stage, mob| {
+                                    stage.shift(mob, [0.001, 0.0, 0.0]);
+                                },
+                                false,
+                            )
+                            .unwrap();
+                    }
+                    5 => context.stage_mut().clear_updaters(root, true),
+                    // A completed build can alter an initial listener's
+                    // captured state without touching the dispatcher itself.
+                    6 => listener_state.set(3.0),
+                    _ => {}
+                }
+                Ok(vec![
+                    NativeSegment::Play {
+                        animations: vec![Box::new(CountedTailAnimation(Box::new(
+                            fmn_anim::rotate(root, std::f64::consts::FRAC_PI_4),
+                        )))],
+                        overrides: fmn_scene::PlayOverrides {
+                            // BN-02 ceilings the exact f64: 0.1 is greater
+                            // than 1/10, so this play emits four frames at 30fps.
+                            run_time: Some(0.1),
+                            ..fmn_scene::PlayOverrides::default()
+                        },
+                    },
+                    // Generated segments count against the original cumulative
+                    // budget, including waits which emit no nominal captures.
+                    NativeSegment::WaitFrames { frames: 0 },
+                ])
+            }),
+            NativeSegment::WaitFrames { frames: 0 },
+            NativeSegment::Wait { duration: None },
+            NativeSegment::WaitFrames { frames: 400 },
+            NativeSegment::Wait {
+                duration: Some(0.125),
+            },
+        ],
+        712,
+    )?
+    .with_checkpoint_registry(registry)
+}
+
+fn wait_tail_config(transient: u8) -> NativeWorkerConfig {
+    let mut policy = config();
+    policy.frame_count = 713;
+    policy.source_digest = protocol_digest(&[b'n', b'a', b't', b'i', b'v', b'e', transient]);
+    policy.replay = NativeReplayPolicy::Checkpointed;
+    policy
+}
+
+fn wait_tail_worker(transient: u8) -> NativeSceneWorker {
+    NativeSceneWorker::new(wait_tail_config(transient), move || {
+        wait_tail_program(transient, 10.01)
+    })
+    .unwrap()
+}
+
+#[test]
+fn trailing_wait_checkpoint_skips_completed_build_and_play_and_continues_exactly() {
+    let mut original = wait_tail_worker(0);
+    TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+    let entry = commit(&mut original, 600);
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (1, 1, 1));
+    let saved = checkpoint(&entry, 0);
+    assert_eq!(&saved.state[..8], b"FMNR\x02\0\0\0");
+    let at_checkpoint = checkpoint_observation(&original);
+    assert_eq!(at_checkpoint.1, 600);
+    assert_eq!(at_checkpoint.2, 5);
+    assert_eq!(
+        original.program().unwrap().preview().stage().roots().len(),
+        2
+    );
+    let expected_capture = seek(&mut original, 603);
+    let expected_observation = checkpoint_observation(&original);
+    let expected_entry = commit(&mut original, 603);
+
+    let mut policy = wait_tail_config(0);
+    policy.max_replay_frames = 3;
+    let mut recovered = NativeSceneWorker::new(policy, || wait_tail_program(0, 10.01)).unwrap();
+    TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+    REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap();
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+    assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+    assert_eq!(
+        recovered.last_restore().unwrap().mode,
+        NativeRestoreMode::Checkpoint
+    );
+    assert_eq!(recovered.last_restore().unwrap().fallback, None);
+
+    let actual_entry = commit(&mut recovered, 603);
+    assert_eq!(actual_entry.state_hash, expected_entry.state_hash);
+    assert_eq!(actual_entry.checkpoint, expected_entry.checkpoint);
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (3, 0));
+    assert_eq!(checkpoint_observation(&recovered), expected_observation);
+    assert_eq!(png(&seek(&mut recovered, 603)), png(&expected_capture));
+}
+
+#[test]
+fn trailing_wait_restore_preserves_zero_waits_seconds_rounding_and_pending_epilogues() {
+    for frame in [8, 308, 600, 708, 709, 712] {
+        let mut original = wait_tail_worker(0);
+        let entry = commit(&mut original, frame);
+        let at_checkpoint = checkpoint_observation(&original);
+        let next = (frame + 1).min(712);
+        let expected = seek(&mut original, next);
+        let expected_observation = checkpoint_observation(&original);
+        let mut policy = wait_tail_config(0);
+        policy.max_replay_frames = 1;
+        let mut recovered = NativeSceneWorker::new(policy, || wait_tail_program(0, 10.01)).unwrap();
+        TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        assert_eq!(
+            checkpoint_observation(&recovered),
+            at_checkpoint,
+            "frame {frame}"
+        );
+        assert_eq!(
+            TAIL_PREFIX_CALLS.with(Cell::get),
+            (0, 0, 0),
+            "frame {frame}"
+        );
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "frame {frame}");
+        assert_eq!(
+            png(&seek(&mut recovered, next)),
+            png(&expected),
+            "frame {frame}"
+        );
+        assert_eq!(
+            checkpoint_observation(&recovered),
+            expected_observation,
+            "frame {frame}"
+        );
+        assert_eq!(
+            TAIL_PREFIX_CALLS.with(Cell::get),
+            (0, 0, 0),
+            "frame {frame}"
+        );
+    }
+}
+
+#[test]
+fn pending_executable_work_and_transient_prefix_bindings_keep_verified_cold_restore() {
+    use fmn_studio::native::NativeCheckpointFallback;
+
+    for (transient, frame, fallback) in [
+        (0, 2, NativeCheckpointFallback::UnsupportedSchedule),
+        (0, 5, NativeCheckpointFallback::UnsupportedSchedule),
+        // Final nominal play capture still has its pending finish lifecycle.
+        (0, 7, NativeCheckpointFallback::UnsupportedSchedule),
+        (1, 8, NativeCheckpointFallback::TransientSceneState),
+        (2, 8, NativeCheckpointFallback::TransientSceneState),
+        (3, 8, NativeCheckpointFallback::TransientSceneState),
+        (4, 8, NativeCheckpointFallback::UnregisteredUpdater),
+        // Removing an opaque factory callback does not make its initial
+        // factory state admissible for registered continuation restoration.
+        (5, 8, NativeCheckpointFallback::UnregisteredUpdater),
+        (6, 8, NativeCheckpointFallback::TransientSceneState),
+    ] {
+        let mut original = wait_tail_worker(transient);
+        let entry = commit(&mut original, frame);
+        assert!(!entry.checkpoint.as_ref().unwrap().starts_with(b"FMNR"));
+        let at_checkpoint = checkpoint_observation(&original);
+        let mut recovered = wait_tail_worker(transient);
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+        let report = recovered.last_restore().unwrap();
+        assert_eq!(report.mode, NativeRestoreMode::ColdVerified);
+        assert_eq!(report.fallback, Some(fallback));
+        assert_eq!(
+            png(&seek(&mut recovered, frame + 1)),
+            png(&seek(&mut original, frame + 1))
+        );
+    }
+}
+
+#[test]
+fn trailing_wait_checkpoint_binds_original_seconds_grid_factory_and_source() {
+    let mut original = wait_tail_worker(0);
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    for case in 0..3 {
+        let mut policy = wait_tail_config(0);
+        if case == 0 {
+            policy.source_digest = protocol_digest(b"changed-native-tail-source");
+        }
+        let mut candidate = NativeSceneWorker::new(policy, move || {
+            // Both durations emit 301 frames, but their alpha laws differ.
+            // The factory identity binds their original values, not the ceil.
+            let program = wait_tail_program(0, if case == 1 { 10.02 } else { 10.01 })?;
+            if case == 2 {
+                program.with_segment_limit(100)
+            } else {
+                Ok(program)
+            }
+        })
+        .unwrap();
+        let before_png = seek(&mut candidate, 2);
+        let before = checkpoint_observation(&candidate);
+        TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        let error = candidate
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            WorkerErrorCode::CheckpointRejected,
+            "case {case}"
+        );
+        assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+        assert_eq!(checkpoint_observation(&candidate), before);
+        assert_eq!(candidate.journal_position(), 0);
+        assert_eq!(candidate.last_state_hash(), None);
+        assert_eq!(candidate.last_restore(), None);
+        assert_eq!(png(&seek(&mut candidate, 2)), png(&before_png));
+    }
+}
+
+#[test]
+fn rehashed_trailing_wait_cursors_refuse_atomically_without_executing_the_prefix() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+
+    let schema = Schema::new(*b"FMNR", 2, 0, 0);
+    let mut original = wait_tail_worker(0);
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let scene = reader.get_str().unwrap();
+    let position = reader.get_u64().unwrap();
+    let read_count = reader.get_u32().unwrap();
+    let mut reads = Vec::new();
+    for _ in 0..read_count {
+        reads.push((reader.get_str().unwrap(), reader.get_bytes().unwrap()));
+    }
+    let factory = reader.get_bytes().unwrap();
+    let frame = reader.get_u64().unwrap();
+    let shape = [reader.get_u64().unwrap(), reader.get_u64().unwrap()];
+    let started = reader.get_u64().unwrap();
+    let effects = reader.get_u8().unwrap();
+    let index = reader.get_u64().unwrap();
+    let prefix_frames = reader.get_i64().unwrap();
+    let prefix_segments = reader.get_u64().unwrap();
+    let prefix_plays = reader.get_u64().unwrap();
+    assert!(reader.get_bool().unwrap());
+    let base = reader.get_i64().unwrap();
+    let stepped = reader.get_i64().unwrap();
+    let purity = reader.get_u8().unwrap();
+    let state = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    assert_eq!(
+        (frame, started, index, base, stepped),
+        (600, 7, 2, 308, 292)
+    );
+    assert_eq!((prefix_frames, prefix_segments, prefix_plays), (7, 4, 3));
+
+    let mut recovered = wait_tail_worker(0);
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+        .unwrap();
+    let before = checkpoint_observation(&recovered);
+    let before_png = seek(&mut recovered, 600);
+    let before_report = recovered.last_restore();
+    for case in [
+        "tail index out of range",
+        "prefix clock changed",
+        "prefix clock negative",
+        "prefix segment count changed",
+        "prefix omitted original steps",
+        "prefix exceeded segment budget",
+        "prefix play count changed",
+        "prefix play count exceeds steps",
+        "started count changed",
+        "active base changed",
+        "zero stepped samples",
+        "stepped beyond active wait",
+        "unknown wait purity",
+        "lost deferred effect",
+        "missing active cursor",
+        "nonfinite frame shape",
+    ] {
+        let mut bad_index = index;
+        let mut bad_prefix_frames = prefix_frames;
+        let mut bad_prefix_segments = prefix_segments;
+        let mut bad_prefix_plays = prefix_plays;
+        let mut bad_started = started;
+        let mut bad_base = base;
+        let mut bad_stepped = stepped;
+        let mut bad_purity = purity;
+        let mut bad_effects = effects;
+        let mut bad_shape = shape;
+        let mut active = true;
+        match case {
+            "tail index out of range" => bad_index = 4,
+            "prefix clock changed" => bad_prefix_frames += 1,
+            "prefix clock negative" => bad_prefix_frames = -1,
+            "prefix segment count changed" => bad_prefix_segments += 1,
+            "prefix omitted original steps" => bad_prefix_segments = 0,
+            "prefix exceeded segment budget" => bad_prefix_segments = u64::MAX,
+            "prefix play count changed" => bad_prefix_plays += 1,
+            "prefix play count exceeds steps" => bad_prefix_plays = bad_prefix_segments + 1,
+            "started count changed" => bad_started += 1,
+            "active base changed" => bad_base += 1,
+            "zero stepped samples" => bad_stepped = 0,
+            "stepped beyond active wait" => bad_stepped = 401,
+            "unknown wait purity" => bad_purity |= 128,
+            "lost deferred effect" => bad_effects &= !4,
+            "missing active cursor" => active = false,
+            "nonfinite frame shape" => bad_shape[0] = f64::NAN.to_bits(),
+            _ => unreachable!(),
+        }
+        let mut writer = Writer::new(schema);
+        writer.put_str(scene).put_u64(position).put_u32(read_count);
+        for (path, digest) in &reads {
+            writer.put_str(path).put_bytes(digest);
+        }
+        writer
+            .put_bytes(factory)
+            .put_u64(frame)
+            .put_u64(bad_shape[0])
+            .put_u64(bad_shape[1])
+            .put_u64(bad_started)
+            .put_u8(bad_effects)
+            .put_u64(bad_index)
+            .put_i64(bad_prefix_frames)
+            .put_u64(bad_prefix_segments)
+            .put_u64(bad_prefix_plays)
+            .put_bool(active);
+        if active {
+            writer
+                .put_i64(bad_base)
+                .put_i64(bad_stepped)
+                .put_u8(bad_purity);
+        }
+        writer.put_bytes(state);
+        let bad_state = writer.finish().unwrap();
+        // Integrity framing is valid; the semantic cursor must still refuse.
+        let state_hash = protocol_digest(&bad_state);
+        TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        let error = recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                state_hash,
+                state: bad_state,
+                ..saved.clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected, "{case}");
+        assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0), "{case}");
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "{case}");
+        assert_eq!(checkpoint_observation(&recovered), before, "{case}");
+        assert_eq!(recovered.journal_position(), 1, "{case}");
+        assert_eq!(
+            recovered.last_state_hash(),
+            Some(entry.state_hash),
+            "{case}"
+        );
+        assert_eq!(recovered.last_restore(), before_report, "{case}");
+        assert!(recovered.journal_tail().is_empty(), "{case}");
+    }
+    assert_eq!(png(&seek(&mut recovered, 600)), png(&before_png));
 }
 
 fn program() -> Result<NativeSceneProgram, ServiceError> {

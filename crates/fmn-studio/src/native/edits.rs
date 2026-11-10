@@ -8,10 +8,15 @@ use crate::protocol::{StudioInput, studio_input_payload};
 use crate::{ProtocolDigest, ServiceError};
 
 use super::NativeSceneProgram;
-use super::program::{NativeProgramCheckpoint, NativeWaitCursor, execution_error, invalid};
+use super::program::{
+    NativeProgramCheckpoint, NativeWaitCursor, NativeWaitTailCursor, execution_error, invalid,
+};
 
 const EDIT_STATE_SCHEMA: Schema = Schema::new(*b"FMEI", 1, 2, 0);
 const RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 1, 0, 0);
+// Keep the all-wait record and its canonical bytes unchanged. A trailing-wait
+// continuation additionally binds the completed executable prefix's counters.
+const WAIT_TAIL_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 0, 0);
 /// Hard ceiling independent of caller policy; each label is separately bounded.
 pub(super) const MAX_RECORDED_INPUTS: usize = 65_536;
 
@@ -305,8 +310,13 @@ pub(super) fn encode_resume_state(
     state: &[u8],
     max_bytes: usize,
 ) -> Result<Vec<u8>, ServiceError> {
+    let schema = if cursor.tail.is_some() {
+        WAIT_TAIL_RESUME_STATE_SCHEMA
+    } else {
+        RESUME_STATE_SCHEMA
+    };
     let mut writer = Writer::with_limits(
-        RESUME_STATE_SCHEMA,
+        schema,
         Limits {
             max_total: max_bytes,
             max_field: max_bytes,
@@ -325,8 +335,15 @@ pub(super) fn encode_resume_state(
         .put_u64(cursor.frame_shape[0])
         .put_u64(cursor.frame_shape[1])
         .put_u64(cursor.started_segments as u64)
-        .put_u8(cursor.effects)
-        .put_bool(cursor.active.is_some());
+        .put_u8(cursor.effects);
+    if let Some(tail) = &cursor.tail {
+        writer
+            .put_u64(tail.index as u64)
+            .put_i64(tail.prefix_frames)
+            .put_u64(tail.prefix_segments as u64)
+            .put_u64(tail.prefix_plays);
+    }
+    writer.put_bool(cursor.active.is_some());
     if let Some(wait) = &cursor.active {
         writer
             .put_i64(wait.base_frame)
@@ -350,9 +367,18 @@ pub(super) fn decode_resume_state<'a>(
     factory: ProtocolDigest,
     max_bytes: usize,
 ) -> Result<RestoredContinuation<'a>, ServiceError> {
+    // Select only a declared record id; Reader still validates the complete
+    // framing, version, reserved fields, limits and checksum before any data.
+    let is_tail =
+        bytes.get(4..8) == Some(WAIT_TAIL_RESUME_STATE_SCHEMA.id.to_le_bytes().as_slice());
+    let schema = if is_tail {
+        WAIT_TAIL_RESUME_STATE_SCHEMA
+    } else {
+        RESUME_STATE_SCHEMA
+    };
     let mut reader = Reader::open(
         bytes,
-        RESUME_STATE_SCHEMA,
+        schema,
         Limits {
             max_total: max_bytes,
             max_field: max_bytes,
@@ -386,6 +412,18 @@ pub(super) fn decode_resume_state<'a>(
     let started_segments =
         usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
     let effects = reader.get_u8().map_err(execution_error)?;
+    let tail = if is_tail {
+        Some(NativeWaitTailCursor {
+            index: usize::try_from(reader.get_u64().map_err(execution_error)?)
+                .map_err(execution_error)?,
+            prefix_frames: reader.get_i64().map_err(execution_error)?,
+            prefix_segments: usize::try_from(reader.get_u64().map_err(execution_error)?)
+                .map_err(execution_error)?,
+            prefix_plays: reader.get_u64().map_err(execution_error)?,
+        })
+    } else {
+        None
+    };
     let active = if reader.get_bool().map_err(execution_error)? {
         Some(NativeWaitCursor {
             base_frame: reader.get_i64().map_err(execution_error)?,
@@ -404,6 +442,7 @@ pub(super) fn decode_resume_state<'a>(
             started_segments,
             effects,
             active,
+            tail,
         },
         state,
     })

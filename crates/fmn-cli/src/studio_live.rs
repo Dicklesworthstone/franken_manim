@@ -46,15 +46,15 @@ impl Builtin {
 
     fn replay_policy(&self) -> NativeReplayPolicy {
         match self {
-            // These factories finish construction before a data-only wait.
-            // Native admission still rechecks events and transient state at
-            // each checkpoint; committed editing retains verified replay.
-            Self::TexSpan | Self::SemanticWitness { .. } | Self::Interactive => {
-                NativeReplayPolicy::Checkpointed
-            }
-            Self::Primitive(_) | Self::FormulaSheet | Self::SoundCue | Self::Camera(_) => {
-                NativeReplayPolicy::ColdVerified
-            }
+            // Original trailing waits can resume after construction and plays
+            // finish. Native admission keeps active plays and transient state
+            // on verified replay; committed edits still use that route.
+            Self::Primitive(_)
+            | Self::TexSpan
+            | Self::FormulaSheet
+            | Self::SemanticWitness { .. }
+            | Self::Interactive => NativeReplayPolicy::Checkpointed,
+            Self::SoundCue | Self::Camera(_) => NativeReplayPolicy::ColdVerified,
         }
     }
 
@@ -852,9 +852,10 @@ mod tests {
             assert_eq!(
                 config.native.replay,
                 match registered {
-                    Builtin::TexSpan | Builtin::SemanticWitness { .. } => {
-                        NativeReplayPolicy::Checkpointed
-                    }
+                    Builtin::Primitive(_)
+                    | Builtin::TexSpan
+                    | Builtin::FormulaSheet
+                    | Builtin::SemanticWitness { .. } => NativeReplayPolicy::Checkpointed,
                     _ => NativeReplayPolicy::ColdVerified,
                 },
                 "authored replay policy for {name}"

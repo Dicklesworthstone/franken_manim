@@ -31,6 +31,12 @@ pub enum NativeReplayPolicy {
     /// affect execution. Recovery verifies real execution, never decoded closures.
     ColdVerified,
     /// Resume admitted wait continuations from supervisor-owned checkpoints.
+    /// This includes an original trailing wait suffix after completed plays or
+    /// deferred construction. The finished prefix is restored as scene data;
+    /// its lifecycle and callbacks are not executed again. Open animations,
+    /// pending executable steps and deferred listener/span changes still need
+    /// verified cold reconstruction. Mixed schedules also refuse author event
+    /// listeners, whose captures could have been changed by the prefix.
     /// Function-pointer updaters must be explicitly registered and keep all
     /// mutable state in durable Stage records. Other programs retain verified
     /// cold reconstruction. The supervisor's journal authenticates the expected

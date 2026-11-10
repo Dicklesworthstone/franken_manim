@@ -1,4 +1,4 @@
-//! Portable native checkpoint continuation, including a real encoded PNG.
+//! Restore a completed native animation into its final wait, with a real PNG.
 //! Run: cargo run --locked -p fmn-studio --example native_checkpoint
 
 use std::error::Error;
@@ -20,7 +20,7 @@ use fmn_studio::{
     WorkerResponse, WorkerService, protocol_digest,
 };
 
-const NAME: &str = "RegisteredWaitCheckpoint";
+const NAME: &str = "CompletedPlayCheckpoint";
 
 fn error(error: impl std::fmt::Display) -> ServiceError {
     ServiceError::new(WorkerErrorCode::ExecutionFailed, error.to_string())
@@ -61,8 +61,28 @@ fn program() -> Result<NativeSceneProgram, ServiceError> {
         protocol_digest(b"registered-drift-v1"),
         drift,
     )?;
-    NativeSceneProgram::new(scene, vec![NativeSegment::WaitFrames { frames: 900 }], 900)?
-        .with_checkpoint_registry(registry)
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::play_with(
+                fmn_scene::PlayOverrides {
+                    run_time: Some(1.0),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+                move |context| {
+                    let offset = (context.rng_mut().next_u64() % 8) as f64 / 32.0;
+                    context.stage_mut().shift(mob, [0.0, offset, 0.0]);
+                    Ok(vec![Box::new(fmn_anim::rotate(
+                        mob,
+                        std::f64::consts::FRAC_PI_4,
+                    ))])
+                },
+            ),
+            NativeSegment::WaitFrames { frames: 870 },
+        ],
+        900,
+    )?
+    .with_checkpoint_registry(registry)
 }
 
 fn config(build_id: ProtocolDigest) -> NativeWorkerConfig {
@@ -132,7 +152,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let entry = journal.entries().first().ok_or("journal entry is absent")?;
     let state = entry.checkpoint.clone().ok_or("checkpoint is absent")?;
     if !state.starts_with(b"FMNR") {
-        return Err("registered wait was not admitted for actual restoration".into());
+        return Err("wait after completed animation was not admitted for restoration".into());
     }
     let checkpoint_bytes = state.len();
     let mut resumed_config = config(build_id);
