@@ -2901,6 +2901,140 @@ fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("native_shape_matching_thread_counts", checked))
 }
 
+/// Conditional native waits and explicit show reach the active renderer.
+fn native_conditional_waits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    #[derive(Default)]
+    struct ConditionalScene {
+        observed: Vec<f64>,
+        after_show: Vec3,
+        frame_after_show: i64,
+    }
+    impl SceneConstruct for ConditionalScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(Square::new().side_length(0.5).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.set_stroke(square, None, Some(0.0), None, None, true);
+            stage.add_dt_updater(
+                square,
+                |arena, me, dt| arena.shift(me, [dt, 0.0, 0.0]),
+                false,
+            )?;
+            let first = stage.wait_until(2.0, |arena| {
+                let x = arena.get_center(square)[0];
+                self.observed.push(x);
+                x >= 0.375
+            })?;
+            let second = stage.wait_until_frames(16, |arena| {
+                let x = arena.get_center(square)[0];
+                self.observed.push(x);
+                x >= 0.625
+            })?;
+            if (
+                first.base_frame,
+                first.n_frames,
+                second.base_frame,
+                second.n_frames,
+            ) != (0, 3, 3, 2)
+            {
+                return Err(SceneError::InvalidLifecycle(
+                    "native conditional waits did not stop on their observed frames",
+                )
+                .into());
+            }
+            let before = stage.scene().time().frames();
+            stage.add_updater(
+                square,
+                |arena, me| {
+                    let y = arena.get_center(me)[1];
+                    arena.shift(me, [0.0, 0.5 - y, 0.0]);
+                },
+                false,
+            )?;
+            stage.show()?;
+            self.after_show = stage.get_center(square);
+            self.frame_after_show = stage.scene().time().frames();
+            if self.frame_after_show != before || stage.scene().play_count() != 2 {
+                return Err(SceneError::InvalidLifecycle(
+                    "explicit native show advanced time or created a segment",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+    struct Expected;
+    impl SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(Square::new().side_length(0.5).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.set_stroke(square, None, Some(0.0), None, None, true);
+            stage.shift(square, [0.625, 0.5, 0.0]);
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    render_with_fs(&mut Expected, options("/wait-expected.png", 1)?, fs.clone())
+        .map_err(|e| fail(e.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/wait-expected.png"))
+        .map_err(|e| fail(e.to_string()))?;
+    let decoded = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    if !decoded
+        .rgba
+        .chunks_exact(4)
+        .any(|pixel| pixel != &decoded.rgba[..4])
+    {
+        return Err(fail("conditional wait oracle rendered no ink"));
+    }
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/wait-{threads}.png");
+        let mut program = ConditionalScene::default();
+        let report = render_with_fs(&mut program, options(&path, threads)?, fs.clone())
+            .map_err(|e| fail(e.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|e| fail(e.to_string()))?;
+        if actual != expected
+            || report.artifact.frame_count != 1
+            || report.scene.play_count != 2
+            || program.observed != [0.125, 0.25, 0.375, 0.5, 0.625]
+            || program.after_show != [0.625, 0.5, 0.0]
+            || program.frame_after_show != 5
+        {
+            return Err(fail(format!(
+                "native conditional waits/show disagree with independent geometry at {threads} threads"
+            )));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_conditional_waits")
+            .field("predicate_checks", 5_u64)
+            .field("nominal_ticks", 5_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("conditional-wait.png", expected)
+        .with_counter("native_wait_predicate_checks", 5)
+        .with_counter("native_wait_nominal_ticks", 5)
+        .with_counter("native_wait_thread_counts", checked))
+}
+
 /// Detached charts clip actual data-x bounds and keep discontinuity gaps empty.
 fn native_detached_areas_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::prelude::*;
@@ -3076,12 +3210,13 @@ fn native_detached_calculus_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
                     if self.oracle {
                         expected
                     } else {
-                        let actual =
-                            axes.tangent_line_styled(0.0, &|x| x, 3.0, 0.125, style)?;
+                        let actual = axes.tangent_line_styled(0.0, &|x| x, 3.0, 0.125, style)?;
                         if actual.points().len() != expected.points().len()
-                            || actual.points().iter().zip(expected.points()).any(|(a, b)| {
-                                (0..3).any(|lane| (a[lane] - b[lane]).abs() > 1e-10)
-                            })
+                            || actual
+                                .points()
+                                .iter()
+                                .zip(expected.points())
+                                .any(|(a, b)| (0..3).any(|lane| (a[lane] - b[lane]).abs() > 1e-10))
                         {
                             return Err(SceneError::InvalidLifecycle(
                                 "detached tangent does not retain the tilted chart's direction",
@@ -3180,13 +3315,20 @@ fn native_detached_calculus_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
             .map_err(|e| fail(e.to_string()))?;
         let image = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
             .map_err(|e| fail(e.to_string()))?;
-        if !image.rgba.chunks_exact(4).any(|pixel| pixel != &image.rgba[..4]) {
+        if !image
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel != &image.rgba[..4])
+        {
             return Err(fail(format!("{name} oracle rendered no ink")));
         }
         for threads in [1, 4, 16] {
             let path = format!("/{name}-{threads}.png");
             let report = render_with_fs(
-                &mut CalculusScene { case, oracle: false },
+                &mut CalculusScene {
+                    case,
+                    oracle: false,
+                },
                 options(&path, threads)?,
                 fs.clone(),
             )
@@ -3243,17 +3385,17 @@ fn transparent_video_encoder_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         ] {
             job.encoder = encoder;
             let resolved = job.resolved_encoder().map_err(|e| fail(e.to_string()))?;
-            let argv = encode_argv(&job, Path::new("/alpha.mov"))
-                .map_err(|e| fail(e.to_string()))?;
+            let argv =
+                encode_argv(&job, Path::new("/alpha.mov")).map_err(|e| fail(e.to_string()))?;
             let formats: Vec<_> = argv
                 .windows(2)
                 .filter(|pair| pair[0] == "-pix_fmt")
                 .map(|pair| pair[1].as_str())
                 .collect();
-            if resolved.as_deref() != Some("qtrle")
-                || formats != [wire.ffmpeg_pix_fmt(), "argb"]
-            {
-                return Err(fail("transparent MOV lost its explicit qtrle/argb contract"));
+            if resolved.as_deref() != Some("qtrle") || formats != [wire.ffmpeg_pix_fmt(), "argb"] {
+                return Err(fail(
+                    "transparent MOV lost its explicit qtrle/argb contract",
+                ));
             }
             accepted += 1;
         }
@@ -3280,13 +3422,20 @@ fn transparent_video_encoder_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
                     )
                     .is_ok()
                 {
-                    return Err(fail("advertised input alpha bypassed transparent admission"));
+                    return Err(fail(
+                        "advertised input alpha bypassed transparent admission",
+                    ));
                 }
                 job.container = Container::Mov;
-                if job.resolved_encoder().map_err(|e| fail(e.to_string()))?.as_deref()
+                if job
+                    .resolved_encoder()
+                    .map_err(|e| fail(e.to_string()))?
+                    .as_deref()
                     != Some(name)
                 {
-                    return Err(fail("transparent admission changed opaque encoder selection"));
+                    return Err(fail(
+                        "transparent admission changed opaque encoder selection",
+                    ));
                 }
                 rejected += 1;
             }
@@ -16744,6 +16893,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_conditional_waits.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_conditional_waits_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_wait_predicate_checks", 5),
+            counter_eq("native_wait_nominal_ticks", 5),
+            counter_eq("native_wait_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_conditional_waits",
+            vec![
+                FieldPred::u64_eq("predicate_checks", 5),
+                FieldPred::u64_eq("nominal_ticks", 5),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+
+    specs.push(spec(
         "render_matrix.native_detached_areas.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -21153,6 +21323,16 @@ fn python_native_outputs_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_native_outputs.v1")
         .expect("Python native output scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_conditional_waits_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_conditional_waits.v1")
+        .expect("native conditional wait scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

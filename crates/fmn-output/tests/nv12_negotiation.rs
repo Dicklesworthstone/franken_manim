@@ -127,15 +127,9 @@ fn transparent_mov_refuses_other_encoder_profiles_even_with_alpha_input_formats(
                 // output-alpha or profile contract.
                 let advertised = vec!["argb".into(), "rgba".into(), "yuva444p10le".into()];
                 assert!(
-                    encode_argv_with_formats(&alpha, Path::new("/alpha.mov"), &advertised)
-                        .is_err()
+                    encode_argv_with_formats(&alpha, Path::new("/alpha.mov"), &advertised).is_err()
                 );
-                assert!(
-                    alpha
-                        .clone()
-                        .with_quality(VideoQuality::default())
-                        .is_err()
-                );
+                assert!(alpha.clone().with_quality(VideoQuality::default()).is_err());
                 // The same explicit codec remains eligible for opaque MOV.
                 alpha.container = Container::Mov;
                 assert_eq!(alpha.resolved_encoder().unwrap().as_deref(), Some(name));

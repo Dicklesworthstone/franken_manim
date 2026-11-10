@@ -1,5 +1,8 @@
 use fmn::prelude::*;
 
+use fmn::animation::{FrameMetadata, ImpureEffect, Purity};
+use fmn::scene::{LifecycleEvent, LifecyclePhase};
+
 #[derive(Default)]
 struct PacketSink {
     captures: usize,
@@ -255,4 +258,353 @@ fn sound_cue_scene_records_an_exact_rational_request() {
 
     assert!(fmn::builtins::sound_scene("circle_shift.v1").is_none());
     assert!(fmn::builtins::primitive_scene(fmn::builtins::SOUND_CUE_SCENE_NAME).is_none());
+}
+
+#[derive(Default)]
+struct BoundarySink {
+    metadata_only: bool,
+    fail_capture: bool,
+    attempts: usize,
+    captures: Vec<(CaptureReason, FrameMetadata)>,
+    packets: Vec<FramePacket>,
+    events: Vec<LifecycleEvent>,
+}
+
+impl BoundarySink {
+    fn record(
+        &mut self,
+        reason: CaptureReason,
+        metadata: FrameMetadata,
+    ) -> std::result::Result<(), IntegrationError> {
+        self.attempts += 1;
+        if self.fail_capture {
+            return Err(IntegrationError::new("native-boundary", "capture refused"));
+        }
+        self.captures.push((reason, metadata));
+        Ok(())
+    }
+}
+
+impl SceneSink for BoundarySink {
+    fn event(&mut self, event: LifecycleEvent) -> std::result::Result<(), IntegrationError> {
+        self.events.push(event);
+        Ok(())
+    }
+
+    fn capture_state_required(&self) -> bool {
+        !self.metadata_only
+    }
+
+    fn accepts_pure_segments(&self) -> bool {
+        // Predicate waits must still use the serial owner even when a sink
+        // offers the compact route. Its default implementation refuses it.
+        true
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> std::result::Result<(), IntegrationError> {
+        assert!(!self.metadata_only);
+        self.record(reason, packet.metadata())?;
+        self.packets.push(packet);
+        Ok(())
+    }
+
+    fn capture_metadata(
+        &mut self,
+        reason: CaptureReason,
+        metadata: FrameMetadata,
+    ) -> std::result::Result<(), IntegrationError> {
+        assert!(self.metadata_only);
+        self.record(reason, metadata)
+    }
+}
+
+#[derive(Default)]
+struct ConditionalWaitScene {
+    mob: Option<Mob>,
+    observed: Vec<Vec3>,
+}
+
+impl SceneConstruct for ConditionalWaitScene {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let mob = stage.add(Mobject::from_points(&[ORIGIN]))?;
+        self.mob = Some(mob);
+        stage.add_dt_updater(mob, |arena, me, dt| arena.shift(me, [dt, 0.0, 0.0]), false)?;
+        let report = stage.wait_until(1.0, |arena| {
+            let center = arena.get_center(mob);
+            self.observed.push(center);
+            center[0] >= 0.375
+        })?;
+        assert_eq!(report.n_frames, 3);
+        assert_eq!(report.base_frame, 0);
+        assert!(matches!(
+            report.purity,
+            Purity::Stateful(ref effects) if effects.contains(&ImpureEffect::StopCondition)
+        ));
+        stage.add_updater(mob, |arena, me| arena.shift(me, [0.0, 0.5, 0.0]), false)?;
+        stage.show()?;
+        Ok(())
+    }
+}
+
+#[test]
+fn native_conditional_wait_and_show_use_the_active_sink_and_live_updaters() {
+    let mut runs = Vec::new();
+    for metadata_only in [false, true] {
+        let mut program = ConditionalWaitScene::default();
+        let mut sink = BoundarySink {
+            metadata_only,
+            ..BoundarySink::default()
+        };
+        let completed = run_scene(
+            &mut program,
+            RuntimeConfig {
+                fps: 8,
+                ..RuntimeConfig::default()
+            },
+            19,
+            &mut sink,
+        )
+        .expect("conditional wait and explicit capture");
+        assert_eq!(completed.report().play_count, 1);
+        assert_eq!(completed.scene().time().frames(), 3);
+        assert_eq!(
+            program.observed,
+            vec![[0.125, 0.0, 0.0], [0.25, 0.0, 0.0], [0.375, 0.0, 0.0]]
+        );
+        let mob = program.mob.unwrap();
+        assert_eq!(completed.scene().stage().get_center(mob), [0.375, 0.5, 0.0]);
+        assert_eq!(sink.captures.len(), 4);
+        for (index, (reason, metadata)) in sink.captures.iter().take(3).enumerate() {
+            assert_eq!(*reason, CaptureReason::Segment);
+            assert_eq!(metadata.frame_index(), index as i64 + 1);
+            assert_eq!(metadata.segment_frame(), index as i64 + 1);
+            assert_eq!(metadata.time().fps(), 8);
+        }
+        let (reason, metadata) = sink.captures[3];
+        assert_eq!(reason, CaptureReason::Show);
+        assert_eq!(metadata.frame_index(), 3);
+        assert_eq!(metadata.segment_frame(), 0);
+        assert_eq!(metadata.alpha(), 1.0);
+        if metadata_only {
+            assert!(sink.packets.is_empty());
+        } else {
+            for (packet, expected) in sink.packets.iter().zip([
+                [0.125, 0.0, 0.0],
+                [0.25, 0.0, 0.0],
+                [0.375, 0.0, 0.0],
+                [0.375, 0.5, 0.0],
+            ]) {
+                assert_eq!(packet.materialize_stage().get_center(mob), expected);
+            }
+        }
+        runs.push((sink.captures, sink.events));
+    }
+    assert_eq!(runs[0], runs[1], "packet demand cannot change scene timing");
+}
+
+#[derive(Default)]
+struct FrameBoundScene {
+    calls: usize,
+}
+
+impl SceneConstruct for FrameBoundScene {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        assert_eq!(
+            stage
+                .wait_until(0.0, |_| panic!("zero-time predicate"))?
+                .n_frames,
+            0
+        );
+        assert_eq!(
+            stage
+                .wait_until_frames(0, |_| panic!("zero-frame predicate"))?
+                .n_frames,
+            0
+        );
+        let mut initially_true = |_: &fmn::mobject::Stage| {
+            self.calls += 1;
+            true
+        };
+        assert_eq!(
+            stage.wait_until_frames(43, &mut initially_true)?.n_frames,
+            1
+        );
+        let report = stage.wait_until_frames(43, |_| {
+            self.calls += 1;
+            false
+        })?;
+        assert_eq!(report.base_frame, 1);
+        assert_eq!(
+            report.n_frames, 43,
+            "43 / 24 seconds would round to 44 frames"
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn native_conditional_waits_keep_zero_bounds_and_exact_frame_budgets() {
+    let mut program = FrameBoundScene::default();
+    let mut sink = BoundarySink::default();
+    let completed = run_scene(
+        &mut program,
+        RuntimeConfig {
+            fps: 24,
+            ..RuntimeConfig::default()
+        },
+        0,
+        &mut sink,
+    )
+    .expect("bounded predicates");
+    assert_eq!(program.calls, 44);
+    assert_eq!(completed.report().play_count, 4);
+    assert_eq!(completed.scene().time().frames(), 44);
+    assert_eq!(sink.captures.len(), 44);
+}
+
+struct InvalidWaitScene;
+
+impl SceneConstruct for InvalidWaitScene {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        for bound in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(matches!(
+                stage.wait_until(bound, |_| panic!("invalid-time predicate")),
+                Err(fmn::Error::Scene(SceneError::InvalidConfig(_)))
+            ));
+        }
+        for error in [
+            stage.wait_until(f64::MAX, |_| panic!("oversized-time predicate")),
+            stage.wait_until_frames(u64::MAX, |_| panic!("oversized-frame predicate")),
+        ] {
+            assert!(matches!(
+                error,
+                Err(fmn::Error::Animation(AnimError::Clock(
+                    fmn::animation::ClockError::RunTimeTooLong
+                )))
+            ));
+        }
+        assert_eq!(stage.scene().time().frames(), 0);
+        assert_eq!(stage.scene().play_count(), 0);
+        Ok(())
+    }
+}
+
+#[test]
+fn native_wait_admission_rejects_invalid_bounds_before_segment_lifecycle() {
+    let mut sink = BoundarySink::default();
+    run_scene(
+        &mut InvalidWaitScene,
+        RuntimeConfig::default(),
+        0,
+        &mut sink,
+    )
+    .expect("construction can handle a refused wait");
+    assert_eq!(sink.attempts, 0);
+    assert!(sink.events.iter().all(|event| event.segment.is_none()));
+    assert!(
+        sink.events
+            .iter()
+            .all(|event| event.phase != LifecyclePhase::Preflight)
+    );
+}
+
+#[derive(Clone, Copy)]
+enum NativeBoundary {
+    Seconds,
+    Frames,
+    Show,
+}
+
+impl NativeBoundary {
+    fn run(
+        self,
+        stage: &mut Stage<'_>,
+        predicate: &mut dyn FnMut(&fmn::mobject::Stage) -> bool,
+    ) -> fmn::Result<()> {
+        match self {
+            Self::Seconds => stage.wait_until(1.0, predicate).map(|_| ()),
+            Self::Frames => stage.wait_until_frames(8, predicate).map(|_| ()),
+            Self::Show => stage.show(),
+        }
+    }
+}
+
+struct BoundaryFailureScene {
+    boundary: NativeBoundary,
+    refuse_updater: bool,
+    mob: Option<Mob>,
+    predicate_calls: usize,
+    completed: bool,
+}
+
+impl SceneConstruct for BoundaryFailureScene {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let mob = stage.add(Mobject::from_points(&[ORIGIN]))?;
+        self.mob = Some(mob);
+        if self.refuse_updater {
+            stage.add_try_updater(
+                mob,
+                |_, _| Err(UpdaterError::callback("native-boundary", "update refused")),
+                false,
+            )?;
+        }
+        self.boundary.run(stage, &mut |_| {
+            self.predicate_calls += 1;
+            true
+        })?;
+        self.completed = true;
+        Ok(())
+    }
+}
+
+#[test]
+fn native_waits_and_show_preserve_capture_and_updater_failures() {
+    for boundary in [
+        NativeBoundary::Seconds,
+        NativeBoundary::Frames,
+        NativeBoundary::Show,
+    ] {
+        for metadata_only in [false, true] {
+            for refuse_updater in [false, true] {
+                let mut program = BoundaryFailureScene {
+                    boundary,
+                    refuse_updater,
+                    mob: None,
+                    predicate_calls: 0,
+                    completed: false,
+                };
+                let mut sink = BoundarySink {
+                    metadata_only,
+                    fail_capture: true,
+                    ..BoundarySink::default()
+                };
+                let error = run_scene(&mut program, RuntimeConfig::default(), 0, &mut sink)
+                    .err()
+                    .expect("the boundary must preserve its failure");
+                assert!(!program.completed);
+                if refuse_updater {
+                    assert!(matches!(
+                        error,
+                        fmn::Error::Animation(AnimError::Updater(ref failure))
+                            if Some(failure.mobject) == program.mob
+                                && failure.error == UpdaterError::callback("native-boundary", "update refused")
+                    ));
+                    assert_eq!(program.predicate_calls, 0);
+                    assert_eq!(sink.attempts, 0);
+                } else {
+                    assert!(matches!(
+                        error,
+                        fmn::Error::Scene(SceneError::Integration(ref failure))
+                            if failure.point() == "native-boundary"
+                                && failure.message() == "capture refused"
+                    ));
+                    assert_eq!(sink.attempts, 1);
+                }
+            }
+        }
+    }
 }

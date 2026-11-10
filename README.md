@@ -123,6 +123,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The `Tex` mobject above is laid out by fmd-math from bundled Computer Modern (same paths, every platform, every time), and `MoveAlongPath`, dashes, tips, and tracers all place by *true* arc length.
 
+Native scenes can wait for updater-driven state with
+`stage.wait_until(10.0, |arena| arena.get_center(mob)[0] >= 1.0)?`, or use
+`stage.wait_until_frames(240, predicate)?` for an exact frame budget that bypasses
+presenter holds. During timed playback, the predicate reads the live arena after
+each completed updater/event/capture boundary; an initially true predicate still
+completes one frame when its budget is positive. Zero budgets never call it.
+The seconds-based form follows configured presenter pauses, as ordinary `wait`
+does. `stage.show()?` explicitly captures the current state through the active
+renderer after zero-delta updaters and pending input, without advancing the clock
+or adding a play segment. Bounds and callback/capture failures keep their typed
+runtime errors.
+
 `RenderOptions::with_format("still.png", RenderFormat::Png)` renders one final-state PNG after the scene completes. Animations and updaters keep their normal timing, and post-play edits appear in the still; intermediate captures count against the frame budget without being rasterized. The camera render route samples the final camera rig, and bundle rendering selects the last recorded sample. PNG publication preserves existing destinations and uses canonical bytes under certified determinism. `RenderFormat::Gif` and `RenderFormat::Y4m` select the other native codecs.
 
 For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.

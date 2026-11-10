@@ -3456,7 +3456,12 @@ mod tests {
             (point(0.5, 0.25), point(1.0, 1.0), RED),
         ]) {
             assert_vec3_near(child.points()[0], start, 1e-9, "secant child start");
-            assert_vec3_near(*child.points().last().unwrap(), end, 1e-9, "secant child end");
+            assert_vec3_near(
+                *child.points().last().unwrap(),
+                end,
+                1e-9,
+                "secant child end",
+            );
             assert_eq!(child.style().stroke_color, color);
         }
         let extended = axes
@@ -3495,8 +3500,7 @@ mod tests {
             "translated derivative",
         );
         assert!(
-            (axes.angle_of_tangent_dx(0.0, &function, dx).unwrap() - 2.0_f64.atan2(1.0))
-                .abs()
+            (axes.angle_of_tangent_dx(0.0, &function, dx).unwrap() - 2.0_f64.atan2(1.0)).abs()
                 < 1e-12
         );
         assert!((axes.slope_of_tangent(0.0, &function).unwrap() - 2.0).abs() < 1e-12);
@@ -3561,7 +3565,11 @@ mod tests {
                 .get_secant_slope_group(0.0, &function, 0.5, None),
             Err(CoordsError::Sampling(_))
         ));
-        assert_eq!(calls.get(), 0, "invalid requests cannot invoke authored code");
+        assert_eq!(
+            calls.get(),
+            0,
+            "invalid requests cannot invoke authored code"
+        );
         let bad_first = |_: f64| {
             calls.set(calls.get() + 1);
             f64::NAN
@@ -3589,7 +3597,9 @@ mod tests {
         let invalid_geometry = |result: Result<VMobject, CoordsError>| {
             assert!(matches!(
                 result,
-                Err(CoordsError::LiveFrame(CoordinateFrameError::InvalidGeometry(_)))
+                Err(CoordsError::LiveFrame(
+                    CoordinateFrameError::InvalidGeometry(_)
+                ))
             ));
         };
         for width in [-1.0, f64::NAN, f64::INFINITY, f64::MAX] {
@@ -3599,7 +3609,11 @@ mod tests {
             };
             for bounds in [[0.0, 1.0], [0.0, 0.0]] {
                 invalid_geometry(axes.riemann_rectangles_styled(
-                    &function, Some(bounds), Some(0.5), "left", &config,
+                    &function,
+                    Some(bounds),
+                    Some(0.5),
+                    "left",
+                    &config,
                 ));
             }
         }
@@ -3609,7 +3623,11 @@ mod tests {
                 ..RiemannConfig::default()
             };
             invalid_geometry(axes.riemann_rectangles_styled(
-                &function, Some([0.0, 1.0]), Some(0.5), "left", &config,
+                &function,
+                Some([0.0, 1.0]),
+                Some(0.5),
+                "left",
+                &config,
             ));
         }
         assert!(
@@ -3631,7 +3649,10 @@ mod tests {
                 height
             };
             invalid_geometry(axes.get_riemann_rectangles(
-                &bad, Some([0.0, 1.0]), Some(0.5), "left",
+                &bad,
+                Some([0.0, 1.0]),
+                Some(0.5),
+                "left",
             ));
             assert_eq!(calls.get(), before + 1, "stop at the first invalid height");
         }
@@ -3641,7 +3662,10 @@ mod tests {
             if x == 0.0 { 1.0 } else { f64::NAN }
         };
         invalid_geometry(axes.get_riemann_rectangles(
-            &bad_second, Some([0.0, 1.0]), Some(0.5), "left",
+            &bad_second,
+            Some([0.0, 1.0]),
+            Some(0.5),
+            "left",
         ));
         assert_eq!(calls.get(), before + 2);
         let empty = axes
@@ -3649,7 +3673,11 @@ mod tests {
             .unwrap();
         assert!(empty.children().is_empty());
         assert_eq!(calls.get(), before + 2, "empty domains invoke no callbacks");
-        assert_eq!(axes.vmob(), &original, "failed construction publishes no mutation");
+        assert_eq!(
+            axes.vmob(),
+            &original,
+            "failed construction publishes no mutation"
+        );
     }
 
     // --- UnitInterval + Slider -----------------------------------------------------
