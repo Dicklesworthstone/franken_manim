@@ -2,16 +2,17 @@
 
 FMTL/1 minor 2 carries already mixed mono/stereo Float32 PCM alongside the
 original visual recording. Rendering the bundle no longer needs the source
-WAV files, scene code, callbacks or a media decoder. Camera-rig recordings can
+audio files, scene code, callbacks or a media decoder. Camera-rig recordings can
 carry sound using the same API family. Legacy picture-only exports keep their
 original bytes and continue refusing authored sound cues.
 
 ## Export a native scene once
 
 Use the explicit APIs in `fmn::exporting::soundtrack`. Source access goes through
-the supplied `FileSystem`, including VirtualFs; export does not launch ffmpeg.
-These entry points decode native supported WAV audio. Compressed media is a
-named capability refusal, not an implicit transcode or silent cue omission.
+the supplied `FileSystem`, including VirtualFs. The default decodes supported
+WAV audio natively. Compressed sources require an explicit ffmpeg capability
+and standard-mode preparation; there is no ambient decoder discovery or silent
+cue omission.
 
 ```rust
 use std::{path::PathBuf, sync::Arc};
@@ -49,6 +50,66 @@ The camera equivalents are `export_camera_bundle_with_soundtrack_bytes` and
 `export_camera_bundle_with_soundtrack_with_fs`: they accept the same camera
 factory and CameraConfig as the established camera export API. The factory
 must not run playback before returning its program and rig.
+
+## Opt in to compressed narration in the native API
+
+With the `fmn` crate's `ffmpeg` feature enabled, the host can explicitly supply
+the existing governed process capability. Using the scene from the example
+above, an MP3 export becomes:
+
+```rust
+let mut bundle = BundleExportOptions::new()?;
+bundle.config.determinism.mode = DeterminismMode::Standard;
+bundle.config.file_writer.ffmpeg_bin = "ffmpeg".to_owned();
+let audio = BundleSoundtrackOptions {
+    ffmpeg: Some(FfmpegCapability::host()),
+    ..BundleSoundtrackOptions::default()
+};
+let receipt = export_bundle_with_soundtrack_with_fs(
+    &mut NarratedScene { narration: "narration.mp3".into() },
+    "narrated.fmtl", bundle, &audio, Arc::new(StdFs),
+)?;
+let sound = receipt.soundtrack.as_ref().expect("the scene authored a cue");
+println!("{} cues, {} external decodes",
+         sound.mix.cues_mixed, sound.audio_decodes.len());
+```
+
+Hosts may instead inject their own `FfmpegCapability` runner, locator and private
+work-directory parent; enabling a host runner is not necessary for an injected
+capability. The executable request is the existing
+`BundleExportOptions.config.file_writer.ffmpeg_bin`. Empty or NUL-containing
+requests are rejected when a capability is supplied. `ffmpeg_limits` on the
+audio options bounds each external decode's duration, logs and artifact bytes.
+These limits and the ordinary recording/mixing settings are validated before
+scene execution or a camera factory. Sample-derived decode limits remain an
+independent, possibly tighter expansion bound.
+
+Container detection follows the actual source bytes. FLAC, MP3, ADTS AAC, Ogg,
+M4A/MP4, AIFF and supported non-PCM WAV can use the existing Reel decoder.
+Playlists, URLs and unknown bytes are refused. Native PCM WAV, malformed native
+PCM, exhausted native limits and scenes without cues never resolve or probe the
+external capability. The first compressed source that needs decoding resolves
+one bounded, fingerprinted ffmpeg boundary; subsequent sources in that export
+reuse its identity. Repeated cue paths still read and decode once.
+
+Certified configuration continues to require native PCM WAV, even when a
+capability is supplied. A recognized external-decode request returns a named
+certified-preparation error before any locator or process call. Standard-mode
+decoded samples enter the same native placement, gain, ducking and resampling
+path as WAV. They are embedded as PCM, so the resulting bundle adds no decoder
+requirement to Studio, the CLI or the browser player.
+
+Both `SceneBundleExport` and the published `BundleExportReport` now expose
+`soundtrack: Option<BundleSoundtrackReport>`. It is `None` when no cue was
+authored. A sound-bearing receipt contains the existing native `SoundtrackReport`
+as `mix`, the actual `workers_used`, cue-ordered `SoundtrackInput` records in
+`inputs`, and distinct external `audio_decodes` in first-source-use order.
+Each input retains the original source bytes plus its source/normalized-PCM
+digests and decoder receipt. Repeated cues share their byte allocation. Receipt
+construction never reopens a source path, including when a source changed during
+decoding. Native inputs have no external invocation. These reports accompany
+the result; original files, paths and decoder instructions are not embedded as
+playback dependencies or presented as a complete certified input closure.
 
 ## Python-authored scenes
 
@@ -94,8 +155,9 @@ most 4096 cues. The complete pictures-plus-sound file still obeys
 `max_output_bytes`, and nothing is published until capture, mix and validation
 succeed. A competing destination writer is never overwritten.
 
-Native supported WAV inputs require no ffmpeg process. Compressed audio is
-an explicit capability refusal in this export API, even when ffmpeg is installed.
+The Python export API still supports native WAV only. Compressed audio remains
+an explicit capability refusal there, even when ffmpeg is installed; the native
+opt-in above does not silently add process authority to the Python export API.
 Scene setup/construct/tear-down run once; audio capture does not rerun Python
 callbacks. Offsets, gains, ducking and resampling are performed by the existing
 native mixer. Short cues pad through the picture grid; long tails are retained.
@@ -133,7 +195,8 @@ tails are retained. The sample clock is independent of the picture FPS.
 Only the final normalized Float32 samples enter the portable artifact; no
 source path or decoder instruction is serialized as an audio dependency.
 
-BundleSoundtrackOptions sets the mixer/decoder limits, worker count and
+BundleSoundtrackOptions sets the optional decoder capability and its process
+limits alongside the mixer/decoder limits, worker count and
 SoundtrackPreparationLimits. The latter separately bounds cue count, unique
 source bytes, retained decoded samples and per-cue mapped/resampled samples.
 Decoded samples are f32; mapped/resampled samples are f64. Each decode also
@@ -162,7 +225,8 @@ number of original authored sound requests. Final audio encoding may be lossy;
 the portable PCM itself is not.
 
 PNG, GIF and Y4M replay refuses sound-bearing input before publication.
-Standalone CLI and Studio audio adapters remain separate work. The WASM
+The standalone CLI and recorded Studio audio adapters consume the embedded
+track without decoding its original sources. The WASM
 picture-only constructor still refuses sound at load, while the explicit
 `FmnPlayer.from_bundle_with_audio` route and local browser player now support
 synchronized audio; see [Browser soundtracks](BROWSER_SOUNDTRACKS.md).
@@ -177,3 +241,16 @@ WAV samples are checked against that mix; published files must contain both
 video and sound tracks. Worker counts 1/4/16 and bounded pipeline completion
 are covered. Host ffmpeg absence is a named test-input skip unless
 `FMN_REQUIRE_FULL_INPUTS=1`, in which case it fails.
+
+The compressed native tests use a scripted process capability with tiny native
+image fixtures: no installed ffmpeg, media fixture download or external process
+is needed. They compare recorded and compact FMTL bytes with equivalent native
+WAV preparation, exercise camera publication, retain exact source/decode receipts
+after source mutation, and check typed missing/certified capability errors,
+decode/expansion limits and failed publication. The decoder's focused admission
+tests run in `fmn-output` without its default process feature:
+
+```bash
+cargo test -p fmn-output --no-default-features --test audio audio_deferred_boundary
+cargo test -p fmn --test soundtrack_bundle
+```

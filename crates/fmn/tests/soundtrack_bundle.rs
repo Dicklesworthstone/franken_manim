@@ -4,7 +4,10 @@ use fmn::exporting::{BundleExportOptions, export_bundle_bytes, export_camera_bun
 use fmn::prelude::*;
 use fmn::rendering::{SoundtrackPreparationLimits, render_bundle_with_fs};
 use fmn_codec::{SampleFormat, WavAudio, encode_wav};
-use fmn_output::{AudioDecodeLimits, AudioDecoder, MixerConfig, SoundCue, SoundMixer};
+use fmn_output::{
+    AudioDecodeError, AudioDecodeLimits, AudioDecoder, AudioInputFormat, MixerConfig, SoundCue,
+    SoundMixer,
+};
 use fmn_platform::fs::{FileSystem, StdFs, VirtualFs};
 use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator, StdProcessRunner};
 use fmn_scene::{CameraRig, TimelineBundle};
@@ -223,6 +226,8 @@ fn no_cues_preserve_legacy_bytes_and_bad_configuration_precedes_scene_execution(
     )
     .unwrap();
     assert_eq!(plain.bundle.bytes, enabled.bundle.bytes);
+    assert!(plain.soundtrack.is_none());
+    assert!(enabled.soundtrack.is_none());
     for bad in [
         BundleSoundtrackOptions {
             workers: 0,
@@ -552,4 +557,658 @@ fn repeated_sources_are_charged_once_but_prepared_cues_each_consume_their_own_bu
             .to_string()
             .contains("prepared-sample budget")
     );
+}
+
+struct UnavailableDecoder {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl FfmpegLocator for UnavailableDecoder {
+    fn locate_ffmpeg(
+        &self,
+        _: &Path,
+    ) -> Result<fmn_platform::process::FfmpegExecutable, fmn_platform::process::FfmpegLocatorError>
+    {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Err(fmn_platform::process::FfmpegLocatorError::NotFound)
+    }
+}
+
+fn unavailable_decoder() -> (BundleSoundtrackOptions, Arc<std::sync::atomic::AtomicUsize>) {
+    let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let mut settings = audio(1, 8);
+    settings.ffmpeg = Some(FfmpegCapability {
+        runner: Arc::new(fmn_platform::process::NoProcessRunner),
+        locator: Arc::new(UnavailableDecoder {
+            calls: Arc::clone(&calls),
+        }),
+        workdir_root: "/unused-bundle-audio".into(),
+    });
+    (settings, calls)
+}
+
+#[test]
+fn native_and_no_cue_exports_never_discover_the_offered_decoder() {
+    let fs = assets();
+    let (settings, calls) = unavailable_decoder();
+    for mode in [DeterminismMode::Standard, DeterminismMode::Certified] {
+        let mut opts = options();
+        opts.config.determinism.mode = mode;
+        let plain = export_bundle_bytes(&mut Explanation::new(false), opts.clone()).unwrap();
+        let silent = export_bundle_with_soundtrack_bytes(
+            &mut Explanation::new(false),
+            opts.clone(),
+            &settings,
+            fs.as_ref(),
+        )
+        .unwrap();
+        assert_eq!(silent.bundle.bytes, plain.bundle.bytes);
+        assert!(silent.soundtrack.is_none());
+        let native = export_bundle_with_soundtrack_bytes(
+            &mut Explanation::new(true),
+            opts,
+            &settings,
+            fs.as_ref(),
+        )
+        .unwrap();
+        let receipt = native.soundtrack.unwrap();
+        assert_eq!(receipt.mix.cues_mixed, 2);
+        assert_eq!((receipt.mix.sample_rate, receipt.mix.channels), (8, 2));
+        assert!(receipt.audio_decodes.is_empty());
+        assert_eq!(receipt.inputs.len(), 2);
+        for input in receipt.inputs {
+            assert_eq!(input.bytes.as_ref(), fs.read(&input.path).unwrap());
+            assert_eq!(input.report.format, AudioInputFormat::Wav);
+            assert!(input.report.invocation.is_none());
+        }
+    }
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[test]
+fn compressed_admission_refusals_preserve_assets_and_publication_without_ambient_discovery() {
+    use std::sync::atomic::Ordering;
+    let fs = assets();
+    fs.insert("/background.wav", b"fLaC source snapshot".to_vec());
+    fs.insert("/existing.fmtl", b"existing artifact".to_vec());
+    let (mut settings, calls) = unavailable_decoder();
+
+    // Capability absence is preserved, even though the configured executable
+    // could exist on the host. Detection follows the source bytes, not suffixes.
+    settings.ffmpeg = None;
+    let mut standard = options();
+    standard.config.determinism.mode = DeterminismMode::Standard;
+    let missing = export_bundle_with_soundtrack_with_fs(
+        &mut Explanation::new(true),
+        "/new.fmtl",
+        standard,
+        &settings,
+        fs.clone(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        missing,
+        BundleExportError::Soundtrack(RenderError::SoundDecode {
+            ref path,
+            error: AudioDecodeError::TranscoderRequired {
+                format: AudioInputFormat::Flac,
+            },
+        }) if path == Path::new("/background.wav"),
+    ));
+    let (settings, certified_calls) = unavailable_decoder();
+    let mut certified = options();
+    certified.config.determinism.mode = DeterminismMode::Certified;
+    let refused = export_bundle_with_soundtrack_with_fs(
+        &mut Explanation::new(true),
+        "/new.fmtl",
+        certified,
+        &settings,
+        fs.clone(),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        refused,
+        BundleExportError::Soundtrack(RenderError::SoundDecode {
+            error: AudioDecodeError::Capability(ref detail),
+            ..
+        }) if detail.contains("flac") && detail.contains("certified bundle preparation"),
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    assert_eq!(certified_calls.load(Ordering::SeqCst), 0);
+    assert!(fs.read(Path::new("/new.fmtl")).is_err());
+    assert_eq!(
+        fs.read(Path::new("/existing.fmtl")).unwrap(),
+        b"existing artifact",
+    );
+}
+
+#[test]
+fn invalid_export_policy_and_unrecognized_sources_precede_decoder_resolution() {
+    use std::sync::atomic::Ordering;
+    let fs = assets();
+    for invalid in 0..6 {
+        let (mut settings, calls) = unavailable_decoder();
+        let mut opts = options();
+        match invalid {
+            0 => settings.ffmpeg_limits.timeout = std::time::Duration::ZERO,
+            1 => settings.ffmpeg_limits.max_log_bytes = 0,
+            2 => settings.ffmpeg_limits.max_artifact_bytes = 0,
+            3 => opts.config.file_writer.ffmpeg_bin.clear(),
+            4 => opts.config.file_writer.ffmpeg_bin.push('\0'),
+            _ => opts.max_output_bytes = 0,
+        }
+        let mut program = Explanation::new(true);
+        assert!(
+            export_bundle_with_soundtrack_bytes(&mut program, opts, &settings, fs.as_ref()).is_err()
+        );
+        assert_eq!(program.calls.get(), 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+    for source in [
+        b"#EXTM3U\nhttps://example.invalid/narration.mp3".to_vec(),
+        encode_wav(1, 8, SampleFormat::F32, &[0.25])[..20].to_vec(),
+    ] {
+        fs.insert("/background.wav", source);
+        let (settings, calls) = unavailable_decoder();
+        assert!(
+            export_bundle_with_soundtrack_with_fs(
+                &mut Explanation::new(true),
+                "/new.fmtl",
+                options(),
+                &settings,
+                fs.clone(),
+            )
+            .is_err()
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(fs.read(Path::new("/new.fmtl")).is_err());
+    }
+}
+
+// The governed boundary admits private tool directories on these native hosts.
+// The process mechanism is scripted: neither this image nor ffmpeg is executed.
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod compressed {
+    use super::*;
+    use fmn_platform::process::{
+        FfmpegExecutable, FfmpegLocatorError, ProcessCancellation, ProcessError, ProcessMechanism,
+        ProcessOutcome, ProcessRunner, ProcessSpec, ProcessStdinLimits, ProcessTermination,
+        RunningProcess,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const VOICE: &[u8] = b"fLaC narration fixture";
+    const CHIME: &[u8] = b"OggS chime fixture";
+
+    struct Narration {
+        calls: Rc<Cell<usize>>,
+    }
+
+    impl Narration {
+        fn new() -> Self {
+            Self {
+                calls: Rc::new(Cell::new(0)),
+            }
+        }
+    }
+
+    impl SceneConstruct for Narration {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            self.calls.set(self.calls.get() + 1);
+            stage.add(Circle::new().radius(0.5))?;
+            stage
+                .scene_mut()
+                .add_sound("/voice.asset", -0.125, Some(-6.0), None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("/chime.asset", 0.0, None, Some(-3.0))?;
+            stage
+                .scene_mut()
+                .add_sound("/voice.asset", -0.125, Some(-3.0), None)?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+
+    fn source_assets(compressed: bool) -> Arc<VirtualFs> {
+        let fs = Arc::new(VirtualFs::new());
+        let pcm = lead();
+        let wav = encode_wav(pcm.channels, pcm.sample_rate, SampleFormat::F32, &pcm.samples);
+        fs.insert(
+            "/voice.asset",
+            if compressed {
+                VOICE.to_vec()
+            } else {
+                wav.clone()
+            },
+        );
+        fs.insert("/chime.asset", if compressed { CHIME.to_vec() } else { wav });
+        fs
+    }
+
+    struct ObservedLocator {
+        requests: Arc<Mutex<Vec<PathBuf>>>,
+    }
+
+    impl FfmpegLocator for ObservedLocator {
+        fn locate_ffmpeg(&self, path: &Path) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.requests.lock().unwrap().push(path.to_owned());
+            StdFfmpegLocator::default().locate_ffmpeg(path)
+        }
+    }
+
+    struct DecoderRunner {
+        runs: Arc<Mutex<Vec<ProcessSpec>>>,
+        sources: Arc<Mutex<Vec<Vec<u8>>>>,
+        output: Vec<u8>,
+        refuse: bool,
+        changed_source: Option<Arc<VirtualFs>>,
+    }
+
+    impl ProcessRunner for DecoderRunner {
+        fn mechanism(&self) -> ProcessMechanism {
+            ProcessMechanism::Scripted
+        }
+
+        fn start(
+            &self,
+            spec: &ProcessSpec,
+            cancellation: ProcessCancellation,
+            stdin_limits: ProcessStdinLimits,
+        ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+            assert!(spec.stdin.is_none());
+            assert!(spec.cwd.is_none());
+            assert!(spec.program.is_absolute());
+            assert_eq!(stdin_limits.max_total_bytes, 0);
+            self.runs.lock().unwrap().push(spec.clone());
+            let mut outcome = ProcessOutcome {
+                termination: ProcessTermination::Exited(Some(0)),
+                stdout: Vec::new(),
+                stderr: Vec::new(),
+            };
+            if spec.argv == ["-version"] {
+                outcome.stdout = b"ffmpeg version bundle-audio-fixture\n".to_vec();
+            } else {
+                assert!(spec.argv.windows(2).any(|pair| pair == ["-c:a", "pcm_f32le"]));
+                assert!(
+                    spec.argv
+                        .windows(2)
+                        .any(|pair| pair == ["-protocol_whitelist", "file"])
+                );
+                assert!(!spec.argv.iter().any(|arg| arg == "-ar" || arg == "-ac"));
+                let input = spec.argv.windows(2).find(|pair| pair[0] == "-i").unwrap();
+                let source = std::fs::read(&input[1]).unwrap();
+                self.sources.lock().unwrap().push(source);
+                if self.refuse {
+                    outcome.termination = ProcessTermination::Exited(Some(9));
+                    outcome.stderr = b"fixture decoder refused the source".to_vec();
+                } else {
+                    std::fs::write(spec.argv.last().unwrap(), &self.output).unwrap();
+                    outcome.stderr = b"fixture decoded original source bytes".to_vec();
+                }
+                if let Some(fs) = &self.changed_source {
+                    // A later repeated cue must use the already-read snapshot,
+                    // rather than reopening the source after external work.
+                    fs.insert("/voice.asset", b"changed during first decode".to_vec());
+                }
+            }
+            Ok(Box::new(DecoderProcess {
+                outcome,
+                cancellation,
+            }))
+        }
+    }
+
+    struct DecoderProcess {
+        outcome: ProcessOutcome,
+        cancellation: ProcessCancellation,
+    }
+
+    impl RunningProcess for DecoderProcess {
+        fn write_stdin(&mut self, bytes: &[u8]) -> Result<(), ProcessError> {
+            assert!(bytes.is_empty(), "audio decode uses its staged source file");
+            Ok(())
+        }
+
+        fn finish(self: Box<Self>) -> Result<ProcessOutcome, ProcessError> {
+            if self.cancellation.is_cancelled() {
+                Ok(ProcessOutcome {
+                    termination: ProcessTermination::Cancelled,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                })
+            } else {
+                Ok(self.outcome)
+            }
+        }
+
+        fn cancel(self: Box<Self>) -> Result<(), ProcessError> {
+            self.cancellation.cancel();
+            Ok(())
+        }
+    }
+
+    struct Fixture {
+        tool: PathBuf,
+        capability: FfmpegCapability,
+        locates: Arc<Mutex<Vec<PathBuf>>>,
+        runs: Arc<Mutex<Vec<ProcessSpec>>>,
+        sources: Arc<Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl Fixture {
+        fn new(changed_source: Option<Arc<VirtualFs>>, output: Vec<u8>, refuse: bool) -> Self {
+            static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let root = PathBuf::from("/tmp").canonicalize().unwrap().join(format!(
+                "fmn-bundle-audio-fixture-{}-{stamp}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::SeqCst),
+            ));
+            std::fs::create_dir(&root).unwrap();
+            std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let tool = root.join("ffmpeg");
+            std::fs::write(&tool, native_image()).unwrap();
+            std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let locates = Arc::new(Mutex::new(Vec::new()));
+            let runs = Arc::new(Mutex::new(Vec::new()));
+            let sources = Arc::new(Mutex::new(Vec::new()));
+            Self {
+                tool,
+                capability: FfmpegCapability {
+                    locator: Arc::new(ObservedLocator {
+                        requests: Arc::clone(&locates),
+                    }),
+                    runner: Arc::new(DecoderRunner {
+                        runs: Arc::clone(&runs),
+                        sources: Arc::clone(&sources),
+                        output,
+                        refuse,
+                        changed_source,
+                    }),
+                    workdir_root: root,
+                },
+                locates,
+                runs,
+                sources,
+            }
+        }
+
+        fn options(&self) -> BundleExportOptions {
+            let mut opts = options();
+            opts.config.determinism.mode = DeterminismMode::Standard;
+            opts.config.file_writer.ffmpeg_bin = self.tool.to_str().unwrap().to_owned();
+            opts
+        }
+
+        fn audio(&self) -> BundleSoundtrackOptions {
+            let mut settings = audio(4, 8);
+            settings.ffmpeg = Some(self.capability.clone());
+            settings.ffmpeg_limits.timeout = std::time::Duration::from_secs(11);
+            settings.ffmpeg_limits.max_log_bytes = 1024;
+            settings.ffmpeg_limits.max_artifact_bytes = 65_536;
+            settings
+        }
+    }
+
+    // The same minimal structural containers used by Reel's existing scripted
+    // boundary tests. Keeping them tiny avoids copying the entire test binary.
+    fn native_image() -> Vec<u8> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut bytes = vec![0_u8; 120];
+            bytes[..4].copy_from_slice(b"\x7fELF");
+            bytes[4..7].copy_from_slice(&[2, 1, 1]);
+            bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
+            let machine = if cfg!(target_arch = "x86_64") {
+                62_u16
+            } else {
+                183_u16
+            };
+            bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+            bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+            bytes[24..32].copy_from_slice(&0x1000_u64.to_le_bytes());
+            bytes[32..40].copy_from_slice(&64_u64.to_le_bytes());
+            bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
+            bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
+            bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+            let segment = &mut bytes[64..];
+            segment[..4].copy_from_slice(&1_u32.to_le_bytes());
+            segment[4..8].copy_from_slice(&5_u32.to_le_bytes());
+            segment[16..24].copy_from_slice(&0x1000_u64.to_le_bytes());
+            segment[32..40].copy_from_slice(&120_u64.to_le_bytes());
+            segment[40..48].copy_from_slice(&120_u64.to_le_bytes());
+            segment[48..56].copy_from_slice(&0x1000_u64.to_le_bytes());
+            bytes
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut bytes = vec![0_u8; 201];
+            bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+            let cpu = if cfg!(target_arch = "x86_64") {
+                0x0100_0007_u32
+            } else {
+                0x0100_000c_u32
+            };
+            let subtype = if cfg!(target_arch = "x86_64") {
+                3_u32
+            } else {
+                0_u32
+            };
+            bytes[4..8].copy_from_slice(&cpu.to_le_bytes());
+            bytes[8..12].copy_from_slice(&subtype.to_le_bytes());
+            bytes[12..16].copy_from_slice(&2_u32.to_le_bytes());
+            bytes[16..20].copy_from_slice(&3_u32.to_le_bytes());
+            bytes[20..24].copy_from_slice(&168_u32.to_le_bytes());
+            let pagezero = &mut bytes[32..104];
+            pagezero[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+            pagezero[4..8].copy_from_slice(&72_u32.to_le_bytes());
+            pagezero[8..18].copy_from_slice(b"__PAGEZERO");
+            pagezero[32..40].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+            let text = &mut bytes[104..176];
+            text[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+            text[4..8].copy_from_slice(&72_u32.to_le_bytes());
+            text[8..14].copy_from_slice(b"__TEXT");
+            text[24..32].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+            text[32..40].copy_from_slice(&201_u64.to_le_bytes());
+            text[48..56].copy_from_slice(&201_u64.to_le_bytes());
+            text[56..60].copy_from_slice(&7_u32.to_le_bytes());
+            text[60..64].copy_from_slice(&5_u32.to_le_bytes());
+            let entry = &mut bytes[176..200];
+            entry[..4].copy_from_slice(&0x8000_0028_u32.to_le_bytes());
+            entry[4..8].copy_from_slice(&24_u32.to_le_bytes());
+            entry[8..16].copy_from_slice(&200_u64.to_le_bytes());
+            bytes[200] = 0xc3;
+            bytes
+        }
+    }
+
+    fn decoded_wav() -> Vec<u8> {
+        let pcm = lead();
+        encode_wav(pcm.channels, pcm.sample_rate, SampleFormat::F32, &pcm.samples)
+    }
+
+    #[test]
+    fn compressed_exports_keep_pcm_source_snapshots_and_decoder_receipts() {
+        for compact in [false, true] {
+            let fs = source_assets(true);
+            let fixture = Fixture::new(Some(Arc::clone(&fs)), decoded_wav(), false);
+            let mut opts = fixture.options();
+            if compact {
+                opts.storage = BundleStorage::Compact(CompactRecordingLimits::default());
+            }
+            let reference = export_bundle_with_soundtrack_bytes(
+                &mut Narration::new(),
+                opts.clone(),
+                &audio(1, 8),
+                source_assets(false).as_ref(),
+            )
+            .unwrap();
+            let mut program = Narration::new();
+            let result =
+                export_bundle_with_soundtrack_bytes(&mut program, opts, &fixture.audio(), fs.as_ref())
+                    .unwrap();
+            assert_eq!(program.calls.get(), 1);
+            assert_eq!(result.bundle.bytes, reference.bundle.bytes);
+            let receipt = result.soundtrack.unwrap();
+            let native = reference.soundtrack.unwrap();
+            assert_eq!(receipt.mix, native.mix);
+            assert_eq!(receipt.inputs.len(), 3);
+            assert_eq!(receipt.mix.cues_mixed, 3);
+            assert_eq!(receipt.audio_decodes.len(), 2);
+            assert_eq!(receipt.inputs[0].bytes.as_ref(), VOICE);
+            assert_eq!(receipt.inputs[1].bytes.as_ref(), CHIME);
+            assert_eq!(receipt.inputs[0].report.format, AudioInputFormat::Flac);
+            assert_eq!(receipt.inputs[1].report.format, AudioInputFormat::Ogg);
+            assert_eq!(
+                receipt.inputs[0].report.source_digest.to_hex(),
+                "3daec786d3d1a4e3081a313f6aa5da2a295621dff7cab75d45ea89ee72465827",
+            );
+            assert_eq!(
+                receipt.inputs[1].report.source_digest.to_hex(),
+                "26e206f3948c318f09916fbcda61cc6e748f1fab7bed6ce7880d3e423459650a",
+            );
+            assert_eq!(
+                receipt.inputs[0].report.pcm_digest,
+                native.inputs[0].report.pcm_digest,
+            );
+            assert!(Arc::ptr_eq(&receipt.inputs[0].bytes, &receipt.inputs[2].bytes));
+            assert_eq!(
+                fixture.locates.lock().unwrap().as_slice(),
+                std::slice::from_ref(&fixture.tool),
+            );
+            assert_eq!(
+                fixture.sources.lock().unwrap().as_slice(),
+                [VOICE.to_vec(), CHIME.to_vec()],
+            );
+            let runs = fixture.runs.lock().unwrap();
+            assert_eq!(
+                runs.len(),
+                3,
+                "one identity probe and two distinct source decodes",
+            );
+            for run in &runs[1..] {
+                assert_eq!(run.timeout, std::time::Duration::from_secs(11));
+                assert_eq!(run.max_output_bytes, 1024);
+            }
+            for invocation in &receipt.audio_decodes {
+                assert_eq!(invocation.provenance.tool_path, fixture.tool);
+                assert_eq!(
+                    invocation.provenance.tool_version,
+                    "ffmpeg version bundle-audio-fixture",
+                );
+                assert_eq!(invocation.provenance.tool_sha256_hex.len(), 64);
+                assert_eq!(
+                    invocation.provenance.process_mechanism,
+                    "scripted.process_runner",
+                );
+                assert!(!invocation.artifact.exists());
+            }
+            assert_eq!(
+                fs.read(Path::new("/voice.asset")).unwrap(),
+                b"changed during first decode",
+            );
+            let mut portable = TimelineBundle::from_bytes(&result.bundle.bytes).unwrap();
+            let pcm = portable.take_soundtrack().unwrap();
+            assert_eq!(pcm.sample_frames(), receipt.mix.sample_frames);
+            assert_eq!(pcm.samples().len() as u64, receipt.mix.sample_frames * 2);
+        }
+    }
+
+    #[test]
+    fn compressed_camera_publication_keeps_receipts_and_no_clobber() {
+        let fs = source_assets(true);
+        let fixture = Fixture::new(None, decoded_wav(), false);
+        let camera = fmn_render::CameraConfig {
+            fps: 8,
+            resolution: (64, 36),
+            ..Default::default()
+        };
+        let factory = |scene: &mut Scene, camera: &fmn_render::CameraConfig| {
+            Ok((Narration::new(), CameraRig::new(scene, camera)?))
+        };
+        let receipt = export_camera_bundle_with_soundtrack_with_fs(
+            factory,
+            "/camera.fmtl",
+            camera.clone(),
+            fixture.options(),
+            &fixture.audio(),
+            fs.clone(),
+        )
+        .unwrap();
+        let bytes = fs.read(Path::new("/camera.fmtl")).unwrap();
+        let bundle = TimelineBundle::from_bytes(&bytes).unwrap();
+        assert!(bundle.has_camera_track());
+        assert_eq!(receipt.bytes, bytes.len());
+        let sound = receipt.soundtrack.unwrap();
+        assert_eq!(sound.audio_decodes.len(), 2);
+        assert_eq!(sound.inputs[0].bytes.as_ref(), VOICE);
+        assert!(
+            export_camera_bundle_with_soundtrack_with_fs(
+                factory,
+                "/camera.fmtl",
+                camera,
+                fixture.options(),
+                &fixture.audio(),
+                fs.clone(),
+            )
+            .is_err()
+        );
+        assert_eq!(fs.read(Path::new("/camera.fmtl")).unwrap(), bytes);
+    }
+
+    #[test]
+    fn compressed_decode_and_expansion_failures_never_publish_a_partial_bundle() {
+        for failure in 0..5 {
+            let fs = source_assets(true);
+            fs.insert("/existing.fmtl", b"keep existing artifact".to_vec());
+            let output = if failure == 1 {
+                encode_wav(1, 8, SampleFormat::F32, &[f32::NAN])
+            } else {
+                decoded_wav()
+            };
+            let fixture = Fixture::new(None, output, failure == 0);
+            let mut settings = fixture.audio();
+            match failure {
+                2 => settings.decode.max_samples = 2,
+                3 => settings.decode.max_input_bytes = 4,
+                4 => settings.ffmpeg_limits.max_artifact_bytes = 8,
+                _ => {}
+            }
+            let error = export_bundle_with_soundtrack_with_fs(
+                &mut Narration::new(),
+                "/new.fmtl",
+                fixture.options(),
+                &settings,
+                fs.clone(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(
+                    &error,
+                    BundleExportError::Soundtrack(RenderError::SoundDecode { .. }),
+                ),
+                "failure {failure}: {error}",
+            );
+            assert!(fs.read(Path::new("/new.fmtl")).is_err());
+            assert_eq!(
+                fs.read(Path::new("/existing.fmtl")).unwrap(),
+                b"keep existing artifact",
+            );
+            assert_eq!(
+                fixture.locates.lock().unwrap().len(),
+                usize::from(failure != 3),
+            );
+        }
+    }
 }

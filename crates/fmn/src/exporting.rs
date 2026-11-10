@@ -3,8 +3,10 @@
 //! The real Scene lifecycle records its immutable captures. Playback consumes
 //! FMTL/1 snapshots, not Rust callbacks. Unlike the declarative Timeline export,
 //! this route does not guess a compact interpolation law for imperative code.
-//! Same scene inputs yield the same bundle bytes; this is not an attestation of
-//! arbitrary callback inputs or a complete certified input-closure manifest.
+//! Native preparation with the same scene inputs yields the same bundle bytes.
+//! Optional compressed-audio preparation also depends on its recorded decoder;
+//! it is standard-mode work, without a certified external-decode promise. Neither
+//! route attests arbitrary callbacks or a complete certified input closure.
 //!
 //! The original exports preserve FMTL/1 minor 0: geometry and the frame grid,
 //! with replay policy supplied separately. [`export_camera_bundle_bytes`] and
@@ -133,6 +135,8 @@ pub struct SceneBundleExport {
     pub scene: SceneRunReport,
     /// Canonical, content-addressed FMTL/1 output.
     pub bundle: RecordedSceneBundle,
+    /// Embedded audio and exact preparation receipts, absent when there are no cues.
+    pub soundtrack: Option<soundtrack::BundleSoundtrackReport>,
 }
 
 /// Receipt for successfully published, no-clobber FMTL output.
@@ -150,6 +154,8 @@ pub struct BundleExportReport {
     pub segment_count: usize,
     /// Actual scene time and play count (stills do not advance that clock).
     pub scene: SceneRunReport,
+    /// Embedded audio and exact preparation receipts, absent when there are no cues.
+    pub soundtrack: Option<soundtrack::BundleSoundtrackReport>,
 }
 
 /// Typed, fail-closed export failures; underlying errors are retained.
@@ -269,10 +275,12 @@ fn export_bundle_bytes_inner<P: SceneConstruct + ?Sized>(
             }
             error => BundleExportError::Recording(error),
         })?;
-    let bundle = soundtrack::finish_recording(bundle, completed.scene(), &options, audio)?;
+    let (bundle, soundtrack) =
+        soundtrack::finish_recording(bundle, completed.scene(), &options, audio)?;
     Ok(SceneBundleExport {
         scene: *completed.report(),
         bundle,
+        soundtrack,
     })
 }
 
@@ -327,6 +335,7 @@ fn publish(
         frame_count: export.bundle.frame_count,
         segment_count: export.bundle.segment_count,
         scene: export.scene,
+        soundtrack: export.soundtrack,
     };
     let mut writer = fs
         .begin_atomic_file(output)

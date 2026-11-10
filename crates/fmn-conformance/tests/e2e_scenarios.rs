@@ -7409,6 +7409,158 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         .with_counter("cli_manifest", 1))
 }
 
+/// Portable audio keeps native PCM deterministic and external decode authority explicit.
+fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::exporting::soundtrack::{
+        BundleSoundtrackOptions, export_bundle_with_soundtrack_bytes,
+        export_bundle_with_soundtrack_with_fs,
+    };
+    use fmn::exporting::{BundleExportError, BundleExportOptions, export_bundle_bytes};
+    use fmn::rendering::RenderError;
+    use fmn_output::{AudioDecodeError, AudioInputFormat, MixerConfig};
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+    use std::path::Path;
+
+    struct Score(Option<&'static str>);
+    impl fmn::SceneConstruct for Score {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(fmn_library::Circle::new().radius(0.5))?;
+            if let Some(path) = self.0 {
+                stage.scene_mut().add_sound(path, 0.0, None, None)?;
+            }
+            stage.wait(0.25)?;
+            if let Some(path) = self.0 {
+                stage.scene_mut().add_sound(path, 0.0, None, None)?;
+            }
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let mut options = BundleExportOptions::new().map_err(|e| fail(e.to_string()))?;
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
+    options.config.camera.fps = 8;
+    options.config.camera.resolution = (64, 36);
+    let fs = Arc::new(VirtualFs::new());
+    let source = fmn_codec::encode_wav(1, 8, fmn_codec::SampleFormat::F32, &[0.125, -0.25]);
+    fs.insert("/tone.wav", source.clone());
+    fs.insert("/compressed.asset", b"fLaC12345678".to_vec());
+    let mut audio = BundleSoundtrackOptions {
+        mixer: MixerConfig {
+            sample_rate: 8,
+            channels: 2,
+            max_output_frames: 32,
+        },
+        ..BundleSoundtrackOptions::default()
+    };
+    let legacy = export_bundle_bytes(&mut Score(None), options.clone())
+        .map_err(|e| fail(e.to_string()))?;
+    let silent = export_bundle_with_soundtrack_bytes(
+        &mut Score(None),
+        options.clone(),
+        &audio,
+        fs.as_ref(),
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    if silent.bundle.bytes != legacy.bundle.bytes || silent.soundtrack.is_some() {
+        return Err(fail("audio opt-in changed a no-cue recording"));
+    }
+    let expected = [0.125, 0.125, -0.25, -0.25, 0.125, 0.125, -0.25, -0.25];
+    let mut artifact = None;
+    let mut checked = 0_u64;
+    for workers in [1, 4, 16] {
+        audio.workers = workers;
+        let export = export_bundle_with_soundtrack_bytes(
+            &mut Score(Some("/tone.wav")),
+            options.clone(),
+            &audio,
+            fs.as_ref(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let receipt = export
+            .soundtrack
+            .as_ref()
+            .ok_or_else(|| fail("embedded PCM has no preparation receipt"))?;
+        let bundle = fmn_scene::TimelineBundle::from_bytes(&export.bundle.bytes)
+            .map_err(|e| fail(e.to_string()))?;
+        let pcm = bundle
+            .soundtrack()
+            .ok_or_else(|| fail("portable bundle lost its native soundtrack"))?;
+        if export.bundle.frame_count != 4
+            || pcm.samples() != expected
+            || (pcm.sample_rate(), pcm.channels(), pcm.sample_frames()) != (8, 2, 4)
+            || receipt.mix.cues_mixed != 2
+            || receipt.mix.clipped_samples != 0
+            || receipt.inputs.len() != 2
+            || !receipt.audio_decodes.is_empty()
+            || !Arc::ptr_eq(&receipt.inputs[0].bytes, &receipt.inputs[1].bytes)
+            || receipt.inputs.iter().any(|input| {
+                input.report.source_digest != sha256(&source)
+                    || input.report.invocation.is_some()
+                    || input.bytes.as_ref() != source.as_slice()
+            })
+        {
+            return Err(fail("portable PCM or immutable source receipts changed"));
+        }
+        if let Some(reference) = &artifact {
+            if reference != &export.bundle.bytes {
+                return Err(fail("native soundtrack bundle depends on mixer workers"));
+            }
+        } else {
+            artifact = Some(export.bundle.bytes);
+        }
+        checked += 1;
+    }
+    let refused = export_bundle_with_soundtrack_with_fs(
+        &mut Score(Some("/compressed.asset")),
+        "/unavailable.fmtl",
+        options.clone(),
+        &audio,
+        fs.clone(),
+    )
+    .expect_err("compressed input without a capability must refuse");
+    if !matches!(
+        refused,
+        BundleExportError::Soundtrack(RenderError::SoundDecode {
+            error: AudioDecodeError::TranscoderRequired { format: AudioInputFormat::Flac },
+            ..
+        })
+    ) || fs.read(Path::new("/unavailable.fmtl")).is_ok()
+    {
+        return Err(fail("compressed capability refusal was untyped or published output"));
+    }
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    let refused = export_bundle_with_soundtrack_with_fs(
+        &mut Score(Some("/compressed.asset")),
+        "/certified.fmtl",
+        options,
+        &audio,
+        fs.clone(),
+    )
+    .expect_err("external compressed decode cannot enter certified preparation");
+    if !matches!(
+        refused,
+        BundleExportError::Soundtrack(RenderError::SoundDecode {
+            error: AudioDecodeError::Capability(ref message),
+            ..
+        }) if message.contains("certified")
+    ) || fs.read(Path::new("/certified.fmtl")).is_ok()
+    {
+        return Err(fail("certified compressed refusal was untyped or published output"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.bundle.soundtrack_capabilities")
+            .field("thread_counts", checked)
+            .field("source_receipts", 2_u64)
+            .field("prepublication_refusals", 2_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("soundtrack.fmtl", artifact.ok_or_else(|| fail("no audio recording"))?)
+        .with_counter("bundle_audio_thread_counts", checked)
+        .with_counter("bundle_audio_source_receipts", 2)
+        .with_counter("bundle_audio_refusals", 2)
+        .with_counter("bundle_audio_no_cue_unchanged", 1))
+}
+
 /// The shared CLI/facade audio composer consumes real scene lifecycle events
 /// and sound requests. Native PCM is the oracle here; the CLI's process-
 /// capability tests separately exercise delivery to the two-stage video mux.
@@ -19396,6 +19548,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     );
 
     specs.push(spec(
+        "lifecycle.bundle_soundtrack_capabilities.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(bundle_soundtrack_capabilities_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("bundle_audio_thread_counts", 3),
+            counter_eq("bundle_audio_source_receipts", 2),
+            counter_eq("bundle_audio_refusals", 2),
+            counter_eq("bundle_audio_no_cue_unchanged", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.bundle.soundtrack_capabilities",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("source_receipts", 2),
+                FieldPred::u64_eq("prepublication_refusals", 2),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.scene_soundtrack_windows.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -21117,6 +21290,16 @@ fn python_text_configuration_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_text_configuration.v1")
         .expect("native Python text configuration is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn bundle_soundtrack_capabilities_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.bundle_soundtrack_capabilities.v1")
+        .expect("bundle soundtrack capabilities are registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -137,10 +137,12 @@ where
         .recorder
         .finish_with_max_bytes(options.max_output_bytes)
         .map_err(recording_error)?;
-    let bundle = super::soundtrack::finish_recording(bundle, &scene, &options, audio)?;
+    let (bundle, soundtrack) =
+        super::soundtrack::finish_recording(bundle, &scene, &options, audio)?;
     Ok(SceneBundleExport {
         scene: report,
         bundle,
+        soundtrack,
     })
 }
 
