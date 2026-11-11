@@ -19,8 +19,9 @@ using namespace metal;
 #define STYLE_STRIDE 20
 #define THREE_D_VERTEX_STRIDE 17
 #define THREE_D_TRIANGLE_STRIDE 51
-#define THREE_D_DRAW_U32_STRIDE 4
+#define THREE_D_DRAW_U32_STRIDE 5
 #define THREE_D_DRAW_F32_STRIDE 24
+#define THREE_D_TEXTURE_U32_STRIDE 8
 #define THREE_D_MAX_SAMPLES 16
 
 #define DRAW_FILL 1u
@@ -30,6 +31,11 @@ using namespace metal;
 #define MULTI_CONTOUR_GRADIENT 16u
 #define THREE_D_SHADER_GOURAUD 1u
 #define THREE_D_SHADER_DOT 2u
+#define THREE_D_SHADER_TEXTURE 3u
+#define THREE_D_NO_TEXTURE 0xffffffffu
+#define THREE_D_DARK_SHIFT 0.2f
+#define THREE_D_WRAP_CLAMP 1u
+#define THREE_D_WRAP_MIRRORED 2u
 #define CLASS_INTERIOR 1u
 #define STATUS_COMPLETE 0x464d4e4du
 #define TRANSFER_TABLE_WORDS_PER_PLANE 16384
@@ -1324,10 +1330,168 @@ static float4 three_d_finalize_color(
     );
 }
 
+// Texture addressing as the CPU sampler's wrap_index: repeat by Euclidean
+// remainder, clamp to the edge texels, or reflect every other interval.
+// Indices are pre-clamped to +-2^30, so no step overflows; the host refuses
+// textures wider or taller than 2^30 - 1 texels.
+static uint three_d_wrap(int index, uint size, uint wrap) {
+    int extent = (int)size;
+    if (wrap == THREE_D_WRAP_CLAMP) {
+        return (uint)clamp(index, 0, extent - 1);
+    }
+    if (wrap == THREE_D_WRAP_MIRRORED) {
+        int period = extent * 2;
+        int value = index % period;
+        if (value < 0) value += period;
+        return (uint)(value < extent ? value : period - 1 - value);
+    }
+    int value = index % extent;
+    if (value < 0) value += extent;
+    return (uint)value;
+}
+
+static float4 three_d_texel(
+    device const float *texels,
+    uint first,
+    uint width,
+    uint x,
+    uint y
+) {
+    uint base = (first + y * width + x) * 4u;
+    return float4(
+        texels[base + 0u],
+        texels[base + 1u],
+        texels[base + 2u],
+        texels[base + 3u]
+    );
+}
+
+// Texture::sample: bilinear over premultiplied texels whose centres sit at
+// (x + 0.5) / width, then unpremultiplied; a non-finite coordinate samples
+// transparent black.
+static float4 three_d_sample(
+    device const float *texels,
+    uint first,
+    uint width,
+    uint height,
+    uint wrap,
+    float2 uv
+) {
+    if (!isfinite(uv.x) || !isfinite(uv.y)) return float4(0.0f);
+    float x = uv.x * (float)width - 0.5f;
+    float y = uv.y * (float)height - 0.5f;
+    float floor_x = clamp(floor(x), -1073741824.0f, 1073741823.0f);
+    float floor_y = clamp(floor(y), -1073741824.0f, 1073741823.0f);
+    int x0 = (int)floor_x;
+    int y0 = (int)floor_y;
+    float fx = x - floor_x;
+    float fy = y - floor_y;
+    uint wrap_u = wrap & 0xfu;
+    uint wrap_v = wrap >> 4u;
+    uint xa = three_d_wrap(x0, width, wrap_u);
+    uint xb = three_d_wrap(x0 + 1, width, wrap_u);
+    uint ya = three_d_wrap(y0, height, wrap_v);
+    uint yb = three_d_wrap(y0 + 1, height, wrap_v);
+    float4 a = three_d_texel(texels, first, width, xa, ya);
+    float4 b = three_d_texel(texels, first, width, xb, ya);
+    float4 c = three_d_texel(texels, first, width, xa, yb);
+    float4 d = three_d_texel(texels, first, width, xb, yb);
+    float4 top = a + (b - a) * fx;
+    float4 bottom = c + (d - c) * fx;
+    float4 value = top + (bottom - top) * fy;
+    if (value.a <= 0.0f) return float4(0.0f);
+    return float4(value.rgb / value.a, value.a);
+}
+
+// The CPU shader's Texture arm: the light sample, crossfaded towards the dark
+// texture on the side facing away from the light, a zero-alpha discard for
+// surfaces, per-fragment lighting, and the vertex opacity (replacing a
+// surface's alpha, multiplying an image's).
+static bool three_d_shade_texture(
+    device const float *draw_f32,
+    device const uint *texture_u32,
+    device const float *texels,
+    uint draw,
+    uint row,
+    ThreeDAttributes attributes,
+    thread float4 *source
+) {
+    uint t = row * (uint)THREE_D_TEXTURE_U32_STRIDE;
+    uint wrap = texture_u32[t + 6u];
+    float4 color = three_d_sample(
+        texels,
+        texture_u32[t + 0u],
+        texture_u32[t + 1u],
+        texture_u32[t + 2u],
+        wrap,
+        attributes.uv
+    );
+    uint base = draw * (uint)THREE_D_DRAW_F32_STRIDE;
+    float3 shading = float3(
+        draw_f32[base + 0u],
+        draw_f32[base + 1u],
+        draw_f32[base + 2u]
+    );
+    float3 light_position = float3(
+        draw_f32[base + 3u],
+        draw_f32[base + 4u],
+        draw_f32[base + 5u]
+    );
+    float3 camera_position = float3(
+        draw_f32[base + 6u],
+        draw_f32[base + 7u],
+        draw_f32[base + 8u]
+    );
+    float3 normal = attributes.normal;
+    if (texture_u32[t + 3u] != THREE_D_NO_TEXTURE) {
+        float4 dark = three_d_sample(
+            texels,
+            texture_u32[t + 3u],
+            texture_u32[t + 4u],
+            texture_u32[t + 5u],
+            wrap,
+            attributes.uv
+        );
+        float3 to_light;
+        if (!three_d_normalize(light_position - attributes.world, &to_light)) {
+            to_light = float3(0.0f);
+        }
+        float edge = clamp(
+            (dot(to_light, normal) + THREE_D_DARK_SHIFT)
+                / (2.0f * THREE_D_DARK_SHIFT),
+            0.0f,
+            1.0f
+        );
+        float alpha = edge * edge * (3.0f - 2.0f * edge);
+        color = dark + (color - dark) * alpha;
+    }
+    bool discard_transparent = texture_u32[t + 7u] != 0u;
+    if (discard_transparent && color.a == 0.0f) return false;
+    color = three_d_finalize_color(
+        color,
+        attributes.world,
+        normal,
+        shading,
+        light_position,
+        camera_position
+    );
+    float opacity = clamp(attributes.opacity, 0.0f, 1.0f);
+    if (discard_transparent) {
+        color.a = opacity;
+    } else {
+        color.a *= opacity;
+    }
+    *source = color;
+    return true;
+}
+
 static bool three_d_shade(
     device const float *draw_f32,
+    device const uint *texture_u32,
+    device const float *texels,
     uint draw,
     uint shader,
+    uint texture_row,
     ThreeDAttributes attributes,
     thread float4 *source
 ) {
@@ -1335,6 +1499,17 @@ static bool three_d_shade(
         *source = attributes.color;
         source->a *= clamp(attributes.opacity, 0.0f, 1.0f);
         return true;
+    }
+    if (shader == THREE_D_SHADER_TEXTURE) {
+        return three_d_shade_texture(
+            draw_f32,
+            texture_u32,
+            texels,
+            draw,
+            texture_row,
+            attributes,
+            source
+        );
     }
     if (shader != THREE_D_SHADER_DOT) return false;
 
@@ -1419,6 +1594,8 @@ kernel void fmn_render_three_d(
     device uint *status [[buffer(8)]],
     device const uint *command_triangles [[buffer(9)]],
     device const uint *tile_triangles [[buffer(10)]],
+    device const uint *texture_u32 [[buffer(11)]],
+    device const float *texels [[buffer(12)]],
     uint2 group_id [[threadgroup_position_in_grid]],
     uint2 local_id [[thread_position_in_threadgroup]]
 ) {
@@ -1485,6 +1662,7 @@ kernel void fmn_render_three_d(
             uint draw_base = draw * (uint)THREE_D_DRAW_U32_STRIDE;
             uint shader = draw_u32[draw_base + 2u];
             bool depth_test = draw_u32[draw_base + 3u] != 0u;
+            uint texture_row = draw_u32[draw_base + 4u];
             uint entry_hi = command_triangles[command + 1u];
             for (uint entry = command_triangles[command];
                  entry < entry_hi;
@@ -1520,8 +1698,11 @@ kernel void fmn_render_three_d(
                         float4 source;
                         if (!three_d_shade(
                                 draw_f32,
+                                texture_u32,
+                                texels,
                                 draw,
                                 shader,
+                                texture_row,
                                 attributes,
                                 &source)) {
                             continue;

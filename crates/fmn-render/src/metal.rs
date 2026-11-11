@@ -31,7 +31,8 @@ use ft_kernel_metal::presentation::{NativePresenter, PresentationConfig};
 use crate::engine::{AaPolicy, Draw, EngineIdentity, FrameConfig, FrameJob, FrameJobError};
 use crate::fill::MonoTable;
 use crate::plan::RenderPlan;
-use crate::three_d::{CompiledPrimitive, Shader, ThreeDJob};
+use crate::texture::{Texture, TextureWrap};
+use crate::three_d::{CompiledPrimitive, Shader, TextureMaterial, ThreeDJob};
 use crate::{Binning, Segment};
 
 const KERNEL_SOURCE: &str = include_str!("shaders/metal.metal");
@@ -51,8 +52,12 @@ const DRAW_F32_STRIDE: usize = 8;
 const STYLE_STRIDE: usize = 20;
 const THREE_D_VERTEX_STRIDE: usize = 17;
 const THREE_D_TRIANGLE_STRIDE: usize = THREE_D_VERTEX_STRIDE * 3;
-const THREE_D_DRAW_U32_STRIDE: usize = 4;
+const THREE_D_DRAW_U32_STRIDE: usize = 5;
 const THREE_D_DRAW_F32_STRIDE: usize = 24;
+const THREE_D_TEXTURE_U32_STRIDE: usize = 8;
+/// A draw row's texture row when it samples none, and a texture row's dark
+/// texture when it has none.
+const THREE_D_NO_TEXTURE: u32 = u32::MAX;
 const STATUS_COMPLETE: u32 = 0x464d_4e4d;
 const TRANSFER_TILE: usize = 16;
 const TRANSFER_TABLE_ENTRIES: usize = 1 << 16;
@@ -66,6 +71,7 @@ const FLAT_FILL: u32 = 1 << 3;
 const MULTI_CONTOUR_GRADIENT: u32 = 1 << 4;
 const THREE_D_SHADER_GOURAUD: u32 = 1;
 const THREE_D_SHADER_DOT: u32 = 2;
+const THREE_D_SHADER_TEXTURE: u32 = 3;
 
 /// Canonical schema for the annex-specific half of C7.
 pub const METAL_BACKEND_SCHEMA: Schema = Schema::new(*b"FMNM", 1, 0, 1);
@@ -792,11 +798,14 @@ impl MetalRenderer {
     /// Render a prepared 3D painter sequence into its linear-light comparison
     /// surface.
     ///
-    /// The first annex tranche accepts camera-clipped true/glow dots and
-    /// untextured Gouraud surfaces. Both consume the exact triangle IR already
-    /// prepared for [`ThreeDJob`]'s CPU executor; retained vectors and textured
-    /// surfaces return a typed refusal so a preview owner can select its declared
-    /// CPU fallback without mislabeling the bytes.
+    /// The annex accepts camera-clipped true/glow dots, Gouraud surfaces, and
+    /// textured surfaces and images. All consume the exact triangle IR already
+    /// prepared for [`ThreeDJob`]'s CPU executor; a frame's textures are uploaded
+    /// once each as premultiplied linear `f32` texels and sampled as the CPU
+    /// route samples them (bilinear, the material's wrap per axis, the dark
+    /// texture's crossfade). Retained vectors return a typed refusal so a
+    /// preview owner can select its declared CPU fallback without mislabeling
+    /// the bytes.
     pub fn render_three_d_raw(
         &mut self,
         job: &ThreeDJob<'_>,
@@ -1122,6 +1131,8 @@ impl MetalRenderer {
         let tile_triangles = self
             .gateway
             .buffer_u32(nonempty_u32(&flat.tile_triangles))?;
+        let texture_u32 = self.gateway.buffer_u32(nonempty_u32(&flat.texture_u32))?;
+        let texels = self.gateway.buffer_f32(nonempty_f32(&flat.texels))?;
         let group_count = flat
             .cols()
             .checked_mul(flat.rows())
@@ -1150,6 +1161,8 @@ impl MetalRenderer {
                 &status,
                 &command_triangles,
                 &tile_triangles,
+                &texture_u32,
+                &texels,
             ],
             Grid::grid_2d(flat.cols(), flat.rows(), tile, tile),
         )?;
@@ -1981,6 +1994,22 @@ struct FlatThreeDFrame {
     /// `tile_triangles[command_triangles[c]..command_triangles[c + 1]]`.
     command_triangles: Vec<u32>,
     tile_triangles: Vec<u32>,
+    /// One row per textured draw: the light texture's first texel, width and
+    /// height; the dark texture's (first texel `THREE_D_NO_TEXTURE` when
+    /// none); the wrap codes (`u | v << 4`); and whether zero alpha discards.
+    texture_u32: Vec<u32>,
+    /// Every texture the frame samples, once each, as premultiplied linear
+    /// RGBA, four scalars a texel.
+    texels: Vec<f32>,
+}
+
+/// The kernel's code for a wrap mode.
+const fn three_d_wrap_code(wrap: TextureWrap) -> u32 {
+    match wrap {
+        TextureWrap::Repeat => 0,
+        TextureWrap::ClampToEdge => 1,
+        TextureWrap::MirroredRepeat => 2,
+    }
 }
 
 /// Which of a draw's triangles a tile command lists.
@@ -2027,8 +2056,11 @@ impl FlatThreeDFrame {
             tile_draws: Vec::new(),
             command_triangles: Vec::new(),
             tile_triangles: Vec::new(),
+            texture_u32: Vec::new(),
+            texels: Vec::new(),
         };
         let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
+        let mut uploaded = std::collections::HashMap::new();
 
         for (draw_index, draw) in job.prepared_draws().iter().enumerate() {
             let CompiledPrimitive::Triangles { triangles, shader } = &draw.primitive else {
@@ -2037,15 +2069,13 @@ impl FlatThreeDFrame {
                     primitive: "retained-vector",
                 });
             };
-            let shader_code = match *shader {
-                Shader::Gouraud => THREE_D_SHADER_GOURAUD,
-                Shader::Dot { .. } => THREE_D_SHADER_DOT,
-                Shader::Texture { .. } => {
-                    return Err(MetalError::UnsupportedThreeDPrimitive {
-                        draw: draw_index,
-                        primitive: "textured-surface",
-                    });
-                }
+            let (shader_code, texture_row) = match *shader {
+                Shader::Gouraud => (THREE_D_SHADER_GOURAUD, THREE_D_NO_TEXTURE),
+                Shader::Dot { .. } => (THREE_D_SHADER_DOT, THREE_D_NO_TEXTURE),
+                Shader::Texture { material, .. } => (
+                    THREE_D_SHADER_TEXTURE,
+                    flat.push_texture_row(material, &mut uploaded)?,
+                ),
             };
 
             let first_triangle = scalar_row(
@@ -2068,6 +2098,7 @@ impl FlatThreeDFrame {
                 triangle_count,
                 shader_code,
                 u32::from(draw.depth_test),
+                texture_row,
             ]);
             flat.draw_f32
                 .extend_from_slice(&three_d_shader_slab(*shader));
@@ -2088,6 +2119,58 @@ impl FlatThreeDFrame {
         Ok(flat)
     }
 
+    /// A textured draw's row, uploading each of its textures the first time
+    /// the frame meets it.
+    fn push_texture_row(
+        &mut self,
+        material: TextureMaterial<'_>,
+        uploaded: &mut std::collections::HashMap<*const Texture, [u32; 3]>,
+    ) -> Result<u32, MetalError> {
+        let light = self.upload_texture(material.light, uploaded)?;
+        let dark = match material.dark {
+            Some(dark) => self.upload_texture(dark, uploaded)?,
+            None => [THREE_D_NO_TEXTURE, 0, 0],
+        };
+        let row = u32::try_from(self.texture_u32.len() / THREE_D_TEXTURE_U32_STRIDE)
+            .map_err(|_| MetalError::SizeOverflow("3D texture row"))?;
+        self.texture_u32.extend_from_slice(&[
+            light[0],
+            light[1],
+            light[2],
+            dark[0],
+            dark[1],
+            dark[2],
+            three_d_wrap_code(material.sampler.wrap_u)
+                | (three_d_wrap_code(material.sampler.wrap_v) << 4),
+            u32::from(material.discard_transparent),
+        ]);
+        Ok(row)
+    }
+
+    /// The first texel, width and height of `texture` in the frame's texels.
+    fn upload_texture(
+        &mut self,
+        texture: &Texture,
+        uploaded: &mut std::collections::HashMap<*const Texture, [u32; 3]>,
+    ) -> Result<[u32; 3], MetalError> {
+        let key: *const Texture = texture;
+        if let Some(&placed) = uploaded.get(&key) {
+            return Ok(placed);
+        }
+        let first = u32::try_from(self.texels.len() / 4)
+            .map_err(|_| MetalError::SizeOverflow("3D texel index"))?;
+        let texels = texture.premultiplied_texels();
+        self.texels
+            .try_reserve_exact(texels.len().saturating_mul(4))
+            .map_err(|_| MetalError::SizeOverflow("3D texels"))?;
+        for texel in texels {
+            self.texels.extend_from_slice(texel);
+        }
+        let placed = [first, texture.width(), texture.height()];
+        uploaded.insert(key, placed);
+        Ok(placed)
+    }
+
     fn validate(&self) -> Result<(), MetalError> {
         if self.params_u32.len() != 6 || self.params_f32.len() != 4 {
             return Err(MetalError::Layout("3D frame parameters"));
@@ -2103,12 +2186,14 @@ impl FlatThreeDFrame {
             .iter()
             .chain(&self.triangles)
             .chain(&self.draw_f32)
+            .chain(&self.texels)
             .any(|value| !value.is_finite())
         {
             return Err(MetalError::Layout(
                 "3D f32 packet contains a non-finite value",
             ));
         }
+        self.validate_textures()?;
         let draws = self.draw_u32.len() / THREE_D_DRAW_U32_STRIDE;
         if self.draw_f32.len() / THREE_D_DRAW_F32_STRIDE != draws
             || self.params_u32.get(5).copied() != u32::try_from(draws).ok()
@@ -2155,6 +2240,61 @@ impl FlatThreeDFrame {
         Ok(())
     }
 
+    /// Every textured draw names a texture row, every other draw none, and
+    /// every row's textures lie inside the frame's texels with the kernel's
+    /// wrap codes; the texel index of every scalar fits the kernel's `uint`.
+    fn validate_textures(&self) -> Result<(), MetalError> {
+        if !self
+            .texture_u32
+            .len()
+            .is_multiple_of(THREE_D_TEXTURE_U32_STRIDE)
+            || !self.texels.len().is_multiple_of(4)
+            || u32::try_from(self.texels.len()).is_err()
+        {
+            return Err(MetalError::Layout("3D texture tables"));
+        }
+        let rows = self.texture_u32.len() / THREE_D_TEXTURE_U32_STRIDE;
+        for draw in self.draw_u32.as_chunks::<THREE_D_DRAW_U32_STRIDE>().0 {
+            let textured = draw[2] == THREE_D_SHADER_TEXTURE;
+            let named = draw[4] != THREE_D_NO_TEXTURE;
+            if textured != named || (named && draw[4] as usize >= rows) {
+                return Err(MetalError::Layout("3D draw texture row"));
+            }
+        }
+        let texel_count = self.texels.len() / 4;
+        let inside = |first: u32, width: u32, height: u32| {
+            width > 0
+                && height > 0
+                && width <= i32::MAX as u32 / 2
+                && height <= i32::MAX as u32 / 2
+                && (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|count| count.checked_add(first as usize))
+                    .is_some_and(|end| end <= texel_count)
+        };
+        for row in self.texture_u32.as_chunks::<THREE_D_TEXTURE_U32_STRIDE>().0 {
+            let [
+                light,
+                light_width,
+                light_height,
+                dark,
+                dark_width,
+                dark_height,
+                wrap,
+                discard,
+            ] = *row;
+            if !inside(light, light_width, light_height)
+                || (dark != THREE_D_NO_TEXTURE && !inside(dark, dark_width, dark_height))
+                || wrap & 0xf > 2
+                || wrap >> 4 > 2
+                || discard > 1
+            {
+                return Err(MetalError::Layout("3D texture row"));
+            }
+        }
+        Ok(())
+    }
+
     fn tile(&self) -> usize {
         self.params_u32[2] as usize
     }
@@ -2178,6 +2318,8 @@ impl FlatThreeDFrame {
             self.tile_draws.len(),
             self.command_triangles.len(),
             self.tile_triangles.len(),
+            self.texture_u32.len(),
+            self.texels.len(),
         ]
         .into_iter()
         .try_fold(0usize, |sum, len| sum.checked_add(len))
@@ -2212,6 +2354,17 @@ fn push_three_d_triangle(out: &mut Vec<f32>, triangle: &crate::three_d::RasterTr
 
 fn three_d_shader_slab(shader: Shader<'_>) -> [f32; THREE_D_DRAW_F32_STRIDE] {
     let mut slab = [0.0; THREE_D_DRAW_F32_STRIDE];
+    if let Shader::Texture {
+        shading,
+        light_position,
+        camera_position,
+        ..
+    } = shader
+    {
+        slab[0..3].copy_from_slice(&shading.map(|value| value as f32));
+        slab[3..6].copy_from_slice(&light_position.map(|value| value as f32));
+        slab[6..9].copy_from_slice(&camera_position.map(|value| value as f32));
+    }
     if let Shader::Dot {
         center,
         radius,
@@ -2593,6 +2746,7 @@ mod tests {
             ("THREE_D_TRIANGLE_STRIDE", THREE_D_TRIANGLE_STRIDE),
             ("THREE_D_DRAW_U32_STRIDE", THREE_D_DRAW_U32_STRIDE),
             ("THREE_D_DRAW_F32_STRIDE", THREE_D_DRAW_F32_STRIDE),
+            ("THREE_D_TEXTURE_U32_STRIDE", THREE_D_TEXTURE_U32_STRIDE),
             (
                 "TRANSFER_TABLE_WORDS_PER_PLANE",
                 TRANSFER_TABLE_WORDS_PER_PLANE,
@@ -2897,6 +3051,369 @@ mod tests {
         }
     }
 
+    /// Noise RGBA8, every tenth texel transparent and the rest partly so.
+    fn noise_texture(
+        width: u32,
+        height: u32,
+        seed: u64,
+        encoding: crate::texture::TextureEncoding,
+    ) -> Texture {
+        let mut state = seed;
+        let mut next = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        };
+        let mut rgba = Vec::new();
+        for index in 0..width * height {
+            for _ in 0..3 {
+                rgba.push((next() >> 56) as u8);
+            }
+            let alpha = 96 + (next() >> 57) as u8;
+            rgba.push(if index % 10 == 3 { 0 } else { alpha });
+        }
+        Texture::from_rgba8(width, height, &rgba, encoding).expect("texture")
+    }
+
+    /// A textured quad: `half` extents about `center`, tilted in depth by
+    /// `tilt` per unit of x, UV from `uv[0]` to `uv[1]` on both axes, the
+    /// left edge's normal and the right edge's.
+    fn textured_quad(
+        center: [f64; 3],
+        half: [f64; 2],
+        tilt: f64,
+        uv: [f64; 2],
+        normals: [[f64; 3]; 2],
+        opacity: f64,
+    ) -> SurfaceMesh {
+        let corner = |sx: f64, sy: f64| {
+            [
+                center[0] + sx * half[0],
+                center[1] + sy * half[1],
+                center[2] + sx * tilt,
+            ]
+        };
+        SurfaceMesh::from_uv_grid(
+            vec![
+                SurfaceVertex::textured(corner(-1.0, 1.0), normals[0], [uv[0], uv[0]], opacity),
+                SurfaceVertex::textured(corner(-1.0, -1.0), normals[0], [uv[0], uv[1]], opacity),
+                SurfaceVertex::textured(corner(1.0, 1.0), normals[1], [uv[1], uv[0]], opacity),
+                SurfaceVertex::textured(corner(1.0, -1.0), normals[1], [uv[1], uv[1]], opacity),
+            ],
+            (2, 2),
+        )
+        .expect("quad")
+    }
+
+    #[test]
+    fn metal_textured_surfaces_stay_within_the_cpu_routes_measured_distance() {
+        // An oracle outside the kernel: FrankenManim's CPU route samples the
+        // same textures in f64. Textured images (unlit, painter order) and
+        // lit surfaces with a dark texture, zero-alpha discard and opacity,
+        // under every wrap mode with UV past [0, 1], tilted in depth, beside
+        // Gouraud triangles and a glow dot, at one, two and four samples a
+        // side.
+        use crate::texture::{SamplerPolicy, TextureEncoding, TextureWrap};
+        use crate::three_d::SurfaceMaterial;
+
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        let noise = noise_texture(7, 5, 0x9E37_79B9_7F4A_7C15, TextureEncoding::Srgb);
+        let small = noise_texture(3, 2, 0xD1B5_4A32_D192_ED03, TextureEncoding::Linear);
+        let fine = noise_texture(32, 24, 0x8CB9_2BA7_2F3D_8DD7, TextureEncoding::Srgb);
+        let dark = noise_texture(5, 4, 0x2545_F491_4F6C_DD1D, TextureEncoding::Srgb);
+        let wraps = [
+            (TextureWrap::Repeat, TextureWrap::Repeat),
+            (TextureWrap::ClampToEdge, TextureWrap::MirroredRepeat),
+            (TextureWrap::MirroredRepeat, TextureWrap::ClampToEdge),
+        ];
+        let facing = [[0.0, 0.0, 1.0]; 2];
+        let outward = [[-0.9, 0.0, 0.45], [0.9, 0.0, 0.45]];
+        let image = textured_quad(
+            [-2.5, 1.0, 0.0],
+            [3.0, 2.2],
+            0.6,
+            [-0.75, 1.75],
+            facing,
+            0.85,
+        );
+        let lit = textured_quad(
+            [2.5, -0.5, 0.3],
+            [3.2, 2.6],
+            -0.8,
+            [-0.4, 1.3],
+            outward,
+            1.0,
+        );
+        let backdrop = textured_quad([0.0, 0.0, -0.5], [6.5, 3.8], 0.0, [0.0, 1.0], facing, 0.6);
+        let white = Srgb::from_rgb8(255, 255, 255).to_linear(0.9);
+        let colored = SurfaceMesh::new(
+            vec![
+                SurfaceVertex::colored([-1.0, -3.0, 0.2], [0.0, 0.0, 1.0], white),
+                SurfaceVertex::colored([1.5, -2.5, 0.2], [0.0, 0.0, 1.0], white),
+                SurfaceVertex::colored([0.0, 2.0, 0.2], [0.0, 0.0, 1.0], white),
+            ],
+            vec![0, 1, 2],
+        )
+        .expect("triangle");
+        let mut worst = (0_u8, 0_usize);
+        for (case, &(resolution, samples, fine_tile)) in [
+            ((96_u32, 72_u32), 1_u8, 8_u32),
+            ((80, 64), 2, 8),
+            ((64, 48), 4, 16),
+            ((101, 67), 2, 16),
+            ((120, 90), 1, 16),
+            ((72, 54), 4, 8),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let camera = Camera::new(CameraConfig {
+                resolution,
+                samples,
+                background: Srgb::from_rgb8(4, 8, 16).to_linear(1.0),
+                ..CameraConfig::default()
+            })
+            .expect("camera");
+            let (wrap_u, wrap_v) = wraps[case % wraps.len()];
+            let sampler = SamplerPolicy { wrap_u, wrap_v };
+            let tiling = crate::bin::Tiling {
+                macro_tile: 32,
+                fine_tile,
+            };
+            let draws_with = |with_dark: bool, sampler: SamplerPolicy| {
+                [
+                    ThreeDDraw::Surface(SurfaceDraw {
+                        material: SurfaceMaterial::Texture(TextureMaterial {
+                            light: &fine,
+                            dark: None,
+                            sampler,
+                            discard_transparent: false,
+                        }),
+                        ..SurfaceDraw::image(&backdrop, &fine)
+                    }),
+                    ThreeDDraw::Surface(SurfaceDraw::new(&colored)),
+                    ThreeDDraw::Surface(SurfaceDraw {
+                        material: SurfaceMaterial::Texture(TextureMaterial {
+                            light: &noise,
+                            dark: None,
+                            sampler,
+                            discard_transparent: false,
+                        }),
+                        ..SurfaceDraw::image(&image, &noise)
+                    }),
+                    ThreeDDraw::Surface(SurfaceDraw {
+                        material: SurfaceMaterial::Texture(TextureMaterial {
+                            light: &small,
+                            dark: with_dark.then_some(&dark),
+                            sampler,
+                            discard_transparent: true,
+                        }),
+                        shading: [0.4, 0.3, 0.5],
+                        depth_test: true,
+                        ..SurfaceDraw::new(&lit)
+                    }),
+                    ThreeDDraw::TrueDot(TrueDotDraw::glow([0.5, 0.2, 1.0], 0.9, white)),
+                ]
+            };
+            let draws = draws_with(true, sampler);
+            let job = ThreeDJob::new(&camera, &draws, tiling).expect("job");
+            let cpu = render_cpu_three_d_rgba8(&job, 4).expect("CPU frame");
+            let (metal, report) = renderer.render_three_d_rgba8(&job).expect("Metal frame");
+            assert_eq!(cpu.as_bytes().len(), metal.as_bytes().len());
+            let deltas = cpu
+                .as_bytes()
+                .iter()
+                .zip(metal.as_bytes())
+                .map(|(a, b)| a.abs_diff(*b))
+                .collect::<Vec<_>>();
+            let largest = deltas.iter().copied().max().unwrap_or(0);
+            let differing = deltas.iter().filter(|delta| **delta > 0).count();
+            println!(
+                "case {case} {resolution:?} x{samples}: largest byte delta {largest}, \
+                 {differing} of {} bytes differ, {} bytes uploaded",
+                deltas.len(),
+                report.upload_bytes
+            );
+            worst = (worst.0.max(largest), worst.1.max(differing));
+            assert!(
+                largest <= 8 && differing <= 64,
+                "case {case}: largest byte delta {largest}, {differing} bytes differ"
+            );
+            // The job exercises what it claims to: the dark texture and,
+            // past [0, 1], the wrap mode change the CPU route's frame.
+            let undarkened = draws_with(false, sampler);
+            let job = ThreeDJob::new(&camera, &undarkened, tiling).expect("job");
+            let without = render_cpu_three_d_rgba8(&job, 4).expect("CPU frame");
+            assert_ne!(
+                without.as_bytes(),
+                cpu.as_bytes(),
+                "case {case}: the dark texture shows"
+            );
+            if case % wraps.len() != 0 {
+                let repeated = draws_with(true, SamplerPolicy::default());
+                let job = ThreeDJob::new(&camera, &repeated, tiling).expect("job");
+                let repeat = render_cpu_three_d_rgba8(&job, 4).expect("CPU frame");
+                assert_ne!(
+                    repeat.as_bytes(),
+                    cpu.as_bytes(),
+                    "case {case}: the wrap shows"
+                );
+            }
+        }
+        println!(
+            "worst: largest byte delta {}, {} bytes differ",
+            worst.0, worst.1
+        );
+    }
+
+    #[test]
+    fn a_textured_packet_uploads_each_texture_once_and_names_its_rows() {
+        use crate::texture::{SamplerPolicy, TextureEncoding, TextureWrap};
+        use crate::three_d::SurfaceMaterial;
+
+        let camera = Camera::new(CameraConfig {
+            resolution: (32, 24),
+            samples: 1,
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let shared = noise_texture(4, 3, 1, TextureEncoding::Linear);
+        let light = noise_texture(2, 2, 2, TextureEncoding::Linear);
+        let dark = noise_texture(3, 1, 3, TextureEncoding::Linear);
+        let facing = [[0.0, 0.0, 1.0]; 2];
+        let quad = textured_quad([0.0, 0.0, 0.0], [4.0, 3.0], 0.0, [0.0, 1.0], facing, 1.0);
+        let white = Srgb::from_rgb8(255, 255, 255).to_linear(1.0);
+        let colored = SurfaceMesh::new(
+            vec![
+                SurfaceVertex::colored([-1.0, -1.0, 0.1], [0.0, 0.0, 1.0], white),
+                SurfaceVertex::colored([1.0, -1.0, 0.1], [0.0, 0.0, 1.0], white),
+                SurfaceVertex::colored([0.0, 1.0, 0.1], [0.0, 0.0, 1.0], white),
+            ],
+            vec![0, 1, 2],
+        )
+        .expect("triangle");
+        let draws = [
+            ThreeDDraw::Surface(SurfaceDraw::image(&quad, &shared)),
+            ThreeDDraw::Surface(SurfaceDraw::image(&quad, &shared)),
+            ThreeDDraw::Surface(SurfaceDraw::new(&colored)),
+            ThreeDDraw::Surface(SurfaceDraw {
+                material: SurfaceMaterial::Texture(TextureMaterial {
+                    light: &light,
+                    dark: Some(&dark),
+                    sampler: SamplerPolicy {
+                        wrap_u: TextureWrap::MirroredRepeat,
+                        wrap_v: TextureWrap::ClampToEdge,
+                    },
+                    discard_transparent: true,
+                }),
+                ..SurfaceDraw::new(&quad)
+            }),
+        ];
+        let job = ThreeDJob::new(
+            &camera,
+            &draws,
+            crate::bin::Tiling {
+                macro_tile: 32,
+                fine_tile: 8,
+            },
+        )
+        .expect("job");
+        let flat = FlatThreeDFrame::derive(&job).expect("packet");
+
+        assert_eq!(flat.texels.len(), (12 + 4 + 3) * 4, "each texture once");
+        assert_eq!(&flat.texels[..4], &shared.premultiplied_texels()[0]);
+        assert_eq!(&flat.texels[48..52], &light.premultiplied_texels()[0]);
+        assert_eq!(&flat.texels[64..68], &dark.premultiplied_texels()[0]);
+        let rows = flat
+            .draw_u32
+            .as_chunks::<THREE_D_DRAW_U32_STRIDE>()
+            .0
+            .iter()
+            .map(|draw| (draw[2], draw[4]))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            rows,
+            [
+                (THREE_D_SHADER_TEXTURE, 0),
+                (THREE_D_SHADER_TEXTURE, 1),
+                (THREE_D_SHADER_GOURAUD, THREE_D_NO_TEXTURE),
+                (THREE_D_SHADER_TEXTURE, 2),
+            ]
+        );
+        assert_eq!(
+            flat.texture_u32,
+            [
+                0,
+                4,
+                3,
+                THREE_D_NO_TEXTURE,
+                0,
+                0,
+                0,
+                0,
+                0,
+                4,
+                3,
+                THREE_D_NO_TEXTURE,
+                0,
+                0,
+                0,
+                0,
+                12,
+                2,
+                2,
+                16,
+                3,
+                1,
+                2 | 1 << 4,
+                1,
+            ]
+        );
+        let scalars = [
+            flat.params_u32.len(),
+            flat.params_f32.len(),
+            flat.triangles.len(),
+            flat.draw_u32.len(),
+            flat.draw_f32.len(),
+            flat.tile_offsets.len(),
+            flat.tile_draws.len(),
+            flat.command_triangles.len(),
+            flat.tile_triangles.len(),
+            flat.texture_u32.len(),
+            flat.texels.len(),
+        ];
+        assert_eq!(
+            flat.upload_bytes().expect("bytes"),
+            4 * scalars.iter().sum::<usize>(),
+            "the texture tables are uploaded"
+        );
+
+        // Rows that would read past the texels, or a textured draw without
+        // a row, are refused before any dispatch.
+        let mut past = FlatThreeDFrame::derive(&job).expect("packet");
+        past.texture_u32[16] = 18;
+        assert!(matches!(
+            past.validate(),
+            Err(MetalError::Layout("3D texture row"))
+        ));
+        let mut unnamed = FlatThreeDFrame::derive(&job).expect("packet");
+        unnamed.draw_u32[THREE_D_DRAW_U32_STRIDE + 4] = THREE_D_NO_TEXTURE;
+        assert!(matches!(
+            unnamed.validate(),
+            Err(MetalError::Layout("3D draw texture row"))
+        ));
+        let mut wrapped = FlatThreeDFrame::derive(&job).expect("packet");
+        wrapped.texture_u32[6] = 3;
+        assert!(matches!(
+            wrapped.validate(),
+            Err(MetalError::Layout("3D texture row"))
+        ));
+    }
+
     #[test]
     fn three_d_packet_keeps_prepared_triangles_and_stable_painter_bins() {
         let black = Srgb::from_rgb8(0, 0, 0).to_linear(1.0);
@@ -3081,7 +3598,8 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn unsupported_three_d_packet_falls_back_without_demoting_metal() {
-        use crate::texture::{Texture, TextureEncoding};
+        use crate::three_d::VectorDraw;
+        use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
 
         if !MetalRenderer::is_available() {
             return;
@@ -3093,26 +3611,50 @@ mod tests {
             ..CameraConfig::default()
         })
         .expect("camera");
-        let texture = Texture::from_rgba8(1, 1, &[255, 128, 32, 255], TextureEncoding::Linear)
-            .expect("texture");
-        let normal = [0.0, 0.0, 1.0];
-        let mesh = SurfaceMesh::from_uv_grid(
-            vec![
-                SurfaceVertex::textured([-4.0, 3.0, 0.0], normal, [0.0, 0.0], 1.0),
-                SurfaceVertex::textured([-4.0, -3.0, 0.0], normal, [0.0, 1.0], 1.0),
-                SurfaceVertex::textured([4.0, 3.0, 0.0], normal, [1.0, 0.0], 1.0),
-                SurfaceVertex::textured([4.0, -3.0, 0.0], normal, [1.0, 1.0], 1.0),
-            ],
-            (2, 2),
-        )
-        .expect("quad");
-        let draws = [ThreeDDraw::Surface(SurfaceDraw::image(&mesh, &texture))];
+        // A closed square of quadratic segments, as the retained IR stores
+        // a path: the one 3D primitive the Metal route does not map.
+        let corners = [
+            [-1.0_f64, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ];
+        let mut points = vec![corners[0]];
+        for index in 1..=corners.len() {
+            let next = corners[index % corners.len()];
+            let previous = points[points.len() - 1];
+            points.push([
+                0.5 * (previous[0] + next[0]),
+                0.5 * (previous[1] + next[1]),
+                0.5 * (previous[2] + next[2]),
+            ]);
+            points.push(next);
+        }
+        let mut buffer =
+            RecordBuffer::new(RecordSchema::vmobject(), points.len()).expect("records");
+        for (index, point) in points.iter().enumerate() {
+            buffer.write(
+                index,
+                "point",
+                &[point[0] as f32, point[1] as f32, point[2] as f32],
+            );
+            buffer.write(index, "fill_rgba", &[0.2, 0.4, 0.6, 1.0]);
+            buffer.write(index, "stroke_rgba", &[0.9, 0.3, 0.1, 1.0]);
+            buffer.write(index, "stroke_width", &[2.0]);
+            buffer.write(index, "fill_border_width", &[0.0]);
+        }
+        let mut stage = Stage::new();
+        let square = stage.add(Mobject::from_buffer(buffer));
+        stage.add_to_scene(square).expect("rooted");
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, camera.revision()).expect("vector plan");
+        let draws = [ThreeDDraw::Vector(VectorDraw::new(&plan, 0))];
         let job = ThreeDJob::new(&camera, &draws, crate::bin::Tiling::default()).expect("job");
         let expected = render_cpu_three_d_rgba8(&job, 1).expect("CPU frame");
         let mut renderer = PreviewRenderer::new().expect("Metal preview renderer");
         let preview = renderer
             .render_three_d(&job, 1)
-            .expect("unsupported texture uses CPU for this frame");
+            .expect("an unsupported vector uses CPU for this frame");
 
         assert!(matches!(
             preview.route,

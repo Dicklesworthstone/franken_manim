@@ -412,6 +412,13 @@ impl Texture {
         TEXTURE_ORIENTATION
     }
 
+    /// The premultiplied linear texels, top row first, as the samplers
+    /// filter them (the Metal 3D route uploads these).
+    #[cfg(feature = "metal")]
+    pub(crate) fn premultiplied_texels(&self) -> &[[f32; 4]] {
+        &self.texels
+    }
+
     /// Read one exact texel as straight linear RGBA.
     #[must_use]
     pub fn texel(&self, x: u32, y: u32) -> Option<LinearRgba> {
