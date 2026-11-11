@@ -1930,3 +1930,79 @@ kernel void fmn_rgba16f_to_p010(
         status[group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
     }
 }
+
+// Controlled bloom over the raw Rgba16F surface (bloom.rs). The arithmetic is
+// the CPU route's, in its order: taps in ascending order, each a multiply then
+// a separate add, f32 row sums, edges clamped, and a round-to-nearest-even
+// encode of `in * keep + blur * strength`.
+
+// Tap `k` of pixel `p`'s window reads pixel `min(max(p + k - radius, 0), last)`.
+static uint bloom_source(uint p, uint k, uint radius, uint last) {
+    uint shifted = p + k;
+    return min(shifted > radius ? shifted - radius : 0u, last);
+}
+
+kernel void fmn_bloom_rows(
+    constant uint *params [[buffer(0)]], // width, height, radius
+    constant float *taps [[buffer(1)]],
+    device const half4 *surface [[buffer(2)]],
+    device float4 *sums [[buffer(3)]],
+    device uint *status [[buffer(4)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]]
+) {
+    uint px = group_id.x * group_size.x + local_id.x;
+    uint py = group_id.y * group_size.y + local_id.y;
+    uint width = params[0];
+    uint radius = params[2];
+    if (px < width && py < params[1]) {
+        float4 acc = float4(0.0f);
+        for (uint k = 0u; k <= 2u * radius; ++k) {
+            uint sx = bloom_source(px, k, radius, width - 1u);
+            float4 product = taps[k] * float4(surface[py * width + sx]);
+            acc = acc + product;
+        }
+        sums[py * width + px] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (local_id.x == 0u && local_id.y == 0u) {
+        uint groups_x = (width + group_size.x - 1u) / group_size.x;
+        status[group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
+    }
+}
+
+kernel void fmn_bloom_columns(
+    constant uint *params [[buffer(0)]], // width, height, radius
+    constant float *taps [[buffer(1)]],
+    constant float *mix [[buffer(2)]], // keep, strength
+    device const float4 *sums [[buffer(3)]],
+    device half4 *surface [[buffer(4)]],
+    device uint *status [[buffer(5)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]]
+) {
+    uint px = group_id.x * group_size.x + local_id.x;
+    uint py = group_id.y * group_size.y + local_id.y;
+    uint width = params[0];
+    uint height = params[1];
+    uint radius = params[2];
+    if (px < width && py < height) {
+        float4 acc = float4(0.0f);
+        for (uint k = 0u; k <= 2u * radius; ++k) {
+            uint sy = bloom_source(py, k, radius, height - 1u);
+            float4 product = taps[k] * sums[sy * width + px];
+            acc = acc + product;
+        }
+        uint at = py * width + px;
+        float4 kept = float4(surface[at]) * mix[0];
+        float4 spread = acc * mix[1];
+        surface[at] = half4(kept + spread);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (local_id.x == 0u && local_id.y == 0u) {
+        uint groups_x = (width + group_size.x - 1u) / group_size.x;
+        status[group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
+    }
+}

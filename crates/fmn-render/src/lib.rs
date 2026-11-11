@@ -29,6 +29,7 @@
 
 mod arena;
 pub mod bin;
+pub mod bloom;
 pub mod cache;
 pub mod camera;
 pub mod engine;
@@ -54,6 +55,7 @@ pub use vector_frame::{OwnedVectorFrame, RasterTeam, RasterTeamStats, VectorFram
 
 pub use arena::{AllocStats, FrameArena};
 pub use bin::{Binning, BinningError, BinningLimits, ScreenMap, Tiling, Viewport};
+pub use bloom::{BLOOM_SCRATCH_BYTES_PER_PIXEL, BLOOM_SIGMA_MAX_PIXELS, Bloom, BloomError};
 pub use cache::{
     CacheStats, OutputTransform, PixelTileCache, PixelTileCacheError, PrefixCacheStats, TileCache,
     TileKey, TileWork,

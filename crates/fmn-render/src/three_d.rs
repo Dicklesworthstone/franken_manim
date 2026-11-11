@@ -25,6 +25,7 @@ use fmn_frame::{
 
 use crate::arena::{Pool, Sink};
 use crate::bin::{ScreenMap, Tiling};
+use crate::bloom::Bloom;
 use crate::camera::{Camera, CameraError, ClippedFillQuadratic, ClippedQuadratic, EdgeSampleLimit};
 use crate::engine::{NativeScopedSpawner, ScopedSpawner, run_scoped_workers};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
@@ -2085,6 +2086,7 @@ impl PreparedThreeDProjection {
             preparation_bytes: self.preparation_bytes,
             preparation_limits: self.preparation_limits,
             scratch_pool: Arc::clone(&self.scratch_pool),
+            bloom: None,
         })
     }
 }
@@ -2116,6 +2118,8 @@ pub struct ThreeDJob<'a> {
     preparation_bytes: u64,
     preparation_limits: ThreeDPreparationLimits,
     scratch_pool: Arc<TileScratchPool>,
+    /// Applied to the raw frame after the raster, on every route.
+    bloom: Option<Bloom>,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -2178,7 +2182,24 @@ impl<'a> ThreeDJob<'a> {
             preparation_bytes: budget.working_bytes,
             preparation_limits: limits,
             scratch_pool: Arc::new(TileScratchPool::new()),
+            bloom: None,
         })
+    }
+
+    /// Bloom the frame after its raster ([`Bloom`]): the CPU route in
+    /// [`ThreeDJob::render_into`], the Metal route on the device, with the
+    /// same bits. It holds [`Bloom::scratch_bytes`] while it runs, outside
+    /// the preparation limits, which bound the job's rows.
+    #[must_use]
+    pub fn with_bloom(mut self, bloom: Bloom) -> Self {
+        self.bloom = Some(bloom);
+        self
+    }
+
+    /// The bloom the frame gets, if any.
+    #[must_use]
+    pub const fn bloom(&self) -> Option<&Bloom> {
+        self.bloom.as_ref()
     }
 
     /// Freeze the projected rows without retaining any borrowed texture.
@@ -2311,13 +2332,18 @@ impl<'a> ThreeDJob<'a> {
     /// for a mismatched destination, and [`FrameError::TooLarge`] if covered
     /// scratch geometry is not addressable or cannot be reserved. Returns
     /// [`FrameError::WorkerSpawnFailed`] if the host cannot start the complete
-    /// requested CPU render team.
+    /// requested CPU render team. With a bloom, as [`Bloom::apply`] after the
+    /// raster.
     pub fn render_into(
         &self,
         threads: usize,
         destination: &mut FrameBuffer,
     ) -> Result<(), FrameError> {
-        self.render_into_with_spawner(threads, destination, &NativeScopedSpawner)
+        self.render_into_with_spawner(threads, destination, &NativeScopedSpawner)?;
+        match &self.bloom {
+            Some(bloom) => bloom.apply(destination, threads),
+            None => Ok(()),
+        }
     }
 
     fn render_into_with_spawner<S: ScopedSpawner>(
@@ -6592,6 +6618,39 @@ mod tests {
                 .expect_err("negative AA width must be rejected"),
             ThreeDError::InvalidAntiAliasWidth
         );
+    }
+
+    #[test]
+    fn a_job_with_a_bloom_renders_its_plain_frame_then_blooms_it() {
+        // FrankenLife FL-019: the CPU route blooms its raw frame after the
+        // raster, at any thread count; a job without a bloom has none.
+        use crate::bloom::Bloom;
+
+        let camera = camera();
+        let white = color("#FFFFFF", 1.0);
+        let draws = [ThreeDDraw::TrueDot(TrueDotDraw::glow(
+            [0.0, 0.0, 0.5],
+            0.4,
+            white,
+        ))];
+        let plain = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("job");
+        assert!(plain.bloom().is_none());
+        let bloom = Bloom::new(0.3, 2.0).expect("bloom");
+        let bloomed = ThreeDJob::new(&camera, &draws, Tiling::default())
+            .expect("job")
+            .with_bloom(bloom.clone());
+        assert_eq!(bloomed.bloom(), Some(&bloom));
+        let unbloomed = plain.render(1).expect("frame");
+        let mut expected = unbloomed.clone();
+        bloom.apply(&mut expected, 1).expect("blooms");
+        assert_ne!(expected.as_bytes(), unbloomed.as_bytes());
+        for threads in [1, 4] {
+            assert_eq!(
+                bloomed.render(threads).expect("frame").as_bytes(),
+                expected.as_bytes(),
+                "{threads}"
+            );
+        }
     }
 
     #[test]

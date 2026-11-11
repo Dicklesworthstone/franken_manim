@@ -28,6 +28,7 @@ pub use ft_kernel_metal::presentation::{
 };
 use ft_kernel_metal::presentation::{NativePresenter, PresentationConfig};
 
+use crate::bloom::Bloom;
 use crate::engine::{AaPolicy, Draw, EngineIdentity, FrameConfig, FrameJob, FrameJobError};
 use crate::fill::MonoTable;
 use crate::plan::RenderPlan;
@@ -41,6 +42,8 @@ const THREE_D_KERNEL: &str = "fmn_render_three_d";
 const RGBA8_KERNEL: &str = "fmn_rgba16f_to_rgba8";
 const NV12_KERNEL: &str = "fmn_rgba16f_to_nv12";
 const P010_KERNEL: &str = "fmn_rgba16f_to_p010";
+const BLOOM_ROWS_KERNEL: &str = "fmn_bloom_rows";
+const BLOOM_COLUMNS_KERNEL: &str = "fmn_bloom_columns";
 const SEGMENT_ARC_INTERVALS: usize = 16;
 const SEGMENT_ARC_VALUES: usize = SEGMENT_ARC_INTERVALS + 1;
 const SEGMENT_STRIDE: usize = 8 + SEGMENT_ARC_VALUES + 1;
@@ -668,9 +671,13 @@ pub struct MetalRenderer {
     rgba8: Pipeline,
     nv12: Pipeline,
     p010: Pipeline,
+    bloom_rows: Pipeline,
+    bloom_columns: Pipeline,
     transfer_table: SharedBuffer,
     raw_surface: Option<SurfaceSlot>,
     output_surface: Option<OutputSurfaceSlot>,
+    /// The bloom's row sums, kept with the raw surface they belong to.
+    bloom_sums: Option<SurfaceSlot>,
     /// The last 3D frame's texels, kept for the next frame that samples the
     /// same textures (FL-033).
     resident_texels: Option<ResidentTexels>,
@@ -697,6 +704,7 @@ impl fmt::Debug for MetalRenderer {
                     .map(|surface| surface.layout.total_bytes()),
             )
             .field("resident_texel_bytes", &self.resident_texel_bytes())
+            .field("bloom_scratch_bytes", &self.bloom_scratch_bytes())
             .finish_non_exhaustive()
     }
 }
@@ -717,6 +725,8 @@ impl MetalRenderer {
         let rgba8 = library.pipeline(RGBA8_KERNEL)?;
         let nv12 = library.pipeline(NV12_KERNEL)?;
         let p010 = library.pipeline(P010_KERNEL)?;
+        let bloom_rows = library.pipeline(BLOOM_ROWS_KERNEL)?;
+        let bloom_columns = library.pipeline(BLOOM_COLUMNS_KERNEL)?;
         let (transfer_words, transfer_table_digest) = build_transfer_table();
         let transfer_table = gateway.buffer_u32(&transfer_words)?;
         Ok(Self {
@@ -726,9 +736,12 @@ impl MetalRenderer {
             rgba8,
             nv12,
             p010,
+            bloom_rows,
+            bloom_columns,
             transfer_table,
             raw_surface: None,
             output_surface: None,
+            bloom_sums: None,
             resident_texels: None,
             device: gateway.device_name(),
             unified_memory: gateway.has_unified_memory(),
@@ -746,6 +759,14 @@ impl MetalRenderer {
         self.resident_texels
             .as_ref()
             .map_or(0, |resident| resident.bytes)
+    }
+
+    /// The bytes of the bloom's row sums the renderer keeps on the device
+    /// ([`Bloom::scratch_bytes`] of the last bloomed 3D frame), reused by
+    /// the next bloomed frame of the same size. Zero before one.
+    #[must_use]
+    pub fn bloom_scratch_bytes(&self) -> usize {
+        self.bloom_sums.as_ref().map_or(0, |sums| sums.bytes)
     }
 
     /// Render the annex's linear-light Rgba16F comparison surface.
@@ -1191,7 +1212,90 @@ impl MetalRenderer {
             Grid::grid_2d(flat.cols(), flat.rows(), tile, tile),
         )?;
         verify_status(&status, group_count, THREE_D_KERNEL)?;
-        Ok((raw_reused, flat.upload_bytes(texels_kept)?))
+        let mut upload_bytes = flat.upload_bytes(texels_kept)?;
+        if let Some(bloom) = &flat.bloom {
+            let [width, height] = [flat.params_u32[0], flat.params_u32[1]];
+            upload_bytes = upload_bytes
+                .checked_add(self.bloom_raw_surface(width, height, bloom)?)
+                .ok_or(MetalError::SizeOverflow("3D frame upload count"))?;
+        }
+        Ok((raw_reused, upload_bytes))
+    }
+
+    /// Bloom the raw surface in place ([`Bloom`]): the row pass into the
+    /// kept row sums, then the column pass and the mix back into the
+    /// surface, each kernel the CPU route's arithmetic in its order. Returns
+    /// the bytes of the bloom's new input buffers (its sizes, taps and mix).
+    fn bloom_raw_surface(
+        &mut self,
+        width: u32,
+        height: u32,
+        bloom: &Bloom,
+    ) -> Result<usize, MetalError> {
+        let sums_bytes = Bloom::scratch_bytes(width, height)
+            .and_then(|bytes| usize::try_from(bytes).ok())
+            .ok_or(MetalError::SizeOverflow("bloom row sums"))?;
+        ensure_surface(self.gateway, &mut self.bloom_sums, sums_bytes)?;
+        let sizes = [
+            width,
+            height,
+            u32::try_from(bloom.radius()).map_err(|_| MetalError::SizeOverflow("bloom radius"))?,
+        ];
+        let mix = [bloom.keep(), bloom.strength()];
+        let params = self.gateway.buffer_u32(&sizes)?;
+        let taps = self.gateway.buffer_f32(bloom.taps())?;
+        let mix_buffer = self.gateway.buffer_f32(&mix)?;
+        let groups_x = (width as usize).div_ceil(TRANSFER_TILE);
+        let groups_y = (height as usize).div_ceil(TRANSFER_TILE);
+        let group_count = groups_x
+            .checked_mul(groups_y)
+            .ok_or(MetalError::SizeOverflow("bloom group count"))?;
+        let surface = &self
+            .raw_surface
+            .as_ref()
+            .ok_or(MetalError::Layout("raw surface disappeared"))?
+            .buffer;
+        let sums = &self
+            .bloom_sums
+            .as_ref()
+            .ok_or(MetalError::Layout("bloom row sums disappeared"))?
+            .buffer;
+        let grid = Grid::grid_2d(groups_x, groups_y, TRANSFER_TILE, TRANSFER_TILE);
+
+        validate_threadgroup(
+            &self.bloom_rows,
+            BLOOM_ROWS_KERNEL,
+            TRANSFER_TILE,
+            TRANSFER_TILE,
+        )?;
+        let status = self
+            .gateway
+            .buffer_zeroed(checked_bytes(group_count, 4, "bloom status")?)?;
+        self.gateway.dispatch(
+            &self.bloom_rows,
+            &[&params, &taps, surface, sums, &status],
+            grid,
+        )?;
+        verify_status(&status, group_count, BLOOM_ROWS_KERNEL)?;
+
+        validate_threadgroup(
+            &self.bloom_columns,
+            BLOOM_COLUMNS_KERNEL,
+            TRANSFER_TILE,
+            TRANSFER_TILE,
+        )?;
+        let status = self
+            .gateway
+            .buffer_zeroed(checked_bytes(group_count, 4, "bloom status")?)?;
+        self.gateway.dispatch(
+            &self.bloom_columns,
+            &[&params, &taps, &mix_buffer, sums, surface, &status],
+            grid,
+        )?;
+        verify_status(&status, group_count, BLOOM_COLUMNS_KERNEL)?;
+        Ok(std::mem::size_of_val(&sizes)
+            + std::mem::size_of_val(bloom.taps())
+            + std::mem::size_of_val(&mix))
     }
 
     /// Put the frame's texels on the device (FL-033): the last 3D frame's
@@ -2054,6 +2158,8 @@ struct FlatThreeDFrame<'a> {
     textures: Vec<&'a Texture>,
     /// The texels of `textures`.
     texel_count: usize,
+    /// The job's bloom, run on the raw surface after the raster.
+    bloom: Option<Bloom>,
 }
 
 /// The kernel's code for a wrap mode.
@@ -2112,6 +2218,7 @@ impl<'a> FlatThreeDFrame<'a> {
             texture_u32: Vec::new(),
             textures: Vec::new(),
             texel_count: 0,
+            bloom: job.bloom().cloned(),
         };
         let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
         let mut uploaded = std::collections::HashMap::new();
@@ -3716,6 +3823,160 @@ mod tests {
             &[&other, &fine, &dark],
             "the textures again",
         );
+    }
+
+    #[test]
+    fn a_bloom_on_the_device_is_the_cpu_routes_bloom_bit_for_bit() {
+        // FrankenLife FL-019: the Metal route blooms its raw surface with the
+        // CPU route's arithmetic. The oracle is the CPU bloom of the Metal
+        // route's own unbloomed raw frame, which keeps the raster's own
+        // CPU/Metal distance out of the comparison. Raw and RGBA8 frames are
+        // equal byte for byte, the upload is larger by exactly the bloom's
+        // inputs, the row sums stay on the device, and a later frame without
+        // a bloom is unbloomed.
+        use crate::bloom::Bloom;
+        use crate::texture::TextureEncoding;
+
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let texture = noise_texture(32, 24, 0x8CB9_2BA7_2F3D_8DD7, TextureEncoding::Srgb);
+        // Not a multiple of the 16-pixel groups.
+        let camera = Camera::new(CameraConfig {
+            resolution: (100, 70),
+            samples: 2,
+            background: Srgb::from_rgb8(2, 3, 8).to_linear(1.0),
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        };
+        let quad = textured_quad(
+            [-1.5, 0.3, 0.0],
+            [2.5, 2.0],
+            0.2,
+            [-0.5, 1.5],
+            [[0.0, 0.0, 1.0]; 2],
+            0.9,
+        );
+        let white = Srgb::from_rgb8(255, 255, 255).to_linear(1.0);
+        let draws = [
+            ThreeDDraw::Surface(SurfaceDraw::image(&quad, &texture)),
+            ThreeDDraw::TrueDot(TrueDotDraw::glow([1.8, 0.4, 0.5], 0.3, white)),
+            ThreeDDraw::TrueDot(TrueDotDraw::glow([2.4, -1.1, 0.5], 0.08, white)),
+            // Across the right edge, so the edges' clamping shows.
+            ThreeDDraw::TrueDot(TrueDotDraw::glow([5.6, 0.0, 0.5], 0.5, white)),
+        ];
+        let rgba8 = |raw: &FrameBuffer| {
+            let layout = FrameLayout::tight(PixelFormat::Rgba8, 100, 70).expect("layout");
+            let mut output = FrameBuffer::new(layout);
+            fmn_frame::convert::rgba16f_to_rgba8(raw, &mut output).expect("converts");
+            output
+        };
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        let plain = ThreeDJob::new(&camera, &draws, tiling).expect("job");
+        let (raw, _) = renderer.render_three_d_raw(&plain).expect("Metal frame");
+        assert_eq!(renderer.bloom_scratch_bytes(), 0, "nothing before a bloom");
+        for (strength, sigma) in [(0.15, 3.0), (0.6, 1.0), (1.0, 7.5)] {
+            let bloom = Bloom::new(strength, sigma).expect("bloom");
+            let mut expected = raw.clone();
+            bloom.apply(&mut expected, 3).expect("blooms");
+            let bloomed = ThreeDJob::new(&camera, &draws, tiling)
+                .expect("job")
+                .with_bloom(bloom.clone());
+            let (unbloomed, before) = renderer.render_three_d_raw(&plain).expect("Metal frame");
+            assert_eq!(unbloomed.as_bytes(), raw.as_bytes(), "{strength}: no bloom");
+            let (ours, report) = renderer.render_three_d_raw(&bloomed).expect("Metal frame");
+            assert_eq!(ours.as_bytes(), expected.as_bytes(), "{strength}: raw");
+            assert_ne!(ours.as_bytes(), raw.as_bytes(), "{strength}: it blooms");
+            assert_eq!(
+                report.upload_bytes,
+                before.upload_bytes + 12 + 4 * bloom.taps().len() + 8,
+                "{strength}: the upload"
+            );
+            assert_eq!(renderer.bloom_scratch_bytes(), 100 * 70 * 16);
+            let (frame, _) = renderer
+                .render_three_d_rgba8(&bloomed)
+                .expect("Metal frame");
+            assert_eq!(
+                frame.as_bytes(),
+                rgba8(&expected).as_bytes(),
+                "{strength}: RGBA8"
+            );
+            // The CPU route blooms its own raster the same way.
+            let mut cpu = plain.render(2).expect("CPU frame");
+            bloom.apply(&mut cpu, 2).expect("blooms");
+            assert_eq!(
+                bloomed.render(2).expect("CPU frame").as_bytes(),
+                cpu.as_bytes(),
+                "{strength}: CPU"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bloom_on_the_device_rounds_every_value_as_the_cpu_does() {
+        // A raster's few distinct values rarely sit where one rounding more
+        // or less shows in half precision. Here every channel of a 256 x 256
+        // premultiplied raw surface is its own value, so a mix or row sum the
+        // device fused, reordered or summed in other precision would round
+        // some of them differently from the CPU bloom, the oracle.
+        use crate::bloom::Bloom;
+        use fmn_frame::half::f16_from_f32;
+
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let (width, height) = (256_u32, 256_u32);
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut unit = || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 40) as f32 / (1_u64 << 24) as f32
+        };
+        let mut raw = FrameBuffer::new(
+            FrameLayout::tight(PixelFormat::Rgba16F, width, height).expect("layout"),
+        );
+        for pixel in raw.as_bytes_mut().as_chunks_mut::<8>().0 {
+            let alpha = unit();
+            let channels = [alpha * unit(), alpha * unit(), alpha * unit(), alpha];
+            for (bytes, value) in pixel.as_chunks_mut::<2>().0.iter_mut().zip(channels) {
+                *bytes = f16_from_f32(value).to_le_bytes();
+            }
+        }
+        let words: Vec<u32> = raw
+            .as_bytes()
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|word| u32::from_le_bytes(*word))
+            .collect();
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        for (strength, sigma) in [(0.15, 3.0), (0.6, 1.0), (0.35, 0.7)] {
+            let bloom = Bloom::new(strength, sigma).expect("bloom");
+            renderer.raw_surface = Some(SurfaceSlot {
+                bytes: raw.as_bytes().len(),
+                buffer: renderer.gateway.buffer_u32(&words).expect("surface"),
+            });
+            renderer
+                .bloom_raw_surface(width, height, &bloom)
+                .expect("device bloom");
+            let mut ours = raw.clone();
+            renderer
+                .raw_surface
+                .as_ref()
+                .expect("surface")
+                .buffer
+                .read_u8(ours.as_bytes_mut())
+                .expect("read back");
+            let mut expected = raw.clone();
+            bloom.apply(&mut expected, 4).expect("blooms");
+            assert_ne!(expected.as_bytes(), raw.as_bytes(), "{strength}: it blooms");
+            assert_eq!(ours.as_bytes(), expected.as_bytes(), "{strength}");
+        }
     }
 
     #[test]
