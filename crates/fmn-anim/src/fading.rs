@@ -137,8 +137,8 @@ pub fn fade_out_to_point(
 /// `false`.
 #[derive(Debug, Clone)]
 pub struct VFade {
-    state: AnimState,
-    reversed: bool,
+    pub(crate) state: AnimState,
+    pub(crate) reversed: bool,
 }
 
 impl VFade {
@@ -147,6 +147,22 @@ impl VFade {
     pub fn with_config(mut self, config: AnimConfig) -> Self {
         self.state.config = config;
         self
+    }
+
+    /// Check the vector geometry without beginning or mutating it.
+    pub(crate) fn validate_geometry(&self, stage: &Stage, mobject: Mob) -> Result<(), AnimError> {
+        if !stage.contains(mobject) {
+            return Err(AnimError::StaleHandle(mobject));
+        }
+        for member in stage.family(mobject) {
+            if let Some(entry) = stage.get(member)
+                && !entry.buffer.is_empty()
+                && entry.buffer.schema().offset("joint_angle").is_none()
+            {
+                return Err(AnimError::Stage(StageError::SchemaMismatch));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -172,19 +188,7 @@ impl Animation for VFade {
     /// "VFadeIn and VFadeOut only work for VMobjects" (fading.py:154) —
     /// enforced up front, by name.
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
-        let mobject = self.state.mobject();
-        if !stage.contains(mobject) {
-            return Err(AnimError::StaleHandle(mobject));
-        }
-        for member in stage.family(mobject) {
-            if let Some(entry) = stage.get(member)
-                && !entry.buffer.is_empty()
-                && entry.buffer.schema().offset("joint_angle").is_none()
-            {
-                return Err(AnimError::Stage(StageError::SchemaMismatch));
-            }
-        }
-        Ok(())
+        self.validate_geometry(stage, self.state.mobject())
     }
 
     /// fading.py:166: `set_stroke(opacity=interpolate(0, start_stroke, α))`

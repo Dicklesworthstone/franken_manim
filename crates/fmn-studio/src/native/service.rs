@@ -30,12 +30,16 @@ pub enum NativeReplayPolicy {
     /// content-hashed closure. No unjournaled I/O or shared mutable state may
     /// affect execution. Recovery verifies real execution, never decoded closures.
     ColdVerified,
-    /// Resume admitted wait continuations from supervisor-owned checkpoints.
+    /// Resume admitted wait and closed native play continuations from
+    /// supervisor-owned checkpoints.
     /// This includes an original trailing wait suffix after completed plays or
     /// deferred construction. The finished prefix is restored as scene data;
-    /// its lifecycle and callbacks are not executed again. Open animations,
-    /// pending executable steps and deferred listener/span changes still need
-    /// verified cold reconstruction. Mixed schedules also refuse author event
+    /// its lifecycle and callbacks are not executed again. A prepared terminal
+    /// Transform, Rotating, VFade or ShowPartial play may resume before its
+    /// original wait suffix (which may be empty), preserving pending cleanup.
+    /// Unsupported animation types/rates, future executable steps and deferred
+    /// listener/span changes still need verified cold reconstruction.
+    /// Mixed schedules also refuse author event
     /// listeners, whose captures could have been changed by the prefix.
     /// Function-pointer updaters must be explicitly registered and keep all
     /// mutable state in durable Stage records. Other programs retain verified
@@ -48,7 +52,7 @@ pub enum NativeReplayPolicy {
 /// Mechanism used by the most recent successful checkpoint restoration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeRestoreMode {
-    /// Scene data, exact wait cursor and registered callbacks were restored.
+    /// Scene data, exact wait/play cursor and registered callbacks were restored.
     Checkpoint,
     /// The independent factory re-executed and verified the scene state.
     ColdVerified,
@@ -425,7 +429,8 @@ impl NativeSceneWorker {
     ) -> Result<Vec<u8>, ServiceError> {
         if let Some(factory) = self.resume_factory
             && edits.is_empty()
-            && let CheckpointAdmission::Resume(cursor) = program.checkpoint_admission()?
+            && let CheckpointAdmission::Resume(cursor) =
+                program.checkpoint_admission(self.config.limits.max_checkpoint_bytes)?
         {
             return encode_resume_state(
                 &self.config.scene,
@@ -460,7 +465,9 @@ impl NativeSceneWorker {
         let Some(program) = self.program.as_mut() else {
             return Ok(None);
         };
-        let CheckpointAdmission::Resume(cursor) = program.checkpoint_admission()? else {
+        let CheckpointAdmission::Resume(cursor) =
+            program.checkpoint_admission(self.config.limits.max_checkpoint_bytes)?
+        else {
             return Ok(None);
         };
         let state = program.state_bytes()?;

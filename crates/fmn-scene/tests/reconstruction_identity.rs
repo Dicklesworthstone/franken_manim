@@ -81,7 +81,7 @@ struct PureMutation<F> {
     change: F,
 }
 
-impl<F: FnMut(&mut Stage, f64)> Animation for PureMutation<F> {
+impl<F: FnMut(&mut Stage, f64) + 'static> Animation for PureMutation<F> {
     fn state(&self) -> &AnimState {
         &self.state
     }

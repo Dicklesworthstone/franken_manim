@@ -20,11 +20,11 @@ use crate::composition::AnimationGroup;
 /// `axis = OUT`, `run_time = 5`, `rate_func = linear`.
 #[derive(Debug, Clone)]
 pub struct Rotating {
-    state: AnimState,
-    angle: f64,
-    axis: Vec3,
-    about_point: Option<Vec3>,
-    about_edge: Option<Vec3>,
+    pub(crate) state: AnimState,
+    pub(crate) angle: f64,
+    pub(crate) axis: Vec3,
+    pub(crate) about_point: Option<Vec3>,
+    pub(crate) about_edge: Option<Vec3>,
 }
 
 impl Rotating {

@@ -1898,3 +1898,710 @@ fn presenter_boundaries_survive_worker_protocol_and_cold_seek_without_extra_samp
         WorkerResponse::Bye
     );
 }
+
+// Durable play checkpoints must carry prepared native lifecycle state, not
+// repeat begin() against the saved frame or silently erase custom hooks.
+#[derive(Clone, Copy, Debug)]
+enum TerminalPlayKind {
+    Rotation,
+    FadeOut,
+    Replacement,
+    VectorFade,
+    PassingFlash,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TerminalPlayPolicy {
+    Native,
+    OpaqueRate,
+    DelegatingWrapper,
+}
+
+thread_local! {
+    static ACTIVE_PLAY_CALLS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+struct DelegatingPlayAnimation(Box<dyn fmn_anim::Animation>);
+
+impl fmn_anim::Animation for DelegatingPlayAnimation {
+    fn state(&self) -> &fmn_anim::AnimState {
+        self.0.state()
+    }
+
+    fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+        self.0.state_mut()
+    }
+
+    fn begin(&mut self, stage: &mut Stage) -> Result<(), fmn_anim::AnimError> {
+        ACTIVE_PLAY_CALLS.with(|calls| {
+            let (begins, finishes) = calls.get();
+            calls.set((begins + 1, finishes));
+        });
+        self.0.begin(stage)
+    }
+
+    fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], alpha: f64) {
+        self.0.interpolate_submobject(stage, mobs, alpha);
+    }
+
+    fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        self.0.interpolate(stage, alpha);
+    }
+
+    fn finish(&mut self, stage: &mut Stage) {
+        self.0.finish(stage);
+        ACTIVE_PLAY_CALLS.with(|calls| {
+            let (begins, finishes) = calls.get();
+            calls.set((begins, finishes + 1));
+        });
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.0.abort(stage);
+    }
+
+    fn effect_signature(&self) -> fmn_anim::AnimationSignature {
+        self.0.effect_signature()
+    }
+
+    fn freeze_interpolation(&self) -> Option<fmn_anim::pure_frame::FrozenAnimation> {
+        self.0.freeze_interpolation()
+    }
+}
+
+fn opaque_play_rate(alpha: f64) -> f64 {
+    alpha * alpha * (2.0 - alpha)
+}
+
+fn terminal_play_program(
+    kind: TerminalPlayKind,
+    policy: TerminalPlayPolicy,
+    tail: bool,
+    angle: f64,
+) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+    let _ = scene.rng_mut().next_u64();
+    let _ = scene.rng_mut().next_u64();
+    let points = [
+        [-0.7_f32, -0.4, 0.0],
+        [0.0, -0.4, 0.0],
+        [0.7, -0.4, 0.0],
+        [0.7, 0.0, 0.0],
+        [0.7, 0.4, 0.0],
+        [0.0, 0.4, 0.0],
+        [-0.7, 0.4, 0.0],
+        [-0.7, 0.0, 0.0],
+        [-0.7, -0.4, 0.0],
+    ];
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+    for (index, point) in points.iter().enumerate() {
+        buffer.write(index, "point", point);
+        buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 1.0]);
+        buffer.write(index, "stroke_width", &[0.0]);
+    }
+    let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+    scene.add(&[root]).unwrap();
+    let mut animation: Box<dyn fmn_anim::Animation> = match kind {
+        TerminalPlayKind::Rotation => Box::new(
+            fmn_anim::Rotating::new(root)
+                .with_angle(angle)
+                .with_about_point([0.2, -0.1, 0.0])
+                .with_config(fmn_anim::AnimConfig {
+                    // The finish sample differs from the final nominal frame.
+                    // This exposes a lost or prematurely executed epilogue.
+                    final_alpha_value: 0.35,
+                    ..fmn_anim::AnimConfig::default()
+                }),
+        ),
+        TerminalPlayKind::FadeOut => {
+            Box::new(fmn_anim::fade_out(scene.stage_mut(), root, [1.25, -0.5, 0.0], 0.6).unwrap())
+        }
+        TerminalPlayKind::Replacement => {
+            let buffer = scene.stage().get(root).unwrap().buffer.deep_clone();
+            let target = scene.stage_mut().add(Mobject::from_buffer(buffer));
+            scene.stage_mut().shift(target, [1.5, 0.5, 0.0]);
+            Box::new(
+                fmn_anim::replacement_transform(root, target).with_path_arc(0.75, [0.0, 0.0, 1.0]),
+            )
+        }
+        TerminalPlayKind::VectorFade => Box::new(fmn_anim::v_fade_out(root)),
+        TerminalPlayKind::PassingFlash => Box::new(fmn_anim::show_passing_flash(root, 0.3)),
+    };
+    animation.state_mut().config.suspend_mobject_updating = true;
+    match policy {
+        TerminalPlayPolicy::Native => {}
+        TerminalPlayPolicy::OpaqueRate => {
+            animation.state_mut().config.rate_func = fmn_anim::RateFunc::Base(opaque_play_rate);
+        }
+        TerminalPlayPolicy::DelegatingWrapper => {
+            animation = Box::new(DelegatingPlayAnimation(animation));
+        }
+    }
+    let mut segments = vec![
+        NativeSegment::Play {
+            animations: vec![Box::new(fmn_anim::rotate(root, 0.4))],
+            overrides: fmn_scene::PlayOverrides {
+                run_time_frames: Some(4),
+                ..fmn_scene::PlayOverrides::default()
+            },
+        },
+        NativeSegment::WaitFrames { frames: 2 },
+        NativeSegment::Play {
+            animations: vec![animation],
+            overrides: fmn_scene::PlayOverrides {
+                run_time_frames: Some(8),
+                ..fmn_scene::PlayOverrides::default()
+            },
+        },
+    ];
+    if tail {
+        segments.extend([
+            NativeSegment::WaitFrames { frames: 0 },
+            // BN-02 ceilings this exact f64 to four frames at 30fps.
+            NativeSegment::Wait {
+                duration: Some(0.1),
+            },
+            NativeSegment::WaitFrames { frames: 3 },
+        ]);
+    }
+    NativeSceneProgram::new(scene, segments, if tail { 21 } else { 14 })
+}
+
+fn terminal_play_config(tail: bool) -> NativeWorkerConfig {
+    let mut config = config();
+    config.frame_count = if tail { 22 } else { 15 };
+    config.checkpoint_frames = 1;
+    config.replay = NativeReplayPolicy::Checkpointed;
+    config.source_digest = protocol_digest(b"terminal-prepared-play-v1");
+    config
+}
+
+fn terminal_play_worker(
+    kind: TerminalPlayKind,
+    policy: TerminalPlayPolicy,
+    tail: bool,
+    threads: usize,
+    replay_budget: u64,
+) -> NativeSceneWorker {
+    let mut config = terminal_play_config(tail);
+    config.renderer.threads = threads;
+    config.max_replay_frames = replay_budget;
+    NativeSceneWorker::new(config, move || {
+        terminal_play_program(kind, policy, tail, std::f64::consts::PI * 1.25)
+    })
+    .unwrap()
+}
+
+#[test]
+fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy};
+
+    for kind in [
+        TerminalPlayKind::Rotation,
+        TerminalPlayKind::FadeOut,
+        TerminalPlayKind::Replacement,
+        TerminalPlayKind::VectorFade,
+        TerminalPlayKind::PassingFlash,
+    ] {
+        for saved_frame in [7, 10, 14] {
+            let mut original = terminal_play_worker(kind, TerminalPlayPolicy::Native, true, 1, 100);
+            let entry = commit(&mut original, saved_frame);
+            let saved = checkpoint(&entry, 0);
+            Reader::open(
+                &saved.state,
+                Schema::new(*b"FMNR", 3, 0, 0),
+                Limits::DEFAULT,
+                UnknownPolicy::Strict,
+            )
+            .expect("prepared terminal native play must emit FMNR3");
+            let at_checkpoint = checkpoint_observation(&original);
+            let checkpoint_png = seek(&mut original, saved_frame);
+            let mut expected = Vec::new();
+            for frame in saved_frame + 1..=21 {
+                let rendered = seek(&mut original, frame);
+                expected.push((frame, rendered, checkpoint_observation(&original)));
+            }
+            for threads in [1, 4] {
+                // Only newly emitted suffix frames fit this budget: replaying
+                // the six-frame prefix or saved play would fail.
+                let mut restored =
+                    terminal_play_worker(kind, TerminalPlayPolicy::Native, true, threads, 1);
+                restored
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                    .unwrap();
+                let report = restored.last_restore().unwrap();
+                assert_eq!(report.mode, NativeRestoreMode::Checkpoint);
+                assert_eq!(report.frame, u64::try_from(saved_frame).unwrap());
+                assert_eq!(report.fallback, None);
+                assert_eq!(restored.journal_position(), 1);
+                assert_eq!(restored.last_state_hash(), Some(entry.state_hash));
+                assert_eq!(checkpoint_observation(&restored), at_checkpoint);
+                assert_eq!(png(&seek(&mut restored, saved_frame)), png(&checkpoint_png));
+                let root = restored
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .stage()
+                    .roots()[0];
+                {
+                    let stage = restored.program().unwrap().preview().scene().stage();
+                    assert!(stage.is_animating(root));
+                    assert!(stage.is_updating_suspended(root));
+                }
+                for (frame, rendered, observation) in &expected {
+                    assert_eq!(
+                        png(&seek(&mut restored, *frame)),
+                        png(rendered),
+                        "{kind:?}, saved {saved_frame}, frame {frame}, threads {threads}"
+                    );
+                    // Full Stage bytes include private begin-time copies as
+                    // well as visible roots, so replaying begin is observable.
+                    assert_eq!(
+                        &checkpoint_observation(&restored),
+                        observation,
+                        "{kind:?}, saved {saved_frame}, frame {frame}, threads {threads}"
+                    );
+                    let scene = restored.program().unwrap().preview().scene();
+                    let stage = scene.stage();
+                    if *frame == 14 {
+                        assert!(stage.roots().contains(&root));
+                        assert!(stage.is_animating(root));
+                        assert!(stage.is_updating_suspended(root));
+                        assert_eq!(scene.play_count(), 2);
+                    }
+                    if *frame >= 15 {
+                        assert!(!stage.is_animating(root));
+                        assert!(!stage.is_updating_suspended(root));
+                        match kind {
+                            TerminalPlayKind::Rotation => assert_eq!(stage.roots(), &[root]),
+                            TerminalPlayKind::FadeOut
+                            | TerminalPlayKind::VectorFade
+                            | TerminalPlayKind::PassingFlash => assert!(stage.roots().is_empty()),
+                            TerminalPlayKind::Replacement => {
+                                assert_eq!(stage.roots().len(), 1);
+                                assert_ne!(stage.roots()[0], root);
+                            }
+                        }
+                    }
+                    if *frame == 15 {
+                        // Play epilogue and zero-frame wait both complete once.
+                        assert_eq!(scene.play_count(), 4);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_play_without_waits_preserves_the_unfinished_last_capture() {
+    for frame in [10, 14] {
+        let mut original = terminal_play_worker(
+            TerminalPlayKind::FadeOut,
+            TerminalPlayPolicy::Native,
+            false,
+            1,
+            100,
+        );
+        let entry = commit(&mut original, frame);
+        let expected = checkpoint_observation(&original);
+        let expected_png = seek(&mut original, frame);
+        let mut restored = terminal_play_worker(
+            TerminalPlayKind::FadeOut,
+            TerminalPlayPolicy::Native,
+            false,
+            4,
+            1,
+        );
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        assert_eq!(
+            restored.last_restore().unwrap().mode,
+            NativeRestoreMode::Checkpoint
+        );
+        assert_eq!(checkpoint_observation(&restored), expected);
+        assert_eq!(png(&seek(&mut restored, frame)), png(&expected_png));
+        let scene = restored.program().unwrap().preview().scene();
+        let root = scene.stage().roots()[0];
+        assert!(scene.stage().is_animating(root));
+        assert!(scene.stage().is_updating_suspended(root));
+        assert_eq!(scene.play_count(), 2);
+    }
+}
+
+#[test]
+fn restored_active_play_can_be_checkpointed_again_without_changing_canonical_state() {
+    let make = || {
+        terminal_play_worker(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            1,
+            100,
+        )
+    };
+    let mut original = make();
+    let first = commit(&mut original, 10);
+    let second = commit(&mut original, 11);
+    let mut restored = make();
+    restored
+        .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&first, 0)))
+        .unwrap();
+    let repeated = commit(&mut restored, 11);
+    assert_eq!(repeated.state_hash, second.state_hash);
+    assert_eq!(repeated.checkpoint, second.checkpoint);
+    assert_eq!(
+        checkpoint_observation(&restored),
+        checkpoint_observation(&original)
+    );
+    let mut twice = make();
+    twice
+        .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(
+            &repeated, 1,
+        )))
+        .unwrap();
+    assert_eq!(
+        twice.last_restore().unwrap().mode,
+        NativeRestoreMode::Checkpoint
+    );
+    assert_eq!(twice.journal_position(), 2);
+    assert_eq!(
+        checkpoint_observation(&twice),
+        checkpoint_observation(&original)
+    );
+    for frame in 12..=21 {
+        assert_eq!(
+            png(&seek(&mut twice, frame)),
+            png(&seek(&mut original, frame))
+        );
+        assert_eq!(
+            checkpoint_observation(&twice),
+            checkpoint_observation(&original)
+        );
+    }
+}
+
+#[test]
+fn nonterminal_plays_opaque_rates_and_delegating_lifecycle_wrappers_stay_cold() {
+    for (policy, frame) in [
+        (TerminalPlayPolicy::Native, 2),
+        (TerminalPlayPolicy::OpaqueRate, 10),
+        (TerminalPlayPolicy::DelegatingWrapper, 10),
+    ] {
+        let make = || terminal_play_worker(TerminalPlayKind::Rotation, policy, true, 1, 100);
+        let mut original = make();
+        let entry = commit(&mut original, frame);
+        let expected = checkpoint_observation(&original);
+        let mut restored = make();
+        ACTIVE_PLAY_CALLS.with(|calls| calls.set((0, 0)));
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        let report = restored.last_restore().unwrap();
+        assert_eq!(report.mode, NativeRestoreMode::ColdVerified, "{policy:?}");
+        assert_eq!(
+            report.fallback,
+            Some(fmn_studio::native::NativeCheckpointFallback::UnsupportedSchedule),
+            "{policy:?}"
+        );
+        assert_eq!(checkpoint_observation(&restored), expected);
+        if matches!(policy, TerminalPlayPolicy::DelegatingWrapper) {
+            assert_eq!(ACTIVE_PLAY_CALLS.with(Cell::get), (1, 0));
+        }
+        for next in frame + 1..=21 {
+            assert_eq!(
+                png(&seek(&mut restored, next)),
+                png(&seek(&mut original, next))
+            );
+            assert_eq!(
+                checkpoint_observation(&restored),
+                checkpoint_observation(&original)
+            );
+        }
+        if matches!(policy, TerminalPlayPolicy::DelegatingWrapper) {
+            // One uninterrupted owner and one cold-restored owner each finish.
+            assert_eq!(ACTIVE_PLAY_CALLS.with(Cell::get), (1, 2));
+        }
+    }
+}
+
+#[test]
+fn active_play_restore_rejects_changed_factory_animation_declaration_atomically() {
+    let chosen_angle = Rc::new(Cell::new(1.25));
+    let source_angle = Rc::clone(&chosen_angle);
+    let mut original = NativeSceneWorker::new(terminal_play_config(true), move || {
+        terminal_play_program(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            source_angle.get(),
+        )
+    })
+    .unwrap();
+    let entry = commit(&mut original, 10);
+    let saved = checkpoint(&entry, 0);
+    // Scene construction bytes, seed and supplied source/build digests remain
+    // identical. The original declared animation is the only difference.
+    chosen_angle.set(0.75);
+    let target_angle = Rc::clone(&chosen_angle);
+    let mut restored = NativeSceneWorker::new(terminal_play_config(true), move || {
+        terminal_play_program(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            target_angle.get(),
+        )
+    })
+    .unwrap();
+    let before_png = seek(&mut restored, 2);
+    let before = checkpoint_observation(&restored);
+    let error = restored
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::CheckpointRejected);
+    assert_eq!(checkpoint_observation(&restored), before);
+    assert_eq!(restored.journal_position(), 0);
+    assert_eq!(restored.last_state_hash(), None);
+    assert_eq!(restored.last_restore(), None);
+    assert!(restored.journal_tail().is_empty());
+    assert_eq!(png(&seek(&mut restored, 2)), png(&before_png));
+}
+
+#[test]
+fn rehashed_active_play_continuations_refuse_atomically() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+
+    let make = || {
+        terminal_play_worker(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            1,
+            100,
+        )
+    };
+    let schema = Schema::new(*b"FMNR", 3, 0, 0);
+    let mut original = make();
+    let entry = commit(&mut original, 10);
+    let saved = checkpoint(&entry, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let scene = reader.get_str().unwrap();
+    let position = reader.get_u64().unwrap();
+    let read_count = reader.get_u32().unwrap();
+    let mut reads = Vec::new();
+    for _ in 0..read_count {
+        reads.push((reader.get_str().unwrap(), reader.get_bytes().unwrap()));
+    }
+    let factory = reader.get_bytes().unwrap();
+    let frame = reader.get_u64().unwrap();
+    let shape = [reader.get_u64().unwrap(), reader.get_u64().unwrap()];
+    let started = reader.get_u64().unwrap();
+    let effects = reader.get_u8().unwrap();
+    let completed_plays = reader.get_u64().unwrap();
+    let admitted_segments = reader.get_u64().unwrap();
+    let remaining_waits = reader.get_u64().unwrap();
+    let declaration = reader.get_bytes().unwrap();
+    assert_eq!(declaration.len(), 32);
+    let mut changed_declaration = declaration.to_vec();
+    changed_declaration[0] ^= 1;
+    let play = reader.get_bytes().unwrap();
+    let state = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    assert_eq!(
+        (frame, started, completed_plays, remaining_waits),
+        (10, 3, 2, 3)
+    );
+    let mut restored = make();
+    restored
+        .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+        .unwrap();
+    let before = checkpoint_observation(&restored);
+    let before_png = seek(&mut restored, 10);
+    let before_report = restored.last_restore();
+    for case in [
+        "clock changed",
+        "nonfinite shape",
+        "started count changed",
+        "unknown effects",
+        "completed plays changed",
+        "completed plays overflow",
+        "admitted count too small",
+        "admitted count overflow",
+        "missing remaining wait",
+        "remaining waits overflow",
+        "changed declaration",
+        "missing declaration",
+        "overlong declaration",
+        "empty prepared play",
+        "invalid prepared play",
+        "invalid scene state",
+    ] {
+        let mut bad_frame = frame;
+        let mut bad_shape = shape;
+        let mut bad_started = started;
+        let mut bad_effects = effects;
+        let mut bad_completed = completed_plays;
+        let mut bad_admitted = admitted_segments;
+        let mut bad_remaining = remaining_waits;
+        let mut bad_declaration = declaration;
+        let mut bad_play = play;
+        let mut bad_state = state;
+        match case {
+            "clock changed" => bad_frame += 1,
+            "nonfinite shape" => bad_shape[0] = f64::NAN.to_bits(),
+            "started count changed" => bad_started += 1,
+            "unknown effects" => bad_effects |= 128,
+            "completed plays changed" => bad_completed += 1,
+            "completed plays overflow" => bad_completed = u64::MAX,
+            "admitted count too small" => bad_admitted = 0,
+            "admitted count overflow" => bad_admitted = u64::MAX,
+            "missing remaining wait" => bad_remaining -= 1,
+            "remaining waits overflow" => bad_remaining = u64::MAX,
+            "changed declaration" => bad_declaration = &changed_declaration,
+            "missing declaration" => bad_declaration = &[],
+            "overlong declaration" => bad_declaration = &[0; 33],
+            "empty prepared play" => bad_play = &[],
+            "invalid prepared play" => bad_play = b"not a prepared native play",
+            "invalid scene state" => bad_state = b"not a SceneState",
+            _ => unreachable!(),
+        }
+        let mut writer = Writer::new(schema);
+        writer.put_str(scene).put_u64(position).put_u32(read_count);
+        for (path, digest) in &reads {
+            writer.put_str(path).put_bytes(digest);
+        }
+        writer
+            .put_bytes(factory)
+            .put_u64(bad_frame)
+            .put_u64(bad_shape[0])
+            .put_u64(bad_shape[1])
+            .put_u64(bad_started)
+            .put_u8(bad_effects)
+            .put_u64(bad_completed)
+            .put_u64(bad_admitted)
+            .put_u64(bad_remaining)
+            .put_bytes(bad_declaration)
+            .put_bytes(bad_play)
+            .put_bytes(bad_state);
+        let bytes = writer.finish().unwrap();
+        let error = restored
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                state_hash: protocol_digest(&bytes),
+                state: bytes,
+                ..saved.clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected, "{case}");
+        assert_eq!(checkpoint_observation(&restored), before, "{case}");
+        assert_eq!(restored.journal_position(), 1, "{case}");
+        assert_eq!(restored.last_state_hash(), Some(entry.state_hash), "{case}");
+        assert_eq!(restored.last_restore(), before_report, "{case}");
+        assert!(restored.journal_tail().is_empty(), "{case}");
+    }
+    assert_eq!(png(&seek(&mut restored, 10)), png(&before_png));
+}
+
+fn active_play_checkpoint_with_wrong_schema(saved: &Checkpoint, starting: bool) -> Checkpoint {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+
+    let schema = Schema::new(*b"FMNR", 3, 0, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let mut writer = Writer::new(schema);
+    writer
+        .put_str(reader.get_str().unwrap())
+        .put_u64(reader.get_u64().unwrap());
+    let read_count = reader.get_u32().unwrap();
+    writer.put_u32(read_count);
+    for _ in 0..read_count {
+        writer
+            .put_str(reader.get_str().unwrap())
+            .put_bytes(reader.get_bytes().unwrap());
+    }
+    writer.put_bytes(reader.get_bytes().unwrap()); // Factory identity.
+    for _ in 0..4 {
+        // Frame, both frame-shape components, and started-segment count.
+        writer.put_u64(reader.get_u64().unwrap());
+    }
+    writer.put_u8(reader.get_u8().unwrap());
+    for _ in 0..3 {
+        // Completed plays, admitted segments, and remaining waits.
+        writer.put_u64(reader.get_u64().unwrap());
+    }
+    writer.put_bytes(reader.get_bytes().unwrap()); // Declaration identity.
+    let play = reader.get_bytes().unwrap();
+    let scene_bytes = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+    scene.restore_state_bytes(scene_bytes).unwrap();
+    let mut clock = fmn_anim::RationalFrameClock::new(scene.fps()).unwrap();
+    clock.advance_frames(scene.time().frames()).unwrap();
+    let (animations, _) = fmn_anim::continuation::restore(scene.stage(), &clock, play).unwrap();
+    let target = if starting {
+        animations[0].state().starting_mobject().unwrap()
+    } else {
+        animations[0].state().mobject()
+    };
+    let len = scene.stage().get(target).unwrap().buffer.len();
+    assert!(len > 0);
+    scene.stage_mut().get_mut(target).unwrap().buffer =
+        RecordBuffer::new(RecordSchema::mobject(), len).unwrap();
+    let changed_scene = scene.state_bytes().unwrap();
+    writer.put_bytes(play).put_bytes(&changed_scene);
+    let state = writer.finish().unwrap();
+    Checkpoint {
+        state_hash: protocol_digest(&state),
+        state,
+        ..saved.clone()
+    }
+}
+
+#[test]
+fn active_vector_fade_and_partial_reveal_reject_wrong_prepared_schemas_atomically() {
+    for kind in [TerminalPlayKind::VectorFade, TerminalPlayKind::PassingFlash] {
+        let make = || terminal_play_worker(kind, TerminalPlayPolicy::Native, true, 1, 100);
+        let mut original = make();
+        let entry = commit(&mut original, 10);
+        let saved = checkpoint(&entry, 0);
+        let mut restored = make();
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap();
+        assert_eq!(
+            restored.last_restore().unwrap().mode,
+            NativeRestoreMode::Checkpoint
+        );
+        let before = checkpoint_observation(&restored);
+        let before_png = seek(&mut restored, 10);
+        let before_report = restored.last_restore();
+        for starting in [false, true] {
+            // All three document checksums and the outer digest are correct.
+            // The malformed buffer preserves its handle, family and flags;
+            // only the mechanism's required VMobject schema has changed.
+            let malformed = active_play_checkpoint_with_wrong_schema(&saved, starting);
+            let error = restored
+                .handle(SupervisorRequest::RestoreCheckpoint(malformed))
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                WorkerErrorCode::CheckpointRejected,
+                "{kind:?}, starting {starting}"
+            );
+            assert_eq!(checkpoint_observation(&restored), before);
+            assert_eq!(restored.journal_position(), 1);
+            assert_eq!(restored.last_state_hash(), Some(entry.state_hash));
+            assert_eq!(restored.last_restore(), before_report);
+            assert!(restored.journal_tail().is_empty());
+            assert_eq!(png(&seek(&mut restored, 10)), png(&before_png));
+        }
+        assert_eq!(png(&seek(&mut restored, 15)), png(&seek(&mut original, 15)));
+        assert_eq!(
+            checkpoint_observation(&restored),
+            checkpoint_observation(&original)
+        );
+    }
+}

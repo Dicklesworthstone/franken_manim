@@ -408,7 +408,7 @@ impl std::fmt::Display for PureFrameRefusal {
 
 impl std::error::Error for PureFrameRefusal {}
 
-fn freeze_animations(
+pub(crate) fn freeze_animations(
     stage: &Stage,
     animations: &[Box<dyn Animation>],
 ) -> Result<Vec<FrozenAnimation>, PureFrameRefusal> {

@@ -12443,7 +12443,11 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     };
 
     let (members_pre, points_pre) = count_geometry(&built.stage);
-    let members: Vec<_> = built.roots.iter().flat_map(|&root| built.stage.family(root)).collect();
+    let members: Vec<_> = built
+        .roots
+        .iter()
+        .flat_map(|&root| built.stage.family(root))
+        .collect();
     let before = built.stage.snapshot();
     let before_bytes = before
         .to_bytes()
@@ -12454,7 +12458,9 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         .filter(|&&member| before.shares_entry_with(&repeated, member))
         .count() as u64;
     if shared_entries != members_pre {
-        return Err(fail("unchanged lifecycle entries did not share snapshot payloads"));
+        return Err(fail(
+            "unchanged lifecycle entries did not share snapshot payloads",
+        ));
     }
     let original_frame = render_certified_doc(&built.stage);
     let mut stage = built.stage;
@@ -12476,7 +12482,9 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         || render_certified_doc(&consumed) != original_frame
         || render_certified_doc(&stage) == original_frame
     {
-        return Err(fail("lifecycle snapshot sharing changed a retained frame or failed to detach"));
+        return Err(fail(
+            "lifecycle snapshot sharing changed a retained frame or failed to detach",
+        ));
     }
 
     ctx.event(

@@ -327,7 +327,7 @@ impl NativeSceneWorker {
         let fallback = if !restored.edits.is_empty() {
             NativeCheckpointFallback::EditedInput
         } else {
-            match program.checkpoint_admission()? {
+            match program.checkpoint_admission(self.config.limits.max_checkpoint_bytes)? {
                 CheckpointAdmission::Resume(_) => NativeCheckpointFallback::LegacyCheckpoint,
                 CheckpointAdmission::Replay(reason) => reason,
             }

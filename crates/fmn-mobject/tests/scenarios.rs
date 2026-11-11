@@ -692,7 +692,10 @@ fn shared_snapshot_payloads_preserve_indirect_family_invalidation() {
         assert!(!before.shares_entry_with(&after, ancestor));
     }
     assert!(before.shares_entry_with(&after, untouched));
-    assert_eq!(before.materialize().family(top), [top, left, middle, first, right]);
+    assert_eq!(
+        before.materialize().family(top),
+        [top, left, middle, first, right]
+    );
     assert_eq!(
         after.materialize().family(top),
         [top, left, middle, first, second, right]
@@ -700,12 +703,18 @@ fn shared_snapshot_payloads_preserve_indirect_family_invalidation() {
 
     stage.delete(first).unwrap();
     let deleted = stage.snapshot();
-    assert_eq!(deleted.materialize().family(top), [top, left, middle, second, right]);
+    assert_eq!(
+        deleted.materialize().family(top),
+        [top, left, middle, second, right]
+    );
     assert_eq!(
         after.materialize().family(top),
         [top, left, middle, first, second, right]
     );
-    assert_eq!(before.materialize().family(top), [top, left, middle, first, right]);
+    assert_eq!(
+        before.materialize().family(top),
+        [top, left, middle, first, right]
+    );
 }
 
 #[test]
@@ -731,7 +740,10 @@ fn snapshot_payload_reuse_keeps_live_view_isolation_and_detachment() {
         let revision = stage.get(mob).unwrap().buffer.field_revision("point");
         if writable {
             assert!(view.write_foreign(0, "point", &[8.0, 9.0, 0.0]));
-            assert_eq!(stage.get(mob).unwrap().buffer.field_revision("point"), revision);
+            assert_eq!(
+                stage.get(mob).unwrap().buffer.field_revision("point"),
+                revision
+            );
         } else {
             stage
                 .get_mut(mob)
@@ -742,7 +754,12 @@ fn snapshot_payload_reuse_keeps_live_view_isolation_and_detachment() {
         assert_eq!(view.read(0, "point"), Some(vec![8.0, 9.0, 0.0]));
         let changed = stage.snapshot();
         assert_eq!(
-            changed.materialize().get(mob).unwrap().buffer.read(0, "point"),
+            changed
+                .materialize()
+                .get(mob)
+                .unwrap()
+                .buffer
+                .read(0, "point"),
             Some(vec![8.0, 9.0, 0.0])
         );
         assert_eq!(first.to_bytes().unwrap(), original_bytes);
@@ -793,7 +810,10 @@ fn snapshot_payloads_preserve_proxy_pins_and_pending_deletion() {
     assert!(!stage.contains(replacement));
     assert_eq!(stage.snapshot_bytes().unwrap(), pinned_bytes);
     stage.unpin(mob);
-    assert!(stage.contains(mob), "the restored pin predates pending deletion");
+    assert!(
+        stage.contains(mob),
+        "the restored pin predates pending deletion"
+    );
 }
 
 #[test]
@@ -807,7 +827,11 @@ fn shared_snapshot_render_handoffs_keep_old_values_without_callbacks() {
     let calls = Rc::new(Cell::new(0));
     let callback_calls = Rc::clone(&calls);
     stage
-        .add_updater(mob, move |_, _| callback_calls.set(callback_calls.get() + 1), false)
+        .add_updater(
+            mob,
+            move |_, _| callback_calls.set(callback_calls.get() + 1),
+            false,
+        )
         .unwrap();
     let snapshot = stage.snapshot();
     let repeated = stage.snapshot();

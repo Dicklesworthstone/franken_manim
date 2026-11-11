@@ -5,7 +5,9 @@
 //! consume the same rational cue requests as the native scene runtime.
 
 use super::*;
-use fmn_output::{AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy};
+use fmn_output::{
+    AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy,
+};
 use pyo3::exceptions::PyAttributeError;
 use pyo3::types::PyBool;
 

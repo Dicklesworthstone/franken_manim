@@ -107,19 +107,19 @@ impl RevealBounds {
 /// starting copy.
 #[derive(Debug, Clone)]
 pub struct ShowPartial {
-    state: AnimState,
-    bounds: RevealBounds,
-    geometry: PartialGeometry,
+    pub(crate) state: AnimState,
+    pub(crate) bounds: RevealBounds,
+    pub(crate) geometry: PartialGeometry,
     /// Stored-but-never-read in the pinned Reference (creation.py:30) —
     /// kept as inert constructor surface for the Parity Ledger.
-    should_match_start: bool,
+    pub(crate) should_match_start: bool,
     /// `ShowPassingFlash.finish` restores every pair to the full run
     /// (indication.py:188); runs in the [`Animation::teardown`] slot.
-    restore_on_teardown: bool,
+    pub(crate) restore_on_teardown: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PartialGeometry {
+pub(crate) enum PartialGeometry {
     QuadraticPath,
     SurfaceGrid {
         resolution: (usize, usize),
@@ -164,32 +164,9 @@ impl ShowPartial {
     pub fn should_match_start(&self) -> bool {
         self.should_match_start
     }
-}
 
-impl Animation for ShowPartial {
-    fn state(&self) -> &AnimState {
-        &self.state
-    }
-
-    fn state_mut(&mut self) -> &mut AnimState {
-        &mut self.state
-    }
-
-    /// Pure: every write is `pointwise_become_partial(start, bounds(α))` —
-    /// a function of the begin snapshot and alpha alone.
-    fn effect_signature(&self) -> AnimationSignature {
-        AnimationSignature::Pure
-    }
-
-    /// Freeze the prepared reveal rule; schema validation remains in begin.
-    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
-        crate::pure_frame::FrozenAnimation::partial(self.clone())
-    }
-
-    /// Validate the selected typed geometry up front, so interpolation can
-    /// never silently skip a schema or grid mismatch.
-    fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
-        let mobject = self.state.mobject();
+    /// Check the typed reveal geometry without beginning or mutating it.
+    pub(crate) fn validate_geometry(&self, stage: &Stage, mobject: Mob) -> Result<(), AnimError> {
         if !stage.contains(mobject) {
             return Err(AnimError::StaleHandle(mobject));
         }
@@ -244,6 +221,33 @@ impl Animation for ShowPartial {
             }
         }
         Ok(())
+    }
+}
+
+impl Animation for ShowPartial {
+    fn state(&self) -> &AnimState {
+        &self.state
+    }
+
+    fn state_mut(&mut self) -> &mut AnimState {
+        &mut self.state
+    }
+
+    /// Pure: every write is `pointwise_become_partial(start, bounds(α))` —
+    /// a function of the begin snapshot and alpha alone.
+    fn effect_signature(&self) -> AnimationSignature {
+        AnimationSignature::Pure
+    }
+
+    /// Freeze the prepared reveal rule; schema validation remains in begin.
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        crate::pure_frame::FrozenAnimation::partial(self.clone())
+    }
+
+    /// Validate the selected typed geometry up front, so interpolation can
+    /// never silently skip a schema or grid mismatch.
+    fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        self.validate_geometry(stage, self.state.mobject())
     }
 
     fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], sub_alpha: f64) {

@@ -482,13 +482,13 @@ impl TargetPrep {
 /// function.
 #[derive(Debug, Clone)]
 pub struct Transform {
-    state: AnimState,
-    target: Mob,
-    target_copy: Option<Mob>,
-    path: PathFunc,
-    replace_in_scene: bool,
-    start_prep: Option<StartPrep>,
-    target_prep: Option<TargetPrep>,
+    pub(crate) state: AnimState,
+    pub(crate) target: Mob,
+    pub(crate) target_copy: Option<Mob>,
+    pub(crate) path: PathFunc,
+    pub(crate) replace_in_scene: bool,
+    pub(crate) start_prep: Option<StartPrep>,
+    pub(crate) target_prep: Option<TargetPrep>,
     interpolation_scratch: FieldInterpolationScratch,
 }
 

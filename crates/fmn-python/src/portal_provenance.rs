@@ -35,10 +35,7 @@ const SUITE_LOCK_TEXT: &str = include_str!("../../../SUITE.lock");
 
 /// Optional PCM reduction is a separate bit-affecting output configuration.
 /// Absent/None preserves the established no-dither certified closure.
-fn audio_reduction_item(
-    format: &str,
-    report: &Bound<'_, PyDict>,
-) -> PyResult<Option<ClosureItem>> {
+fn audio_reduction_item(format: &str, report: &Bound<'_, PyDict>) -> PyResult<Option<ClosureItem>> {
     let value = match report.get_item("audio_dither_seed")? {
         None => return Ok(None),
         Some(value) if value.is_none() => return Ok(None),
@@ -859,7 +856,10 @@ mod tests {
             assert_eq!(zero.virtual_path.as_deref(), Some("audio/pcm-reduction"));
             assert_eq!(
                 zero.digest,
-                audio_reduction_item("wav", &report).unwrap().unwrap().digest
+                audio_reduction_item("wav", &report)
+                    .unwrap()
+                    .unwrap()
+                    .digest
             );
             report.set_item("audio_dither_seed", u64::MAX).unwrap();
             let largest = audio_reduction_item("wav", &report).unwrap().unwrap();

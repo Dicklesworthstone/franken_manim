@@ -631,6 +631,46 @@ pub struct OpenSegment {
 }
 
 impl OpenSegment {
+    /// Reconstitute only a completed-frame cursor whose native carriers have
+    /// already been validated by the durable continuation decoder. No begin,
+    /// alpha-zero interpolation or lifecycle work runs at this boundary.
+    pub(crate) fn resume_closed(
+        clock: &RationalFrameClock,
+        segment: FrameSegment,
+        base_frame: i64,
+        stepped: i64,
+    ) -> Result<Self, AnimError> {
+        if segment.end_time().fps() != clock.fps()
+            || segment.n_frames() <= 0
+            || base_frame < 0
+            || stepped < 0
+            || stepped > segment.n_frames()
+            || base_frame.checked_add(segment.n_frames()).is_none()
+            || base_frame.checked_add(stepped) != Some(clock.now().frames())
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "play continuation disagrees with its original grid or restored clock",
+            ));
+        }
+        Ok(Self {
+            report: SegmentReport {
+                kind: SegmentKind::Play,
+                purity: Purity::Pure,
+                begin_state: None,
+                base_frame,
+                n_frames: segment.n_frames(),
+                run_time: segment.run_time(),
+            },
+            segment,
+            stepped,
+            current_sample: None,
+            next_animation: 0,
+            prepared: None,
+            animations_finished: false,
+            final_updaters_completed: false,
+        })
+    }
+
     /// The segment's journal record (classification, begin state, frame
     /// range).
     #[must_use]

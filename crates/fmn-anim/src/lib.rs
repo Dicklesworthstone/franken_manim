@@ -50,6 +50,7 @@ pub mod apply_method;
 pub mod bundle;
 pub mod clock;
 pub mod composition;
+pub mod continuation;
 pub mod creation;
 pub mod fading;
 pub mod frame;

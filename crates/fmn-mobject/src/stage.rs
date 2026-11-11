@@ -1436,6 +1436,23 @@ impl Stage {
         self.get(mob).is_some()
     }
 
+    /// Durable coordinates of a live handle in this arena's snapshot.
+    /// Process-local stage identity is excluded. Foreign and stale handles
+    /// cannot be exported as references into this snapshot.
+    #[must_use]
+    pub fn snapshot_handle(&self, mob: Mob) -> Option<(u32, u32)> {
+        self.get(mob).map(|_| mob.parts())
+    }
+
+    /// Resolve coordinates against an already restored matching snapshot.
+    /// The generation is checked before a handle in this arena is returned.
+    /// The enclosing durable document must bind the matching snapshot identity.
+    #[must_use]
+    pub fn resolve_snapshot_handle(&self, index: u32, generation: u32) -> Option<Mob> {
+        let mob = Mob::from_parts(self.id, index, generation);
+        self.contains(mob).then_some(mob)
+    }
+
     // ---------------------------------------------------- add and compose
 
     /// Move a detached mobject (and its detached children, recursively)
@@ -3397,12 +3414,7 @@ impl Stage {
             slots: self
                 .slots
                 .iter()
-                .map(|slot| {
-                    (
-                        slot.generation,
-                        slot.entry.as_ref().map(Entry::snapshot),
-                    )
-                })
+                .map(|slot| (slot.generation, slot.entry.as_ref().map(Entry::snapshot)))
                 .collect(),
             free: self.free.clone(),
             roots: self.roots.clone(),

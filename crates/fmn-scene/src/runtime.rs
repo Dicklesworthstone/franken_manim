@@ -356,6 +356,16 @@ impl From<PersistError> for SceneError {
     }
 }
 
+impl From<fmn_anim::continuation::Error> for SceneError {
+    fn from(error: fmn_anim::continuation::Error) -> Self {
+        match error {
+            fmn_anim::continuation::Error::Serial(error) => Self::Serialize(error),
+            fmn_anim::continuation::Error::Animation(error) => Self::Animation(error),
+            fmn_anim::continuation::Error::Invalid(reason) => Self::InvalidState(reason),
+        }
+    }
+}
+
 impl From<SerialError> for SceneError {
     fn from(error: SerialError) -> Self {
         Self::Serialize(error)
@@ -1345,6 +1355,97 @@ impl Scene {
             pure_seek,
             sink_error: None,
         }))
+    }
+
+    /// Capture prepared native interpolation and its pending finish/cleanup.
+    /// The enclosing checkpoint also stores SceneState; no lifecycle work or
+    /// frame sampling runs here. Unsupported carriers/rates and current effects
+    /// return None so an owning front end can use its ordinary replay fallback.
+    ///
+    /// # Errors
+    /// An unfinished frame, invalid native state, failed scene, or byte budget.
+    pub fn checkpoint_stepped_play(
+        &self,
+        play: &SteppedPlay,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if !self.allows_unobserved_advance()
+            || play.sink_error.is_some()
+            || self.event_error.is_some()
+            || !self.stepped_play_purity(play).is_pure()
+        {
+            return Ok(None);
+        }
+        fmn_anim::continuation::capture(
+            &self.stage,
+            &self.clock,
+            &play.animations,
+            &play.open,
+            max_bytes,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Resume a closed play after its matching SceneState has been restored.
+    /// Exact clocks, prepared families, native kinds and generation references
+    /// are validated before this Scene changes. Begin, preparation, zero-dt
+    /// updates and already completed samples are never repeated. The ordinary
+    /// finish operation still consumes the pending epilogue exactly once.
+    ///
+    /// # Errors
+    /// Failed/unbound state, open external effects, or an invalid continuation.
+    pub fn resume_stepped_play(&mut self, bytes: &[u8]) -> Result<SteppedPlay, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if !self.allows_unobserved_advance()
+            || self.event_error.is_some()
+            || self.play_count == u64::MAX
+        {
+            return Err(SceneError::InvalidLifecycle(
+                "cannot resume a native play with failed or externally owned effects",
+            ));
+        }
+        let (animations, open) = fmn_anim::continuation::restore(&self.stage, &self.clock, bytes)?;
+        self.frame_duration_requested |= animations
+            .iter()
+            .any(|animation| animation.state().config.run_time_frames.is_some());
+        self.preflight_done = true;
+        Ok(SteppedPlay {
+            animations,
+            open,
+            // A later restored state is not the historical begin snapshot.
+            // Ordinary exact stepping remains available without inventing one.
+            pure_seek: None,
+            sink_error: None,
+        })
+    }
+
+    /// Read a supported factory play's complete native declaration as data.
+    /// Timing overrides are applied to known native clones; no rate callback,
+    /// begin hook, target preparation or stage mutation is executed.
+    ///
+    /// # Errors
+    /// Invalid declared handles or bounded encoding failure.
+    pub fn play_declaration_bytes(
+        &self,
+        animations: &[Box<dyn Animation>],
+        overrides: &PlayOverrides,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, SceneError> {
+        fmn_anim::continuation::declaration_bytes(
+            &self.stage,
+            animations,
+            fmn_anim::continuation::DeclarationOverrides {
+                run_time: overrides.run_time,
+                run_time_frames: overrides.run_time_frames,
+                rate_func: overrides.rate_func.as_ref(),
+                lag_ratio: overrides.lag_ratio,
+            },
+            max_bytes,
+        )
+        .map_err(Into::into)
     }
 
     /// Advance at most `max_frames` within a seekable pure play, returning the
