@@ -333,7 +333,8 @@ fn duplicate_roots_and_edges_are_not_silently_deduplicated() {
     ));
     source.roots.pop();
     let entry = source.slots[root.parts().0 as usize].1.as_mut().unwrap();
-    entry.submobjects.push(entry.submobjects[0]);
+    let duplicate_child = entry.submobjects[0];
+    entry.submobjects.push(duplicate_child);
     assert!(matches!(
         source.to_render_bytes(),
         Err(RenderSnapshotError::InvalidGraph("duplicate child edge"))
@@ -384,7 +385,8 @@ fn handle_generations_and_unrooted_parents_do_not_leak_into_picture_identity() {
     for (generation, slot) in &mut snapshot.slots {
         *generation = 7;
         if let Some(slot) = slot {
-            for handle in slot.submobjects.iter_mut().chain(&mut slot.parents) {
+            let data = &mut **slot;
+            for handle in data.submobjects.iter_mut().chain(&mut data.parents) {
                 *handle = Mob::from_parts(snapshot.stage_id, handle.parts().0, 7);
             }
         }

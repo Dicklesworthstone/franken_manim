@@ -50,7 +50,7 @@ use fmn_core::types::Vec3;
 
 use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::{ShapeSlot, ShapeTag};
-use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
+use crate::stage::{Mob, Snapshot, SnapshotEntry, SnapshotEntryData, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
 use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
@@ -1176,7 +1176,7 @@ impl Snapshot {
             &mut budget,
             slot_count,
             5,
-            std::mem::size_of::<(u32, Option<SnapshotEntry>)>(),
+            std::mem::size_of::<(u32, Option<SnapshotEntry>)>() + SnapshotEntry::ALLOCATION_BYTES,
             "arena slot table",
         )?;
         let mut slots: Vec<(u32, Option<SnapshotEntry>)> = Vec::new();
@@ -1393,7 +1393,7 @@ impl Snapshot {
                 }
                 // Minor 1.2 appended the scene-sort key (§8.5).
                 let z_index = if r.version().1 >= 2 { r.get_i32()? } else { 0 };
-                Some(SnapshotEntry {
+                Some(SnapshotEntry::new(SnapshotEntryData {
                     buffer,
                     placement: Placement::IDENTITY,
                     placement_revision: 0,
@@ -1418,7 +1418,7 @@ impl Snapshot {
                     image: None,
                     image_revision: 0,
                     family_cache: None,
-                })
+                }))
             } else {
                 None
             };

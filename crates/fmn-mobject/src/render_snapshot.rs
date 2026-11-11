@@ -19,7 +19,7 @@ use fmn_hash::{Limits, SerialError};
 
 use crate::StageError;
 use crate::shape::ShapeSlot;
-use crate::stage::{Mob, Snapshot, SnapshotEntry};
+use crate::stage::{Mob, Snapshot, SnapshotEntry, SnapshotEntryData};
 
 /// Graph workspace admitted while projecting a recorded frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +263,7 @@ fn project(
     };
     let mut slots = Vec::new();
     budget.reserve(&mut slots, order.len(), "projected slots")?;
+    budget.charge::<[u8; SnapshotEntry::ALLOCATION_BYTES]>(order.len(), "projected metadata")?;
     for &mob in &order {
         let source = entry(snapshot, mob)?;
         let mut children = Vec::new();
@@ -294,7 +295,7 @@ fn project(
         };
         slots.push((
             0,
-            Some(SnapshotEntry {
+            Some(SnapshotEntry::new(SnapshotEntryData {
                 buffer,
                 placement: source.placement,
                 placement_revision: 0,
@@ -317,7 +318,7 @@ fn project(
                 image: source.image.clone(),
                 image_revision: u64::from(source.image.is_some()),
                 family_cache: None,
-            }),
+            })),
         ));
     }
     // Rebuild reciprocal parents in canonical source/child order. Filtering

@@ -1,6 +1,6 @@
 //! The ten G0-1 lifetime scenarios as fmn-mobject's **permanent regression
 //! suite** (fm-ce8), plus the arena acceptance tests: generational safety,
-//! O(touched) snapshot cost, family-cache invalidation, and cycle refusal.
+//! shared snapshot payloads, family-cache invalidation, and cycle refusal.
 
 use fmn_mobject::{Mob, Mobject, Stage, StageError};
 
@@ -598,10 +598,10 @@ fn stateful_and_fallible_callbacks_receive_their_post_rollback_identity() {
     assert_ne!(fallible_state, dt);
 }
 
-// Snapshot cost is O(touched), not O(scene): untouched entries share
-// storage with the snapshot; only written entries diverge.
+// Captures still visit the slot table. Unchanged record and entry payloads
+// share storage; only touched entries detach their retained snapshot payload.
 #[test]
-fn snapshot_cost_is_o_touched() {
+fn snapshot_payloads_only_detach_for_touched_entries() {
     let mut stage = Stage::new();
     let mobs: Vec<Mob> = (0..16).map(|_| stage.add(square())).collect();
     for &m in &mobs {
@@ -619,14 +619,16 @@ fn snapshot_cost_is_o_touched() {
         .collect();
 
     let snapshot = stage.snapshot();
-    // Taking the snapshot copied nothing (no live views anywhere) and shared
-    // CoW metadata vectors across the snapshot boundary.
+    let repeated = stage.snapshot();
+    let bytes_before = snapshot.to_bytes().unwrap();
+    assert_eq!(repeated.to_bytes().unwrap(), bytes_before);
     for ((m, id), meta) in mobs.iter().zip(&ids_before).zip(&meta_before) {
+        assert!(snapshot.shares_entry_with(&repeated, *m));
         assert_eq!(stage.get(*m).unwrap().buffer.storage_id(), *id);
         assert_eq!(stage.get(*m).unwrap().metadata_storage_id(), *meta);
     }
 
-    // Touch exactly one entry's buffer and metadata.
+    // Touch exactly one parent's buffer and metadata.
     stage
         .get_mut(mobs[3])
         .unwrap()
@@ -635,9 +637,11 @@ fn snapshot_cost_is_o_touched() {
     let extra_child = stage.add(square());
     stage.attach(mobs[3], extra_child).unwrap();
     stage.add_updater(mobs[3], |_, _| {}, false).unwrap();
+    let changed = stage.snapshot();
     for (i, ((m, id), meta)) in mobs.iter().zip(&ids_before).zip(&meta_before).enumerate() {
         let now = stage.get(*m).unwrap().buffer.storage_id();
         let meta_now = stage.get(*m).unwrap().metadata_storage_id();
+        assert_eq!(snapshot.shares_entry_with(&changed, *m), i != 3);
         if i == 3 {
             assert_ne!(now, *id, "touched entry must have unshared");
             assert_ne!(meta_now.0, meta.0, "touched submobjects must have unshared");
@@ -652,6 +656,187 @@ fn snapshot_cost_is_o_touched() {
     for (m, meta) in mobs.iter().zip(&meta_before) {
         assert_eq!(restored.get(*m).unwrap().metadata_storage_id(), *meta);
     }
+    assert_eq!(snapshot.to_bytes().unwrap(), bytes_before);
+    assert_eq!(repeated.to_bytes().unwrap(), bytes_before);
+    assert_ne!(changed.to_bytes().unwrap(), bytes_before);
+}
+
+#[test]
+fn shared_snapshot_payloads_preserve_indirect_family_invalidation() {
+    let mut stage = Stage::new();
+    let top = stage.add(Mobject::new());
+    let left = stage.add(Mobject::new());
+    let right = stage.add(Mobject::new());
+    let middle = stage.add(Mobject::new());
+    let first = stage.add(square());
+    let untouched = stage.add(square());
+    for (parent, child) in [
+        (top, left),
+        (top, right),
+        (left, middle),
+        (right, middle),
+        (middle, first),
+    ] {
+        stage.attach(parent, child).unwrap();
+    }
+    assert_eq!(stage.family(top), [top, left, middle, first, right]);
+    assert_eq!(stage.family(left), [left, middle, first]);
+    assert_eq!(stage.family(right), [right, middle, first]);
+    let before = stage.snapshot();
+
+    // Attaching below middle never asks get_mut for top, left, or right.
+    let second = stage.add(square());
+    stage.attach(middle, second).unwrap();
+    let after = stage.snapshot();
+    for ancestor in [top, left, right, middle] {
+        assert!(!before.shares_entry_with(&after, ancestor));
+    }
+    assert!(before.shares_entry_with(&after, untouched));
+    assert_eq!(before.materialize().family(top), [top, left, middle, first, right]);
+    assert_eq!(
+        after.materialize().family(top),
+        [top, left, middle, first, second, right]
+    );
+
+    stage.delete(first).unwrap();
+    let deleted = stage.snapshot();
+    assert_eq!(deleted.materialize().family(top), [top, left, middle, second, right]);
+    assert_eq!(
+        after.materialize().family(top),
+        [top, left, middle, first, second, right]
+    );
+    assert_eq!(before.materialize().family(top), [top, left, middle, first, right]);
+}
+
+#[test]
+fn snapshot_payload_reuse_keeps_live_view_isolation_and_detachment() {
+    for writable in [false, true] {
+        let mut stage = Stage::new();
+        let mob = stage.add(square());
+        let original = stage.snapshot();
+        let original_bytes = original.to_bytes().unwrap();
+        let view = stage.get_mut(mob).unwrap().buffer.export_view(writable);
+        let live_storage = stage.get(mob).unwrap().buffer.storage_id();
+        let first = stage.snapshot();
+        let repeated = stage.snapshot();
+        assert!(!original.shares_entry_with(&first, mob));
+        assert!(!first.shares_entry_with(&repeated, mob));
+        for capture in [&first, &repeated] {
+            assert_ne!(
+                capture.materialize().get(mob).unwrap().buffer.storage_id(),
+                live_storage
+            );
+        }
+
+        let revision = stage.get(mob).unwrap().buffer.field_revision("point");
+        if writable {
+            assert!(view.write_foreign(0, "point", &[8.0, 9.0, 0.0]));
+            assert_eq!(stage.get(mob).unwrap().buffer.field_revision("point"), revision);
+        } else {
+            stage
+                .get_mut(mob)
+                .unwrap()
+                .buffer
+                .write(0, "point", &[8.0, 9.0, 0.0]);
+        }
+        assert_eq!(view.read(0, "point"), Some(vec![8.0, 9.0, 0.0]));
+        let changed = stage.snapshot();
+        assert_eq!(
+            changed.materialize().get(mob).unwrap().buffer.read(0, "point"),
+            Some(vec![8.0, 9.0, 0.0])
+        );
+        assert_eq!(first.to_bytes().unwrap(), original_bytes);
+        assert_eq!(repeated.to_bytes().unwrap(), original_bytes);
+
+        stage.restore(&first);
+        assert!(!view.is_attached_to(&stage.get(mob).unwrap().buffer));
+        assert_eq!(stage.snapshot_bytes().unwrap(), original_bytes);
+        drop(view);
+        let restored = stage.snapshot();
+        let restored_again = stage.snapshot();
+        assert!(restored.shares_entry_with(&restored_again, mob));
+    }
+}
+
+#[test]
+fn snapshot_payloads_preserve_proxy_pins_and_pending_deletion() {
+    let mut stage = Stage::new();
+    let mob = stage.add(square());
+    let untouched = stage.add(square());
+    let unpinned = stage.snapshot();
+    stage.pin(mob).unwrap();
+    let pinned = stage.snapshot();
+    let pinned_bytes = pinned.to_bytes().unwrap();
+    assert!(!unpinned.shares_entry_with(&pinned, mob));
+    assert!(unpinned.shares_entry_with(&pinned, untouched));
+    stage.delete(mob).unwrap();
+    let pending = stage.snapshot();
+    assert!(!pinned.shares_entry_with(&pending, mob));
+    assert!(pinned.shares_entry_with(&pending, untouched));
+
+    let mut pending_branch = pending.materialize();
+    pending_branch.unpin(mob);
+    assert!(!pending_branch.contains(mob));
+    let mut pinned_branch = pinned.materialize();
+    pinned_branch.unpin(mob);
+    assert!(pinned_branch.contains(mob));
+
+    stage.unpin(mob);
+    assert!(!stage.contains(mob));
+    let replacement = stage.add(square());
+    let replaced = stage.snapshot();
+    assert_ne!(replacement, mob);
+    assert!(!pinned.shares_entry_with(&replaced, mob));
+    assert!(!pinned.shares_entry_with(&replaced, replacement));
+    stage.restore(&pinned);
+    assert!(stage.contains(mob));
+    assert!(!stage.contains(replacement));
+    assert_eq!(stage.snapshot_bytes().unwrap(), pinned_bytes);
+    stage.unpin(mob);
+    assert!(stage.contains(mob), "the restored pin predates pending deletion");
+}
+
+#[test]
+fn shared_snapshot_render_handoffs_keep_old_values_without_callbacks() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let mob = stage.add(square());
+    stage.add_to_scene(mob).unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let callback_calls = Rc::clone(&calls);
+    stage
+        .add_updater(mob, move |_, _| callback_calls.set(callback_calls.get() + 1), false)
+        .unwrap();
+    let snapshot = stage.snapshot();
+    let repeated = stage.snapshot();
+    assert!(snapshot.shares_entry_with(&repeated, mob));
+    let consumed = repeated.into_render_state(0.25);
+    stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .write(0, "point", &[99.0, 99.0, 0.0]);
+    let borrowed = snapshot.render_state(0.5);
+
+    for (handoff, expected_time) in [(consumed, 0.25), (borrowed, 0.5)] {
+        std::thread::spawn(move || {
+            let restored = handoff.materialize();
+            assert_eq!(restored.time(), expected_time);
+            assert_eq!(
+                restored.get(mob).unwrap().buffer.read(0, "point"),
+                Some(vec![1.0, 1.0, 0.0])
+            );
+            assert!(restored.updater_ids(mob).is_empty());
+        })
+        .join()
+        .unwrap();
+    }
+    assert_eq!(calls.get(), 0);
+    stage.restore(&snapshot);
+    stage.update(0.125);
+    assert_eq!(calls.get(), 1);
 }
 
 // The family cache invalidates on structural change, transitively through

@@ -12443,9 +12443,41 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     };
 
     let (members_pre, points_pre) = count_geometry(&built.stage);
+    let members: Vec<_> = built.roots.iter().flat_map(|&root| built.stage.family(root)).collect();
+    let before = built.stage.snapshot();
+    let before_bytes = before
+        .to_bytes()
+        .map_err(|error| fail(format!("initial lifecycle snapshot: {error}")))?;
+    let repeated = built.stage.snapshot();
+    let shared_entries = members
+        .iter()
+        .filter(|&&member| before.shares_entry_with(&repeated, member))
+        .count() as u64;
+    if shared_entries != members_pre {
+        return Err(fail("unchanged lifecycle entries did not share snapshot payloads"));
+    }
+    let original_frame = render_certified_doc(&built.stage);
     let mut stage = built.stage;
     scene_goldens::apply_lifecycle_transform(&mut stage, &built.roots, 0);
     let (members_post, points_post) = count_geometry(&stage);
+    let after = stage.snapshot();
+    let detached_entries = members
+        .iter()
+        .filter(|&&member| !before.shares_entry_with(&after, member))
+        .count() as u64;
+    let borrowed = before.render_state(0.0).materialize();
+    let consumed = repeated.into_render_state(0.0).materialize();
+    if detached_entries == 0
+        || before
+            .to_bytes()
+            .map_err(|error| fail(format!("retained lifecycle snapshot: {error}")))?
+            != before_bytes
+        || render_certified_doc(&borrowed) != original_frame
+        || render_certified_doc(&consumed) != original_frame
+        || render_certified_doc(&stage) == original_frame
+    {
+        return Err(fail("lifecycle snapshot sharing changed a retained frame or failed to detach"));
+    }
 
     ctx.event(
         LogEvent::new(e2e::spans::SCENE_CONSTRUCT)
@@ -12458,9 +12490,18 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
             .field("members", members_post)
             .field("points", points_post),
     );
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.snapshot_sharing")
+            .field("shared_entries", shared_entries)
+            .field("detached_entries", detached_entries)
+            .field("frozen_frames_equal", 2_u64),
+    );
     ctx.counter("lifecycle_members", members_pre);
     ctx.counter("lifecycle_points_pre", points_pre);
     ctx.counter("lifecycle_points_post", points_post);
+    ctx.counter("lifecycle_shared_entries", shared_entries);
+    ctx.counter("lifecycle_detached_entries", detached_entries);
+    ctx.counter("lifecycle_frozen_frames_equal", 2);
 
     if members_pre == 0 || points_pre == 0 || points_post == 0 {
         return Err(fail(
@@ -12475,7 +12516,10 @@ fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         .with_artifact("lifecycle.circle_tex_label.construct_transform.v1", bytes)
         .with_counter("lifecycle_members", members_pre)
         .with_counter("lifecycle_points_pre", points_pre)
-        .with_counter("lifecycle_points_post", points_post))
+        .with_counter("lifecycle_points_post", points_post)
+        .with_counter("lifecycle_shared_entries", shared_entries)
+        .with_counter("lifecycle_detached_entries", detached_entries)
+        .with_counter("lifecycle_frozen_frames_equal", 2))
 }
 
 /// Installing a rebuilt value preserves shared placements and retires private history.
@@ -20182,6 +20226,9 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             counter_ge("lifecycle_members", 1),
             counter_ge("lifecycle_points_pre", 1),
             counter_ge("lifecycle_points_post", 1),
+            counter_ge("lifecycle_shared_entries", 1),
+            counter_ge("lifecycle_detached_entries", 1),
+            counter_eq("lifecycle_frozen_frames_equal", 2),
             Assertion::GoldenLock {
                 suite: E2E_SUITE,
                 scope: Scope::Certified,
@@ -20196,6 +20243,14 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 ],
             ),
             LogExpect::event_order(e2e::spans::SCENE_CONSTRUCT, "e2e.lifecycle.transform"),
+            LogExpect::span_present(
+                "e2e.lifecycle.snapshot_sharing",
+                vec![
+                    FieldPred::u64_ge("shared_entries", 1),
+                    FieldPred::u64_ge("detached_entries", 1),
+                    FieldPred::u64_eq("frozen_frames_equal", 2),
+                ],
+            ),
         ],
     ));
     specs.push(spec(
