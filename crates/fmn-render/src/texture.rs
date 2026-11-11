@@ -150,6 +150,8 @@ pub enum TextureSource {
     },
     /// Caller-provided RGBA bytes.
     Rgba8(TextureEncoding),
+    /// Caller-provided premultiplied linear `f32` texels, kept as given.
+    PremultipliedLinear,
 }
 
 /// Resource budgets declared before decoding untrusted texture input.
@@ -197,6 +199,19 @@ pub enum TextureError {
         /// Lowercase extension or `unknown`.
         format: String,
     },
+    /// Premultiplied texels and dimensions disagree.
+    TexelCount {
+        /// Texels required by the dimensions.
+        expected: usize,
+        /// Texels supplied.
+        got: usize,
+    },
+    /// A premultiplied texel is not a colour: a component is not finite, a
+    /// colour component is negative, or alpha is outside `[0, 1]`.
+    InvalidTexel {
+        /// The texel's index, row-major from the top row.
+        index: usize,
+    },
 }
 
 impl std::fmt::Display for TextureError {
@@ -221,6 +236,15 @@ impl std::fmt::Display for TextureError {
                 "{format} texture requires the optional ffmpeg image-transcode capability; \
                  convert to PNG/JPEG or enable ffmpeg"
             ),
+            Self::TexelCount { expected, got } => write!(
+                f,
+                "premultiplied texture has {got} texels, dimensions require {expected}"
+            ),
+            Self::InvalidTexel { index } => write!(
+                f,
+                "premultiplied texel {index} is not finite, has a negative colour component, \
+                 or has alpha outside [0, 1]"
+            ),
         }
     }
 }
@@ -237,6 +261,48 @@ impl From<JpegError> for TextureError {
     fn from(error: JpegError) -> Self {
         Self::Jpeg(error)
     }
+}
+
+/// The content address of premultiplied linear texels: the texture schema's
+/// header, the dimensions, transfer tag 3 (premultiplied linear `f32`), the
+/// payload length and every component's little-endian bytes, sealed by its
+/// own checksum as `rgba_identity` seals RGBA bytes.
+fn texel_identity(width: u32, height: u32, texels: &[[f32; 4]]) -> Result<Digest, TextureError> {
+    const TEXELS_PER_CHUNK: usize = 256;
+    let payload_bytes = u64::try_from(texels.len())
+        .ok()
+        .and_then(|count| count.checked_mul(16))
+        .ok_or(TextureError::InvalidDimensions)?;
+    let metadata_len = 4u64 + 4 + 4 + 8;
+    let payload_len = metadata_len
+        .checked_add(payload_bytes)
+        .ok_or(TextureError::InvalidDimensions)?;
+
+    let mut document = Sha256::new();
+    document.update(&TEXTURE_SCHEMA.magic);
+    document.update(&TEXTURE_SCHEMA.id.to_le_bytes());
+    document.update(&TEXTURE_SCHEMA.major.to_le_bytes());
+    document.update(&TEXTURE_SCHEMA.minor.to_le_bytes());
+    document.update(&0u16.to_le_bytes()); // flags
+    document.update(&0u16.to_le_bytes()); // reserved
+    document.update(&payload_len.to_le_bytes());
+    document.update(&width.to_le_bytes());
+    document.update(&height.to_le_bytes());
+    document.update(&3u32.to_le_bytes());
+    document.update(&payload_bytes.to_le_bytes());
+    let mut bytes = [0u8; 16 * TEXELS_PER_CHUNK];
+    for chunk in texels.chunks(TEXELS_PER_CHUNK) {
+        for (texel, out) in chunk.iter().zip(bytes.as_chunks_mut::<16>().0) {
+            for (component, slot) in texel.iter().zip(out.as_chunks_mut::<4>().0) {
+                *slot = component.to_le_bytes();
+            }
+        }
+        document.update(&bytes[..chunk.len() * 16]);
+    }
+
+    let checksum = document.clone().finalize();
+    document.update(checksum.as_bytes());
+    Ok(document.finalize())
 }
 
 fn checked_rgba_layout(width: u32, height: u32, rgba_len: usize) -> Result<usize, TextureError> {
@@ -351,6 +417,52 @@ impl Texture {
             TextureSource::Rgba8(encoding),
             digest,
         )
+    }
+
+    /// Build from premultiplied linear RGBA texels, top row first: the
+    /// representation the samplers filter, kept exactly as given, with no
+    /// transfer function and no 8-bit quantization. For textures computed at
+    /// run time, such as a data field's colours.
+    ///
+    /// # Errors
+    /// [`TextureError::InvalidDimensions`] for empty or unaddressable
+    /// dimensions; [`TextureError::TexelCount`] when `texels` is not
+    /// `width × height` long; [`TextureError::InvalidTexel`] for a component
+    /// that is not finite, a negative colour component, or an alpha outside
+    /// `[0, 1]`.
+    pub fn from_premultiplied_linear(
+        width: u32,
+        height: u32,
+        texels: Vec<[f32; 4]>,
+    ) -> Result<Self, TextureError> {
+        let expected = u64::from(width)
+            .checked_mul(u64::from(height))
+            .filter(|&count| count > 0)
+            .and_then(|count| usize::try_from(count).ok())
+            .ok_or(TextureError::InvalidDimensions)?;
+        if texels.len() != expected {
+            return Err(TextureError::TexelCount {
+                expected,
+                got: texels.len(),
+            });
+        }
+        if let Some(index) = texels.iter().position(|&[r, g, b, a]| {
+            ![r, g, b, a].iter().all(|component| component.is_finite())
+                || r < 0.0
+                || g < 0.0
+                || b < 0.0
+                || !(0.0..=1.0).contains(&a)
+        }) {
+            return Err(TextureError::InvalidTexel { index });
+        }
+        let digest = texel_identity(width, height, &texels)?;
+        Ok(Self {
+            width,
+            height,
+            texels,
+            source: TextureSource::PremultipliedLinear,
+            digest,
+        })
     }
 
     fn from_parts(
@@ -551,6 +663,95 @@ mod tests {
 
     fn close(a: f64, b: f64) -> bool {
         (a - b).abs() <= 2e-6
+    }
+
+    #[test]
+    fn premultiplied_linear_texels_are_kept_and_sampled_as_given() {
+        // Values an 8-bit linear texture would round to zero, and a
+        // half-covered texel.
+        let texels = vec![
+            [0.0006, 0.0009, 0.0024, 1.0],
+            [0.25, 0.125, 0.0625, 0.5],
+            [0.0, 0.0, 0.0, 0.0],
+            [0.9, 0.8, 0.7, 1.0],
+        ];
+        let texture =
+            Texture::from_premultiplied_linear(2, 2, texels.clone()).expect("valid texels");
+        assert_eq!(texture.source(), TextureSource::PremultipliedLinear);
+        assert_eq!((texture.width(), texture.height()), (2, 2));
+        assert_eq!(texture.texels, texels, "stored exactly");
+        let dark = texture.texel(0, 0).expect("texel");
+        assert_eq!(
+            [dark.r, dark.g, dark.b, dark.a],
+            [0.0006_f32, 0.0009, 0.0024, 1.0].map(f64::from)
+        );
+        let half = texture.texel(1, 0).expect("texel");
+        assert!(close(half.r, 0.5) && close(half.g, 0.25) && close(half.b, 0.125));
+        assert!(close(half.a, 0.5));
+        // Between the top texels: the premultiplied mean, unpremultiplied.
+        let between = texture.sample([0.5, 0.25], SamplerPolicy::default());
+        let alpha = (1.0 + 0.5) / 2.0;
+        assert!(close(between.a, alpha));
+        assert!(close(
+            between.r,
+            (f64::from(0.0006_f32) + 0.25) / 2.0 / alpha
+        ));
+    }
+
+    #[test]
+    fn premultiplied_linear_texels_must_be_colours_of_the_given_shape() {
+        let opaque = [0.1, 0.2, 0.3, 1.0];
+        assert_eq!(
+            Texture::from_premultiplied_linear(0, 2, Vec::new()),
+            Err(TextureError::InvalidDimensions)
+        );
+        assert_eq!(
+            Texture::from_premultiplied_linear(2, 2, vec![opaque; 3]),
+            Err(TextureError::TexelCount {
+                expected: 4,
+                got: 3
+            })
+        );
+        for (bad, why) in [
+            ([f32::NAN, 0.0, 0.0, 1.0], "not finite"),
+            ([0.0, f32::INFINITY, 0.0, 1.0], "infinite"),
+            ([0.0, 0.0, -0.001, 1.0], "negative"),
+            ([0.0, 0.0, 0.0, 1.5], "alpha above one"),
+            ([0.0, 0.0, 0.0, -0.5], "alpha below zero"),
+        ] {
+            let mut texels = vec![opaque; 4];
+            texels[2] = bad;
+            assert_eq!(
+                Texture::from_premultiplied_linear(2, 2, texels),
+                Err(TextureError::InvalidTexel { index: 2 }),
+                "{why}"
+            );
+        }
+    }
+
+    #[test]
+    fn premultiplied_linear_identity_follows_every_texel_and_the_shape() {
+        let texels: Vec<[f32; 4]> = (0..600)
+            .map(|index| {
+                let value = index as f32 / 600.0;
+                [value * 0.5, value * 0.25, value * 0.125, 0.5]
+            })
+            .collect();
+        let digest = |width: u32, height: u32, texels: Vec<[f32; 4]>| {
+            Texture::from_premultiplied_linear(width, height, texels)
+                .expect("valid texels")
+                .digest()
+        };
+        let base = digest(30, 20, texels.clone());
+        assert_eq!(base, digest(30, 20, texels.clone()), "stable");
+        assert_ne!(base, digest(20, 30, texels.clone()), "the shape counts");
+        // The last texel sits in the third hashing chunk.
+        let mut last = texels.clone();
+        last[599][3] = 0.25;
+        assert_ne!(base, digest(30, 20, last), "every texel counts");
+        let mut bits = texels;
+        bits[0][0] = f32::from_bits(bits[0][0].to_bits() + 1);
+        assert_ne!(base, digest(30, 20, bits), "every bit counts");
     }
 
     fn policy(wrap: TextureWrap) -> SamplerPolicy {
