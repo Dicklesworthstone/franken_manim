@@ -3601,15 +3601,24 @@ fn append_clipped_triangle(
     // A clipping pass over a polygon whose every vertex is inside its plane
     // returns that polygon unchanged and in order, so a triangle inside every
     // active plane leaves the clipper as itself. Skip the clipper for those
-    // (most of a mesh): the bytes are the clipper's.
-    if let Some(projected) = unclipped(camera, triangle, fixed, clip_planes) {
-        if let Some(triangle) = raster_triangle(projected, camera.pixel_shape()) {
-            budget.reserve_rows(output, PreparationRows::RasterTriangles, 1)?;
-            output.push(triangle);
+    // (most of a mesh): the bytes are the clipper's. A pass over a polygon
+    // whose every vertex is outside its plane returns nothing, so a triangle
+    // the clipper's passes leave unchanged up to a plane it is wholly outside
+    // leaves the clipper empty (off-screen dots): skip the clipper for those
+    // too.
+    match unclipped(camera, triangle, fixed, clip_planes) {
+        Ok(projected) => {
+            if let Some(triangle) = raster_triangle(projected, camera.pixel_shape()) {
+                budget.reserve_rows(output, PreparationRows::RasterTriangles, 1)?;
+                output.push(triangle);
+            }
+            Ok(())
         }
-        return Ok(());
+        Err(Clipper::Empty) => Ok(()),
+        Err(Clipper::Needed) => {
+            append_clipped_polygon(camera, triangle, fixed, clip_planes, output, budget)
+        }
     }
-    append_clipped_polygon(camera, triangle, fixed, clip_planes, output, budget)
 }
 
 /// `distance`'s side as the clippers decide it: on the plane is inside, and
@@ -3618,15 +3627,41 @@ fn inside(distance: f64) -> bool {
     distance >= 0.0
 }
 
+/// What the clipper would do with a triangle it does not return unchanged,
+/// decided without running it.
+#[derive(Debug)]
+enum Clipper {
+    /// Every vertex is inside every active world plane, and at the first
+    /// homogeneous plane (in the clipper's order) not holding all three
+    /// inside, all three are outside: the clipper returns nothing.
+    Empty,
+    /// Anything else: only the clipper can tell.
+    Needed,
+}
+
+/// The distance to homogeneous clip plane `plane` (0 to 5, the clipper's
+/// order: left, right, bottom, top, near, far) of a clip-space point.
+fn homogeneous_distance([x, y, z, w]: [f64; 4], plane: usize) -> f64 {
+    match plane {
+        0 => x + w,
+        1 => w - x,
+        2 => y + w,
+        3 => w - y,
+        4 => z + w,
+        _ => w - z,
+    }
+}
+
 /// `triangle` projected, if every vertex is inside every active world plane
 /// (by the world clipper's own distance) and inside the whole homogeneous clip
-/// volume (by the projected clipper's); otherwise `None`.
+/// volume (by the projected clipper's), as the clipper would return it;
+/// otherwise what the clipper would do, as [`Clipper`] says.
 fn unclipped(
     camera: &Camera,
     triangle: &[WorldVertex; 3],
     fixed: f64,
     clip_planes: [[f64; 4]; 4],
-) -> Option<[ProjectedVertex; 3]> {
+) -> Result<[ProjectedVertex; 3], Clipper> {
     for plane in clip_planes {
         if plane[..3].iter().all(|value| *value == 0.0) {
             continue;
@@ -3634,7 +3669,7 @@ fn unclipped(
         for vertex in triangle {
             let point = vertex.attributes.world;
             if !inside(point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]) {
-                return None;
+                return Err(Clipper::Needed);
             }
         }
     }
@@ -3642,16 +3677,26 @@ fn unclipped(
         clip: camera.project(vertex.attributes.world, fixed).clip,
         attributes: vertex.attributes,
     });
-    for vertex in &projected {
-        let [x, y, z, w] = vertex.clip;
-        if ![x + w, w - x, y + w, w - y, z + w, w - z]
-            .into_iter()
-            .all(inside)
-        {
-            return None;
+    homogeneous_clipper(&projected)?;
+    Ok(projected)
+}
+
+/// What the six homogeneous clipping passes would do with `projected`:
+/// return it unchanged (`Ok`), return nothing, or something only they can
+/// tell, as [`Clipper`] says.
+fn homogeneous_clipper(projected: &[ProjectedVertex; 3]) -> Result<(), Clipper> {
+    for plane in 0..6 {
+        let inside_count = projected
+            .iter()
+            .filter(|vertex| inside(homogeneous_distance(vertex.clip, plane)))
+            .count();
+        match inside_count {
+            3 => {}
+            0 => return Err(Clipper::Empty),
+            _ => return Err(Clipper::Needed),
         }
     }
-    Some(projected)
+    Ok(())
 }
 
 /// The general path: clip against every active world plane, project, clip
@@ -3700,15 +3745,7 @@ fn append_clipped_polygon(
     for plane in 0..6 {
         (projected, projected_len) =
             clip_projected_polygon(&projected[..projected_len], |vertex| {
-                let [x, y, z, w] = vertex.clip;
-                match plane {
-                    0 => x + w,
-                    1 => w - x,
-                    2 => y + w,
-                    3 => w - y,
-                    4 => z + w,
-                    _ => w - z,
-                }
+                homogeneous_distance(vertex.clip, plane)
             })?;
         if projected_len < 3 {
             return Ok(());
@@ -8378,7 +8415,8 @@ mod tests {
         two[1] = [0.3, -0.7, 0.2, 1.5];
         two[3] = [0.0, 1.0, 0.0, 2.0];
         let plane_sets = [none, one, two];
-        let (mut fast, mut general, mut empty, mut split, mut near) = (0, 0, 0, 0, 0);
+        let (mut fast, mut rejected, mut general, mut empty, mut split, mut near) =
+            (0, 0, 0, 0, 0, 0);
         for case in 0..60_000_usize {
             let scale = [0.5, 3.0, 9.0, 40.0][case % 4];
             let center: [f64; 3] = std::array::from_fn(|_| (unit() - 0.5) * scale);
@@ -8451,18 +8489,30 @@ mod tests {
             {
                 near += 1;
             }
-            if unclipped(&camera, &triangle, fixed, planes).is_some() {
-                fast += 1;
-            } else {
-                general += 1;
-                match slow.len() {
-                    0 => empty += 1,
-                    1 => {}
-                    _ => split += 1,
+            match unclipped(&camera, &triangle, fixed, planes) {
+                Ok(_) => fast += 1,
+                Err(Clipper::Empty) => {
+                    assert!(
+                        slow.is_empty(),
+                        "case {case}: a rejected triangle the clipper keeps"
+                    );
+                    rejected += 1;
+                }
+                Err(Clipper::Needed) => {
+                    general += 1;
+                    match slow.len() {
+                        0 => empty += 1,
+                        1 => {}
+                        _ => split += 1,
+                    }
                 }
             }
         }
         assert!(fast > 5_000, "fast path taken {fast} times");
+        assert!(
+            rejected > 1_000,
+            "rejected without the clipper {rejected} times"
+        );
         assert!(general > 5_000, "general path taken {general} times");
         assert!(empty > 1_000, "clipped away {empty} times");
         assert!(
@@ -8470,6 +8520,94 @@ mod tests {
             "clipped into several triangles {split} times"
         );
         assert!(near > 1_000, "crossed only the near plane {near} times");
+    }
+
+    #[test]
+    fn homogeneous_clipper_decides_as_the_clipping_passes_on_the_planes() {
+        // Random world triangles almost never put a corner exactly on a clip
+        // plane. These clip-space corners are exact multiples of w, so many
+        // do (at +0 and -0), with w zero and negative, NaN and infinities.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut pick = move |count: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % count).expect("a small index")
+        };
+        let attributes = Attributes {
+            world: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [0.0; 2],
+            opacity: 1.0,
+        };
+        let multiples = [-1.5, -1.0, -0.5, -0.0, 0.0, 0.5, 1.0, 1.5];
+        let (mut kept, mut kept_flat_on_a_plane, mut empty, mut needed) = (0, 0, 0, 0);
+        for case in 0..60_000 {
+            let w = [1.0, 2.0, 0.75, 0.0, -1.0][pick(5)];
+            let projected: [ProjectedVertex; 3] = std::array::from_fn(|_| {
+                let mut clip = [0.0, 0.0, 0.0, w];
+                for coordinate in &mut clip[..3] {
+                    *coordinate = multiples[pick(8)] * w;
+                }
+                match pick(40) {
+                    0 => clip[pick(4)] = f64::NAN,
+                    1 => clip[pick(3)] = f64::INFINITY,
+                    _ => {}
+                }
+                ProjectedVertex { clip, attributes }
+            });
+            let mut polygon = [projected[0]; 13];
+            polygon[..3].copy_from_slice(&projected);
+            let mut polygon_len = 3;
+            for plane in 0..6 {
+                (polygon, polygon_len) =
+                    clip_projected_polygon(&polygon[..polygon_len], |vertex| {
+                        homogeneous_distance(vertex.clip, plane)
+                    })
+                    .expect("clips");
+                if polygon_len < 3 {
+                    break;
+                }
+            }
+            match homogeneous_clipper(&projected) {
+                Ok(()) => {
+                    assert_eq!(polygon_len, 3, "case {case}: kept, but clipped");
+                    for (clipped, vertex) in polygon[..3].iter().zip(&projected) {
+                        assert_eq!(
+                            clipped.clip.map(f64::to_bits),
+                            vertex.clip.map(f64::to_bits),
+                            "case {case}: kept, but moved"
+                        );
+                    }
+                    kept += 1;
+                    if w > 0.0
+                        && (0..6).any(|plane| {
+                            projected
+                                .iter()
+                                .all(|vertex| homogeneous_distance(vertex.clip, plane) == 0.0)
+                        })
+                    {
+                        kept_flat_on_a_plane += 1;
+                    }
+                }
+                Err(Clipper::Empty) => {
+                    assert!(
+                        polygon_len < 3,
+                        "case {case}: rejected, but clipped to {polygon_len}"
+                    );
+                    empty += 1;
+                }
+                Err(Clipper::Needed) => needed += 1,
+            }
+        }
+        assert!(kept > 1_000, "kept {kept} times");
+        assert!(
+            kept_flat_on_a_plane > 20,
+            "kept lying on a plane, w > 0, {kept_flat_on_a_plane} times"
+        );
+        assert!(empty > 1_000, "rejected {empty} times");
+        assert!(needed > 1_000, "left to the clipper {needed} times");
     }
 
     #[test]
