@@ -18450,7 +18450,8 @@ class SceneFileWriter:
         # optional None, and the refusal of lossy numeric conversions.
         encode_options = {
             name: kwargs.pop(name)
-            for name in ("video_crf", "video_preset", "video_tune", "video_bitrate", "audio_bitrate")
+            for name in ("video_crf", "video_preset", "video_tune", "video_bitrate", "audio_bitrate",
+                         "audio_dither_seed")
             if name in kwargs
         }
         if kwargs:

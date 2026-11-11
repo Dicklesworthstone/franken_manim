@@ -13,9 +13,9 @@ use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_platform::process::{ProcessRunner, StdProcessRunner};
 use fmn_render::{EngineIdentity, FrameConfig, ScreenMap, Tiling, Viewport};
 use fmn_runtime::{ExecutionPlan, OutputPixelFormat, PlanRequest, RenderIntent};
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyBool, PyDict};
 
 use crate::CapabilityError;
 
@@ -32,6 +32,42 @@ const TARGET_TRIPLE: &str = env!("FMN_TARGET_TRIPLE");
 const CARGO_PROFILE: &str = env!("FMN_CARGO_PROFILE");
 const SUITE_LOCK_BYTES: &[u8] = include_bytes!("../../../SUITE.lock");
 const SUITE_LOCK_TEXT: &str = include_str!("../../../SUITE.lock");
+
+/// Optional PCM reduction is a separate bit-affecting output configuration.
+/// Absent/None preserves the established no-dither certified closure.
+fn audio_reduction_item(
+    format: &str,
+    report: &Bound<'_, PyDict>,
+) -> PyResult<Option<ClosureItem>> {
+    let value = match report.get_item("audio_dither_seed")? {
+        None => return Ok(None),
+        Some(value) if value.is_none() => return Ok(None),
+        Some(value) => value,
+    };
+    if format != "wav" {
+        return Err(PyValueError::new_err(
+            "audio_dither_seed requires native wav output",
+        ));
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "audio_dither_seed must be an unsigned 64-bit integer, not bool",
+        ));
+    }
+    let seed = value.extract::<u64>()?;
+    ClosureItem::structural_at(
+        4,
+        "audio/pcm-reduction",
+        "Reel TPDF PCM reduction, keyed by interleaved artifact sample index",
+        &[
+            StructuralField::Text("tpdf-splitmix64-v1"),
+            StructuralField::U64(seed),
+            StructuralField::U64(0),
+        ],
+    )
+    .map(Some)
+    .map_err(|error| PyRuntimeError::new_err(error.to_string()))
+}
 
 pub(crate) fn pinned_toolchain() -> Result<&'static str, String> {
     let mut toolchain = false;
@@ -511,6 +547,9 @@ pub(crate) fn _portal_publish_manifest(
         "fully resolved configuration after defaults, files, and CLI overlay",
     )
     .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    // Bind the frozen native receipt, never a mutable writer attribute or the
+    // unrelated scene RNG seed. Default manifests retain their existing bytes.
+    let audio_reduction = audio_reduction_item(format, artifact_report)?;
 
     let c5 = ClosureItem::structural(
         5,
@@ -742,6 +781,7 @@ pub(crate) fn _portal_publish_manifest(
         c10,
     ];
     items.extend(source_items);
+    items.extend(audio_reduction);
     items.extend(read_items);
     items.extend(image_items);
     items.extend(font_items);
@@ -801,6 +841,34 @@ mod tests {
                 image_input_items(Some(list.into_any())).is_err(),
                 "external products cannot enter a native certificate"
             );
+        });
+    }
+
+    #[test]
+    fn certified_audio_reduction_states_full_seed_without_changing_defaults() {
+        Python::initialize();
+        Python::attach(|py| {
+            let report = PyDict::new(py);
+            assert!(audio_reduction_item("wav", &report).unwrap().is_none());
+            report.set_item("audio_dither_seed", py.None()).unwrap();
+            assert!(audio_reduction_item("wav", &report).unwrap().is_none());
+
+            report.set_item("audio_dither_seed", 0_u64).unwrap();
+            let zero = audio_reduction_item("wav", &report).unwrap().unwrap();
+            assert_eq!(zero.item_id, 4);
+            assert_eq!(zero.virtual_path.as_deref(), Some("audio/pcm-reduction"));
+            assert_eq!(
+                zero.digest,
+                audio_reduction_item("wav", &report).unwrap().unwrap().digest
+            );
+            report.set_item("audio_dither_seed", u64::MAX).unwrap();
+            let largest = audio_reduction_item("wav", &report).unwrap().unwrap();
+            assert_ne!(zero.digest, largest.digest);
+            assert!(audio_reduction_item("png", &report).is_err());
+            report.set_item("audio_dither_seed", true).unwrap();
+            assert!(audio_reduction_item("wav", &report).is_err());
+            report.set_item("audio_dither_seed", -1_i64).unwrap();
+            assert!(audio_reduction_item("wav", &report).is_err());
         });
     }
 

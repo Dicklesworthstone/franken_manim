@@ -14,6 +14,30 @@ _spec.loader.exec_module(v)
 
 
 class VideoCliTests(unittest.TestCase):
+    def test_wav_dither_seed_is_explicit_u64_and_not_a_video_control(self):
+        for seed in (0, 17, (1 << 64) - 1):
+            for tokens in (["--audio-dither-seed", str(seed)], [f"--audio-dither-seed={seed}"]):
+                self.assertEqual(v.take_video_options(tokens), ([], {"audio_dither_seed": seed}))
+            v.validate_video_format("wav", {"audio_dither_seed": seed})
+        for value in ("", "-1", "+1", "1.5", "true", "١", str(1 << 64), "1" * 1000):
+            with self.assertRaises(ValueError):
+                v.take_video_options(["--audio-dither-seed", value])
+        with self.assertRaises(ValueError):
+            v.take_video_options(["--audio-dither-seed=0", "--audio-dither-seed=1"])
+        for format in ("mp4", "mov", "png", "png_sequence", "gif", "y4m", "svg", "fmtl"):
+            with self.assertRaisesRegex(ValueError, "native wav"):
+                v.validate_video_format(format, {"audio_dither_seed": 0})
+            v.validate_video_format(format, {"audio_dither_seed": None})
+        writer = SimpleNamespace(audio_dither_seed=17, video_crf=16)
+        v.apply_video_options(SimpleNamespace(file_writer=writer), {"audio_dither_seed": 0})
+        self.assertEqual(writer.audio_dither_seed, 0)
+        self.assertEqual(writer.video_crf, 16)
+        self.assertEqual(
+            v.take_video_options(["--file_name", "--audio-dither-seed", "--audio-dither-seed=5"],
+                                 {"--file_name"}),
+            (["--file_name", "--audio-dither-seed"], {"audio_dither_seed": 5}),
+        )
+
     def test_ffmpeg_limits_preserve_64_bit_units_and_all_dispatch_forms(self):
         for flag, name in v._LIMIT_FLAGS.items():
             for value in (1, 86400, 1 << 40, (1 << 64) - 1):

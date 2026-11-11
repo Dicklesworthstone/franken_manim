@@ -21,6 +21,7 @@ _LIMIT_FLAGS = {
     "--ffmpeg-max-input-bytes": "ffmpeg_max_input_bytes",
 }
 _VIDEO_FLAGS.update(_LIMIT_FLAGS)
+_VIDEO_FLAGS["--audio-dither-seed"] = "audio_dither_seed"
 VIDEO_VALUE_FLAGS = frozenset(_VIDEO_FLAGS)
 VIDEO_WRITER_OPTIONS = tuple(_VIDEO_FLAGS.values())
 VIDEO_HELP = """Compressed video quality (fmn-python):
@@ -34,6 +35,10 @@ VIDEO_HELP = """Compressed video quality (fmn-python):
   --ffmpeg-max-artifact-bytes N   Encoded/intermediate artifact ceiling.
   --ffmpeg-max-input-bytes N     Raw-video input ceiling; audio keeps its own cap.
 
+Native WAV reduction:
+  --audio-dither-seed N    Enable counter-keyed TPDF dither with a u64 seed.
+                         Zero is a valid seed; omission leaves dither disabled.
+
 Both --flag value and --flag=value are accepted; each setting is specified once.
 Video quality applies to MP4/MOV, including named batches, --write_all and --subdivide.
 Native outputs refuse quality controls; transparent MOV accepts audio bitrate and resource limits.
@@ -45,10 +50,19 @@ The ffmpeg watchdog defaults to 24 hours, including scene construction and
 frame rendering. Limits also apply to compressed sound decoding for WAV output.
 Every bound is a positive integer; there is no unlimited sentinel. Video encode,
 audio decode and final mux share the admitted policy, recorded in receipts.
+WAV dither is keyed by the interleaved output sample index, starting at zero
+for each artifact, so the same seed is independent of mixer worker count.
 """
 
 
 def _value(flag: str, text: str):
+    if flag == "--audio-dither-seed":
+        if not text or len(text) > 20 or any(char not in "0123456789" for char in text):
+            raise ValueError(f"{flag} requires an unsigned decimal integer")
+        value = int(text)
+        if value >= 1 << 64:
+            raise ValueError(f"{flag} must lie between 0 and {(1 << 64) - 1}")
+        return value
     if flag in _LIMIT_FLAGS:
         if not text or len(text) > 20 or any(char not in "0123456789" for char in text):
             raise ValueError(f"{flag} requires a positive unsigned decimal integer")
@@ -103,6 +117,8 @@ def take_video_options(arguments: list[str], value_flags=frozenset()):
 
 def validate_video_format(format: str, options, *, transparent: bool = False) -> None:
     """Reject explicitly ignored controls before console source execution."""
+    if options.get("audio_dither_seed") is not None and format != "wav":
+        raise ValueError("audio_dither_seed requires native wav output")
     if any(options.get(name) is not None for name in _LIMIT_FLAGS.values()):
         if format not in {"mp4", "mov", "wav"}:
             raise ValueError("ffmpeg resource controls require mp4, mov, or wav output")

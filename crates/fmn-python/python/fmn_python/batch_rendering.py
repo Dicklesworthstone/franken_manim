@@ -542,6 +542,11 @@ def _restored_outcome(row):
             continue
         if type(value) is not int or value < (1 if name in {"fps", "threads"} else 0):
             raise ValueError("invalid checkpoint receipt field: " + name)
+    dither_seed = data.get("audio_dither_seed")
+    if dither_seed is not None and (
+            data.get("format") != "wav" or type(dither_seed) is not int
+            or not 0 <= dither_seed < 1 << 64):
+        raise ValueError("invalid checkpoint receipt field: audio_dither_seed")
     resolution = data.get("resolution")
     if not isinstance(resolution, list) or len(resolution) != 2 or any(type(value) is not int or value <= 0 for value in resolution):
         raise ValueError("invalid checkpoint receipt resolution")

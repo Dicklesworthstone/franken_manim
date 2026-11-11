@@ -5,7 +5,9 @@
 //! consume the same rational cue requests as the native scene runtime.
 
 use super::*;
-use fmn_output::{AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder};
+use fmn_output::{AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy};
+use pyo3::exceptions::PyAttributeError;
+use pyo3::types::PyBool;
 
 pub(crate) struct PortalAudioInput {
     path: PathBuf,
@@ -22,6 +24,7 @@ pub(crate) struct PortalAudio {
     minimum_window_frames: i64,
     pub(crate) inputs: Vec<PortalAudioInput>,
     pub(crate) ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
+    pub(crate) dither: DitherPolicy,
 }
 
 impl PortalAudio {
@@ -30,17 +33,31 @@ impl PortalAudio {
         format: &PortalOutputFormat,
         video: Option<&portal_video::PortalVideoConfig>,
     ) -> PyResult<Box<Self>> {
+        // Freeze before setup/construct/tear_down. Publication must never
+        // reinterpret a writer setting changed by authored scene callbacks.
+        // Bare native PyScene instances need no writer for pixel-only output.
+        let writer = match scene.getattr("file_writer") {
+            Ok(writer) => Some(writer),
+            Err(error) if error.is_instance_of::<PyAttributeError>(scene.py()) => None,
+            Err(error) => return Err(error),
+        };
+        let dither = match &writer {
+            Some(writer) => dither_from_writer(writer, format)?,
+            None => DitherPolicy::None,
+        };
         let (executable, policy) = if let Some(video) = video {
             (
                 Some(video.ffmpeg_bin.clone()),
                 Some((video.job_limits.clone(), video.max_input_bytes)),
             )
         } else if matches!(format, PortalOutputFormat::Wav) {
-            let writer = scene.getattr("file_writer")?;
+            let writer = writer.as_ref().ok_or_else(|| {
+                PyAttributeError::new_err("WAV output requires Scene.file_writer")
+            })?;
             (
                 Some(writer.getattr("ffmpeg_bin")?.extract::<String>()?),
                 Some(portal_video::limits_from_writer(
-                    &writer,
+                    writer,
                     AudioDecodeLimits::default().max_input_bytes,
                 )?),
             )
@@ -77,6 +94,7 @@ impl PortalAudio {
             minimum_window_frames: i64::from(video.is_some()),
             inputs: Vec::new(),
             ffmpeg_limits: ffmpeg_limits.map(|(_, report)| report),
+            dither,
         }))
     }
 
@@ -203,6 +221,40 @@ impl PortalAudio {
             .filter_map(|input| input.report.invocation.clone())
             .collect()
     }
+
+    pub(crate) const fn dither_seed(&self) -> Option<u64> {
+        match self.dither {
+            DitherPolicy::None => None,
+            DitherPolicy::Tpdf { seed } => Some(seed),
+        }
+    }
+}
+
+fn dither_from_writer(
+    writer: &Bound<'_, PyAny>,
+    format: &PortalOutputFormat,
+) -> PyResult<DitherPolicy> {
+    let value = match writer.getattr("audio_dither_seed") {
+        Ok(value) if value.is_none() => return Ok(DitherPolicy::None),
+        Ok(value) => value,
+        Err(error) if error.is_instance_of::<PyAttributeError>(writer.py()) => {
+            return Ok(DitherPolicy::None);
+        }
+        Err(error) => return Err(error),
+    };
+    if !matches!(format, PortalOutputFormat::Wav) {
+        return Err(PyValueError::new_err(
+            "file_writer.audio_dither_seed requires native wav output",
+        ));
+    }
+    if value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err(
+            "file_writer.audio_dither_seed must be an unsigned 64-bit integer, not bool",
+        ));
+    }
+    Ok(DitherPolicy::Tpdf {
+        seed: value.extract::<u64>()?,
+    })
 }
 
 fn decode_error(error: AudioDecodeError) -> PyErr {

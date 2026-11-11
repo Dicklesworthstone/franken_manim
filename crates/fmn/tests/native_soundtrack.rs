@@ -10,7 +10,7 @@ use fmn::prelude::*;
 use fmn::{SoundtrackRenderOptions, render_soundtrack_with_fs};
 use fmn_codec::{SampleFormat, WavLimits, decode_wav, encode_wav};
 use fmn_config::config::{DeterminismMode, Engine};
-use fmn_output::{AudioDecodeError, SoundError};
+use fmn_output::{AudioDecodeError, DitherPolicy, SoundError};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 
 fn options(path: &str, threads: usize) -> SoundtrackRenderOptions {
@@ -286,6 +286,60 @@ impl SceneConstruct for Cue {
         stage.wait(0.25)?;
         Ok(())
     }
+}
+
+#[test]
+fn explicit_tpdf_is_seeded_bounded_and_independent_of_mixer_workers() {
+    let fs = Arc::new(VirtualFs::new());
+    let quiet = vec![0.25 / 32768.0; 128];
+    fs.insert(
+        "/quiet.wav",
+        encode_wav(1, 32, SampleFormat::F32, &quiet),
+    );
+    let plain = render_soundtrack_with_fs(
+        &mut Cue("/quiet.wav"),
+        options("/plain.wav", 1),
+        fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(plain.dither, DitherPolicy::None);
+    let plain_bytes = fs.read(Path::new("/plain.wav")).unwrap();
+    assert_eq!(plain_bytes, encode_wav(1, 32, SampleFormat::S16, &quiet));
+    assert!(plain_bytes[44..].iter().all(|byte| *byte == 0));
+
+    let mut seeded_outputs = Vec::new();
+    for seed in [0, u64::MAX] {
+        let mut reference = None;
+        for threads in [1, 4, 16] {
+            let path = format!("/dither-{seed}-{threads}.wav");
+            let mut request = options(&path, threads);
+            request.dither = DitherPolicy::Tpdf { seed };
+            let report =
+                render_soundtrack_with_fs(&mut Cue("/quiet.wav"), request, fs.clone())
+                    .unwrap();
+            assert_eq!(report.dither, DitherPolicy::Tpdf { seed });
+            assert_eq!(report.artifact.sample_frames, 128);
+            assert_eq!(report.artifact.clipped_samples, 0);
+            let bytes = fs.read(Path::new(&path)).unwrap();
+            assert_eq!(bytes.len(), plain_bytes.len());
+            assert_ne!(bytes, plain_bytes, "TPDF must reach the published PCM");
+            let decoded = decode_wav(&bytes, &WavLimits::default()).unwrap();
+            assert!(
+                decoded
+                    .samples
+                    .iter()
+                    .all(|sample| sample.abs() <= 2.0 / 32768.0),
+                "dither must stay within a few output quantization steps"
+            );
+            if let Some(expected) = &reference {
+                assert_eq!(&bytes, expected, "worker count changed the PCM");
+            } else {
+                reference = Some(bytes);
+            }
+        }
+        seeded_outputs.push(reference.unwrap());
+    }
+    assert_ne!(seeded_outputs[0], seeded_outputs[1], "seed was ignored");
 }
 
 #[test]

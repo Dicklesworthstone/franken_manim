@@ -371,8 +371,10 @@ impl PreparedSceneSoundtrack {
 /// The scene still executes its normal animations and updaters. No pixel
 /// buffers, render teams, or video encoder are created. Input is native PCM
 /// WAV; compressed media returns the decoder's named capability refusal.
-/// Output is canonical signed 16-bit PCM without dither, at the explicit
-/// mixer's sample rate and mono/stereo layout. AAC/video quality settings
+/// Output is canonical signed 16-bit PCM, at the explicit mixer's sample rate
+/// and mono/stereo layout. Dither is disabled by default; callers can request
+/// seeded, sample-counter TPDF when reducing the mixed floating-point audio.
+/// AAC/video quality settings
 /// are irrelevant to this native artifact and are not consulted.
 #[derive(Debug, Clone)]
 pub struct SoundtrackRenderOptions {
@@ -384,6 +386,9 @@ pub struct SoundtrackRenderOptions {
     /// Output sample rate, mono/stereo layout and per-cue/timeline frame bound.
     /// The output-byte ceiling below can impose a smaller sample-frame bound.
     pub mixer: MixerConfig,
+    /// Explicit PCM reduction policy. TPDF is keyed by the interleaved output
+    /// sample index, so a seed produces identical bytes at every worker count.
+    pub dither: DitherPolicy,
     /// Per-source native WAV decoding bounds. No transcoder is admitted.
     pub decode: AudioDecodeLimits,
     /// Cumulative source, decoded and per-cue prepared-storage admission.
@@ -413,6 +418,7 @@ impl SoundtrackRenderOptions {
             output: output.into(),
             config: Config::resolve(&[], None)?.config,
             mixer: MixerConfig::default(),
+            dither: DitherPolicy::None,
             decode: AudioDecodeLimits::default(),
             preparation: SoundtrackPreparationLimits::default(),
             threads: NonZeroUsize::MIN,
@@ -509,6 +515,8 @@ pub struct SoundtrackRenderReport {
     pub sample_rate: u32,
     /// Native output channels (one or two).
     pub channels: u16,
+    /// PCM reduction policy actually applied to the published artifact.
+    pub dither: DitherPolicy,
     /// Actual native mixer workers, zero for an empty mix.
     pub workers_used: usize,
     /// Insertion-ordered exact source bytes and decoder identities. Repeated
@@ -617,7 +625,7 @@ pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
         &WavPublicationConfig {
             destination: options.output,
             format: SampleFormat::S16,
-            dither: DitherPolicy::None,
+            dither: options.dither,
             max_artifact_bytes: options.max_output_bytes,
             profile: None,
         },
@@ -629,6 +637,7 @@ pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
         artifact,
         sample_rate: mix.audio.sample_rate,
         channels: mix.audio.channels,
+        dither: options.dither,
         workers_used: mix.workers_used,
         inputs: prepared.inputs().to_vec(),
         typesetting: completed.typesetting_report().clone(),

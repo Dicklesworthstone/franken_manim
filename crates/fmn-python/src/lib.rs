@@ -203,6 +203,7 @@ struct PortalArtifactReport {
     digest: fmn_output::ArtifactDigest,
     invocations: Vec<fmn_output::InvocationReport>,
     audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    audio_dither_seed: Option<u64>,
     image_inputs: Vec<portal_raster::PortalImageInput>,
     /// Frames rasterized on Lumen's retained planar route and on the camera
     /// route (fm-sq8.11).
@@ -267,6 +268,7 @@ impl From<NativeArtifactReport> for PortalArtifactReport {
             digest: report.digest,
             invocations: Vec::new(),
             audio_inputs: Vec::new(),
+            audio_dither_seed: None,
             image_inputs: Vec::new(),
             routes: PortalRoutes::default(),
             tuning: None,
@@ -437,7 +439,7 @@ impl PortalRenderSession {
                     &fmn_output::WavPublicationConfig {
                         destination,
                         format: fmn_codec::SampleFormat::S16,
-                        dither: fmn_output::DitherPolicy::None,
+                        dither: audio.dither,
                         max_artifact_bytes,
                         profile: None,
                     },
@@ -451,6 +453,7 @@ impl PortalRenderSession {
                         bytes: report.bytes,
                         digest: report.digest,
                         invocations: audio.invocations(),
+                        audio_dither_seed: audio.dither_seed(),
                         audio_inputs: std::mem::take(&mut audio.inputs),
                         image_inputs: Vec::new(),
                         routes: PortalRoutes::default(),
@@ -1134,6 +1137,7 @@ impl PortalFrameSession {
                     digest: report.boundary.artifact_digest,
                     invocations: report.boundary.invocations,
                     audio_inputs: Vec::new(),
+                    audio_dither_seed: None,
                     image_inputs: Vec::new(),
                     routes: PortalRoutes::default(),
                     tuning: None,
@@ -1297,6 +1301,7 @@ struct PyScene {
     render_generation: Arc<()>,
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    render_audio_dither_seed: Option<u64>,
     render_image_inputs: Vec<portal_raster::PortalImageInput>,
     image_checkpoints: RefCell<portal_raster::ImageCheckpoints>,
     render_ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
@@ -1942,6 +1947,7 @@ pub(crate) fn install_pristine_arena(
         owner.render_generation = Arc::new(());
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
+        owner.render_audio_dither_seed = None;
         owner.render_image_inputs.clear();
         *owner.image_checkpoints.borrow_mut() = portal_raster::ImageCheckpoints::default();
         owner.render_ffmpeg_limits = None;
@@ -8930,6 +8936,7 @@ impl PyScene {
             render_generation: Arc::new(()),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
+            render_audio_dither_seed: None,
             render_image_inputs: Vec::new(),
             image_checkpoints: RefCell::new(portal_raster::ImageCheckpoints::default()),
             render_ffmpeg_limits: None,
@@ -9156,6 +9163,7 @@ impl PyScene {
             let mut scene = slf.borrow_mut();
             scene.render_invocations = report.invocations;
             scene.render_audio_inputs = report.audio_inputs;
+            scene.render_audio_dither_seed = report.audio_dither_seed;
             scene.render_image_inputs = report.image_inputs;
             scene.render_routes = report.routes;
             scene.render_tuning = report.tuning;
@@ -9247,6 +9255,12 @@ impl PyScene {
     #[getter]
     fn _render_audio_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
         portal_audio::input_facts(slf)
+    }
+
+    /// Frozen TPDF seed applied to the last native WAV publication, if any.
+    #[getter]
+    fn _render_audio_dither_seed(&self) -> Option<u64> {
+        self.render_audio_dither_seed
     }
 
     #[getter]
