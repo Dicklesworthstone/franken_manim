@@ -671,6 +671,9 @@ pub struct MetalRenderer {
     transfer_table: SharedBuffer,
     raw_surface: Option<SurfaceSlot>,
     output_surface: Option<OutputSurfaceSlot>,
+    /// The last 3D frame's texels, kept for the next frame that samples the
+    /// same textures (FL-033).
+    resident_texels: Option<ResidentTexels>,
     device: String,
     unified_memory: bool,
     kernel_digest: Digest,
@@ -693,6 +696,7 @@ impl fmt::Debug for MetalRenderer {
                     .as_ref()
                     .map(|surface| surface.layout.total_bytes()),
             )
+            .field("resident_texel_bytes", &self.resident_texel_bytes())
             .finish_non_exhaustive()
     }
 }
@@ -725,11 +729,23 @@ impl MetalRenderer {
             transfer_table,
             raw_surface: None,
             output_surface: None,
+            resident_texels: None,
             device: gateway.device_name(),
             unified_memory: gateway.has_unified_memory(),
             kernel_digest: sha256(KERNEL_SOURCE.as_bytes()),
             transfer_table_digest,
         })
+    }
+
+    /// The bytes of the 3D texels the renderer keeps between frames: the
+    /// last 3D frame's textures, which the next frame sampling the same
+    /// textures (equal content digests and sizes, in the same order) binds
+    /// instead of uploading them again. Zero before a 3D frame.
+    #[must_use]
+    pub fn resident_texel_bytes(&self) -> usize {
+        self.resident_texels
+            .as_ref()
+            .map_or(0, |resident| resident.bytes)
     }
 
     /// Render the annex's linear-light Rgba16F comparison surface.
@@ -803,9 +819,12 @@ impl MetalRenderer {
     /// prepared for [`ThreeDJob`]'s CPU executor; a frame's textures are uploaded
     /// once each as premultiplied linear `f32` texels and sampled as the CPU
     /// route samples them (bilinear, the material's wrap per axis, the dark
-    /// texture's crossfade). Retained vectors return a typed refusal so a
-    /// preview owner can select its declared CPU fallback without mislabeling
-    /// the bytes.
+    /// texture's crossfade). The renderer keeps the last frame's texels on the
+    /// device, and a frame sampling the same textures (equal content digests
+    /// and sizes, in the same order) binds them instead of uploading them
+    /// again ([`MetalRenderer::resident_texel_bytes`]). Retained vectors return
+    /// a typed refusal so a preview owner can select its declared CPU fallback
+    /// without mislabeling the bytes.
     pub fn render_three_d_raw(
         &mut self,
         job: &ThreeDJob<'_>,
@@ -1132,7 +1151,12 @@ impl MetalRenderer {
             .gateway
             .buffer_u32(nonempty_u32(&flat.tile_triangles))?;
         let texture_u32 = self.gateway.buffer_u32(nonempty_u32(&flat.texture_u32))?;
-        let texels = self.gateway.buffer_f32(nonempty_f32(&flat.texels))?;
+        let texels_kept = self.reside_texels(flat)?;
+        let texels = &self
+            .resident_texels
+            .as_ref()
+            .ok_or(MetalError::Layout("resident texels disappeared"))?
+            .buffer;
         let group_count = flat
             .cols()
             .checked_mul(flat.rows())
@@ -1162,12 +1186,37 @@ impl MetalRenderer {
                 &command_triangles,
                 &tile_triangles,
                 &texture_u32,
-                &texels,
+                texels,
             ],
             Grid::grid_2d(flat.cols(), flat.rows(), tile, tile),
         )?;
         verify_status(&status, group_count, THREE_D_KERNEL)?;
-        Ok((raw_reused, flat.upload_bytes()?))
+        Ok((raw_reused, flat.upload_bytes(texels_kept)?))
+    }
+
+    /// Put the frame's texels on the device (FL-033): the last 3D frame's
+    /// buffer when the frame samples the same textures (equal content digests
+    /// and sizes, in the same order), else a new buffer in its place. The old
+    /// buffer is dropped before the new one is made, so the renderer never
+    /// holds two. Returns whether the last frame's buffer was kept.
+    fn reside_texels(&mut self, flat: &FlatThreeDFrame<'_>) -> Result<bool, MetalError> {
+        let key = flat.texel_key();
+        if self
+            .resident_texels
+            .as_ref()
+            .is_some_and(|resident| resident.key == key)
+        {
+            return Ok(true);
+        }
+        self.resident_texels = None;
+        let texels = flat.texels()?;
+        let buffer = self.gateway.buffer_f32(nonempty_f32(&texels))?;
+        self.resident_texels = Some(ResidentTexels {
+            key,
+            buffer,
+            bytes: checked_bytes(texels.len(), 4, "3D texel bytes")?,
+        });
+        Ok(false)
     }
 
     fn transfer_rgba8_surface(
@@ -1982,7 +2031,7 @@ impl FlatFrame {
 }
 
 #[derive(Debug)]
-struct FlatThreeDFrame {
+struct FlatThreeDFrame<'a> {
     params_u32: Vec<u32>,
     params_f32: Vec<f32>,
     triangles: Vec<f32>,
@@ -1998,9 +2047,13 @@ struct FlatThreeDFrame {
     /// height; the dark texture's (first texel `THREE_D_NO_TEXTURE` when
     /// none); the wrap codes (`u | v << 4`); and whether zero alpha discards.
     texture_u32: Vec<u32>,
-    /// Every texture the frame samples, once each, as premultiplied linear
-    /// RGBA, four scalars a texel.
-    texels: Vec<f32>,
+    /// Every texture the frame samples, once each, in the order the rows
+    /// first name them. Their premultiplied linear texels follow one another
+    /// in the texel buffer ([`FlatThreeDFrame::texels`]), which a renderer
+    /// keeps for the next frame that samples the same textures.
+    textures: Vec<&'a Texture>,
+    /// The texels of `textures`.
+    texel_count: usize,
 }
 
 /// The kernel's code for a wrap mode.
@@ -2023,12 +2076,12 @@ enum TriangleBins {
     Whole,
 }
 
-impl FlatThreeDFrame {
-    fn derive(job: &ThreeDJob<'_>) -> Result<Self, MetalError> {
+impl<'a> FlatThreeDFrame<'a> {
+    fn derive(job: &ThreeDJob<'a>) -> Result<Self, MetalError> {
         Self::derive_with(job, TriangleBins::PerTile)
     }
 
-    fn derive_with(job: &ThreeDJob<'_>, bins: TriangleBins) -> Result<Self, MetalError> {
+    fn derive_with(job: &ThreeDJob<'a>, bins: TriangleBins) -> Result<Self, MetalError> {
         let camera = job.camera();
         let width = camera.pixel_width();
         let height = camera.pixel_height();
@@ -2057,7 +2110,8 @@ impl FlatThreeDFrame {
             command_triangles: Vec::new(),
             tile_triangles: Vec::new(),
             texture_u32: Vec::new(),
-            texels: Vec::new(),
+            textures: Vec::new(),
+            texel_count: 0,
         };
         let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
         let mut uploaded = std::collections::HashMap::new();
@@ -2123,7 +2177,7 @@ impl FlatThreeDFrame {
     /// the frame meets it.
     fn push_texture_row(
         &mut self,
-        material: TextureMaterial<'_>,
+        material: TextureMaterial<'a>,
         uploaded: &mut std::collections::HashMap<*const Texture, [u32; 3]>,
     ) -> Result<u32, MetalError> {
         let light = self.upload_texture(material.light, uploaded)?;
@@ -2150,25 +2204,57 @@ impl FlatThreeDFrame {
     /// The first texel, width and height of `texture` in the frame's texels.
     fn upload_texture(
         &mut self,
-        texture: &Texture,
+        texture: &'a Texture,
         uploaded: &mut std::collections::HashMap<*const Texture, [u32; 3]>,
     ) -> Result<[u32; 3], MetalError> {
         let key: *const Texture = texture;
         if let Some(&placed) = uploaded.get(&key) {
             return Ok(placed);
         }
-        let first = u32::try_from(self.texels.len() / 4)
+        let first = u32::try_from(self.texel_count)
             .map_err(|_| MetalError::SizeOverflow("3D texel index"))?;
-        let texels = texture.premultiplied_texels();
-        self.texels
-            .try_reserve_exact(texels.len().saturating_mul(4))
-            .map_err(|_| MetalError::SizeOverflow("3D texels"))?;
-        for texel in texels {
-            self.texels.extend_from_slice(texel);
-        }
+        self.texel_count = self
+            .texel_count
+            .checked_add(texture.premultiplied_texels().len())
+            .ok_or(MetalError::SizeOverflow("3D texels"))?;
+        self.textures.push(texture);
         let placed = [first, texture.width(), texture.height()];
         uploaded.insert(key, placed);
         Ok(placed)
+    }
+
+    /// Every texture's premultiplied linear texels, one after another in the
+    /// order the rows place them, four scalars a texel: what the kernel
+    /// samples.
+    fn texels(&self) -> Result<Vec<f32>, MetalError> {
+        let scalars = self
+            .texel_count
+            .checked_mul(4)
+            .ok_or(MetalError::SizeOverflow("3D texels"))?;
+        let mut texels = Vec::new();
+        texels
+            .try_reserve_exact(scalars)
+            .map_err(|_| MetalError::SizeOverflow("3D texels"))?;
+        for texture in &self.textures {
+            for texel in texture.premultiplied_texels() {
+                texels.extend_from_slice(texel);
+            }
+        }
+        if texels.iter().any(|value| !value.is_finite()) {
+            return Err(MetalError::Layout(
+                "3D f32 packet contains a non-finite value",
+            ));
+        }
+        Ok(texels)
+    }
+
+    /// What the frame's texels are: each texture's content digest and size,
+    /// in order. Frames with equal keys sample equal texels.
+    fn texel_key(&self) -> Vec<(Digest, u32, u32)> {
+        self.textures
+            .iter()
+            .map(|texture| (texture.digest(), texture.width(), texture.height()))
+            .collect()
     }
 
     fn validate(&self) -> Result<(), MetalError> {
@@ -2186,7 +2272,6 @@ impl FlatThreeDFrame {
             .iter()
             .chain(&self.triangles)
             .chain(&self.draw_f32)
-            .chain(&self.texels)
             .any(|value| !value.is_finite())
         {
             return Err(MetalError::Layout(
@@ -2248,8 +2333,11 @@ impl FlatThreeDFrame {
             .texture_u32
             .len()
             .is_multiple_of(THREE_D_TEXTURE_U32_STRIDE)
-            || !self.texels.len().is_multiple_of(4)
-            || u32::try_from(self.texels.len()).is_err()
+            || self
+                .texel_count
+                .checked_mul(4)
+                .and_then(|scalars| u32::try_from(scalars).ok())
+                .is_none()
         {
             return Err(MetalError::Layout("3D texture tables"));
         }
@@ -2261,7 +2349,7 @@ impl FlatThreeDFrame {
                 return Err(MetalError::Layout("3D draw texture row"));
             }
         }
-        let texel_count = self.texels.len() / 4;
+        let texel_count = self.texel_count;
         let inside = |first: u32, width: u32, height: u32| {
             width > 0
                 && height > 0
@@ -2307,7 +2395,16 @@ impl FlatThreeDFrame {
         (self.params_u32[1] as usize).div_ceil(self.tile())
     }
 
-    fn upload_bytes(&self) -> Result<usize, MetalError> {
+    /// The bytes the frame copies into new buffers: every table, and the
+    /// texels unless the renderer kept them from an earlier frame.
+    fn upload_bytes(&self, texels_kept: bool) -> Result<usize, MetalError> {
+        let texels = if texels_kept {
+            0
+        } else {
+            self.texel_count
+                .checked_mul(4)
+                .ok_or(MetalError::SizeOverflow("3D upload scalar count"))?
+        };
         let scalars = [
             self.params_u32.len(),
             self.params_f32.len(),
@@ -2319,13 +2416,21 @@ impl FlatThreeDFrame {
             self.command_triangles.len(),
             self.tile_triangles.len(),
             self.texture_u32.len(),
-            self.texels.len(),
+            texels,
         ]
         .into_iter()
         .try_fold(0usize, |sum, len| sum.checked_add(len))
         .ok_or(MetalError::SizeOverflow("3D upload scalar count"))?;
         checked_bytes(scalars, 4, "3D upload bytes")
     }
+}
+
+/// The last 3D frame's texels on the device, and what they are (FL-033):
+/// each texture's content digest and size, in order.
+struct ResidentTexels {
+    key: Vec<(Digest, u32, u32)>,
+    buffer: SharedBuffer,
+    bytes: usize,
 }
 
 fn push_three_d_triangle(out: &mut Vec<f32>, triangle: &crate::three_d::RasterTriangle) {
@@ -3324,10 +3429,20 @@ mod tests {
         .expect("job");
         let flat = FlatThreeDFrame::derive(&job).expect("packet");
 
-        assert_eq!(flat.texels.len(), (12 + 4 + 3) * 4, "each texture once");
-        assert_eq!(&flat.texels[..4], &shared.premultiplied_texels()[0]);
-        assert_eq!(&flat.texels[48..52], &light.premultiplied_texels()[0]);
-        assert_eq!(&flat.texels[64..68], &dark.premultiplied_texels()[0]);
+        let texels = flat.texels().expect("texels");
+        assert_eq!(texels.len(), (12 + 4 + 3) * 4, "each texture once");
+        assert_eq!(&texels[..4], &shared.premultiplied_texels()[0]);
+        assert_eq!(&texels[48..52], &light.premultiplied_texels()[0]);
+        assert_eq!(&texels[64..68], &dark.premultiplied_texels()[0]);
+        assert_eq!(
+            flat.texel_key(),
+            [&shared, &light, &dark].map(|texture| (
+                texture.digest(),
+                texture.width(),
+                texture.height()
+            )),
+            "the texels' key names each texture in their order"
+        );
         let rows = flat
             .draw_u32
             .as_chunks::<THREE_D_DRAW_U32_STRIDE>()
@@ -3384,12 +3499,17 @@ mod tests {
             flat.command_triangles.len(),
             flat.tile_triangles.len(),
             flat.texture_u32.len(),
-            flat.texels.len(),
+            texels.len(),
         ];
         assert_eq!(
-            flat.upload_bytes().expect("bytes"),
+            flat.upload_bytes(false).expect("bytes"),
             4 * scalars.iter().sum::<usize>(),
             "the texture tables are uploaded"
+        );
+        assert_eq!(
+            flat.upload_bytes(true).expect("bytes"),
+            4 * (scalars.iter().sum::<usize>() - texels.len()),
+            "texels a renderer kept are not uploaded again"
         );
 
         // Rows that would read past the texels, or a textured draw without
@@ -3412,6 +3532,190 @@ mod tests {
             wrapped.validate(),
             Err(MetalError::Layout("3D texture row"))
         ));
+    }
+
+    #[test]
+    fn a_frame_sampling_the_same_textures_keeps_their_texels_on_the_device() {
+        // FL-033: the renderer keeps the last 3D frame's texels and binds
+        // them for a frame that samples the same textures (equal content
+        // digests and sizes, in the same order), uploading the rest. The
+        // oracle is a fresh renderer, which uploads everything: every frame
+        // must equal its frame byte for byte, through the raw and the RGBA8
+        // routes.
+        use crate::texture::{SamplerPolicy, TextureEncoding};
+        use crate::three_d::SurfaceMaterial;
+
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let fine = noise_texture(32, 24, 0x8CB9_2BA7_2F3D_8DD7, TextureEncoding::Srgb);
+        let noise = noise_texture(7, 5, 0x9E37_79B9_7F4A_7C15, TextureEncoding::Srgb);
+        let dark = noise_texture(5, 4, 0x2545_F491_4F6C_DD1D, TextureEncoding::Linear);
+        // The same size as `noise`, other texels.
+        let other = noise_texture(7, 5, 0xD1B5_4A32_D192_ED03, TextureEncoding::Srgb);
+        let camera = Camera::new(CameraConfig {
+            resolution: (96, 72),
+            samples: 2,
+            background: Srgb::from_rgb8(4, 8, 16).to_linear(1.0),
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        };
+        let facing = [[0.0, 0.0, 1.0]; 2];
+        // Two quads, moved by `shift` (a pan).
+        let quads = |shift: f64| {
+            (
+                textured_quad(
+                    [-2.0 + shift, 0.5, 0.0],
+                    [3.0, 2.2],
+                    0.4,
+                    [-0.5, 1.5],
+                    facing,
+                    0.9,
+                ),
+                textured_quad(
+                    [2.0 + shift, -0.5, 0.3],
+                    [2.5, 2.0],
+                    -0.3,
+                    [0.0, 1.0],
+                    facing,
+                    1.0,
+                ),
+            )
+        };
+        fn draws<'a>(
+            back: &'a SurfaceMesh,
+            front: &'a SurfaceMesh,
+            first: &'a Texture,
+            second: &'a Texture,
+            dark: &'a Texture,
+        ) -> [ThreeDDraw<'a>; 2] {
+            [
+                ThreeDDraw::Surface(SurfaceDraw::image(back, first)),
+                ThreeDDraw::Surface(SurfaceDraw {
+                    material: SurfaceMaterial::Texture(TextureMaterial {
+                        light: second,
+                        dark: Some(dark),
+                        sampler: SamplerPolicy::default(),
+                        discard_transparent: true,
+                    }),
+                    shading: [0.4, 0.3, 0.5],
+                    ..SurfaceDraw::new(front)
+                }),
+            ]
+        }
+        let texel_bytes = |textures: &[&Texture]| {
+            16 * textures
+                .iter()
+                .map(|texture| (texture.width() * texture.height()) as usize)
+                .sum::<usize>()
+        };
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        assert_eq!(renderer.resident_texel_bytes(), 0, "nothing before a frame");
+        // Each frame through the kept renderer and a fresh one: equal bytes;
+        // the upload smaller by exactly the texels when they were kept.
+        let mut frame =
+            |job: &ThreeDJob<'_>, raw: bool, kept: bool, textures: &[&Texture], step: &str| {
+                let mut fresh = MetalRenderer::new().expect("Metal renderer");
+                let ((ours, report), (theirs, reference)) = if raw {
+                    (
+                        renderer.render_three_d_raw(job).expect("Metal frame"),
+                        fresh.render_three_d_raw(job).expect("Metal frame"),
+                    )
+                } else {
+                    (
+                        renderer.render_three_d_rgba8(job).expect("Metal frame"),
+                        fresh.render_three_d_rgba8(job).expect("Metal frame"),
+                    )
+                };
+                assert_eq!(ours.as_bytes(), theirs.as_bytes(), "{step}: the frame");
+                let saved = if kept { texel_bytes(textures) } else { 0 };
+                assert_eq!(
+                    report.upload_bytes + saved,
+                    reference.upload_bytes,
+                    "{step}: the upload"
+                );
+                assert_eq!(
+                    renderer.resident_texel_bytes(),
+                    texel_bytes(textures),
+                    "{step}: the kept texels"
+                );
+                ours.as_bytes().to_vec()
+            };
+
+        let (back, front) = quads(0.0);
+        let job = ThreeDJob::new(&camera, &draws(&back, &front, &fine, &noise, &dark), tiling)
+            .expect("job");
+        let first = frame(
+            &job,
+            false,
+            false,
+            &[&fine, &noise, &dark],
+            "the first frame",
+        );
+
+        // A pan: the same textures, kept, through both routes.
+        let (back, front) = quads(0.7);
+        let job = ThreeDJob::new(&camera, &draws(&back, &front, &fine, &noise, &dark), tiling)
+            .expect("job");
+        let panned = frame(&job, false, true, &[&fine, &noise, &dark], "a pan");
+        assert_ne!(panned, first, "the pan moved the quads");
+        frame(&job, true, true, &[&fine, &noise, &dark], "the raw route");
+
+        // Other textures with the same content: kept.
+        let (fine2, noise2, dark2) = (fine.clone(), noise.clone(), dark.clone());
+        let job = ThreeDJob::new(
+            &camera,
+            &draws(&back, &front, &fine2, &noise2, &dark2),
+            tiling,
+        )
+        .expect("job");
+        frame(&job, false, true, &[&fine, &noise, &dark], "equal textures");
+
+        // One texture of the same size with other texels: uploaded.
+        let job = ThreeDJob::new(&camera, &draws(&back, &front, &fine, &other, &dark), tiling)
+            .expect("job");
+        let changed = frame(
+            &job,
+            false,
+            false,
+            &[&fine, &other, &dark],
+            "another texture",
+        );
+        assert_ne!(changed, panned, "the other texture shows");
+
+        // The same textures in another order: uploaded, at their new places.
+        let job = ThreeDJob::new(&camera, &draws(&back, &front, &other, &fine, &dark), tiling)
+            .expect("job");
+        frame(&job, false, false, &[&other, &fine, &dark], "another order");
+        frame(
+            &job,
+            false,
+            true,
+            &[&other, &fine, &dark],
+            "that order again",
+        );
+
+        // A frame without textures, then the textures again: uploaded.
+        let plain = [ThreeDDraw::TrueDot(TrueDotDraw::glow(
+            [0.5, 0.2, 1.0],
+            0.9,
+            Srgb::from_rgb8(255, 255, 255).to_linear(0.9),
+        ))];
+        let job = ThreeDJob::new(&camera, &plain, tiling).expect("job");
+        frame(&job, false, false, &[], "no textures");
+        let job = ThreeDJob::new(&camera, &draws(&back, &front, &other, &fine, &dark), tiling)
+            .expect("job");
+        frame(
+            &job,
+            false,
+            false,
+            &[&other, &fine, &dark],
+            "the textures again",
+        );
     }
 
     #[test]
@@ -3477,7 +3781,7 @@ mod tests {
             }),
             "stable scatter must never invert painter order"
         );
-        assert!(flat.upload_bytes().expect("bounded packet") > 0);
+        assert!(flat.upload_bytes(false).expect("bounded packet") > 0);
     }
 
     #[test]
