@@ -21,6 +21,12 @@
 //! the result is encoded round-to-nearest-even. Rows are write-disjoint, so
 //! the thread count changes nothing. The Metal route's two kernels run the
 //! same arithmetic in the same order.
+//!
+//! The frame blooms in bands of [`BLOOM_BAND_ROWS`] rows, top to bottom, so
+//! only the row sums within the blur's reach of one band are held at once,
+//! in a ring ([`Bloom::ring_rows`]): before a band is mixed in place, the
+//! sums of every row it reaches are taken from rows not yet written, each
+//! row's once. The bits do not depend on the band height either.
 
 use std::fmt;
 use std::sync::{Mutex, PoisonError};
@@ -33,9 +39,13 @@ use crate::engine::{NativeScopedSpawner, run_scoped_workers};
 /// The widest bloom accepted: its standard deviation in pixels.
 pub const BLOOM_SIGMA_MAX_PIXELS: f64 = 32.0;
 
-/// Bytes per pixel the blur's row pass holds while a frame blooms: four
-/// `f32` sums.
+/// Bytes per pixel of the row sums a blooming frame holds: four `f32`
+/// sums, for the rows of [`Bloom::ring_rows`].
 pub const BLOOM_SCRATCH_BYTES_PER_PIXEL: u64 = 16;
+
+/// The rows a frame blooms in at once: the band the column pass mixes
+/// before the next band's row sums replace the ones it no longer reaches.
+pub const BLOOM_BAND_ROWS: u32 = 128;
 
 /// A refused bloom.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -143,24 +153,44 @@ impl Bloom {
         self.taps.len() / 2
     }
 
-    /// The bytes [`Bloom::apply`] holds for a `width` × `height` frame
-    /// ([`BLOOM_SCRATCH_BYTES_PER_PIXEL`] a pixel); the Metal route holds the
-    /// same on the device. `None` on overflow.
+    /// The rows of row sums a frame `height` rows tall holds while it
+    /// blooms: a band of [`BLOOM_BAND_ROWS`] and the blur's reach above and
+    /// below it, or the whole frame when that is shorter.
     #[must_use]
-    pub fn scratch_bytes(width: u32, height: u32) -> Option<u64> {
+    pub fn ring_rows(&self, height: u32) -> u32 {
+        ring_rows(height, BLOOM_BAND_ROWS, self.radius())
+    }
+
+    /// The bytes of row sums a `width` × `height` frame holds while it
+    /// blooms: [`BLOOM_SCRATCH_BYTES_PER_PIXEL`] for each pixel of
+    /// [`Bloom::ring_rows`] rows. [`Bloom::apply`] allocates them; the Metal
+    /// route keeps them on the device. `None` on overflow.
+    #[must_use]
+    pub fn scratch_bytes(&self, width: u32, height: u32) -> Option<u64> {
         u64::from(width)
-            .checked_mul(u64::from(height))?
+            .checked_mul(u64::from(self.ring_rows(height)))?
             .checked_mul(BLOOM_SCRATCH_BYTES_PER_PIXEL)
     }
 
     /// Bloom a raw `Rgba16F` frame in place on up to `threads` threads.
     ///
     /// # Errors
-    /// [`FrameError::FormatMismatch`] for another format;
-    /// [`FrameError::TooLarge`] when the row pass's sums cannot be reserved;
-    /// [`FrameError::WorkerSpawnFailed`] if the host cannot start the
-    /// requested team, before the frame is touched.
+    /// [`FrameError::FormatMismatch`] for another format, the frame
+    /// untouched; [`FrameError::TooLarge`] when the row sums cannot be
+    /// reserved, the frame untouched; [`FrameError::WorkerSpawnFailed`] if
+    /// the host cannot start the requested team, which leaves the bands
+    /// before it bloomed and the rest not.
     pub fn apply(&self, frame: &mut FrameBuffer, threads: usize) -> Result<(), FrameError> {
+        self.apply_in_bands(frame, threads, BLOOM_BAND_ROWS)
+    }
+
+    /// [`Bloom::apply`] in bands of `band` rows (at least one).
+    fn apply_in_bands(
+        &self,
+        frame: &mut FrameBuffer,
+        threads: usize,
+        band: u32,
+    ) -> Result<(), FrameError> {
         let layout = frame.layout();
         if layout.format() != PixelFormat::Rgba16F {
             return Err(FrameError::FormatMismatch {
@@ -171,22 +201,50 @@ impl Bloom {
         let width = layout.width() as usize;
         let height = layout.height() as usize;
         let stride = layout.stride(0);
+        let band = band.max(1) as usize;
+        let radius = self.radius();
+        let ring = ring_rows(layout.height(), band as u32, radius) as usize;
         let row_values = width.checked_mul(4).ok_or(FrameError::TooLarge)?;
-        let values = row_values.checked_mul(height).ok_or(FrameError::TooLarge)?;
+        let values = row_values.checked_mul(ring).ok_or(FrameError::TooLarge)?;
         let mut sums = Vec::new();
         sums.try_reserve_exact(values)
             .map_err(|_| FrameError::TooLarge)?;
         sums.resize(values, 0.0_f32);
         let workers = crate::effective_threads(threads).max(1);
 
-        let plane = frame.plane(0);
-        for_each_row(workers, &mut sums, row_values, |y, row| {
-            self.blur_row(&plane[y * stride..], width, row);
-        })?;
-        let sums = &sums;
-        for_each_row(workers, frame.plane_mut(0), stride, |y, row| {
-            self.blur_column_and_mix(sums, y, width, height, row);
-        })
+        // Rows `0..summed` have had their sums taken; row `y`'s are in slot
+        // `y % ring`. A band's rows reach `radius` rows past it, so their
+        // sums are taken first, from rows no band has written yet; the slots
+        // they take hold rows above the band's reach.
+        let mut summed = 0;
+        let mut first = 0;
+        while first < height {
+            let last = height.min(first + band);
+            let ahead = height.min(last + radius);
+            if ahead > summed {
+                let (from, plane) = (summed, frame.plane(0));
+                for_each_row(workers, &mut sums, row_values, |slot, row| {
+                    let y = from + (slot + ring - from % ring) % ring;
+                    if y < ahead {
+                        self.blur_row(&plane[y * stride..], width, row);
+                    }
+                })?;
+                summed = ahead;
+            }
+            let sums = &sums;
+            let plane = frame.plane_mut(0);
+            let end = plane.len().min(last * stride);
+            for_each_row(
+                workers,
+                &mut plane[first * stride..end],
+                stride,
+                |i, row| {
+                    self.blur_column_and_mix(sums, ring, first + i, width, height, row);
+                },
+            )?;
+            first = last;
+        }
+        Ok(())
     }
 
     /// The row pass: `sums[x] = Σₖ taps[k] × in[clamp(x + k − r)]`, per
@@ -205,11 +263,12 @@ impl Bloom {
         }
     }
 
-    /// The column pass over the row sums, then the mix with the frame's own
-    /// row `y`, written back in place.
+    /// The column pass over the row sums, held in a ring of `ring` rows,
+    /// then the mix with the frame's own row `y`, written back in place.
     fn blur_column_and_mix(
         &self,
         sums: &[f32],
+        ring: usize,
         y: usize,
         width: usize,
         height: usize,
@@ -221,7 +280,7 @@ impl Bloom {
             let mut acc = [0.0_f32; 4];
             for (k, &tap) in self.taps.iter().enumerate() {
                 let sy = (y + k).saturating_sub(radius).min(height - 1);
-                let base = sy * row_values + x * 4;
+                let base = (sy % ring) * row_values + x * 4;
                 for (c, acc) in acc.iter_mut().enumerate() {
                     *acc += tap * sums[base + c];
                 }
@@ -233,6 +292,15 @@ impl Bloom {
             }
         }
     }
+}
+
+/// The rows of row sums a frame `height` rows tall blooming in bands of
+/// `band` rows with a blur of `radius` holds: the band and the blur's reach
+/// above and below it, or the whole frame when that is shorter.
+pub(crate) fn ring_rows(height: u32, band: u32, radius: usize) -> u32 {
+    // The radius is at most 96 (`BLOOM_SIGMA_MAX_PIXELS`).
+    let reach = band.saturating_add(2 * radius as u32);
+    height.min(reach)
 }
 
 /// Channel `index` of a row of little-endian binary16 samples.
@@ -328,6 +396,48 @@ mod tests {
             .sum();
         assert!((variance.sqrt() - 3.0).abs() < 0.05, "{variance}");
         assert_eq!((bloom.strength(), bloom.keep()), (0.15, 0.85));
+    }
+
+    #[test]
+    fn the_bits_do_not_depend_on_the_band_height() {
+        // One band of the whole frame keeps every row's sums at once (the
+        // ring is the frame); every other height evicts sums the bands
+        // above no longer reach, and must give the same bits.
+        let original = frame(29, 31, speckle);
+        for sigma in [0.7, 1.5, 3.0] {
+            let bloom = Bloom::new(0.4, sigma).expect("bloom");
+            let mut whole = original.clone();
+            bloom.apply_in_bands(&mut whole, 1, 31).expect("blooms");
+            assert_ne!(whole.as_bytes(), original.as_bytes());
+            for band in [1, 2, 5, 9, 30, BLOOM_BAND_ROWS] {
+                for threads in [1, 3] {
+                    let mut banded = original.clone();
+                    bloom
+                        .apply_in_bands(&mut banded, threads, band)
+                        .expect("blooms");
+                    assert_eq!(
+                        banded.as_bytes(),
+                        whole.as_bytes(),
+                        "{sigma} {band} {threads}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_bloom_holds_the_row_sums_of_one_band_and_its_reach() {
+        // sigma 3: radius 9. A 4K frame holds 128 + 18 rows of sums, 9 MB
+        // where the whole frame's would be 133 MB; a frame shorter than
+        // that holds its own rows.
+        let bloom = Bloom::new(0.15, 3.0).expect("bloom");
+        assert_eq!(bloom.ring_rows(2160), 146);
+        assert_eq!(bloom.scratch_bytes(3840, 2160), Some(3840 * 146 * 16));
+        assert_eq!(bloom.ring_rows(100), 100);
+        assert_eq!(bloom.scratch_bytes(64, 100), Some(64 * 100 * 16));
+        let widest = Bloom::new(0.15, BLOOM_SIGMA_MAX_PIXELS).expect("bloom");
+        assert_eq!(widest.radius(), 96);
+        assert_eq!(widest.ring_rows(2160), 128 + 192);
     }
 
     #[test]

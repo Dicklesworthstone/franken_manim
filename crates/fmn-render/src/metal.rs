@@ -28,7 +28,7 @@ pub use ft_kernel_metal::presentation::{
 };
 use ft_kernel_metal::presentation::{NativePresenter, PresentationConfig};
 
-use crate::bloom::Bloom;
+use crate::bloom::{BLOOM_BAND_ROWS, BLOOM_SCRATCH_BYTES_PER_PIXEL, Bloom};
 use crate::engine::{AaPolicy, Draw, EngineIdentity, FrameConfig, FrameJob, FrameJobError};
 use crate::fill::MonoTable;
 use crate::plan::RenderPlan;
@@ -44,6 +44,7 @@ const NV12_KERNEL: &str = "fmn_rgba16f_to_nv12";
 const P010_KERNEL: &str = "fmn_rgba16f_to_p010";
 const BLOOM_ROWS_KERNEL: &str = "fmn_bloom_rows";
 const BLOOM_COLUMNS_KERNEL: &str = "fmn_bloom_columns";
+const BLOOM_KERNELS: &str = "fmn_bloom_rows and fmn_bloom_columns";
 const SEGMENT_ARC_INTERVALS: usize = 16;
 const SEGMENT_ARC_VALUES: usize = SEGMENT_ARC_INTERVALS + 1;
 const SEGMENT_STRIDE: usize = 8 + SEGMENT_ARC_VALUES + 1;
@@ -678,6 +679,9 @@ pub struct MetalRenderer {
     output_surface: Option<OutputSurfaceSlot>,
     /// The bloom's row sums, kept with the raw surface they belong to.
     bloom_sums: Option<SurfaceSlot>,
+    /// The rows the bloom works in at once ([`BLOOM_BAND_ROWS`]; tests
+    /// take others: the bits do not depend on it).
+    bloom_band_rows: u32,
     /// The last 3D frame's texels, kept for the next frame that samples the
     /// same textures (FL-033).
     resident_texels: Option<ResidentTexels>,
@@ -742,6 +746,7 @@ impl MetalRenderer {
             raw_surface: None,
             output_surface: None,
             bloom_sums: None,
+            bloom_band_rows: BLOOM_BAND_ROWS,
             resident_texels: None,
             device: gateway.device_name(),
             unified_memory: gateway.has_unified_memory(),
@@ -762,8 +767,9 @@ impl MetalRenderer {
     }
 
     /// The bytes of the bloom's row sums the renderer keeps on the device
-    /// ([`Bloom::scratch_bytes`] of the last bloomed 3D frame), reused by
-    /// the next bloomed frame of the same size. Zero before one.
+    /// ([`Bloom::scratch_bytes`] of the last bloomed 3D frame: a band and
+    /// the blur's reach, not the whole frame), reused by the next bloomed
+    /// frame of the same size and reach. Zero before one.
     #[must_use]
     pub fn bloom_scratch_bytes(&self) -> usize {
         self.bloom_sums.as_ref().map_or(0, |sums| sums.bytes)
@@ -1222,78 +1228,134 @@ impl MetalRenderer {
         Ok((raw_reused, upload_bytes))
     }
 
-    /// Bloom the raw surface in place ([`Bloom`]): the row pass into the
-    /// kept row sums, then the column pass and the mix back into the
-    /// surface, each kernel the CPU route's arithmetic in its order. Returns
-    /// the bytes of the bloom's new input buffers (its sizes, taps and mix).
+    /// Bloom the raw surface in place ([`Bloom`]), in bands of
+    /// `bloom_band_rows` as the CPU route does: for each band, the row sums
+    /// of the rows it reaches that have none yet into the kept ring, then
+    /// the column pass and the mix back into the band's rows. Every kernel
+    /// runs the CPU route's arithmetic in its order, all in one command
+    /// buffer, in order. Returns the bytes of the bloom's new input buffers
+    /// (each band's sizes, the taps and the mix).
     fn bloom_raw_surface(
         &mut self,
         width: u32,
         height: u32,
         bloom: &Bloom,
     ) -> Result<usize, MetalError> {
-        let sums_bytes = Bloom::scratch_bytes(width, height)
-            .and_then(|bytes| usize::try_from(bytes).ok())
-            .ok_or(MetalError::SizeOverflow("bloom row sums"))?;
-        ensure_surface(self.gateway, &mut self.bloom_sums, sums_bytes)?;
-        let sizes = [
-            width,
-            height,
-            u32::try_from(bloom.radius()).map_err(|_| MetalError::SizeOverflow("bloom radius"))?,
-        ];
-        let mix = [bloom.keep(), bloom.strength()];
-        let params = self.gateway.buffer_u32(&sizes)?;
-        let taps = self.gateway.buffer_f32(bloom.taps())?;
-        let mix_buffer = self.gateway.buffer_f32(&mix)?;
+        let radius =
+            u32::try_from(bloom.radius()).map_err(|_| MetalError::SizeOverflow("bloom radius"))?;
+        let band = self.bloom_band_rows.max(1);
+        let ring = crate::bloom::ring_rows(height, band, bloom.radius());
+        let ring_bytes = checked_bytes(
+            usize::try_from(u64::from(width) * u64::from(ring))
+                .map_err(|_| MetalError::SizeOverflow("bloom row sums"))?,
+            BLOOM_SCRATCH_BYTES_PER_PIXEL as usize,
+            "bloom row sums",
+        )?;
+        ensure_surface(self.gateway, &mut self.bloom_sums, ring_bytes)?;
+        // Each band: width, height, radius, ring rows; the rows whose sums
+        // are taken (first, count, first status word); the band's rows
+        // (first, count, first status word).
         let groups_x = (width as usize).div_ceil(TRANSFER_TILE);
-        let groups_y = (height as usize).div_ceil(TRANSFER_TILE);
-        let group_count = groups_x
-            .checked_mul(groups_y)
-            .ok_or(MetalError::SizeOverflow("bloom group count"))?;
-        let surface = &self
+        let groups_of = |rows: u32| groups_x * (rows as usize).div_ceil(TRANSFER_TILE);
+        let status_word = |groups: usize| {
+            u32::try_from(groups).map_err(|_| MetalError::SizeOverflow("bloom status"))
+        };
+        let mut bands: Vec<[u32; 10]> = Vec::new();
+        let (mut summed, mut first, mut groups) = (0_u32, 0_u32, 0_usize);
+        while first < height {
+            let last = height.min(first.saturating_add(band));
+            let ahead = height.min(last.saturating_add(radius));
+            let summing = ahead.saturating_sub(summed);
+            let rows_status = status_word(groups)?;
+            groups += groups_of(summing);
+            let band_status = status_word(groups)?;
+            groups += groups_of(last - first);
+            bands.push([
+                width,
+                height,
+                radius,
+                ring,
+                summed,
+                summing,
+                rows_status,
+                first,
+                last - first,
+                band_status,
+            ]);
+            summed = summed.max(ahead);
+            first = last;
+        }
+        let mix = [bloom.keep(), bloom.strength()];
+        let gateway = self.gateway;
+        let params = bands
+            .iter()
+            .map(|sizes| gateway.buffer_u32(sizes))
+            .collect::<Result<Vec<_>, _>>()?;
+        let taps = gateway.buffer_f32(bloom.taps())?;
+        let mix_buffer = gateway.buffer_f32(&mix)?;
+        let mut status = gateway.buffer_zeroed(checked_bytes(groups, 4, "bloom status")?)?;
+        for (pipeline, name) in [
+            (&self.bloom_rows, BLOOM_ROWS_KERNEL),
+            (&self.bloom_columns, BLOOM_COLUMNS_KERNEL),
+        ] {
+            validate_threadgroup(pipeline, name, TRANSFER_TILE, TRANSFER_TILE)?;
+        }
+        let surface = &mut self
             .raw_surface
-            .as_ref()
+            .as_mut()
             .ok_or(MetalError::Layout("raw surface disappeared"))?
             .buffer;
-        let sums = &self
+        let sums = &mut self
             .bloom_sums
-            .as_ref()
+            .as_mut()
             .ok_or(MetalError::Layout("bloom row sums disappeared"))?
             .buffer;
-        let grid = Grid::grid_2d(groups_x, groups_y, TRANSFER_TILE, TRANSFER_TILE);
-
-        validate_threadgroup(
-            &self.bloom_rows,
-            BLOOM_ROWS_KERNEL,
-            TRANSFER_TILE,
-            TRANSFER_TILE,
-        )?;
-        let status = self
-            .gateway
-            .buffer_zeroed(checked_bytes(group_count, 4, "bloom status")?)?;
-        self.gateway.dispatch(
-            &self.bloom_rows,
-            &[&params, &taps, surface, sums, &status],
-            grid,
-        )?;
-        verify_status(&status, group_count, BLOOM_ROWS_KERNEL)?;
-
-        validate_threadgroup(
-            &self.bloom_columns,
-            BLOOM_COLUMNS_KERNEL,
-            TRANSFER_TILE,
-            TRANSFER_TILE,
-        )?;
-        let status = self
-            .gateway
-            .buffer_zeroed(checked_bytes(group_count, 4, "bloom status")?)?;
-        self.gateway.dispatch(
-            &self.bloom_columns,
-            &[&params, &taps, &mix_buffer, sums, surface, &status],
-            grid,
-        )?;
-        verify_status(&status, group_count, BLOOM_COLUMNS_KERNEL)?;
-        Ok(std::mem::size_of_val(&sizes)
+        let mut batch = gateway.batch();
+        let (surface, sums, status_out) = (
+            batch.output(surface),
+            batch.output(sums),
+            batch.output(&mut status),
+        );
+        let (taps_in, mix_in) = (batch.input(&taps), batch.input(&mix_buffer));
+        let grid = |rows: u32| {
+            Grid::grid_2d(
+                groups_x,
+                (rows as usize).div_ceil(TRANSFER_TILE),
+                TRANSFER_TILE,
+                TRANSFER_TILE,
+            )
+        };
+        for (sizes, buffer) in bands.iter().zip(&params) {
+            let sizes_in = batch.input(buffer);
+            if sizes[5] > 0 {
+                batch.dispatch(
+                    &self.bloom_rows,
+                    &[
+                        sizes_in.read(),
+                        taps_in.read(),
+                        surface.read(),
+                        sums.write(),
+                        status_out.write(),
+                    ],
+                    grid(sizes[5]),
+                )?;
+            }
+            batch.dispatch(
+                &self.bloom_columns,
+                &[
+                    sizes_in.read(),
+                    taps_in.read(),
+                    mix_in.read(),
+                    sums.read(),
+                    surface.write(),
+                    status_out.write(),
+                ],
+                grid(sizes[8]),
+            )?;
+        }
+        batch.submit()?;
+        verify_status(&status, groups, BLOOM_KERNELS)?;
+        Ok(std::mem::size_of_val(bands.as_slice())
             + std::mem::size_of_val(bloom.taps())
             + std::mem::size_of_val(&mix))
     }
@@ -3893,10 +3955,12 @@ mod tests {
             assert_ne!(ours.as_bytes(), raw.as_bytes(), "{strength}: it blooms");
             assert_eq!(
                 report.upload_bytes,
-                before.upload_bytes + 12 + 4 * bloom.taps().len() + 8,
+                // One band: its ten sizes; the taps; the mix.
+                before.upload_bytes + 40 + 4 * bloom.taps().len() + 8,
                 "{strength}: the upload"
             );
-            assert_eq!(renderer.bloom_scratch_bytes(), 100 * 70 * 16);
+            let ring = 70.min(128 + 2 * bloom.radius());
+            assert_eq!(renderer.bloom_scratch_bytes(), 100 * ring * 16);
             let (frame, _) = renderer
                 .render_three_d_rgba8(&bloomed)
                 .expect("Metal frame");
@@ -3917,7 +3981,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bloom_on_the_device_rounds_every_value_as_the_cpu_does() {
+    fn a_bloom_on_the_device_rounds_every_value_as_the_cpu_does_in_bands_of_any_height() {
         // A raster's few distinct values rarely sit where one rounding more
         // or less shows in half precision. Here every channel of a 256 x 256
         // premultiplied raw surface is its own value, so a mix or row sum the
@@ -3955,8 +4019,20 @@ mod tests {
             .map(|word| u32::from_le_bytes(*word))
             .collect();
         let mut renderer = MetalRenderer::new().expect("Metal renderer");
-        for (strength, sigma) in [(0.15, 3.0), (0.6, 1.0), (0.35, 0.7)] {
+        // In bands of every height: the default, one row, a few rows across
+        // a radius, more than half the frame. The CPU bloom runs in its
+        // default bands, so the bits must not depend on the band height.
+        let cases = [
+            (0.15, 3.0, BLOOM_BAND_ROWS),
+            (0.6, 1.0, BLOOM_BAND_ROWS),
+            (0.35, 0.7, BLOOM_BAND_ROWS),
+            (0.15, 3.0, 1),
+            (0.15, 3.0, 7),
+            (0.6, 1.0, 100),
+        ];
+        for (strength, sigma, band) in cases {
             let bloom = Bloom::new(strength, sigma).expect("bloom");
+            renderer.bloom_band_rows = band;
             renderer.raw_surface = Some(SurfaceSlot {
                 bytes: raw.as_bytes().len(),
                 buffer: renderer.gateway.buffer_u32(&words).expect("surface"),
@@ -3964,6 +4040,8 @@ mod tests {
             renderer
                 .bloom_raw_surface(width, height, &bloom)
                 .expect("device bloom");
+            let ring = (band as usize + 2 * bloom.radius()).min(height as usize);
+            assert_eq!(renderer.bloom_scratch_bytes(), width as usize * ring * 16);
             let mut ours = raw.clone();
             renderer
                 .raw_surface
@@ -3975,7 +4053,7 @@ mod tests {
             let mut expected = raw.clone();
             bloom.apply(&mut expected, 4).expect("blooms");
             assert_ne!(expected.as_bytes(), raw.as_bytes(), "{strength}: it blooms");
-            assert_eq!(ours.as_bytes(), expected.as_bytes(), "{strength}");
+            assert_eq!(ours.as_bytes(), expected.as_bytes(), "{strength} {band}");
         }
     }
 
