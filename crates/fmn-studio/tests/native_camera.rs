@@ -85,7 +85,7 @@ fn object(kind: Kind) -> Mobject {
         }
         Kind::Dots => {
             let schema = RecordSchema::new(
-                &[("point", 3), ("rgba", 4), ("radius", 1), ("glow_factor", 1)],
+                &[("point", 3), ("radius", 1), ("rgba", 4)],
                 &["point"],
                 &["point"],
             )
@@ -94,7 +94,6 @@ fn object(kind: Kind) -> Mobject {
             buffer.write(0, "point", &[0.0, 0.0, 0.4]);
             buffer.write(0, "rgba", &[0.1, 1.0, 0.3, 1.0]);
             buffer.write(0, "radius", &[0.7]);
-            buffer.write(0, "glow_factor", &[0.0]);
             Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::DotCloud)
         }
         Kind::Image => {

@@ -904,6 +904,7 @@ fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
                     left_uniforms.anti_alias_width,
                     right_uniforms.anti_alias_width,
                 )
+                || !canonical_f64_equal(left_uniforms.glow_factor, right_uniforms.glow_factor)
                 || left_uniforms.joint_type != right_uniforms.joint_type
                 || left_uniforms.flat_stroke != right_uniforms.flat_stroke
                 || left_uniforms.scale_stroke_with_zoom != right_uniforms.scale_stroke_with_zoom
@@ -1270,6 +1271,17 @@ mod tests {
         let mob = stage.add(test_mobject(TRIANGLE));
         stage.add_to_scene(mob).expect("fresh handle roots");
         (stage, mob)
+    }
+
+    #[test]
+    fn pure_proof_compares_glow_uniforms_even_when_records_are_identical() {
+        let (mut stage, mob) = stage_with_mob();
+        let before = stage.snapshot().materialize();
+        assert!(rooted_states_equal(&before, &stage));
+        stage.set_glow_factor(mob, 2.0, false);
+        assert!(!rooted_states_equal(&before, &stage));
+        stage.set_glow_factor(mob, 0.0, false);
+        assert!(rooted_states_equal(&before, &stage));
     }
 
     /// Read the container's top-level fields with the format's own Reader

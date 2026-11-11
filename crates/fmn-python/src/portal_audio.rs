@@ -371,9 +371,8 @@ impl BundleAudioCapture {
                 / 4
                 / usize::from(options.channels)) as u64,
         };
-        let minimum =
-            frames_to_samples(i64::from(picture_frames), time.fps(), options.sample_rate)
-                .map_err(native_error)?;
+        let minimum = frames_to_samples(i64::from(picture_frames), time.fps(), options.sample_rate)
+            .map_err(native_error)?;
         let minimum = u64::try_from(minimum).map_err(native_error)?;
         if config.max_output_frames == 0 || minimum > config.max_output_frames {
             return Err(PyRuntimeError::new_err(
@@ -395,9 +394,11 @@ impl BundleAudioCapture {
                 Entry::Vacant(entry) => {
                     let raw_budget = (options.max_bytes - source_bytes)
                         .min(64 * 1024 * 1024)
-                        .min(self.ffmpeg_limits.as_ref().map_or(usize::MAX, |policy| {
-                            policy.max_input_bytes as usize
-                        }));
+                        .min(
+                            self.ffmpeg_limits
+                                .as_ref()
+                                .map_or(usize::MAX, |policy| policy.max_input_bytes as usize),
+                        );
                     let sample_budget = (options.max_bytes - decoded_bytes) / 4;
                     if raw_budget == 0 || sample_budget == 0 {
                         return Err(PyRuntimeError::new_err(

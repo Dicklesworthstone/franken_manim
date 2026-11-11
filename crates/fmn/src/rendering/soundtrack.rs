@@ -10,9 +10,9 @@ use fmn_anim::FramePacket;
 use fmn_codec::SampleFormat;
 use fmn_config::Config;
 use fmn_output::{
-    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy,
-    InvocationReport, MixReport, MixerConfig, SoundCue, SoundMixer, WavPublicationConfig,
-    WavPublicationReport, frames_to_samples, publish_wav_new,
+    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy, InvocationReport, MixReport,
+    MixerConfig, SoundCue, SoundMixer, WavPublicationConfig, WavPublicationReport,
+    frames_to_samples, publish_wav_new,
 };
 use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};

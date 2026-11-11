@@ -1119,6 +1119,7 @@ fn same_camera_uniforms(before: &Uniforms, after: &Uniforms) -> bool {
         && before.clip_planes.map(|plane| plane.map(f64::to_bits))
             == after.clip_planes.map(|plane| plane.map(f64::to_bits))
         && before.anti_alias_width.to_bits() == after.anti_alias_width.to_bits()
+        && before.glow_factor.to_bits() == after.glow_factor.to_bits()
 }
 
 fn camera_scene_entries(
@@ -1690,21 +1691,12 @@ fn dot_draws(stage: &Stage, mob: Mob) -> Result<Vec<TrueDotDraw>, RetainedFrameR
                 mob,
                 reason: "dot-cloud radius field is absent",
             })?;
-        let glow_factor = entry
-            .buffer
-            .read(record, "glow_factor")
-            .and_then(|value| value.first().copied())
-            .map(f64::from)
-            .ok_or(RetainedFrameRendererError::InvalidPrimitive {
-                mob,
-                reason: "dot-cloud glow_factor field is absent",
-            })?;
         let mut draw = TrueDotDraw::new(
             placement.apply_point(record_vec3(stage, mob, record, "point")?),
             radius,
             record_rgba(stage, mob, record)?,
         );
-        draw.glow_factor = glow_factor;
+        draw.glow_factor = entry.uniforms().glow_factor;
         draw.anti_alias_width = entry.uniforms().anti_alias_width;
         draw.shading = entry.uniforms().shading;
         draw.is_fixed_in_frame = entry.uniforms().is_fixed_in_frame;
@@ -1798,7 +1790,7 @@ mod tests {
     }
     fn dot_cloud() -> Mobject {
         let schema = RecordSchema::new(
-            &[("point", 3), ("radius", 1), ("rgba", 4), ("glow_factor", 1)],
+            &[("point", 3), ("radius", 1), ("rgba", 4)],
             &["point"],
             &["point"],
         )
@@ -1807,7 +1799,6 @@ mod tests {
         buffer.write(0, "point", &[2.0, 0.5, 0.5]);
         buffer.write(0, "radius", &[0.45]);
         buffer.write(0, "rgba", &[0.2, 1.0, 0.2, 1.0]);
-        buffer.write(0, "glow_factor", &[0.0]);
         Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::DotCloud)
     }
     fn triangle_mesh() -> Mobject {
@@ -2816,6 +2807,73 @@ mod tests {
         four.render_with_camera(&stage, &camera)
             .expect("same mixed frame at four threads");
         assert_eq!(one.frame().as_bytes(), four.frame().as_bytes());
+    }
+
+    #[test]
+    fn dot_glow_uniform_invalidates_cached_pixels_and_preserves_frozen_frames() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(dot_cloud());
+        stage.add_to_scene(mob).unwrap();
+        let points = stage.get_points(mob).unwrap();
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        let hard = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        let hard_pixels = renderer.frame().as_bytes().to_vec();
+
+        stage.get_mut(mob).unwrap().uniforms_mut().glow_factor = 2.0;
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        let glow_pixels = renderer.frame().as_bytes().to_vec();
+        let glow = renderer.prepare_with_camera(&stage, &camera).unwrap();
+        assert_ne!(hard_pixels, glow_pixels);
+        assert!(!Arc::ptr_eq(&hard.scene, &glow.scene));
+        assert!(!Arc::ptr_eq(&hard.projection, &glow.projection));
+        assert_eq!(stage.get_points(mob).unwrap(), points);
+
+        stage.get_mut(mob).unwrap().uniforms_mut().glow_factor = 0.0;
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), hard_pixels);
+        for threads in [1, 4, 16] {
+            assert_eq!(hard.render(threads).unwrap().as_bytes(), hard_pixels);
+            assert_eq!(glow.render(threads).unwrap().as_bytes(), glow_pixels);
+        }
+    }
+
+    #[test]
+    fn custom_glow_columns_never_control_dot_material() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(dot_cloud());
+        stage.add_to_scene(mob).unwrap();
+        stage.get_mut(mob).unwrap().uniforms_mut().glow_factor = 2.0;
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        let original = renderer.frame().as_bytes().to_vec();
+
+        // Even an authored non-scalar field with the same name is just data.
+        let schema = RecordSchema::new(
+            &[("point", 3), ("radius", 1), ("rgba", 4), ("glow_factor", 2)],
+            &["point"],
+            &["point"],
+        )
+        .unwrap();
+        let mut buffer = RecordBuffer::new(schema, 1).unwrap();
+        for field in ["point", "radius", "rgba"] {
+            let values = stage.get(mob).unwrap().buffer.read_column(field).unwrap();
+            buffer.write_range(field, 0, &values);
+        }
+        buffer.write(0, "glow_factor", &[-7.0, 31.0]);
+        stage.get_mut(mob).unwrap().buffer = buffer;
+        assert_eq!(dot_draws(&stage, mob).unwrap()[0].glow_factor, 2.0);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), original);
+        stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .write(0, "glow_factor", &[99.0, -5.0]);
+        renderer.render_with_camera(&stage, &camera).unwrap();
+        assert_eq!(renderer.frame().as_bytes(), original);
     }
 
     #[test]

@@ -630,11 +630,16 @@ class _LiveUniforms(dict):
         del self._extras[key]
 
     def __iter__(self):
-        yield from self._owner()._uniform_names()
-        yield from self._extras
+        native = self._owner()._uniform_names()
+        yield from native
+        # A material-changing become can give an existing extension key a
+        # native meaning. Expose that key once, with the native value, while
+        # retaining the authored extension if the material changes again.
+        yield from (key for key in self._extras if key not in native)
 
     def __len__(self):
-        return len(self._owner()._uniform_names()) + len(self._extras)
+        native = self._owner()._uniform_names()
+        return len(native) + sum(key not in native for key in self._extras)
 
     def __contains__(self, key):
         return key in self._owner()._uniform_names() or key in self._extras
@@ -10617,7 +10622,7 @@ class PGroup(PMobject):
 
 class DotCloud(PMobject):
     """The Reference's DotCloud over the pointcloud shelf: the native
-    point/radius/rgba/glow_factor record schema (NOT a VMobject — the
+    point/radius/rgba record schema and scalar glow uniform (NOT a VMobject — the
     VMobject stroke/fill surface does not exist here; Mobject-level
     set_color/set_opacity write the real rgba records)."""
 

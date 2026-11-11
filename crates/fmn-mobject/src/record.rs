@@ -545,6 +545,25 @@ impl RecordBuffer {
         Some(cells[start..start + width].to_vec())
     }
 
+    /// Inspect a constant one-lane field without allocating a column. Empty
+    /// records use the phantom default, or zero when no default was stored.
+    /// Used by durable-format migrations that must respect the decode budget.
+    pub(crate) fn constant_scalar_field(&self, field: &str) -> Option<f32> {
+        if self.schema.field_width(field)? != 1 {
+            return None;
+        }
+        if self.len == 0 {
+            return Some(self.default_record_slice(field).map_or(0.0, |row| row[0]));
+        }
+        let offset = self.schema.offset(field)?;
+        let stride = self.schema.stride();
+        let cells = self.storage.cells.read().expect("storage lock poisoned");
+        let value = cells[offset];
+        (1..self.len)
+            .all(|record| cells[record * stride + offset] == value)
+            .then_some(value)
+    }
+
     /// Extract the whole column of `field`, record-major
     /// (`len * width` values) — the observation the mirror coherence tests
     /// compare against.

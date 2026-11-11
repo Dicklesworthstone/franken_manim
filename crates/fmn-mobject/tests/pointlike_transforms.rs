@@ -200,7 +200,11 @@ fn checked_family_map_keeps_world_normals_views_and_unique_descendants() {
             None,
         )
         .unwrap();
-    assert_eq!(calls.get(), 6, "two rows times three unique pointlike fields");
+    assert_eq!(
+        calls.get(),
+        6,
+        "two rows times three unique pointlike fields"
+    );
     assert_eq!(
         column(&stage, shared, "point"),
         [1.0, 3.0, 0.0, 3.0, 3.0, 4.0]
@@ -221,11 +225,7 @@ fn checked_family_map_keeps_world_normals_views_and_unique_descendants() {
 
 #[test]
 fn checked_family_map_refuses_late_points_and_auxiliary_overflow_atomically() {
-    for (bad, only_normals) in [
-        (f64::NAN, false),
-        (f64::MAX, false),
-        (f64::MAX, true),
-    ] {
+    for (bad, only_normals) in [(f64::NAN, false), (f64::MAX, false), (f64::MAX, true)] {
         let mut stage = Stage::new();
         let root = stage.add(Mobject::new());
         let first = surface(&mut stage);
@@ -277,11 +277,7 @@ fn checked_family_map_refuses_late_points_and_auxiliary_overflow_atomically() {
 fn checked_maps_preserve_surface_holes_without_sampling_their_inert_rows() {
     let mut stage = Stage::new();
     let schema = RecordSchema::new(
-        &[
-            ("point", 3),
-            ("d_normal_point", 3),
-            ("surface_validity", 1),
-        ],
+        &[("point", 3), ("d_normal_point", 3), ("surface_validity", 1)],
         &["point"],
         &["point", "d_normal_point"],
     )

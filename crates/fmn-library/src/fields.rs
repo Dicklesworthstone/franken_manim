@@ -2963,7 +2963,11 @@ fn check_field_point(
     Ok(())
 }
 
-fn field_displacement(operation: &'static str, velocity: Vec3, dt: f64) -> Result<Vec3, UpdaterError> {
+fn field_displacement(
+    operation: &'static str,
+    velocity: Vec3,
+    dt: f64,
+) -> Result<Vec3, UpdaterError> {
     check_field_point(
         operation,
         velocity,
@@ -4690,10 +4694,7 @@ mod tests {
             stage.get_points(copied_path).unwrap(),
             control.get_points(copied_path).unwrap()
         );
-        assert_eq!(
-            stage.get_points(copied_path).unwrap()[0],
-            [3.0, 0.5, 0.5]
-        );
+        assert_eq!(stage.get_points(copied_path).unwrap()[0], [3.0, 0.5, 0.5]);
         assert_eq!(stage.get_points(path).unwrap()[0], [2.5, 0.75, 0.5]);
         stage.add_to_scene(root).unwrap();
         assert!(!classify_wait(&stage, false).is_pure());
@@ -4703,19 +4704,15 @@ mod tests {
     fn vector_field_point_failure_keeps_every_family_member_and_view() {
         let mut stage = Stage::new();
         let root = stage.add(crate::vmobject::v_group([
-            VMobject::from_points(vec![
-                [0.0, 0.0, 0.0],
-                [0.5, 0.0, 0.0],
-                [1.0, 0.0, 0.0],
-            ]),
-            VMobject::from_points(vec![
-                [3.0, 0.0, 0.0],
-                [3.5, 0.0, 0.0],
-                [4.0, 0.0, 0.0],
-            ]),
+            VMobject::from_points(vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            VMobject::from_points(vec![[3.0, 0.0, 0.0], [3.5, 0.0, 0.0], [4.0, 0.0, 0.0]]),
         ]));
         let children = stage.get(root).unwrap().submobjects().to_vec();
-        let view = stage.get_mut(children[0]).unwrap().buffer.export_view(false);
+        let view = stage
+            .get_mut(children[0])
+            .unwrap()
+            .buffer
+            .export_view(false);
         let before: Vec<_> = children
             .iter()
             .map(|&child| stage.get_points(child).unwrap())
@@ -4768,10 +4765,7 @@ mod tests {
         }
         stage.update_mobject(root, 0.5);
         assert_eq!(view.read(0, "point").unwrap(), [0.5, 0.0, 0.0]);
-        assert_eq!(
-            stage.get_points(children[1]).unwrap()[0],
-            [3.5, 0.0, 0.0]
-        );
+        assert_eq!(stage.get_points(children[1]).unwrap()[0], [3.5, 0.0, 0.0]);
     }
 
     #[test]
@@ -4793,14 +4787,10 @@ mod tests {
             let view = stage.get_mut(shared).unwrap().buffer.export_view(false);
             let samples = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
             let sampled = std::rc::Rc::clone(&samples);
-            move_submobjects_along_vector_field(
-                &mut stage,
-                root,
-                move |center| {
-                    sampled.borrow_mut().push(center[0]);
-                    [center[0], 0.0, 0.0]
-                },
-            )
+            move_submobjects_along_vector_field(&mut stage, root, move |center| {
+                sampled.borrow_mut().push(center[0]);
+                [center[0], 0.0, 0.0]
+            })
             .unwrap();
             stage.update_mobject(root, dt);
             // A pinned view rounds the first nudge to f32 before the second
@@ -4829,18 +4819,18 @@ mod tests {
             VMobject::from_points(vec![[3.0, 0.0, 0.0]]),
         ]));
         let children = stage.get(root).unwrap().submobjects().to_vec();
-        let view = stage.get_mut(children[0]).unwrap().buffer.export_view(false);
-        move_submobjects_along_vector_field(
-            &mut stage,
-            root,
-            |p| {
-                if p[0] > 2.0 {
-                    [f64::NAN, 0.0, 0.0]
-                } else {
-                    [1.0, 0.0, 0.0]
-                }
-            },
-        )
+        let view = stage
+            .get_mut(children[0])
+            .unwrap()
+            .buffer
+            .export_view(false);
+        move_submobjects_along_vector_field(&mut stage, root, |p| {
+            if p[0] > 2.0 {
+                [f64::NAN, 0.0, 0.0]
+            } else {
+                [1.0, 0.0, 0.0]
+            }
+        })
         .unwrap();
         stage.update_mobject(root, 0.5);
         assert_eq!(
@@ -4851,44 +4841,33 @@ mod tests {
             )
         );
         assert_eq!(view.read(0, "point").unwrap(), [0.0; 3]);
-        assert_eq!(
-            stage.get_points(children[1]).unwrap()[0],
-            [3.0, 0.0, 0.0]
-        );
+        assert_eq!(stage.get_points(children[1]).unwrap()[0], [3.0, 0.0, 0.0]);
     }
 
     #[test]
     fn vector_field_helpers_refuse_invalid_deltas_and_stale_registration() {
         for kind in 0..3 {
             let mut stage = Stage::new();
-            let root = stage.add(crate::vmobject::v_group([
-                VMobject::from_points(vec![[0.0; 3]]),
-            ]));
+            let root = stage.add(crate::vmobject::v_group([VMobject::from_points(vec![
+                [0.0; 3],
+            ])]));
             let child = stage.get(root).unwrap().submobjects()[0];
             let calls = std::rc::Rc::new(std::cell::Cell::new(0));
             let sampled = std::rc::Rc::clone(&calls);
             let operation = match kind {
                 0 => {
-                    move_along_vector_field(
-                        &mut stage,
-                        root,
-                        move |_| {
-                            sampled.set(sampled.get() + 1);
-                            [1.0, 0.0, 0.0]
-                        },
-                    )
+                    move_along_vector_field(&mut stage, root, move |_| {
+                        sampled.set(sampled.get() + 1);
+                        [1.0, 0.0, 0.0]
+                    })
                     .unwrap();
                     "move_along_vector_field"
                 }
                 1 => {
-                    move_submobjects_along_vector_field(
-                        &mut stage,
-                        root,
-                        move |_| {
-                            sampled.set(sampled.get() + 1);
-                            [1.0, 0.0, 0.0]
-                        },
-                    )
+                    move_submobjects_along_vector_field(&mut stage, root, move |_| {
+                        sampled.set(sampled.get() + 1);
+                        [1.0, 0.0, 0.0]
+                    })
                     .unwrap();
                     "move_submobjects_along_vector_field"
                 }

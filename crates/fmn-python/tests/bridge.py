@@ -9119,7 +9119,9 @@ dot_cloud.add_point([3.0, 4.0, 0.0], opacity=0.25, color=manimlib.BLUE)
 assert np.allclose(dot_cloud.get_points(), [[1, 2, 0], [3, 4, 0]])
 assert np.allclose(dot_cloud.get_opacities(), [0.75, 0.25])
 assert np.allclose(dot_cloud.data["radius"], [0.2, 0.2])
-assert np.allclose(dot_cloud.data["glow_factor"], [2.0, 2.0])
+assert dot_cloud.data.dtype == np.dtype(manimlib.DotCloud.data_dtype)
+assert dot_cloud.data.dtype.itemsize == 32
+assert dot_cloud.uniforms["glow_factor"] == 2.0
 dot_cloud.set_opacity([0.5, 0.125])
 assert np.allclose(dot_cloud.get_opacities(), [0.5, 0.125])
 
@@ -22434,8 +22436,8 @@ assert np.allclose(cloud.get_radii().reshape(-1), [1.2, 1.2, 1.2])
 assert cloud.set_glow_factor(1.5) is cloud
 assert np.isclose(cloud.get_glow_factor(), 1.5)
 assert np.isclose(cloud.uniforms["glow_factor"], 1.5)
-if "glow_factor" in cloud.data.dtype.names:
-    assert np.allclose(cloud.data["glow_factor"].reshape(-1), [1.5, 1.5, 1.5])
+assert cloud.data.dtype == np.dtype(dot_cloud_mod.DotCloud.data_dtype)
+assert cloud.data.dtype.itemsize == 32
 assert cloud.make_3d() is cloud
 assert np.allclose(cloud.get_shading(), [0.5, 0.1, 0.2])
 assert bool(cloud.uniforms["depth_test"]) is True

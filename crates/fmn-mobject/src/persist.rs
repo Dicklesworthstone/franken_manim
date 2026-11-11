@@ -5,7 +5,7 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.8,
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.9,
 //!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v2.0; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
@@ -54,7 +54,7 @@ use crate::stage::{Mob, Snapshot, SnapshotEntry, Stage, UpdaterFn, UpdaterId};
 use crate::uniforms::{JointType, Uniforms};
 use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.8.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.9.
 ///
 /// Minor history: 1.1 appended the shape tag; 1.2 appended `z_index`; 1.3
 /// preserves the monotonic updater-id cursor, including identities removed
@@ -64,7 +64,15 @@ use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, 
 /// the per-buffer `_data_defaults` phantom record** (fm-laky): one
 /// presence bool and, when set, exactly one stride of f32 lanes. **1.8 appends
 /// durable dark-side image resources**, retaining the full 1.7 payload prefix.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 8);
+/// **1.9 appends object-wide dot glow uniforms**. A writer uses 1.8 when
+/// every glow is zero and no dot cloud is present; the corresponding payload
+/// has exactly the 1.8 meaning and layout. Every dot cloud requires 1.9 so
+/// older renderers cannot mistake the new packed dtype for the legacy one.
+/// Older dot clouds' constant glow lanes promote exactly to the uniform.
+/// Heterogeneous legacy lanes refuse: choosing one point's value would lose
+/// the saved material, which cannot be represented by an object-wide uniform.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 9);
+const SNAPSHOT_SCHEMA_WITHOUT_GLOW: Schema = Schema::new(*b"FMNA", 1, 1, 8);
 
 /// The scene-state envelope: magic `FMNA`, schema id 2, version 2.0.
 ///
@@ -522,6 +530,30 @@ fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) -> Result<(), SerialError> 
     Ok(())
 }
 
+// Before 1.9, the built-in dot renderer used a per-record f32 glow lane.
+// Preserve the records themselves (including Python's exact dtype contract),
+// but migrate the material only when one scalar represents every old point.
+fn legacy_dot_glow(buffer: &RecordBuffer) -> Result<f64, PersistError> {
+    match buffer.schema().field_width("glow_factor") {
+        None => return Ok(0.0),
+        Some(1) => {}
+        Some(_) => {
+            return Err(PersistError::Malformed(
+                "legacy DotCloud glow_factor must have one lane",
+            ));
+        }
+    }
+    let Some(value) = buffer
+        .constant_scalar_field("glow_factor")
+        .filter(|value| value.is_finite())
+    else {
+        return Err(PersistError::Malformed(
+            "legacy DotCloud per-point glow cannot be represented by one finite glow_factor uniform",
+        ));
+    };
+    Ok(f64::from(value))
+}
+
 fn put_uniforms(w: &mut Writer, u: &Uniforms) {
     w.put_f64(u.is_fixed_in_frame);
     for v in u.shading {
@@ -961,7 +993,18 @@ impl Snapshot {
             max_total: limits.max_total.min(Limits::DEFAULT.max_total),
             max_field: limits.max_field.min(Limits::DEFAULT.max_field),
         };
-        let mut w = Writer::with_limits(SNAPSHOT_SCHEMA, limits);
+        let has_glow_table = self.slots.iter().any(|(_, entry)| {
+            entry.as_ref().is_some_and(|entry| {
+                entry.uniforms.glow_factor != 0.0
+                    || entry.render_primitive == RenderPrimitive::DotCloud
+            })
+        });
+        let schema = if has_glow_table {
+            SNAPSHOT_SCHEMA
+        } else {
+            SNAPSHOT_SCHEMA_WITHOUT_GLOW
+        };
+        let mut w = Writer::with_limits(schema, limits);
         w.put_u32(count_u32(self.slots.len())?);
         for (generation, entry) in &self.slots {
             w.put_u32(*generation);
@@ -1052,6 +1095,17 @@ impl Snapshot {
                 }
                 None => {
                     w.put_bool(false);
+                }
+            }
+        }
+        // Minor 1.9 leaves the complete 1.8 payload intact. The table is also
+        // emitted for a user-defined dot column named glow_factor: its bytes
+        // remain ordinary record data, never a legacy material override.
+        if has_glow_table {
+            for (_, entry) in &self.slots {
+                w.put_bool(entry.is_some());
+                if let Some(entry) = entry {
+                    w.put_f64(entry.uniforms.glow_factor);
                 }
             }
         }
@@ -1319,6 +1373,7 @@ impl Snapshot {
                     shading,
                     clip_planes,
                     anti_alias_width,
+                    glow_factor: 0.0,
                     joint_type,
                     flat_stroke: r.get_bool()?,
                     scale_stroke_with_zoom: r.get_bool()?,
@@ -1517,6 +1572,28 @@ impl Snapshot {
                             "dark-image table does not match arena liveness",
                         ));
                     }
+                }
+            }
+        }
+        if r.version().1 >= 9 {
+            for (_, entry) in &mut slots {
+                let present = r.get_bool()?;
+                match (present, entry) {
+                    (false, None) => {}
+                    (true, Some(entry)) => entry.uniforms.glow_factor = r.get_f64()?,
+                    _ => {
+                        return Err(PersistError::Malformed(
+                            "glow-uniform table does not match arena liveness",
+                        ));
+                    }
+                }
+            }
+        } else {
+            for (_, entry) in &mut slots {
+                if let Some(entry) = entry
+                    && entry.render_primitive == RenderPrimitive::DotCloud
+                {
+                    entry.uniforms.glow_factor = legacy_dot_glow(&entry.buffer)?;
                 }
             }
         }

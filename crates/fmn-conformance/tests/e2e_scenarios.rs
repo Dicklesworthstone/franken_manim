@@ -6422,6 +6422,15 @@ fn python_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("surface_hole_cases", cases))
 }
 
+/// Reference-packed NumPy point clouds retain a native scalar glow material
+/// through live views, copies, interpolation, snapshots and rendered frames.
+fn python_point_cloud_uniforms_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_point_cloud_uniforms()
+        .map_err(|error| fail(format!("Python point-cloud uniforms: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.point_cloud_uniforms").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("point_cloud_uniform_cases", cases))
+}
+
 /// The same real five-point camera lifecycle suite as the installed-wheel gate,
 /// including live views, Group transforms, capture and SceneState restoration.
 fn python_camera_frame_points_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -17988,6 +17997,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_point_cloud_uniforms.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_point_cloud_uniforms_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("point_cloud_uniform_cases", 26),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.point_cloud_uniforms",
+            vec![FieldPred::u64_ge("cases", 26)],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.control_panel_frame.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -22185,6 +22208,16 @@ fn studio_presenter_holds_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_presenter_holds.v1")
         .expect("native Studio presenter scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_point_cloud_uniforms_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_point_cloud_uniforms.v1")
+        .expect("point-cloud uniform lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

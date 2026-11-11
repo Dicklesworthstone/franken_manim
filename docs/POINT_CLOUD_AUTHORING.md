@@ -23,23 +23,48 @@ one-point origin default. Explicit points replace hook-authored points after
 initialization and radius assignment; an empty sequence produces an empty cloud.
 `PGroup` retains hook-added children before its supplied point-cloud members.
 
-## One native material, two authoring forms
+## Packed records and one native material
 
-A scalar write through `set_glow_factor`, `set_uniform`, `set_uniforms`, or the
-live `uniforms` mapping broadcasts to the native `glow_factor` record lane.
-When the cloud is empty, the write updates its retained style row, so later
-appends and independent copies receive the material. Explicit scalar assignment
-also deliberately replaces a heterogeneous per-point glow field.
+`DotCloud`, `TrueDot`, `GlowDots`, and `GlowDot` use the Reference's exact packed
+32-byte record dtype. The exported NumPy array is a writable view of the actual
+native records, with no extra material lane:
 
-Direct `data["glow_factor"]` edits remain per-point edits. The shared callback
-record interpolator blends those values without broadcasting its scalar Python
-uniform projection over them afterward. Data/uniform locks and authored paths
-remain on the existing interpolation protocol. Ordinary native Transform
-selection remains native; this adapter does not add a frame loop or renderer.
+| Field | NumPy type and shape | Byte offset |
+| --- | --- | --- |
+| `point` | `float32`, `(3,)` | 0 |
+| `radius` | `float32`, `(1,)` | 12 |
+| `rgba` | `float32`, `(4,)` | 16 |
 
-Scalar glow must be finite, non-negative, and float32-representable. Invalid
-values and unusable fields refuse before accepting a new uniform value. Other
-mobject types and unrelated custom uniforms retain their existing behavior.
+`set_data` accepts independently created arrays with this dtype. Subclasses keep
+their declared extra float32 fields and resulting stride. Even an authored
+field named `glow_factor` is ordinary per-point data: copying, `set_data`, and
+record interpolation preserve it without giving it control of the renderer.
+
+Glow is a native float64 uniform shared by all points in a cloud. Writes through
+`set_glow_factor`, `set_uniform`, `set_uniforms`, or the live `uniforms` mapping
+update that scalar and invalidate retained rendering without changing record
+bytes. Zero gives a hard disc; `GlowDot` and `GlowDots` default to a radial
+exponent of `2.0`. An empty cloud retains its material independently of its
+records, so appends, copies, and deep copies keep the current glow.
+
+Native and callback-driven `Transform` animations interpolate the same scalar
+uniform. Callback data/uniform locks and authored paths remain on the shared
+interpolation protocol. Copies, `become`, saved-state restoration, Python
+pickles, and scene checkpoints carry the native material with the geometry.
+
+Scalar glow must be finite and non-negative; it retains float64 precision and
+does not require float32 representability. Invalid values refuse before changing
+the material. Other mobject types and unrelated custom uniforms retain their
+existing behavior.
+
+## Durable material state
+
+Dot-cloud snapshots use FMNA 1.9, which stores the scalar independently of the
+record schema. A legacy snapshot with a constant per-point glow lane promotes
+that value exactly to the native uniform while preserving its existing record
+columns. An empty legacy cloud uses its retained default record when available.
+A legacy cloud with heterogeneous glow values receives an explicit migration
+error because one shared scalar cannot preserve those different materials.
 
 ## Validation boundary
 
@@ -49,8 +74,6 @@ protocol probes against an older extension cannot prove primitive publication.
 `native_point_cloud_materials.py` exercises actual records and Y4M output,
 including retained-frame edits, independent constructor controls, and 1/4/16
 worker comparisons. Both are registered in the embedded and installed gates.
-
-The native catalog Transform's synchronization of Python uniform extras is a
-separate remaining gap: its glow records can animate while the Python scalar
-projection remains stale. This change fixes explicit scalar writes and the
-shared callback interpolation path, not every native animation metadata path.
+The named point-cloud-uniform gauntlet also checks packed dtype/byte parity,
+native material lifecycle, native/callback animation agreement, and rendered
+output after live uniform edits.

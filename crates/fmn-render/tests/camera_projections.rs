@@ -144,7 +144,7 @@ fn image() -> Mobject {
 
 fn dots() -> Mobject {
     let schema = RecordSchema::new(
-        &[("point", 3), ("radius", 1), ("rgba", 4), ("glow_factor", 1)],
+        &[("point", 3), ("radius", 1), ("rgba", 4)],
         &["point"],
         &["point"],
     )
@@ -157,7 +157,6 @@ fn dots() -> Mobject {
         assert!(records.write(index, "point", point));
         assert!(records.write(index, "radius", &[0.4]));
         assert!(records.write(index, "rgba", &[0.3, 0.95, 0.2, 0.9]));
-        assert!(records.write(index, "glow_factor", &[0.0]));
     }
     Mobject::from_buffer(records).with_render_primitive(RenderPrimitive::DotCloud)
 }

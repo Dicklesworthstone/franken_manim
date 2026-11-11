@@ -1980,6 +1980,11 @@ impl Stage {
     pub fn set_anti_alias_width(&mut self, mob: Mob, width: f64, recurse: bool) -> &mut Self {
         self.edit_uniforms(mob, recurse, |u| u.anti_alias_width = width)
     }
+    /// Set the shared radial glow exponent (`0.0` gives a hard disc).
+    /// The dot renderer reads this uniform; record columns stay untouched.
+    pub fn set_glow_factor(&mut self, mob: Mob, value: f64, recurse: bool) -> &mut Self {
+        self.edit_uniforms(mob, recurse, |u| u.glow_factor = value)
+    }
     /// Set the `[reflectiveness, gloss, shadow]` shading triple.
     pub fn set_shading(&mut self, mob: Mob, shading: Vec3, recurse: bool) -> &mut Self {
         self.edit_uniforms(mob, recurse, |u| u.shading = shading)

@@ -42,6 +42,8 @@ pub use portal_network::run_portal_gauntlet_network_animations;
 #[cfg(feature = "gauntlet")]
 pub use portal_ode::run_portal_gauntlet_ode_solution;
 #[cfg(feature = "gauntlet")]
+pub use portal_point_cloud::run_portal_gauntlet_point_cloud_uniforms;
+#[cfg(feature = "gauntlet")]
 pub use portal_rates::run_portal_gauntlet_exact_rates;
 mod portal_playback;
 mod portal_readback;
@@ -2450,6 +2452,7 @@ fn uniform_value<'py>(
             .into_pyobject(py)?
             .into_any()),
         "anti_alias_width" => Ok(uniforms.anti_alias_width.into_pyobject(py)?.into_any()),
+        "glow_factor" => Ok(uniforms.glow_factor.into_pyobject(py)?.into_any()),
         "joint_type" => Ok(uniforms.joint_type.to_code().into_pyobject(py)?.into_any()),
         "flat_stroke" => Ok(uniforms
             .flat_stroke
@@ -3041,9 +3044,22 @@ impl BridgeMobject {
         numpy_array(slf.py(), slf, writable)
     }
 
-    #[staticmethod]
-    fn _uniform_names() -> Vec<&'static str> {
-        UNIFORM_NAMES.to_vec()
+    fn _uniform_names(slf: &Bound<'_, Self>) -> PyResult<Vec<&'static str>> {
+        // The scalar glow is native material state only for a dot cloud.
+        // Other mobjects retain their open-ended Python extension map,
+        // including an authored key with this spelling. Read the primitive,
+        // not the Python class: become() may replace a different receiver's
+        // material without changing its class or proxy identity.
+        let dot_cloud = with_stage(slf, |stage, mob| {
+            stage
+                .get(mob)
+                .is_some_and(|entry| entry.render_primitive() == RenderPrimitive::DotCloud)
+        })?;
+        let mut names = UNIFORM_NAMES.to_vec();
+        if dot_cloud {
+            names.push("glow_factor");
+        }
+        Ok(names)
     }
 
     fn _get_uniform<'py>(slf: &Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -3053,6 +3069,21 @@ impl BridgeMobject {
 
     fn _set_uniform(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         crossing::record(CrossingClass::FieldWrite);
+        if name == "glow_factor" {
+            // __float__ may reenter the scene. Convert and validate before
+            // borrowing its arena; refusing must leave the live material
+            // unchanged and preserve the original Python exception.
+            let glow = value.extract::<f64>()?;
+            if !glow.is_finite() || glow < 0.0 {
+                return Err(PyValueError::new_err(
+                    "glow_factor must be finite and non-negative",
+                ));
+            }
+            return with_uniforms(slf, |uniforms| {
+                uniforms.glow_factor = glow;
+                Ok(())
+            });
+        }
         with_uniforms(slf, |uniforms| set_uniform(uniforms, name, value))
     }
 
@@ -5731,7 +5762,7 @@ impl BridgeMobject {
 
     /// `DotCloud(points, color, opacity, radius, glow_factor,
     /// anti_alias_width)` over the pointcloud shelf — the DotCloud record
-    /// schema (`point`/`radius`/`rgba`/`glow_factor`), not a VMobject.
+    /// schema (`point`/`radius`/`rgba`) and scalar glow uniform, not a VMobject.
     #[allow(clippy::too_many_arguments)]
     fn _build_dot_cloud<'py>(
         slf: &Bound<'py, Self>,

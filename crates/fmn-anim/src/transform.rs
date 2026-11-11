@@ -296,6 +296,7 @@ fn interpolate_fields_with_scratch(
         let lerp = |x: f64, y: f64| (1.0 - alpha) * x + alpha * y;
         u.is_fixed_in_frame = lerp(ua.is_fixed_in_frame, ub.is_fixed_in_frame);
         u.anti_alias_width = lerp(ua.anti_alias_width, ub.anti_alias_width);
+        u.glow_factor = lerp(ua.glow_factor, ub.glow_factor);
         for k in 0..3 {
             u.shading[k] = lerp(ua.shading[k], ub.shading[k]);
         }

@@ -83,6 +83,31 @@ Two exports of the same scene run MUST produce identical bytes: fixed field
 order, canonical floats, no timestamps, no host paths, no hash-map iteration
 (wherever maps appear, serialize in sorted key order).
 
+### Nested dot-cloud material snapshots
+
+The nested arena codec supports FMNA/1 version 1.9. It appends one liveness
+marker per arena slot and one f64 `glow_factor` for each live object, after the
+1.8 dark-image table. Dot-cloud records use `point: f32[3]`, `radius: f32[1]`
+and `rgba: f32[4]`; glow is an object-wide numeric uniform and interpolates
+alongside other numeric uniforms. User-authored record columns, including a
+column also named `glow_factor`, never control the radial material.
+
+The writer retains version 1.8 and its exact bytes when all glow uniforms are
+zero and no dot cloud is present. Every dot cloud requires version 1.9, even a
+hard dot with zero glow: older renderers require the former per-point lane and
+cannot render the new packed dtype. A nonzero glow uniform on any other object
+also requires version 1.9. Strict older readers reject that newer nested snapshot.
+
+When reading older snapshots, a constant legacy per-point glow lane promotes
+exactly from f32 to the new f64 uniform. The original record schema and values
+are retained, including the field list used by Python pickle state. A legacy
+empty cloud can recover its glow from its phantom default record. Historical
+heterogeneous or nonfinite per-point glow cannot be represented by one finite
+uniform and is refused with an explicit malformed-snapshot error; it is never
+silently replaced by the first point's value. Such old recordings must be
+re-exported from source using uniform glow values (or separate clouds for
+different glow values).
+
 
 ## Camera-bearing FMTL/1 minor 1
 

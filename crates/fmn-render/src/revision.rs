@@ -397,6 +397,11 @@ fn uniform_key(u: &Uniforms) -> u64 {
     mixer.write_u64(u.stroke_behind as u64);
     mixer.write_u64(u.depth_test as u64);
     mixer.write_u64(u.use_winding_fill as u64);
+    // Zero glow is the prior material. Preserve its identity while recording
+    // every new exponent, including a distinct signed zero, by its exact bits.
+    if u.glow_factor.to_bits() != 0 {
+        mixer.write_u64(u.glow_factor.to_bits());
+    }
     mixer.finish()
 }
 
@@ -539,6 +544,7 @@ mod tests {
                 [13.0, 14.0, 15.0, 16.0],
             ],
             anti_alias_width: 1.75,
+            glow_factor: 0.0,
             joint_type: fmn_mobject::JointType::Miter,
             flat_stroke: true,
             scale_stroke_with_zoom: false,
@@ -552,6 +558,14 @@ mod tests {
             legacy_uniform_key(&Uniforms::default())
         );
         assert_eq!(uniform_key(&uniforms), legacy_uniform_key(&uniforms));
+        assert_ne!(
+            uniform_key(&Uniforms {
+                glow_factor: 2.0,
+                ..uniforms
+            }),
+            uniform_key(&uniforms),
+            "changing the dot material must invalidate retained resources"
+        );
     }
 
     #[test]

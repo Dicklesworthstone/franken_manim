@@ -27,13 +27,6 @@
 //!
 //! # Carriage deviations (documented, not silent)
 //!
-//! * **`glow_factor` rides a record lane.** The Reference keeps it in the
-//!   shader uniform inventory; our [`fmn_mobject::Uniforms`] has no
-//!   `glow_factor` slot (§8.4 predates point clouds), so the detached
-//!   record schema appends one constant `glow_factor` lane to the
-//!   Reference's `(point, radius, rgba)` dtype. A §8.4 inventory extension
-//!   is the clean cutover; until then the lane is the only channel that
-//!   survives `Stage::add`.
 //! * **`ingest_submobjects` clears the children.** The Reference vstacks
 //!   the family data and *keeps* the submobjects, which double-draws every
 //!   ingested point; D5's dedup doctrine rules that wrong, so the children
@@ -789,16 +782,14 @@ impl From<DotCloud> for Mobject {
             children,
             ..
         } = cloud;
-        // The Reference's DotCloud dtype — [('point', f32, 3), ('radius',
-        // f32, 1), ('rgba', f32, 4)] — plus one constant `glow_factor`
-        // lane carrying the shader uniform the §8.4 inventory has no slot
-        // for yet (see the module docs).
+        // The Reference's packed DotCloud dtype: eight f32 lanes. Glow is
+        // object-wide material state, carried by the typed uniform inventory.
         let schema = RecordSchema::new(
-            &[("point", 3), ("radius", 1), ("rgba", 4), ("glow_factor", 1)],
+            &[("point", 3), ("radius", 1), ("rgba", 4)],
             &["point"],
             &["point"],
         )
-        .expect("the point-cloud record schema is nine lanes");
+        .expect("the point-cloud record schema is eight lanes");
         let mut buffer = RecordBuffer::new(schema, points.len())
             .expect("record sizing bounded by the point list");
         #[allow(clippy::cast_possible_truncation)]
@@ -816,12 +807,9 @@ impl From<DotCloud> for Mobject {
             .flat_map(|c| c.iter().map(|v| *v as f32))
             .collect();
         buffer.write_range("rgba", 0, &flat_rgba);
-        #[allow(clippy::cast_possible_truncation)]
-        let flat_glow: Vec<f32> = vec![glow_factor as f32; points.len()];
-        buffer.write_range("glow_factor", 0, &flat_glow);
-
         let uniforms = Uniforms {
             anti_alias_width,
+            glow_factor,
             shading,
             depth_test,
             ..Uniforms::default()
@@ -1118,7 +1106,7 @@ mod tests {
     }
 
     #[test]
-    fn dot_cloud_records_carry_the_reference_dtype_plus_glow() {
+    fn dot_cloud_records_carry_the_reference_dtype_and_glow_is_a_uniform() {
         let mob = Mobject::from(
             DotCloud::new([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]])
                 .colored(RED, 0.5)
@@ -1133,8 +1121,8 @@ mod tests {
             .iter()
             .map(|f| f.name.as_str())
             .collect();
-        // Reference order, then the constant glow lane.
-        assert_eq!(names, ["point", "radius", "rgba", "glow_factor"]);
+        assert_eq!(names, ["point", "radius", "rgba"]);
+        assert_eq!(mob.buffer.schema().stride(), 8);
         assert_eq!(
             mob.buffer.read(1, "point").expect("field"),
             vec![4.0, 5.0, 6.0]
@@ -1145,10 +1133,19 @@ mod tests {
         assert!((f64::from(rgba[0]) - RED.r).abs() < 1e-3);
         assert!((f64::from(rgba[1]) - RED.g).abs() < 1e-3);
         assert!((rgba[3] - 0.5).abs() < 1e-6);
-        assert_eq!(mob.buffer.read(1, "glow_factor").expect("field"), vec![2.0]);
-        // The DotCloud AA band lands in the uniform inventory.
+        assert!(mob.buffer.read(1, "glow_factor").is_none());
+        assert_eq!(mob.uniforms.glow_factor, 2.0);
+        // DotCloud's AA band and glow share the uniform inventory.
         assert_eq!(mob.uniforms.anti_alias_width, DOT_CLOUD_AA_WIDTH);
         assert_eq!(mob.render_primitive, RenderPrimitive::DotCloud);
+    }
+
+    #[test]
+    fn empty_dot_cloud_keeps_its_glow_without_a_phantom_point() {
+        let mob = Mobject::from(DotCloud::new([]).with_glow_factor(1.0e40));
+        assert!(mob.buffer.is_empty());
+        assert_eq!(mob.buffer.schema().stride(), 8);
+        assert_eq!(mob.uniforms.glow_factor, 1.0e40);
     }
 
     #[test]

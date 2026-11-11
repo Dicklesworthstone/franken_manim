@@ -285,8 +285,7 @@ fn _portal_begin_compact_bundle(
         )
     } else {
         if audio_ffmpeg
-            || (sample_rate, channels, workers, max_audio_bytes)
-                != (48_000, 2, 1, 64 * 1024 * 1024)
+            || (sample_rate, channels, workers, max_audio_bytes) != (48_000, 2, 1, 64 * 1024 * 1024)
         {
             return Err(PyValueError::new_err("audio settings require audio=True"));
         }
@@ -602,12 +601,10 @@ fn finish_bundle(
         .transpose()?
         .flatten();
     drop(live);
-    let audio_facts = soundtrack
-        .as_ref()
-        .map(|mixed| {
-            let pcm = &mixed.soundtrack;
-            (pcm.sample_rate(), pcm.channels(), pcm.sample_frames())
-        });
+    let audio_facts = soundtrack.as_ref().map(|mixed| {
+        let pcm = &mixed.soundtrack;
+        (pcm.sample_rate(), pcm.channels(), pcm.sample_frames())
+    });
     let artifact = match &soundtrack {
         Some(mixed) => artifact
             .with_soundtrack(&mixed.soundtrack, bundle.max_output_bytes)
@@ -815,7 +812,9 @@ mod tests {
                 let count = |name: &str| -> PyResult<u64> {
                     globals
                         .get_item(name)?
-                        .ok_or_else(|| PyRuntimeError::new_err("bundle acceptance count is absent"))?
+                        .ok_or_else(|| {
+                            PyRuntimeError::new_err("bundle acceptance count is absent")
+                        })?
                         .extract()
                 };
                 Ok((
