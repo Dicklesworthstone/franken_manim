@@ -1,6 +1,31 @@
 # WASM-target audit of the governed closure (fm-7wm.4, R15)
 
-**Status:** joined main `28a0cd52` plus the two retained OBJ regression inputs,
+**Status:** working-tree pin `401172c625f6d3acaf269503e09ea02208f43794`
+on main `b7d4c675`, retaining asupersync 0.6.2, fnp 0.5.0 and
+ft-kernel-metal 0.1.1, was audited through all four original commands by
+owned-host DSR/RCH `20261108T174312-2213491`. The normal locked tree,
+WASM target build and release Node smoke exit 0; Node retains digest
+`1f248a71347b82aa`, `process=capability-absent`, `topology=1-cpu`,
+`semantic_oracles=111111` and `mirrored=101000`. The package command builds
+the serial/shared artifacts, then fails **1,021,980 > 514,521 bytes**.
+The combined result is **0/0/0/1**, with npm/browser checks unreached;
+fm-8j70 remains open and no budget changes.
+
+All 4,439 tracked source rows/modes in
+`/run/user/1000/fmn-execute-20261108-review10-consumer-inputs-v1.json`
+(SHA-256 `9a9fff60d8100bb9ed1d57eca90886c1b95e0e38e60e244f60c85fae3e37f7b6`)
+and the actual DSR source fingerprint remain unchanged across execution.
+This is a bounded dirty-source audit, not a whole ignored-input/RCH,
+browser, certified-platform or release qualification. Artifacts remain under
+`/data/ssd/tmp/fmn-execute-20261108-review10-template-wasm-package-v1`.
+The freshly rebuilt raw WASM is also unchanged at **1,376,357 bytes**,
+SHA-256 `7e1cd0cb4ac5db0f689a7d77097a572afe5d131abccd3777212f13f7b60c51a9`.
+Its bytes equal the existing host-test input, which still exceeds the
+unchanged **703,695-byte** raw budget. No old artifact was substituted
+for the current build. The typography provider is absent from the smoke
+graph; its lock is unchanged, as confirmed by the actual locked tree/build.
+
+**Historical 33ff7d7 status:** joined main `28a0cd52` plus the two retained OBJ regression inputs,
 with provider `33ff7d7db9a671b92c34fb8e55f79e498797cb28`, asupersync 0.6.2,
 fnp 0.5.0 and ft-kernel-metal 0.1.1, was audited on
 2026-11-08 through all four original commands, owned-host DSR/RCH
@@ -16,14 +41,30 @@ browser checks are **unreached**. The combined four-command gate remains
 **failed**; fm-8j70 remains open. This dirty-source diagnostic does not qualify
 a release, an installed Python portal, or browser-native typography.
 
+The native whole-Cargo run `20261108T151218-480334` also fails its WASM
+artifact-size test: its isolated checkout has neither a release artifact in
+the native Cargo target nor generated `demo/wasm/pkg` output. The unchanged
+test correctly refuses that missing required input. Supplying the actual
+release artifact built by this audit to the documented native-target path
+then fails the original budget, DSR `20261108T161929-1462726`:
+**1,376,357 > 703,695 bytes** (`cargo-release-wasm`). The artifact SHA-256 is
+`7e1cd0cb4ac5db0f689a7d77097a572afe5d131abccd3777212f13f7b60c51a9`;
+the preserved binding receipt is
+`/run/user/1000/fmn-execute-20261108-review8-joined-wasm-host-input-v1.json`.
+No budget or test is changed. Earlier pre-merge whole-Cargo passes consumed
+a 377,436-byte generated web artifact dated November 7 and do not establish
+current WASM size qualification. Both current size failures remain under
+fm-8j70, and the joined whole-Cargo gate remains failed.
+
 The frozen input manifest is
 `/run/user/1000/fmn-execute-20261108-review8-joined-consumer-inputs-v1.json`,
 SHA-256 `e26ce545285549d4aefdb33f4912fd55f96cc3a0291ea75f4de946ee552dfc77`.
 All 4,440 input rows and executable bits stay unchanged across
 execution, as does DSR's source fingerprint. The actual package artifacts are
 under `/data/ssd/tmp/fmn-execute-20261108-review8-joined-consumer-wasm-package-v1`.
-The current three lock hashes below bind this audit; the auxiliary smoke lock
-is `e307b83a`. This audit does not qualify native typography in the browser.
+The three current lock hashes below bind the latest status above, not this
+historical joined-source receipt. Its auxiliary smoke lock is `e307b83a`.
+This audit does not qualify native typography in the browser.
 
 The pre-merge MathML snapshot, with the older asupersync/fnp/ft pins, was audited
 as DSR `20261108T131544-3352414` on manifest `890ddc36d3f88c7fe7bde5756f64d9ec5d90ddd6922c3956da7a7ab74606b64b`.
@@ -1029,8 +1070,8 @@ The always-on `wasm_audit_is_bound_to_current_locks` Gauntlet test fails when
 either authority changes. That forces this audit to be re-run and its outcome
 recorded, instead of leaving a plausible but stale "current pins" claim behind.
 
-- `SUITE.lock` SHA-256: `e9670cf8bd437d12352deb191afed6a437d55bfa6b2b333fd572fb2fd9283c93`
-- `Cargo.lock` SHA-256: `37f6231804430a71d1bedece0a8f00278d5327fc792655a396eb17edd52d5e41`
+- `SUITE.lock` SHA-256: `ed89b5e0deed2ced3bfbfbff99ff1f946eda3dbb36e10a7278e1aa26e88fb54f`
+- `Cargo.lock` SHA-256: `1ac72d6dc3b941cba58af3d79c93c591d52ae4d5cbaf78827d0d428955374638`
 - Auxiliary `wasm-smoke/Cargo.lock` SHA-256: `e307b83ae1686cb4369dcc2e8e6a7edc421c08b3b46de209a0bc073406401739`
 
 The earlier 0.5.0 release bump re-bound the lock identities at that revision.

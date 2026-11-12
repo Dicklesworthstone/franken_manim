@@ -8,6 +8,27 @@ use fmn_tex::{
 
 const MATH: Mode = Mode::Math(Style::Display);
 
+#[test]
+fn common_template_configs_keep_the_reference_standalone_paragraph_width() {
+    let source = std::iter::repeat_n("a", 100).collect::<Vec<_>>().join(" ");
+    for template in ["default", "basic", "empty"] {
+        let mut config = fmn_config::Config::resolve(&[], None).unwrap().config;
+        config.tex.template = template.to_owned();
+        let registry = fmn_config::PackRegistry::builtin();
+        let engine = TexEngine::from_config(&config, &registry).unwrap();
+        let layout = engine.typeset(Mode::Text, &source).unwrap();
+        let mut baselines: Vec<_> = layout.layout.glyphs.iter().map(|glyph| glyph.y).collect();
+        baselines.sort_by(f64::total_cmp);
+        baselines.dedup();
+        assert_eq!(baselines.len(), 3, "{template}: Reference paragraph lines");
+        assert_eq!(layout.layout.glyphs.len(), 100, "{template}: no lost ink");
+        assert!(
+            layout.layout.width <= 34.5,
+            "{template}: paragraph overflows"
+        );
+    }
+}
+
 fn engine() -> TexEngine {
     TexEngine::new("fmd-math/pack/default", None).unwrap()
 }

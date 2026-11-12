@@ -862,7 +862,13 @@ fn the_actual_reference_files_parse_when_checked_out() {
     let registry = PackRegistry::builtin();
     for (name, _) in entries {
         match registry.resolve_template(name) {
-            Ok(_) | Err(PackError::UnsupportedTemplate { .. }) => {}
+            Ok(_) => {}
+            Err(error @ PackError::UnsupportedTemplate { .. }) => {
+                assert!(
+                    error.to_string().contains(&format!("#template-{name}")),
+                    "{name}: refusal must cite its classification row"
+                );
+            }
             Err(e @ PackError::UnknownTemplate { .. }) => {
                 panic!("shipped template {name:?} is unmapped: {e}");
             }

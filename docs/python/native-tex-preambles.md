@@ -37,6 +37,100 @@ errors. Known unavailable and unknown templates list the available native packs.
 A trailing comment cannot consume the expression because the native boundary
 inserts a newline before the original formula.
 
+## Reference template compatibility
+
+The registry classifies all 58 templates from the pinned Reference. The three
+native packs implement the native construct vocabulary, not complete LaTeX
+packages; unsupported constructs remain named errors. All three retain the
+standalone document's 345 pt paragraph width. `default` additionally selects
+physics function arguments, disables text ligatures and defines `\minus`;
+`basic` and `empty` keep ordinary text ligatures and no extra macro definitions.
+
+Native grammar supplies the supported amsmath/amssymb operations, colors,
+text islands, size/style commands, font-independent spacing and selected
+symbols from the other default packages. `dsfont`, `mathrsfs`, `calligra`,
+`wasysym`, `tipa`, `relsize` and the other package names are not promises of
+complete package support. The coverage ratchet and named construct errors
+describe the remaining vocabulary. Font selection, CJK shaping and a host
+compiler never silently fall back to another look.
+
+The partial classification has concrete limits. None of these packs executes
+LaTeX packages, selects encodings with `fontenc`, implements Babel language
+rules or automatic word hyphenation, or reproduces microtype's font expansion
+and margin protrusion. `default` maps selected commands from its larger
+package list; it does not load those packages. `basic` maps native math and
+color operations without promising the entire amsmath/amssymb vocabulary.
+`empty` adds no definitions but still exposes the shared native grammar,
+including constructs beyond an empty LaTeX preamble.
+
+The table is generated from the same classifications used by template
+resolution. Regenerate its block with
+`cargo test -p fmn-config template_table_in_user_docs -- --nocapture`.
+The test also fails if this documented block differs from the runtime registry.
+
+<!-- BEGIN TEMPLATE COMPATIBILITY -->
+| Reference template | Classification | Native pack or unavailable contract |
+|---|---|---|
+| <a id="template-default"></a>`default` | partial native pack | fmd-math/pack/default |
+| <a id="template-basic"></a>`basic` | partial native pack | fmd-math/pack/basic |
+| <a id="template-empty"></a>`empty` | partial native pack | fmd-math/pack/empty |
+| <a id="template-ctex"></a>`ctex` | refused by name | it selects CJK typesetting, which is outside the current typography tier (complex scripts are tiered out with a revisit trigger; see the Behavior Notes) |
+| <a id="template-basic_ctex"></a>`basic_ctex` | refused by name | it selects CJK typesetting, which is outside the current typography tier (complex scripts are tiered out with a revisit trigger; see the Behavior Notes) |
+| <a id="template-empty_ctex"></a>`empty_ctex` | refused by name | it requests XeLaTeX's Unicode/font engine; its empty preamble supplies no native font mapping |
+| <a id="template-american_typewriter"></a>`american_typewriter` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-antykwa"></a>`antykwa` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-apple_chancery"></a>`apple_chancery` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-auriocus_kalligraphicus"></a>`auriocus_kalligraphicus` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-baskervald_adf_fourier"></a>`baskervald_adf_fourier` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-baskerville_it"></a>`baskerville_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-biolinum"></a>`biolinum` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-brushscriptx"></a>`brushscriptx` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-chalkboard_se"></a>`chalkboard_se` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-chalkduster"></a>`chalkduster` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-comfortaa"></a>`comfortaa` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-comic_sans"></a>`comic_sans` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-droid_sans"></a>`droid_sans` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-droid_sans_it"></a>`droid_sans_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-droid_serif"></a>`droid_serif` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-droid_serif_px_it"></a>`droid_serif_px_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-ecf_augie"></a>`ecf_augie` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-ecf_jd"></a>`ecf_jd` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-ecf_skeetch"></a>`ecf_skeetch` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-ecf_tall_paul"></a>`ecf_tall_paul` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-ecf_webster"></a>`ecf_webster` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-electrum_adf"></a>`electrum_adf` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-epigrafica"></a>`epigrafica` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-fourier_utopia"></a>`fourier_utopia` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-french_cursive"></a>`french_cursive` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-gfs_bodoni"></a>`gfs_bodoni` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-gfs_didot"></a>`gfs_didot` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-gfs_neohellenic"></a>`gfs_neohellenic` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-gnu_freesans_tx"></a>`gnu_freesans_tx` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-gnu_freeserif_freesans"></a>`gnu_freeserif_freesans` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-helvetica_fourier_it"></a>`helvetica_fourier_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-latin_modern_tw"></a>`latin_modern_tw` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-latin_modern_tw_it"></a>`latin_modern_tw_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-libertine"></a>`libertine` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-libris_adf_fourier"></a>`libris_adf_fourier` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-minion_pro_myriad_pro"></a>`minion_pro_myriad_pro` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-minion_pro_tx"></a>`minion_pro_tx` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-new_century_schoolbook"></a>`new_century_schoolbook` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-new_century_schoolbook_px"></a>`new_century_schoolbook_px` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-noteworthy_light"></a>`noteworthy_light` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-palatino"></a>`palatino` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-papyrus"></a>`papyrus` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-romande_adf_fourier_it"></a>`romande_adf_fourier_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-slitex"></a>`slitex` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-times_fourier_it"></a>`times_fourier_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-urw_avant_garde"></a>`urw_avant_garde` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-urw_zapf_chancery"></a>`urw_zapf_chancery` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-venturis_adf_fourier_it"></a>`venturis_adf_fourier_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-verdana_it"></a>`verdana_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-vollkorn"></a>`vollkorn` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-vollkorn_fourier_it"></a>`vollkorn_fourier_it` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+| <a id="template-zapf_chancery"></a>`zapf_chancery` | refused by name | it selects a font family or font-specific math package outside the bundled faces (sometimes a host system font); FrankenManim never substitutes a different native face |
+<!-- END TEMPLATE COMPATIBILITY -->
+
 ## Source identity and caching
 
 `get_tex()`, selectors, isolation, coloring, matching animations and live numeric

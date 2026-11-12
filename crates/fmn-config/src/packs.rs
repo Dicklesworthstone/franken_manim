@@ -14,15 +14,17 @@
 //!
 //! `tex_templates.yml` ships two families: the general-purpose templates
 //! (`default`, `basic`, `empty`, and their `*_ctex` CJK variants) and a
-//! showcase of ~30 host-font templates (`american_typewriter`, …). The
+//! showcase of 52 font templates (`american_typewriter`, …). The
 //! mapping keeps what has native meaning and names what does not:
 //!
 //! - `default` / `basic` / `empty` → the same-named native packs.
-//! - The `*_ctex` variants → a **named capability error**: CJK typesetting
+//! - `ctex` / `basic_ctex` → a **named capability error**: CJK typesetting
 //!   is outside the current typography tier (the Behavior Notes' honest
 //!   fringe), with the revisit trigger documented there.
-//! - The host-font showcase templates → a named error too: they configure
-//!   external LaTeX around system fonts, neither of which exists here.
+//! - `empty_ctex` → a named engine refusal: its preamble is empty, but its
+//!   selected XeLaTeX Unicode/font engine has no native template mapping.
+//! - The font showcase templates → a named error too: their selected
+//!   families and font-specific math metrics are not the bundled faces.
 //! - Anything else → an unknown-template error listing the known packs.
 //!
 //! Every refusal is precise and actionable — never a silent fallback to a
@@ -40,6 +42,32 @@ pub struct Pack {
     /// The stable identifier fmd-math's macro/symbol bundles key on
     /// (fm-kg9 consumes this; the id is versioned there, not here).
     pub content_id: &'static str,
+}
+
+/// The compatibility classification used by both resolution and its docs.
+/// A native pack supports the native grammar, not every loaded LaTeX package.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TemplateMapping {
+    /// A named native pack with the engine's precise per-construct limits.
+    Native(&'static Pack),
+    /// A known Reference template that cannot select native semantics.
+    Unsupported {
+        /// Its exact pinned Reference name.
+        name: &'static str,
+        /// The unavailable font, script tier, or compiler contract.
+        reason: &'static str,
+    },
+}
+
+impl TemplateMapping {
+    /// The exact name accepted by the configuration's template field.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Native(pack) => pack.name,
+            Self::Unsupported { name, .. } => name,
+        }
+    }
 }
 
 /// Why a template name did not resolve to a pack. Every variant carries the
@@ -74,7 +102,7 @@ impl fmt::Display for PackError {
                 known,
             } => write!(
                 f,
-                "tex template {template:?} has no native preamble pack: {reason}; available packs: {}",
+                "tex template {template:?} has no native preamble pack: {reason}; see docs/python/native-tex-preambles.md#template-{template}; available packs: {}",
                 known.join(", ")
             ),
             Self::UnknownTemplate { template, known } => write!(
@@ -90,7 +118,7 @@ impl std::error::Error for PackError {}
 
 /// The built-in packs. `default` is the Reference's everyday surface
 /// (amsmath/amssymb-tier macros and symbols); `basic` is its slimmer
-/// sibling; `empty` is no preamble at all.
+/// sibling; `empty` has no definitions. All use the standalone document width.
 const BUILTIN: &[Pack] = &[
     Pack {
         name: "default",
@@ -104,15 +132,18 @@ const BUILTIN: &[Pack] = &[
     },
     Pack {
         name: "empty",
-        description: "no preamble: bare TeX-math primitives only",
+        description: "no definitions: the native grammar and standalone document width",
         content_id: "fmd-math/pack/empty",
     },
 ];
 
 const CJK_REASON: &str = "it selects CJK typesetting, which is outside the current typography \
      tier (complex scripts are tiered out with a revisit trigger; see the Behavior Notes)";
-const HOST_FONT_REASON: &str = "it configures external LaTeX around a host system font; \
-     FrankenManim typesets natively on bundled faces";
+const ENGINE_REASON: &str = "it requests XeLaTeX's Unicode/font engine; its empty preamble \
+     supplies no native font mapping";
+const HOST_FONT_REASON: &str = "it selects a font family or font-specific math package outside \
+     the bundled faces (sometimes a host system font); FrankenManim never substitutes a \
+     different native face";
 
 /// The Reference templates that exist but cannot be served natively, with
 /// their reasons. (The host-font showcase list is every remaining name in
@@ -120,7 +151,7 @@ const HOST_FONT_REASON: &str = "it configures external LaTeX around a host syste
 const UNSUPPORTED: &[(&str, &str)] = &[
     ("ctex", CJK_REASON),
     ("basic_ctex", CJK_REASON),
-    ("empty_ctex", CJK_REASON),
+    ("empty_ctex", ENGINE_REASON),
     ("american_typewriter", HOST_FONT_REASON),
     ("antykwa", HOST_FONT_REASON),
     ("apple_chancery", HOST_FONT_REASON),
@@ -199,6 +230,16 @@ impl PackRegistry {
         BUILTIN.iter().map(|p| p.name).collect()
     }
 
+    /// Every known Reference template, native packs first, then refusals.
+    /// Resolution and the generated compatibility table share these rows.
+    pub fn template_mappings(&self) -> impl Iterator<Item = TemplateMapping> + 'static {
+        BUILTIN.iter().map(TemplateMapping::Native).chain(
+            UNSUPPORTED
+                .iter()
+                .map(|&(name, reason)| TemplateMapping::Unsupported { name, reason }),
+        )
+    }
+
     /// A pack by its own name.
     #[must_use]
     pub fn get(&self, name: &str) -> Option<&'static Pack> {
@@ -212,15 +253,20 @@ impl PackRegistry {
     /// [`PackError::UnsupportedTemplate`] for a known Reference template
     /// with no native meaning; [`PackError::UnknownTemplate`] otherwise.
     pub fn resolve_template(&self, template: &str) -> Result<&'static Pack, PackError> {
-        if let Some(pack) = self.get(template) {
-            return Ok(pack);
-        }
-        if let Some((_, reason)) = UNSUPPORTED.iter().find(|(name, _)| *name == template) {
-            return Err(PackError::UnsupportedTemplate {
-                template: template.to_owned(),
-                reason,
-                known: self.names(),
-            });
+        if let Some(mapping) = self
+            .template_mappings()
+            .find(|mapping| mapping.name() == template)
+        {
+            return match mapping {
+                TemplateMapping::Native(pack) => Ok(pack),
+                TemplateMapping::Unsupported { reason, .. } => {
+                    Err(PackError::UnsupportedTemplate {
+                        template: template.to_owned(),
+                        reason,
+                        known: self.names(),
+                    })
+                }
+            };
         }
         Err(PackError::UnknownTemplate {
             template: template.to_owned(),
@@ -232,6 +278,73 @@ impl PackRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn compatibility_table() -> String {
+        use std::fmt::Write;
+        let mut out = String::from(
+            "| Reference template | Classification | Native pack or unavailable contract |\n\
+             |---|---|---|\n",
+        );
+        for mapping in PackRegistry::builtin().template_mappings() {
+            let name = mapping.name();
+            let (class, detail) = match mapping {
+                TemplateMapping::Native(pack) => ("partial native pack", pack.content_id),
+                TemplateMapping::Unsupported { reason, .. } => ("refused by name", reason),
+            };
+            writeln!(
+                out,
+                "| <a id=\"template-{name}\"></a>`{name}` | {class} | {detail} |"
+            )
+            .expect("write to a string");
+        }
+        out
+    }
+
+    #[test]
+    fn template_table_in_user_docs_is_generated_from_runtime_classifications() {
+        let table = compatibility_table();
+        let document = include_str!("../../../docs/python/native-tex-preambles.md");
+        let block = document
+            .split_once("<!-- BEGIN TEMPLATE COMPATIBILITY -->\n")
+            .expect("compatibility table start")
+            .1
+            .split_once("<!-- END TEMPLATE COMPATIBILITY -->")
+            .expect("compatibility table end")
+            .0;
+        // --nocapture prints the exact table to regenerate the documented block.
+        println!("{table}");
+        assert_eq!(block, table, "documented template classification drift");
+    }
+
+    #[test]
+    fn each_known_refusal_cites_its_own_classification_row() {
+        let registry = PackRegistry::builtin();
+        let mut names = std::collections::BTreeSet::new();
+        for mapping in registry.template_mappings() {
+            let name = mapping.name();
+            assert!(names.insert(name), "duplicate classification: {name}");
+            match mapping {
+                TemplateMapping::Native(pack) => {
+                    assert_eq!(registry.resolve_template(name), Ok(pack));
+                }
+                TemplateMapping::Unsupported { reason, .. } => {
+                    let error = registry.resolve_template(name).expect_err(name);
+                    let message = error.to_string();
+                    assert!(message.contains(reason), "{name}: {message}");
+                    assert!(message.contains(&format!("#template-{name}")), "{message}");
+                }
+            }
+        }
+        assert_eq!(names.len(), 58, "all pinned Reference templates");
+        let empty = registry
+            .resolve_template("empty_ctex")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            empty.contains("XeLaTeX") && !empty.contains("CJK"),
+            "{empty}"
+        );
+    }
 
     #[test]
     fn the_common_templates_resolve_to_native_packs() {
@@ -246,7 +359,7 @@ mod tests {
     #[test]
     fn cjk_templates_refuse_with_the_tier_reason() {
         let r = PackRegistry::builtin();
-        for name in ["ctex", "basic_ctex", "empty_ctex"] {
+        for name in ["ctex", "basic_ctex"] {
             match r.resolve_template(name) {
                 Err(PackError::UnsupportedTemplate {
                     template,

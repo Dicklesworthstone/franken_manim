@@ -7644,7 +7644,54 @@ fn tex_mathml_text_islands_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
                 .field("preserved", "true"),
         );
     }
-    Ok(RunOutcome::ok().with_counter("tex_mathml_text_islands", 7))
+    for (command, face) in [
+        ("textbf", "bold"),
+        ("textit", "italic"),
+        ("texttt", "monospace"),
+        ("textsf", "sans-serif"),
+    ] {
+        let source = format!(r"\{command}{{\underline{{B}}}}");
+        let control = format!(r"\{command}{{B}}");
+        let node = fmd_math::parse_text(&source)
+            .map_err(|error| fail(format!("{source}: underline parse: {error}")))?;
+        let xml = fmd_math::to_mathml(&node, false);
+        let built = fmn_library::TexText::new(&source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: native underline: {error}")))?;
+        let plain = fmn_library::TexText::new(&control)
+            .build(engine)
+            .map_err(|error| fail(format!("{control}: native face control: {error}")))?;
+        let glyphs = |layout: &fmd_math::Layout| {
+            layout
+                .glyphs
+                .iter()
+                .map(|glyph| {
+                    (
+                        glyph.ch, glyph.face, glyph.gid, glyph.x, glyph.y, glyph.size,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        if fmd_math::mathml_well_formed(&xml).is_err()
+            || !xml.contains(&format!(
+                r#"<menclose notation="bottom"><mtext mathvariant="{face}">B</mtext></menclose>"#
+            ))
+            || built.typeset.layout.glyphs.len() != 1
+            || glyphs(&built.typeset.layout) != glyphs(&plain.typeset.layout)
+            || built.typeset.layout.rules.len() != plain.typeset.layout.rules.len() + 1
+        {
+            return Err(fail(format!(
+                "{source}: native or MathML underline changed its inherited face: {xml}"
+            )));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_mathml_text_islands")
+                .field("source", source)
+                .field("mathml", xml)
+                .field("preserved", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_mathml_text_islands", 11))
 }
 
 /// fm-text-ellipsis-r11-52jw: text periods, font stretch and amsmath's
@@ -7920,15 +7967,20 @@ const TEXTEXT_PARAGRAPH: &str = "Every paragraph that is wider than its line bre
 
 /// fm-texttext-line-breaking-r11-bfdx: a `TexText` paragraph under the
 /// default pack (the Reference's 345 pt line) sets TeX's two lines, centred
-/// on one axis. Under the basic pack, which has no line width, the same
-/// paragraph is one line with the same glyphs.
+/// on one axis. A text box in inline math keeps its glyphs on one line.
+/// All three document packs also wrap the measured hundred-word paragraph.
 fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     // Each glyph's ink box, `(min, max)`, in emission order.
     type Ink = (fmn_core::types::Vec3, fmn_core::types::Vec3);
-    let glyphs = |pack: &'static str| -> Result<Vec<Ink>, ScenarioError> {
-        let engine = fmn_library::TexEngine::new(pack, None)
-            .map_err(|error| fail(format!("the {pack} engine: {error}")))?;
-        let text = fmn_library::TexText::new(TEXTEXT_PARAGRAPH)
+    let glyphs = |pack: &str, source: &str| -> Result<Vec<Ink>, ScenarioError> {
+        let mut config = fmn_config::Config::resolve(&[], None)
+            .map_err(|error| fail(format!("default config: {error}")))?
+            .config;
+        config.tex.template = pack.to_owned();
+        let engine =
+            fmn_library::TexEngine::from_config(&config, &fmn_config::PackRegistry::builtin())
+                .map_err(|error| fail(format!("the {pack} engine: {error}")))?;
+        let text = fmn_library::TexText::new(source)
             .build(&engine)
             .map_err(|error| fail(format!("the paragraph under {pack}: {error}")))?;
         let mut boxes = Vec::new();
@@ -7948,8 +8000,27 @@ fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         }
         Ok(boxes)
     };
-    let broken = glyphs("fmd-math/pack/default")?;
-    let one_line = glyphs("fmd-math/pack/basic")?;
+    let broken = glyphs("default", TEXTEXT_PARAGRAPH)?;
+    let one_line = glyphs("basic", &format!(r"$\text{{{TEXTEXT_PARAGRAPH}}}$"))?;
+    // Ordinary basic/empty text keeps its own kerning. Test each pack's
+    // measured line count rather than demanding default-pack geometry.
+    let words = std::iter::repeat_n("a", 100).collect::<Vec<_>>().join(" ");
+    for pack in ["default", "basic", "empty"] {
+        let actual = glyphs(pack, &words)?;
+        let mut centres: Vec<_> = actual
+            .iter()
+            .map(|(min, max)| (min[1] + max[1]) / 2.0)
+            .collect();
+        centres.sort_by(f64::total_cmp);
+        centres.dedup();
+        if actual.len() != 100 || centres.len() != 3 {
+            return Err(fail(format!(
+                "the {pack} document paragraph sets {} glyphs on {} lines, expected 100/3",
+                actual.len(),
+                centres.len()
+            )));
+        }
+    }
     if broken.len() != 128 || one_line.len() != 128 {
         return Err(fail(format!(
             "the paragraph sets {} and {} glyphs, not 128",
@@ -7997,6 +8068,7 @@ fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
         LogEvent::new("e2e.parity.textext_paragraph_lines")
             .field("lines", lines.len() as u64)
             .field("first_line_glyphs", first_line as u64)
+            .field("template_packs", 3_u64)
             .field("centred", truth(centred)),
     );
     if !centred {
@@ -8006,6 +8078,7 @@ fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
     }
     Ok(RunOutcome::ok()
         .with_counter("textext_paragraph_lines", lines.len() as u64)
+        .with_counter("textext_paragraph_template_packs", 3)
         .with_counter("textext_paragraph_first_line_glyphs", first_line as u64))
 }
 
@@ -15173,7 +15246,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         Invocation::new(tex_mathml_text_islands_run),
         vec![
             Assertion::ExitCode(0),
-            counter_eq("tex_mathml_text_islands", 7),
+            counter_eq("tex_mathml_text_islands", 11),
         ],
         vec![LogExpect::span_present(
             "e2e.parity.tex_mathml_text_islands",
@@ -15225,12 +15298,14 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             // TeX's lines: two, the first ending after "of" (63 glyphs).
             counter_eq("textext_paragraph_lines", 2),
             counter_eq("textext_paragraph_first_line_glyphs", 63),
+            counter_eq("textext_paragraph_template_packs", 3),
         ],
         vec![LogExpect::span_present(
             "e2e.parity.textext_paragraph_lines",
             vec![
                 FieldPred::u64_eq("lines", 2),
                 FieldPred::u64_eq("first_line_glyphs", 63),
+                FieldPred::u64_eq("template_packs", 3),
                 FieldPred::str_eq("centred", truth(true)),
             ],
         )],
