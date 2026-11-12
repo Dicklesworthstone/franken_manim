@@ -288,7 +288,9 @@ pub struct MetalReport {
     pub max_threads_per_threadgroup: usize,
     /// Raster pipeline SIMD execution width.
     pub thread_execution_width: usize,
-    /// Bytes materialized into new input buffers for this frame.
+    /// Bytes copied from the host into the frame's input buffers: new ones,
+    /// or for the 3D route's tables the buffers the renderer keeps
+    /// ([`MetalRenderer::resident_table_bytes`]).
     pub upload_bytes: usize,
     /// Frame-pixel bytes copied to the host for the requested output.
     ///
@@ -685,6 +687,10 @@ pub struct MetalRenderer {
     /// The last 3D frame's texels, kept for the next frame that samples the
     /// same textures (FL-033).
     resident_texels: Option<ResidentTexels>,
+    /// The 3D route's tables on the device, in the order
+    /// `dispatch_three_d` lists them, kept between frames (FL-033;
+    /// [`reside_table`]).
+    resident_tables: [Option<SharedBuffer>; THREE_D_TABLES],
     device: String,
     unified_memory: bool,
     kernel_digest: Digest,
@@ -709,6 +715,7 @@ impl fmt::Debug for MetalRenderer {
             )
             .field("resident_texel_bytes", &self.resident_texel_bytes())
             .field("bloom_scratch_bytes", &self.bloom_scratch_bytes())
+            .field("resident_table_bytes", &self.resident_table_bytes())
             .finish_non_exhaustive()
     }
 }
@@ -748,6 +755,7 @@ impl MetalRenderer {
             bloom_sums: None,
             bloom_band_rows: BLOOM_BAND_ROWS,
             resident_texels: None,
+            resident_tables: Default::default(),
             device: gateway.device_name(),
             unified_memory: gateway.has_unified_memory(),
             kernel_digest: sha256(KERNEL_SOURCE.as_bytes()),
@@ -773,6 +781,20 @@ impl MetalRenderer {
     #[must_use]
     pub fn bloom_scratch_bytes(&self) -> usize {
         self.bloom_sums.as_ref().map_or(0, |sums| sums.bytes)
+    }
+
+    /// The bytes of the 3D tables the renderer keeps on the device between
+    /// frames (FL-033): a buffer a table, which the next 3D frame writes its
+    /// table over when it fits, and replaces with one a quarter larger than
+    /// its table when it does not. They never shrink. Zero before a 3D
+    /// frame.
+    #[must_use]
+    pub fn resident_table_bytes(&self) -> usize {
+        self.resident_tables
+            .iter()
+            .flatten()
+            .map(SharedBuffer::len_bytes)
+            .sum()
     }
 
     /// Render the annex's linear-light Rgba16F comparison surface.
@@ -1166,19 +1188,53 @@ impl MetalRenderer {
         raw_bytes: usize,
     ) -> Result<(bool, usize), MetalError> {
         let raw_reused = ensure_surface(self.gateway, &mut self.raw_surface, raw_bytes)?;
-        let params_u32 = self.gateway.buffer_u32(&flat.params_u32)?;
-        let params_f32 = self.gateway.buffer_f32(&flat.params_f32)?;
-        let triangles = self.gateway.buffer_f32(nonempty_f32(&flat.triangles))?;
-        let draw_u32 = self.gateway.buffer_u32(nonempty_u32(&flat.draw_u32))?;
-        let draw_f32 = self.gateway.buffer_f32(nonempty_f32(&flat.draw_f32))?;
-        let tile_offsets = self.gateway.buffer_u32(&flat.tile_offsets)?;
-        let tile_draws = self.gateway.buffer_u32(nonempty_u32(&flat.tile_draws))?;
-        let command_triangles = self.gateway.buffer_u32(&flat.command_triangles)?;
-        let tile_triangles = self
-            .gateway
-            .buffer_u32(nonempty_u32(&flat.tile_triangles))?;
-        let texture_u32 = self.gateway.buffer_u32(nonempty_u32(&flat.texture_u32))?;
+        // The kernel reads a table only through the frame's validated counts
+        // and offsets, never past its end, so what a kept buffer holds
+        // beyond it is never read.
+        let tables = [
+            Table::U32(&flat.params_u32),
+            Table::F32(&flat.params_f32),
+            Table::F32(nonempty_f32(&flat.triangles)),
+            Table::U32(nonempty_u32(&flat.draw_u32)),
+            Table::F32(nonempty_f32(&flat.draw_f32)),
+            Table::U32(&flat.tile_offsets),
+            Table::U32(nonempty_u32(&flat.tile_draws)),
+            Table::U32(&flat.command_triangles),
+            Table::U32(nonempty_u32(&flat.tile_triangles)),
+            Table::U32(nonempty_u32(&flat.texture_u32)),
+        ];
+        for (slot, table) in self.resident_tables.iter_mut().zip(tables) {
+            reside_table(self.gateway, slot, table)?;
+        }
         let texels_kept = self.reside_texels(flat)?;
+        let table = |index: usize| {
+            self.resident_tables[index]
+                .as_ref()
+                .ok_or(MetalError::Layout("resident 3D table disappeared"))
+        };
+        let [
+            params_u32,
+            params_f32,
+            triangles,
+            draw_u32,
+            draw_f32,
+            tile_offsets,
+            tile_draws,
+            command_triangles,
+            tile_triangles,
+            texture_u32,
+        ] = [
+            table(0)?,
+            table(1)?,
+            table(2)?,
+            table(3)?,
+            table(4)?,
+            table(5)?,
+            table(6)?,
+            table(7)?,
+            table(8)?,
+            table(9)?,
+        ];
         let texels = &self
             .resident_texels
             .as_ref()
@@ -1197,22 +1253,22 @@ impl MetalRenderer {
         self.gateway.dispatch(
             &self.three_d,
             &[
-                &params_u32,
-                &params_f32,
-                &triangles,
-                &draw_u32,
-                &draw_f32,
-                &tile_offsets,
-                &tile_draws,
+                params_u32,
+                params_f32,
+                triangles,
+                draw_u32,
+                draw_f32,
+                tile_offsets,
+                tile_draws,
                 &self
                     .raw_surface
                     .as_ref()
                     .ok_or(MetalError::Layout("raw surface disappeared"))?
                     .buffer,
                 &status,
-                &command_triangles,
-                &tile_triangles,
-                &texture_u32,
+                command_triangles,
+                tile_triangles,
+                texture_u32,
                 texels,
             ],
             Grid::grid_2d(flat.cols(), flat.rows(), tile, tile),
@@ -2600,8 +2656,9 @@ impl<'a> FlatThreeDFrame<'a> {
         (self.params_u32[1] as usize).div_ceil(self.tile())
     }
 
-    /// The bytes the frame copies into new buffers: every table, and the
-    /// texels unless the renderer kept them from an earlier frame.
+    /// The bytes the frame copies to the device: every table (into the
+    /// renderer's kept buffers), and the texels unless the renderer kept
+    /// them from an earlier frame.
     fn upload_bytes(&self, texels_kept: bool) -> Result<usize, MetalError> {
         let texels = if texels_kept {
             0
@@ -2636,6 +2693,53 @@ struct ResidentTexels {
     key: Vec<(Digest, u32, u32)>,
     buffer: SharedBuffer,
     bytes: usize,
+}
+
+/// The 3D route's tables: parameters (u32 and f32), triangles, draws (u32
+/// and f32), tile offsets, tile draws, command triangles, tile triangles and
+/// texture rows.
+const THREE_D_TABLES: usize = 10;
+
+/// A frame's table, as the kernel reads it.
+#[derive(Clone, Copy)]
+enum Table<'t> {
+    F32(&'t [f32]),
+    U32(&'t [u32]),
+}
+
+/// Put `table` on the device in `slot` (FL-033): written over the kept
+/// buffer when it fits, else into a new buffer with room for a quarter more
+/// scalars (as many as the device allows). The old buffer is dropped before
+/// the new one is made, so the renderer never holds two.
+fn reside_table(
+    gateway: Gateway,
+    slot: &mut Option<SharedBuffer>,
+    table: Table<'_>,
+) -> Result<(), MetalError> {
+    let scalars = match table {
+        Table::F32(values) => values.len(),
+        Table::U32(values) => values.len(),
+    };
+    let bytes = checked_bytes(scalars, 4, "3D table bytes")?;
+    let kept = slot
+        .as_ref()
+        .is_some_and(|buffer| buffer.len_bytes() >= bytes);
+    if !kept {
+        *slot = None;
+        let room = scalars
+            .saturating_add(scalars / 4)
+            .min(gateway.max_buffer_length() / 4)
+            .max(scalars);
+        *slot = Some(gateway.buffer_zeroed(checked_bytes(room, 4, "3D table bytes")?)?);
+    }
+    let buffer = slot
+        .as_mut()
+        .ok_or(MetalError::Layout("resident 3D table disappeared"))?;
+    match table {
+        Table::F32(values) => buffer.write_f32(0, values)?,
+        Table::U32(values) => buffer.write_u32(0, values)?,
+    }
+    Ok(())
 }
 
 /// One draw's triangles, and the frame row of the first.
@@ -4400,6 +4504,103 @@ mod tests {
                 "case {case}: per-tile lists change the frame"
             );
         }
+    }
+
+    #[test]
+    fn metal_three_d_tables_kept_between_frames_render_what_new_buffers_render() {
+        // One renderer draws every tile-list job and back again, so its kept
+        // tables are written over by smaller ones (stale scalars left past
+        // each table's end) and replaced for larger ones. Each frame's raw
+        // RGBA16F bytes must be a new renderer's. A table's buffer is
+        // replaced only when the table does not fit, by one with a quarter
+        // more scalars, and never shrinks.
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let jobs = tile_list_jobs();
+        let draws = jobs
+            .iter()
+            .enumerate()
+            .map(|(case, (_, meshes, dots, _))| tile_list_draws(meshes, dots, case))
+            .collect::<Vec<_>>();
+        let three_d = jobs
+            .iter()
+            .zip(&draws)
+            .map(|((camera, _, _, fine), draws)| {
+                let tiling = crate::bin::Tiling {
+                    macro_tile: 32,
+                    fine_tile: *fine,
+                };
+                ThreeDJob::new(camera, draws, tiling).expect("job")
+            })
+            .collect::<Vec<_>>();
+        let fresh = three_d
+            .iter()
+            .map(|job| {
+                let mut renderer = MetalRenderer::new().expect("Metal renderer");
+                assert_eq!(renderer.resident_table_bytes(), 0);
+                renderer.render_three_d_raw(job).expect("frame").0
+            })
+            .collect::<Vec<_>>();
+        let mut kept = MetalRenderer::new().expect("Metal renderer");
+        let mut model = [0_usize; THREE_D_TABLES];
+        let (mut replaced, mut written_over, mut frames) = (0, 0, 0);
+        let cases = (0..three_d.len())
+            .chain((0..three_d.len()).rev())
+            .chain([0, 3, 1]);
+        for case in cases {
+            let flat = FlatThreeDFrame::derive(&three_d[case]).expect("packet");
+            // An empty table is bound as one zero.
+            let scalars = [
+                flat.params_u32.len(),
+                flat.params_f32.len(),
+                flat.triangles.len().max(1),
+                flat.draw_u32.len().max(1),
+                flat.draw_f32.len().max(1),
+                flat.tile_offsets.len(),
+                flat.tile_draws.len().max(1),
+                flat.command_triangles.len(),
+                flat.tile_triangles.len().max(1),
+                flat.texture_u32.len().max(1),
+            ];
+            for (bytes, scalars) in model.iter_mut().zip(scalars) {
+                if *bytes >= scalars * 4 {
+                    written_over += 1;
+                } else {
+                    *bytes = (scalars + scalars / 4) * 4;
+                    replaced += 1;
+                }
+            }
+            let (frame, _) = kept.render_three_d_raw(&three_d[case]).expect("frame");
+            let background = frame
+                .as_bytes()
+                .as_chunks::<8>()
+                .0
+                .iter()
+                .filter(|pixel| **pixel == frame.as_bytes()[..8])
+                .count();
+            assert!(background < frame.as_bytes().len() / 8, "case {case} drew");
+            assert!(
+                frame.as_bytes() == fresh[case].as_bytes(),
+                "case {case}: kept tables change the frame"
+            );
+            let held = kept
+                .resident_tables
+                .iter()
+                .map(|slot| slot.as_ref().map_or(0, SharedBuffer::len_bytes))
+                .collect::<Vec<_>>();
+            assert_eq!(held, model, "case {case}");
+            assert_eq!(kept.resident_table_bytes(), model.iter().sum::<usize>());
+            frames += 1;
+        }
+        assert_eq!(frames, 13);
+        // The first frame makes every buffer; later ones replace some and
+        // write over others (the largest frame's tables fit the smaller).
+        assert!(replaced > THREE_D_TABLES, "{replaced} replaced");
+        assert!(
+            written_over > 5 * THREE_D_TABLES,
+            "{written_over} written over"
+        );
     }
 
     #[test]
