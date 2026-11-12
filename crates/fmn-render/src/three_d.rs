@@ -2089,6 +2089,7 @@ impl PreparedThreeDProjection {
             preparation_limits: self.preparation_limits,
             scratch_pool: Arc::clone(&self.scratch_pool),
             bloom: None,
+            threads: 1,
         })
     }
 }
@@ -2122,6 +2123,8 @@ pub struct ThreeDJob<'a> {
     scratch_pool: Arc<TileScratchPool>,
     /// Applied to the raw frame after the raster, on every route.
     bloom: Option<Bloom>,
+    /// The threads the job was prepared on ([`ThreeDJob::preparation_threads`]).
+    threads: usize,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -2168,16 +2171,11 @@ impl<'a> ThreeDJob<'a> {
         limits: ThreeDPreparationLimits,
         threads: usize,
     ) -> Result<Self, ThreeDError> {
+        let threads = crate::effective_threads(threads).max(1);
         let mut budget = PreparationBudget::new(limits);
         let mut compiled = Vec::new();
         budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
-        compile_draws(
-            camera,
-            draws,
-            &mut budget,
-            &mut compiled,
-            crate::effective_threads(threads),
-        )?;
+        compile_draws(camera, draws, &mut budget, &mut compiled, threads)?;
         let sample_grid = match camera.edge_sample_limit() {
             EdgeSampleLimit::Native => 1,
             EdgeSampleLimit::TwoByTwo => 2,
@@ -2207,7 +2205,19 @@ impl<'a> ThreeDJob<'a> {
             preparation_limits: limits,
             scratch_pool: Arc::new(TileScratchPool::new()),
             bloom: None,
+            threads,
         })
+    }
+
+    /// The threads the job was prepared on: the `threads` of
+    /// [`ThreeDJob::new_with_threads`] (one for [`ThreeDJob::new`],
+    /// [`ThreeDJob::new_with_limits`] and a job bound from a prepared
+    /// projection), at least one. A route may use as many
+    /// for its own host preparation of the frame; the bytes do not depend on
+    /// it.
+    #[must_use]
+    pub const fn preparation_threads(&self) -> usize {
+        self.threads
     }
 
     /// Bloom the frame after its raster ([`Bloom`]): the CPU route in

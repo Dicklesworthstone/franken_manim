@@ -33,7 +33,7 @@ use crate::engine::{AaPolicy, Draw, EngineIdentity, FrameConfig, FrameJob, Frame
 use crate::fill::MonoTable;
 use crate::plan::RenderPlan;
 use crate::texture::{Texture, TextureWrap};
-use crate::three_d::{CompiledPrimitive, Shader, TextureMaterial, ThreeDJob};
+use crate::three_d::{CompiledPrimitive, RasterTriangle, Shader, TextureMaterial, ThreeDJob};
 use crate::{Binning, Segment};
 
 const KERNEL_SOURCE: &str = include_str!("shaders/metal.metal");
@@ -2222,6 +2222,10 @@ struct FlatThreeDFrame<'a> {
     texel_count: usize,
     /// The job's bloom, run on the raw surface after the raster.
     bloom: Option<Bloom>,
+    /// The host threads the frame's preparation and checks may use (the
+    /// job's [`ThreeDJob::preparation_threads`]). The tables do not depend on
+    /// it.
+    threads: usize,
 }
 
 /// The kernel's code for a wrap mode.
@@ -2250,6 +2254,16 @@ impl<'a> FlatThreeDFrame<'a> {
     }
 
     fn derive_with(job: &ThreeDJob<'a>, bins: TriangleBins) -> Result<Self, MetalError> {
+        Self::derive_on(job, bins, job.preparation_threads())
+    }
+
+    /// The frame on up to `threads` host threads: the same tables, and the
+    /// same error, on any number.
+    fn derive_on(
+        job: &ThreeDJob<'a>,
+        bins: TriangleBins,
+        threads: usize,
+    ) -> Result<Self, MetalError> {
         let camera = job.camera();
         let width = camera.pixel_width();
         let height = camera.pixel_height();
@@ -2281,6 +2295,7 @@ impl<'a> FlatThreeDFrame<'a> {
             textures: Vec::new(),
             texel_count: 0,
             bloom: job.bloom().cloned(),
+            threads: crate::effective_threads(threads).max(1),
         };
         let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
         let mut uploaded = std::collections::HashMap::new();
@@ -2301,6 +2316,10 @@ impl<'a> FlatThreeDFrame<'a> {
             .try_reserve_exact(triangle_scalars)
             .map_err(|_| MetalError::SizeOverflow("3D triangles"))?;
 
+        // Each draw's triangles and the row of the first, in draw order; the
+        // rows are written once every draw's row is in place.
+        let mut pieces = Vec::with_capacity(job.prepared_draws().len());
+        let mut next_triangle = 0_usize;
         for (draw_index, draw) in job.prepared_draws().iter().enumerate() {
             let CompiledPrimitive::Triangles { triangles, shader } = &draw.primitive else {
                 return Err(MetalError::UnsupportedThreeDPrimitive {
@@ -2317,21 +2336,18 @@ impl<'a> FlatThreeDFrame<'a> {
                 ),
             };
 
-            let first_triangle = scalar_row(
-                &flat.triangles,
-                THREE_D_TRIANGLE_STRIDE,
-                "3D triangle index",
-            )?;
-            for triangle in triangles {
-                push_three_d_triangle(&mut flat.triangles, triangle);
-            }
-            let triangle_count = scalar_row(
-                &flat.triangles,
-                THREE_D_TRIANGLE_STRIDE,
-                "3D triangle count",
-            )?
-            .checked_sub(first_triangle)
-            .ok_or(MetalError::Layout("3D triangle range reversed"))?;
+            let first_triangle = u32::try_from(next_triangle)
+                .map_err(|_| MetalError::SizeOverflow("3D triangle index"))?;
+            pieces.push(TrianglePiece {
+                first: next_triangle,
+                triangles,
+            });
+            // No overflow: the sum of every draw's triangles was checked above.
+            next_triangle += triangles.len();
+            let triangle_count = u32::try_from(next_triangle)
+                .map_err(|_| MetalError::SizeOverflow("3D triangle count"))?
+                .checked_sub(first_triangle)
+                .ok_or(MetalError::Layout("3D triangle range reversed"))?;
             flat.draw_u32.extend_from_slice(&[
                 first_triangle,
                 triangle_count,
@@ -2343,6 +2359,9 @@ impl<'a> FlatThreeDFrame<'a> {
                 .extend_from_slice(&three_d_shader_slab(*shader));
             draw_bounds.push(draw.bounds);
         }
+        // Within the reservation: `triangle_scalars` is every draw's rows.
+        flat.triangles.resize(triangle_scalars, 0.0);
+        flatten_three_d_triangles(&pieces, &mut flat.triangles, flat.threads);
 
         (flat.tile_offsets, flat.tile_draws) =
             stable_three_d_bins(&draw_bounds, width, height, tile)?;
@@ -2455,9 +2474,9 @@ impl<'a> FlatThreeDFrame<'a> {
         if self
             .params_f32
             .iter()
-            .chain(&self.triangles)
             .chain(&self.draw_f32)
             .any(|value| !value.is_finite())
+            || !all_finite_on(&self.triangles, self.threads)
         {
             return Err(MetalError::Layout(
                 "3D f32 packet contains a non-finite value",
@@ -2618,9 +2637,95 @@ struct ResidentTexels {
     bytes: usize,
 }
 
-fn push_three_d_triangle(out: &mut Vec<f32>, triangle: &crate::three_d::RasterTriangle) {
-    for vertex in triangle.vertices {
-        out.extend_from_slice(&[
+/// One draw's triangles, and the frame row of the first.
+struct TrianglePiece<'r> {
+    first: usize,
+    triangles: &'r [RasterTriangle],
+}
+
+/// A flatten worker takes at least this many triangles; with fewer, the
+/// calling thread writes them all.
+const TRIANGLES_PER_FLATTEN_WORKER: usize = 4096;
+
+/// A finiteness check worker takes at least this many scalars.
+const SCALARS_PER_CHECK_WORKER: usize = 1 << 18;
+
+/// The most workers one flatten or check starts.
+const MAX_HOST_WORKERS: usize = 64;
+
+/// Write the triangles of `pieces`, each from its first row, into `out`,
+/// which holds exactly their rows, on up to `threads` threads. Every worker
+/// writes its own run of rows, and every scalar is its vertex value's `f32`
+/// cast, so the table does not depend on the threads. A worker that cannot
+/// start leaves its rows to the calling thread.
+fn flatten_three_d_triangles(pieces: &[TrianglePiece<'_>], out: &mut [f32], threads: usize) {
+    let rows = out.as_chunks_mut::<THREE_D_TRIANGLE_STRIDE>().0;
+    let workers = threads
+        .min(rows.len() / TRIANGLES_PER_FLATTEN_WORKER)
+        .min(MAX_HOST_WORKERS);
+    if workers < 2 {
+        flatten_three_d_rows(pieces, 0, rows);
+        return;
+    }
+    let per_worker = rows.len().div_ceil(workers);
+    let mut missed = Vec::new();
+    std::thread::scope(|scope| {
+        let mut chunks = rows.chunks_mut(per_worker).enumerate();
+        let mine = chunks.next();
+        for (worker, chunk) in chunks {
+            let first = worker * per_worker;
+            let work = move || flatten_three_d_rows(pieces, first, chunk);
+            if spawn_host_worker(scope, worker, work).is_err() {
+                missed.push(worker);
+            }
+        }
+        if let Some((_, chunk)) = mine {
+            flatten_three_d_rows(pieces, 0, chunk);
+        }
+    });
+    for worker in missed {
+        let first = worker * per_worker;
+        let end = first.saturating_add(per_worker).min(rows.len());
+        flatten_three_d_rows(pieces, first, &mut rows[first..end]);
+    }
+}
+
+/// Write rows `first..first + rows.len()` of `pieces` into `rows`.
+fn flatten_three_d_rows(
+    pieces: &[TrianglePiece<'_>],
+    first: usize,
+    rows: &mut [[f32; THREE_D_TRIANGLE_STRIDE]],
+) {
+    let end = first + rows.len();
+    // The first piece with a row at or after `first`.
+    let start = pieces.partition_point(|piece| piece.first + piece.triangles.len() <= first);
+    for piece in &pieces[start..] {
+        if piece.first >= end {
+            break;
+        }
+        let skip = first.saturating_sub(piece.first);
+        let take = (end - piece.first).min(piece.triangles.len());
+        let at = piece.first + skip - first;
+        for (row, triangle) in rows[at..at + (take - skip)]
+            .iter_mut()
+            .zip(&piece.triangles[skip..take])
+        {
+            *row = three_d_triangle_row(triangle);
+        }
+    }
+}
+
+/// A triangle's row: each vertex's screen position, `1/w`, NDC depth, world
+/// position, normal, colour, uv and opacity, cast to `f32`.
+fn three_d_triangle_row(triangle: &RasterTriangle) -> [f32; THREE_D_TRIANGLE_STRIDE] {
+    let mut row = [0.0; THREE_D_TRIANGLE_STRIDE];
+    for (scalars, vertex) in row
+        .as_chunks_mut::<THREE_D_VERTEX_STRIDE>()
+        .0
+        .iter_mut()
+        .zip(&triangle.vertices)
+    {
+        *scalars = [
             vertex.screen[0] as f32,
             vertex.screen[1] as f32,
             vertex.inverse_w as f32,
@@ -2638,8 +2743,63 @@ fn push_three_d_triangle(out: &mut Vec<f32>, triangle: &crate::three_d::RasterTr
             vertex.attributes.uv[0] as f32,
             vertex.attributes.uv[1] as f32,
             vertex.attributes.opacity as f32,
-        ]);
+        ];
     }
+    row
+}
+
+/// Whether every value is finite, checked on up to `threads` threads. A
+/// worker that cannot start leaves its values to the calling thread.
+fn all_finite_on(values: &[f32], threads: usize) -> bool {
+    let workers = threads
+        .min(values.len() / SCALARS_PER_CHECK_WORKER)
+        .min(MAX_HOST_WORKERS);
+    if workers < 2 {
+        return values.iter().all(|value| value.is_finite());
+    }
+    let per_worker = values.len().div_ceil(workers);
+    std::thread::scope(|scope| {
+        let mut chunks = values.chunks(per_worker);
+        let mine = chunks.next().unwrap_or_default();
+        let started = chunks
+            .enumerate()
+            .map(|(worker, chunk)| {
+                let work = move || chunk.iter().all(|value| value.is_finite());
+                (chunk, spawn_host_worker(scope, worker + 1, work))
+            })
+            .collect::<Vec<_>>();
+        let mut finite = mine.iter().all(|value| value.is_finite());
+        for (chunk, handle) in started {
+            finite &= match handle {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(_) => chunk.iter().all(|value| value.is_finite()),
+            };
+        }
+        finite
+    })
+}
+
+/// Start `work` on a scoped thread, or say why it could not start.
+#[cfg_attr(not(test), allow(unused_variables))]
+fn spawn_host_worker<'scope, T: Send + 'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    worker: usize,
+    work: impl FnOnce() -> T + Send + 'scope,
+) -> std::io::Result<std::thread::ScopedJoinHandle<'scope, T>> {
+    #[cfg(test)]
+    if worker < MAX_HOST_WORKERS && HOST_WORKERS_REFUSED.get() >> worker & 1 == 1 {
+        return Err(std::io::Error::other("worker refused by the test"));
+    }
+    std::thread::Builder::new().spawn_scoped(scope, work)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Workers (by bit) that [`spawn_host_worker`] refuses to start on this
+    /// thread, so tests can reach the calling thread's fallback.
+    static HOST_WORKERS_REFUSED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn three_d_shader_slab(shader: Shader<'_>) -> [f32; THREE_D_DRAW_F32_STRIDE] {
@@ -3373,6 +3533,257 @@ mod tests {
             rows += expected / THREE_D_TRIANGLE_STRIDE;
         }
         assert!(rows > 5_000, "{rows} triangle rows");
+    }
+
+    /// The triangle rows as the frame wrote them before threads, verbatim:
+    /// each draw's triangles pushed in draw order.
+    fn sequential_triangle_rows(job: &ThreeDJob<'_>) -> Vec<f32> {
+        fn push_three_d_triangle(out: &mut Vec<f32>, triangle: &crate::three_d::RasterTriangle) {
+            for vertex in triangle.vertices {
+                out.extend_from_slice(&[
+                    vertex.screen[0] as f32,
+                    vertex.screen[1] as f32,
+                    vertex.inverse_w as f32,
+                    vertex.ndc_z as f32,
+                    vertex.attributes.world[0] as f32,
+                    vertex.attributes.world[1] as f32,
+                    vertex.attributes.world[2] as f32,
+                    vertex.attributes.normal[0] as f32,
+                    vertex.attributes.normal[1] as f32,
+                    vertex.attributes.normal[2] as f32,
+                    vertex.attributes.color[0] as f32,
+                    vertex.attributes.color[1] as f32,
+                    vertex.attributes.color[2] as f32,
+                    vertex.attributes.color[3] as f32,
+                    vertex.attributes.uv[0] as f32,
+                    vertex.attributes.uv[1] as f32,
+                    vertex.attributes.opacity as f32,
+                ]);
+            }
+        }
+        let mut rows = Vec::new();
+        for draw in job.prepared_draws() {
+            if let CompiledPrimitive::Triangles { triangles, .. } = &draw.primitive {
+                for triangle in triangles {
+                    push_three_d_triangle(&mut rows, triangle);
+                }
+            }
+        }
+        rows
+    }
+
+    /// Every table of a frame, as bits.
+    fn frame_tables(flat: &FlatThreeDFrame<'_>) -> Vec<Vec<u32>> {
+        let bits = |values: &[f32]| values.iter().map(|value| value.to_bits()).collect();
+        vec![
+            flat.params_u32.clone(),
+            bits(&flat.params_f32),
+            bits(&flat.triangles),
+            flat.draw_u32.clone(),
+            bits(&flat.draw_f32),
+            flat.tile_offsets.clone(),
+            flat.tile_draws.clone(),
+            flat.command_triangles.clone(),
+            flat.tile_triangles.clone(),
+            flat.texture_u32.clone(),
+            vec![u32::try_from(flat.texel_count).expect("texels")],
+        ]
+    }
+
+    #[test]
+    fn a_frame_flattened_on_threads_is_the_sequential_flatten_bit_for_bit() {
+        // A scene of about 50,000 triangle rows: one mesh far larger than a
+        // worker's run, then thousands of dots of two rows each (a run
+        // boundary can split one), some cut away entirely (empty draws),
+        // and loose triangles last. Each worker's rows, every table, and the
+        // finiteness refusal anywhere in the rows are those of one thread,
+        // also when workers cannot start and the calling thread takes theirs.
+        let camera = Camera::new(CameraConfig {
+            resolution: (640, 360),
+            samples: 2,
+            background: Srgb::from_rgb8(4, 8, 16).to_linear(1.0),
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let mut state = 0x1319_8A2E_0370_7344_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let (nu, nv) = (151_u32, 101_u32);
+        let mut vertices = Vec::new();
+        for j in 0..nv {
+            for i in 0..nu {
+                let x = -7.0 + 14.0 * f64::from(i) / f64::from(nu - 1);
+                let y = -4.0 + 8.0 * f64::from(j) / f64::from(nv - 1);
+                let color = Srgb::from_rgb8(
+                    (unit() * 255.0) as u8,
+                    (unit() * 255.0) as u8,
+                    (unit() * 255.0) as u8,
+                )
+                .to_linear(0.5 + 0.5 * unit());
+                vertices.push(SurfaceVertex::colored(
+                    [x, y, 0.3 * (unit() - 0.5)],
+                    [0.0, 0.0, 1.0],
+                    color,
+                ));
+            }
+        }
+        let grid = SurfaceMesh::from_uv_grid(vertices, (nu, nv)).expect("grid");
+        let mut loose = Vec::new();
+        for _ in 0..300 {
+            let center = [(unit() - 0.5) * 16.0, (unit() - 0.5) * 9.0, unit() - 0.5];
+            let corner = |unit: &mut dyn FnMut() -> f64| {
+                [
+                    center[0] + (unit() - 0.5) * 3.0,
+                    center[1] + (unit() - 0.5) * 3.0,
+                    center[2],
+                ]
+            };
+            let color = Srgb::from_rgb8(200, 120, 40).to_linear(0.5 + 0.5 * unit());
+            let normal = [0.0, 0.0, 1.0];
+            let vertices = vec![
+                SurfaceVertex::colored(corner(&mut unit), normal, color),
+                SurfaceVertex::colored(corner(&mut unit), normal, color),
+                SurfaceVertex::colored(corner(&mut unit), normal, color),
+            ];
+            loose.push(SurfaceMesh::new(vertices, vec![0, 1, 2]).expect("triangle"));
+        }
+        let white = Srgb::from_rgb8(255, 255, 255).to_linear(0.9);
+        let mut draws = vec![ThreeDDraw::Surface(SurfaceDraw::new(&grid))];
+        for index in 0..10_000 {
+            // Every 97th dot sits behind the camera, cut away entirely.
+            let z = if index % 97 == 0 { 1.0e3 } else { unit() - 0.5 };
+            let center = [(unit() - 0.5) * 15.0, (unit() - 0.5) * 8.5, z];
+            let radius = 0.01 + 0.2 * unit();
+            draws.push(ThreeDDraw::TrueDot(if index % 2 == 0 {
+                TrueDotDraw::glow(center, radius, white)
+            } else {
+                TrueDotDraw::new(center, radius, white)
+            }));
+        }
+        draws.extend(
+            loose
+                .iter()
+                .map(|mesh| ThreeDDraw::Surface(SurfaceDraw::new(mesh))),
+        );
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: 16,
+        };
+        let job = ThreeDJob::new(&camera, &draws, tiling).expect("job");
+        assert_eq!(job.preparation_threads(), 1);
+        let oracle = sequential_triangle_rows(&job);
+        let rows = oracle.len() / THREE_D_TRIANGLE_STRIDE;
+        let lengths = job
+            .prepared_draws()
+            .iter()
+            .map(|draw| match &draw.primitive {
+                CompiledPrimitive::Triangles { triangles, .. } => triangles.len(),
+                CompiledPrimitive::Vector(_) => 0,
+            })
+            .collect::<Vec<_>>();
+        // Eight workers flatten and eight check; the mesh spans several runs;
+        // some draws are empty.
+        assert!(rows > 8 * TRIANGLES_PER_FLATTEN_WORKER, "{rows} rows");
+        assert!(
+            oracle.len() > 8 * SCALARS_PER_CHECK_WORKER,
+            "{} scalars",
+            oracle.len()
+        );
+        assert!(lengths[0] > 3 * rows / 8, "mesh {} of {rows}", lengths[0]);
+        let empty = lengths.iter().filter(|&&length| length == 0).count();
+        assert!(empty >= 50, "{empty} empty draws");
+
+        let one = FlatThreeDFrame::derive(&job).expect("one thread");
+        assert_eq!(one.threads, 1);
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&one.triangles), bits(&oracle));
+        let tables = frame_tables(&one);
+        for threads in [2, 3, 5, 8, 13, 64] {
+            for refused in [0_u64, 0b10, 0b1010_1010, u64::MAX] {
+                HOST_WORKERS_REFUSED.set(refused);
+                let flat = FlatThreeDFrame::derive_on(&job, TriangleBins::PerTile, threads)
+                    .expect("threads");
+                HOST_WORKERS_REFUSED.set(0);
+                assert_eq!(flat.threads, threads);
+                assert!(
+                    frame_tables(&flat) == tables,
+                    "{threads} threads, refused {refused:#b}"
+                );
+            }
+        }
+        // A job prepared on threads derives on as many.
+        let threaded = ThreeDJob::new_with_threads(
+            &camera,
+            &draws,
+            tiling,
+            crate::three_d::ThreeDPreparationLimits::default(),
+            8,
+        )
+        .expect("threaded job");
+        assert_eq!(threaded.preparation_threads(), 8);
+        let flat = FlatThreeDFrame::derive(&threaded).expect("threaded frame");
+        assert_eq!(flat.threads, 8);
+        assert!(frame_tables(&flat) == tables);
+
+        // A non-finite scalar anywhere in the rows (each check worker's run,
+        // its edges, the first and the last) is refused on any threads, also
+        // by the calling thread for a worker that could not start.
+        let mut flat = flat;
+        let scalars = flat.triangles.len();
+        let mut places = (0..40)
+            .map(|step| step * (scalars / 40))
+            .collect::<Vec<_>>();
+        for workers in [2, 3, 8] {
+            let per_worker = scalars.div_ceil(workers);
+            for worker in 1..workers {
+                places.extend([worker * per_worker - 1, worker * per_worker]);
+            }
+        }
+        places.push(scalars - 1);
+        let mut refusals = 0;
+        for &place in &places {
+            let kept = flat.triangles[place];
+            for (poison, threads, refused) in [
+                (f32::NAN, 1, 0),
+                (f32::INFINITY, 2, 0),
+                (f32::NEG_INFINITY, 3, 0),
+                (f32::NAN, 8, 0),
+                (f32::NAN, 8, u64::MAX),
+                (f32::INFINITY, 64, 0b1010_1010),
+            ] {
+                flat.triangles[place] = poison;
+                flat.threads = threads;
+                HOST_WORKERS_REFUSED.set(refused);
+                let checked = format!("{:?}", flat.validate());
+                HOST_WORKERS_REFUSED.set(0);
+                assert_eq!(
+                    checked,
+                    format!(
+                        "{:?}",
+                        Err::<(), _>(MetalError::Layout(
+                            "3D f32 packet contains a non-finite value"
+                        ))
+                    ),
+                    "scalar {place}, {threads} threads, refused {refused:#b}"
+                );
+                refusals += 1;
+            }
+            flat.triangles[place] = kept;
+        }
+        for threads in [1, 2, 8, 64] {
+            flat.threads = threads;
+            assert!(flat.validate().is_ok(), "{threads} threads");
+        }
+        assert!(refusals > 300, "{refusals} refusals");
     }
 
     #[test]
