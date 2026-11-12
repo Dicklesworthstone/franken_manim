@@ -2146,23 +2146,38 @@ impl<'a> ThreeDJob<'a> {
         tiling: Tiling,
         limits: ThreeDPreparationLimits,
     ) -> Result<Self, ThreeDError> {
+        Self::new_with_threads(camera, draws, tiling, limits, 1)
+    }
+
+    /// [`ThreeDJob::new_with_limits`], with up to `threads` threads compiling
+    /// long runs of [`ThreeDDraw::TrueDot`]s.
+    ///
+    /// The job, its rows, its preparation accounting and any error are
+    /// exactly those of [`ThreeDJob::new_with_limits`]. A run's dots are
+    /// compiled ahead on worker threads, each within its share of the
+    /// raster-triangle rows the limits still admit, and then admitted one row
+    /// at a time in painter order, as the sequential compile admits them. A
+    /// dot not compiled ahead (it failed, or its worker's share ran out) is
+    /// compiled where the sequential compile meets it, after the dots
+    /// compiled ahead behind it are dropped. The rows held therefore never
+    /// exceed what the limits admit.
+    pub fn new_with_threads(
+        camera: &'a Camera,
+        draws: &[ThreeDDraw<'a>],
+        tiling: Tiling,
+        limits: ThreeDPreparationLimits,
+        threads: usize,
+    ) -> Result<Self, ThreeDError> {
         let mut budget = PreparationBudget::new(limits);
         let mut compiled = Vec::new();
         budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
-        // The camera's constants, once for the job rather than per point.
-        let projection = camera.projection();
-        let location = camera.location();
-        for draw in draws {
-            compiled.push(match *draw {
-                ThreeDDraw::Vector(vector) => compile_vector(camera, vector, &mut budget)?,
-                ThreeDDraw::Surface(surface) => {
-                    compile_surface(camera, &projection, surface, &mut budget)?
-                }
-                ThreeDDraw::TrueDot(dot) => {
-                    compile_dot(camera, &projection, location, dot, &mut budget)?
-                }
-            });
-        }
+        compile_draws(
+            camera,
+            draws,
+            &mut budget,
+            &mut compiled,
+            crate::effective_threads(threads),
+        )?;
         let sample_grid = match camera.edge_sample_limit() {
             EdgeSampleLimit::Native => 1,
             EdgeSampleLimit::TwoByTwo => 2,
@@ -3524,6 +3539,254 @@ fn compile_surface<'a>(
         },
         depth_test: draw.depth_test,
     })
+}
+
+/// A run of fewer consecutive dots than this compiles on the calling thread:
+/// starting workers would cost more than the dots.
+const PARALLEL_DOT_RUN: usize = 2048;
+
+/// The fewest dots a worker compiles ahead.
+const DOTS_PER_WORKER: usize = 512;
+
+/// The most workers one run starts.
+const MAX_DOT_WORKERS: usize = 64;
+
+/// Compile `draws` in painter order onto `compiled`, whose slots `budget` has
+/// already admitted. With `threads` above one, long runs of dots are compiled
+/// ahead on worker threads ([`compile_dot_round`]); every draw, every charge
+/// and any error are the sequential compile's.
+fn compile_draws<'a>(
+    camera: &'a Camera,
+    draws: &[ThreeDDraw<'a>],
+    budget: &mut PreparationBudget,
+    compiled: &mut Vec<CompiledDraw<'a>>,
+    threads: usize,
+) -> Result<(), ThreeDError> {
+    // The camera's constants, once for the job rather than per point.
+    let projection = camera.projection();
+    let location = camera.location();
+    let mut index = 0;
+    while index < draws.len() {
+        let run = if threads > 1 {
+            draws[index..]
+                .iter()
+                .take_while(|draw| matches!(draw, ThreeDDraw::TrueDot(_)))
+                .count()
+        } else {
+            0
+        };
+        if run >= PARALLEL_DOT_RUN {
+            index += compile_dot_round(
+                camera,
+                &projection,
+                location,
+                &draws[index..index + run],
+                budget,
+                compiled,
+                threads,
+            )?;
+            continue;
+        }
+        let end = index + run.max(1);
+        for &draw in &draws[index..end] {
+            compiled.push(compile_draw(camera, &projection, location, draw, budget)?);
+        }
+        index = end;
+    }
+    Ok(())
+}
+
+/// One draw, sequentially. `projection` is `camera.projection()` and
+/// `location` is `camera.location()`.
+fn compile_draw<'a>(
+    camera: &'a Camera,
+    projection: &Projection,
+    location: Vec3,
+    draw: ThreeDDraw<'a>,
+    budget: &mut PreparationBudget,
+) -> Result<CompiledDraw<'a>, ThreeDError> {
+    match draw {
+        ThreeDDraw::Vector(vector) => compile_vector(camera, vector, budget),
+        ThreeDDraw::Surface(surface) => compile_surface(camera, projection, surface, budget),
+        ThreeDDraw::TrueDot(dot) => compile_dot(camera, projection, location, dot, budget),
+    }
+}
+
+/// Compile the first of `dots` (a run of [`ThreeDDraw::TrueDot`]s) onto
+/// `compiled`, as many as one round takes, at least one; returns how many.
+///
+/// The round splits the raster-triangle rows `budget` still admits among its
+/// workers in proportion to their dots. Each worker compiles its dots in
+/// order, ahead of admission, under a private budget of its share, and stops
+/// at its first error, which may be its share running out. Then, in painter
+/// order, each dot compiled ahead is admitted one row at a time, exactly as
+/// [`compile_dot`] admits its rows. At the first dot not compiled ahead, the
+/// dots compiled ahead behind it are dropped and it is compiled here, where
+/// the sequential compile meets it; the next round starts after it. Ahead of
+/// admission the round holds at most the rows the limits still admit, so the
+/// rows held never exceed what they admit.
+fn compile_dot_round<'a>(
+    camera: &'a Camera,
+    projection: &Projection,
+    location: Vec3,
+    dots: &[ThreeDDraw<'a>],
+    budget: &mut PreparationBudget,
+    compiled: &mut Vec<CompiledDraw<'a>>,
+    threads: usize,
+) -> Result<usize, ThreeDError> {
+    let allowance = budget.remaining_rows::<RasterTriangle>(PreparationRows::RasterTriangles);
+    // A dot is two triangles unless clipping splits it, so a round takes at
+    // most half as many dots as the allowance has rows.
+    let count = dots.len().min(allowance / 2);
+    let workers = threads.min(count / DOTS_PER_WORKER).min(MAX_DOT_WORKERS);
+    if count < PARALLEL_DOT_RUN || workers < 2 {
+        // Too few rows left to share out: the rest of the run sequentially.
+        for &dot in dots {
+            compiled.push(compile_draw(camera, projection, location, dot, budget)?);
+        }
+        return Ok(dots.len());
+    }
+    let per_worker = count.div_ceil(workers);
+    let start = compiled.len();
+    // The slots are the ones `budget` admitted for these draws; an empty
+    // slot holds no rows.
+    compiled.extend(std::iter::repeat_with(empty_dot_slot).take(count));
+    let mut ahead = [0_usize; MAX_DOT_WORKERS];
+    std::thread::scope(|scope| {
+        let chunks = dots[..count]
+            .chunks(per_worker)
+            .zip(compiled[start..].chunks_mut(per_worker))
+            .enumerate();
+        let last = count.div_ceil(per_worker) - 1;
+        let mut handles = Vec::new();
+        for (worker, (chunk, slots)) in chunks {
+            let share = allowance_share(allowance, chunk.len(), count);
+            let work = move || {
+                let slots = slots;
+                compile_dots_ahead(camera, projection, location, chunk, slots, share)
+            };
+            if worker == last {
+                ahead[worker] = work();
+            } else if let Ok(handle) = std::thread::Builder::new().spawn_scoped(scope, work) {
+                handles.push((worker, handle));
+            }
+            // A worker that could not start compiled nothing ahead.
+        }
+        for (worker, handle) in handles {
+            match handle.join() {
+                Ok(done) => ahead[worker] = done,
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+    });
+    #[cfg(test)]
+    record_dot_round(&compiled[start..], &ahead, per_worker, allowance);
+    let mut offset = 0;
+    for (worker, chunk) in dots[..count].chunks(per_worker).enumerate() {
+        let done = ahead[worker];
+        for slot in &compiled[start + offset..start + offset + done] {
+            for _ in 0..slot_triangles(slot) {
+                budget.charge_rows::<RasterTriangle>(PreparationRows::RasterTriangles, 1)?;
+            }
+        }
+        if done < chunk.len() {
+            let at = offset + done;
+            compiled.truncate(start + at);
+            compiled.push(compile_draw(
+                camera, projection, location, dots[at], budget,
+            )?);
+            return Ok(at + 1);
+        }
+        offset += chunk.len();
+    }
+    Ok(count)
+}
+
+/// Compile `dots` in order into `slots`, ahead of admission, under a private
+/// budget of `share` raster-triangle rows; stop at the first error. Returns
+/// how many it compiled.
+fn compile_dots_ahead<'a>(
+    camera: &'a Camera,
+    projection: &Projection,
+    location: Vec3,
+    dots: &[ThreeDDraw<'a>],
+    slots: &mut [CompiledDraw<'a>],
+    share: usize,
+) -> usize {
+    let rows = u64::try_from(share).unwrap_or(u64::MAX);
+    let row_bytes = u64::try_from(std::mem::size_of::<RasterTriangle>()).unwrap_or(u64::MAX);
+    let mut budget = PreparationBudget::new(ThreeDPreparationLimits {
+        max_raster_triangles: rows,
+        max_working_bytes: rows.saturating_mul(row_bytes),
+        ..ThreeDPreparationLimits::default()
+    });
+    let mut done = 0;
+    for (&draw, slot) in dots.iter().zip(slots) {
+        let ThreeDDraw::TrueDot(dot) = draw else {
+            break;
+        };
+        match compile_dot(camera, projection, location, dot, &mut budget) {
+            Ok(compiled) => *slot = compiled,
+            Err(_) => break,
+        }
+        done += 1;
+    }
+    done
+}
+
+/// A worker's share of `allowance` rows for `dots` of a round's `count`:
+/// in proportion, rounded down, so the shares never sum past the allowance.
+fn allowance_share(allowance: usize, dots: usize, count: usize) -> usize {
+    let share = u128::from(allowance as u64) * dots as u128 / (count.max(1) as u128);
+    usize::try_from(share).unwrap_or(0)
+}
+
+/// A dot's slot before its worker fills it: no rows.
+fn empty_dot_slot<'a>() -> CompiledDraw<'a> {
+    ProjectedDraw {
+        primitive: ProjectedPrimitive::Triangles {
+            triangles: ProjectedRows::Owned(Vec::new()),
+            shader: ProjectedShader::Gouraud,
+        },
+        depth_test: false,
+        bounds: None,
+    }
+}
+
+/// The raster triangles a compiled dot holds.
+fn slot_triangles(slot: &CompiledDraw<'_>) -> usize {
+    match &slot.primitive {
+        ProjectedPrimitive::Triangles { triangles, .. } => triangles.len(),
+        ProjectedPrimitive::Vector(_) => 0,
+    }
+}
+
+// Test record of every round on this thread: (rows compiled ahead,
+// allowance, dots compiled ahead, dots in the round). A round records on the
+// thread that compiles the job, so concurrent tests do not see each other's.
+#[cfg(test)]
+thread_local! {
+    static DOT_ROUNDS: std::cell::RefCell<Vec<(usize, usize, usize, usize)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+#[cfg(test)]
+fn record_dot_round(
+    slots: &[CompiledDraw<'_>],
+    ahead: &[usize],
+    per_worker: usize,
+    allowance: usize,
+) {
+    let mut rows = 0;
+    let mut dots = 0;
+    for (worker, chunk) in slots.chunks(per_worker).enumerate() {
+        dots += ahead[worker];
+        rows += chunk[..ahead[worker]]
+            .iter()
+            .map(slot_triangles)
+            .sum::<usize>();
+    }
+    DOT_ROUNDS.with_borrow_mut(|rounds| rounds.push((rows, allowance, dots, slots.len())));
 }
 
 /// `projection` is `camera.projection()` and `location` is
@@ -8545,6 +8808,444 @@ mod tests {
             }
         }
         assert!(drawn > 0 && empty > 0, "drawn {drawn}, off screen {empty}");
+    }
+
+    /// The compile as it was before dots were compiled on threads, verbatim:
+    /// the oracle for [`compile_draws`].
+    fn sequential_compile<'a>(
+        camera: &'a Camera,
+        draws: &[ThreeDDraw<'a>],
+        limits: ThreeDPreparationLimits,
+    ) -> Result<(Vec<CompiledDraw<'a>>, PreparationBudget), ThreeDError> {
+        let mut budget = PreparationBudget::new(limits);
+        let mut compiled = Vec::new();
+        budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
+        let projection = camera.projection();
+        let location = camera.location();
+        for draw in draws {
+            compiled.push(match *draw {
+                ThreeDDraw::Vector(vector) => compile_vector(camera, vector, &mut budget)?,
+                ThreeDDraw::Surface(surface) => {
+                    compile_surface(camera, &projection, surface, &mut budget)?
+                }
+                ThreeDDraw::TrueDot(dot) => {
+                    compile_dot(camera, &projection, location, dot, &mut budget)?
+                }
+            });
+        }
+        Ok((compiled, budget))
+    }
+
+    /// [`compile_draws`] as the job calls it.
+    fn threaded_compile<'a>(
+        camera: &'a Camera,
+        draws: &[ThreeDDraw<'a>],
+        limits: ThreeDPreparationLimits,
+        threads: usize,
+    ) -> Result<(Vec<CompiledDraw<'a>>, PreparationBudget), ThreeDError> {
+        let mut budget = PreparationBudget::new(limits);
+        let mut compiled = Vec::new();
+        budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
+        compile_draws(camera, draws, &mut budget, &mut compiled, threads)?;
+        Ok((compiled, budget))
+    }
+
+    /// Compiled draws as comparable values: every row, bound and depth test
+    /// as bits, every shader and vector as text.
+    fn compiled_record(compiled: &[CompiledDraw<'_>]) -> (Vec<u64>, String) {
+        use std::fmt::Write as _;
+        let mut bits = Vec::new();
+        let mut text = String::new();
+        for draw in compiled {
+            match &draw.primitive {
+                CompiledPrimitive::Triangles { triangles, shader } => {
+                    bits.push(triangles.len() as u64);
+                    bits.extend(raster_bits(triangles));
+                    write!(text, "{shader:?};").expect("write to a string");
+                }
+                vector => write!(text, "{vector:?};").expect("write to a string"),
+            }
+            bits.push(u64::from(draw.bounds.is_some()));
+            bits.extend(draw.bounds.iter().flatten().map(|value| value.to_bits()));
+            bits.push(u64::from(draw.depth_test));
+        }
+        (bits, text)
+    }
+
+    type CompileOutcome = Result<(Vec<u64>, String, String), String>;
+
+    /// A compile's draws, its budget's every counter, or its error.
+    fn compile_outcome(
+        result: Result<(Vec<CompiledDraw<'_>>, PreparationBudget), ThreeDError>,
+    ) -> CompileOutcome {
+        result
+            .map(|(compiled, budget)| {
+                let (bits, text) = compiled_record(&compiled);
+                (bits, text, format!("{budget:?}"))
+            })
+            .map_err(|error| format!("{error:?}"))
+    }
+
+    /// One random dot: on screen (`kind` below 0.6), far off it (below 0.8)
+    /// or near the eye where the near plane cuts it; one in twenty of radius
+    /// zero; some fixed in frame; with probability `cut`, cut by a user plane
+    /// through it; and, if `rounded`, its corners cut off by all four planes,
+    /// so that it is more than two rows.
+    fn random_dot(
+        unit: &mut impl FnMut() -> f64,
+        eye: Vec3,
+        kind: f64,
+        cut: f64,
+        rounded: bool,
+    ) -> TrueDotDraw {
+        let reach = (eye[0] * eye[0] + eye[1] * eye[1] + eye[2] * eye[2]).sqrt();
+        let (center, radius) = if kind < 0.6 {
+            (
+                [14.0 * unit() - 7.0, 8.0 * unit() - 4.0, 2.0 * unit() - 1.0],
+                0.02 + 0.3 * unit(),
+            )
+        } else if kind < 0.8 {
+            (
+                [
+                    400.0 * unit() - 200.0,
+                    400.0 * unit() - 200.0,
+                    4.0 * unit() - 2.0,
+                ],
+                0.02 + 0.3 * unit(),
+            )
+        } else {
+            let t = 0.01 + 0.2 * unit();
+            let lateral = [8.0 * t * (unit() - 0.5), 5.0 * t * (unit() - 0.5), 0.0];
+            (
+                std::array::from_fn(|axis| eye[axis] * (1.0 - t) + lateral[axis]),
+                t * reach * (0.2 + 2.0 * unit()),
+            )
+        };
+        let radius = if unit() < 0.05 { 0.0 } else { radius };
+        let tint = color(
+            ["#E04070", "#40C0F0", "#F0E040"][(unit() * 3.0) as usize % 3],
+            0.3 + 0.7 * unit(),
+        );
+        let mut dot = if unit() < 0.5 {
+            TrueDotDraw::new(center, radius, tint)
+        } else {
+            TrueDotDraw::glow(center, radius, tint)
+        };
+        dot.shading = [unit(), unit(), unit()];
+        dot.anti_alias_width = 1.5 * unit();
+        dot.depth_test = unit() < 0.5;
+        if unit() < 0.1 {
+            dot.is_fixed_in_frame = unit();
+        }
+        if unit() < cut {
+            let normal = [unit() - 0.5, unit() - 0.5, unit() - 0.5];
+            let offset = radius * (unit() - 0.5);
+            dot.clip_planes[(unit() * 4.0) as usize % 4] = [
+                normal[0],
+                normal[1],
+                normal[2],
+                offset - (normal[0] * center[0] + normal[1] * center[1] + normal[2] * center[2]),
+            ];
+        }
+        if rounded {
+            // Planes across the billboard, each keeping the center and lying
+            // a little beyond the radius in some direction within it, where
+            // the corners reach to the radius times the square root of two.
+            let to_camera = normalize(sub(eye, center)).unwrap_or([0.0, 0.0, 1.0]);
+            for plane in &mut dot.clip_planes {
+                let across = cross(to_camera, [unit() - 0.5, unit() - 0.5, unit() - 0.5]);
+                let toward = normalize(across).unwrap_or([1.0, 0.0, 0.0]);
+                let reach = radius * (1.02 + 0.18 * unit());
+                *plane = [
+                    -toward[0],
+                    -toward[1],
+                    -toward[2],
+                    reach + (toward[0] * center[0] + toward[1] * center[1] + toward[2] * center[2]),
+                ];
+            }
+        }
+        dot
+    }
+
+    #[test]
+    fn dots_compiled_on_threads_are_the_sequential_compile_bit_for_bit() {
+        // Long runs of dots are compiled ahead on worker threads and admitted
+        // in painter order. Whatever the threads, the compile must be the
+        // sequential one's: every row bit for bit, every shader, bound and
+        // depth test, every counter of the budget, or the same error; and the
+        // job built on it the same bins and accounting. Random scenes put
+        // runs long and short (2047 and 2048 at the edge) between surfaces
+        // and vectors, with dots on screen, off it, near the eye, cut by user
+        // planes (in half the scenes most dots are, so a dot is often more
+        // than two rows), fixed in frame and of radius zero; a non-finite or
+        // invalid dot in three scenes of four; and limits ample, exactly
+        // enough, running out somewhere, leaving too little for a round, and
+        // the same for working bytes. Every round must hold no more rows
+        // ahead than the limits still admitted when it started.
+        let mut camera = camera();
+        camera
+            .frame_mut()
+            .set_euler_angles(Some(0.3), Some(0.9), Some(-0.2))
+            .expect("finite angles");
+        let eye = camera.location();
+        let mesh = full_triangle(-1.0, color("#336699", 1.0));
+        let plan = vector_plan(
+            &path_points(
+                &[[-3.0, -1.5, 0.5], [0.0, 2.5, 0.5], [3.0, -1.5, 0.5]],
+                true,
+            ),
+            [0.2, 0.7, 0.3, 0.5],
+            [0.9, 0.7, 0.1, 0.8],
+            1.6,
+            camera.revision(),
+            |_| {},
+        );
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let row_bytes = std::mem::size_of::<RasterTriangle>() as u64;
+        let (mut rounds, mut stopped, mut exhausted, mut many_rows) = (0, 0, 0, 0);
+        let (mut passed, mut mixed, mut failed, mut limited) = (0, 0, 0, 0);
+        for case in 0..8_usize {
+            // A skewed scene's first run is rounded dots on screen, then dots
+            // off it, and the rest of the scene is off it too: under limits
+            // that hold exactly its rows, a round shares about two rows a
+            // dot, and the workers of the rounded dots run out.
+            let skewed = case % 4 == 0;
+            let cut = if case % 2 == 1 { 0.7 } else { 0.1 };
+            let mut draws = vec![if case % 4 < 2 {
+                ThreeDDraw::Surface(SurfaceDraw::new(&mesh))
+            } else {
+                ThreeDDraw::Vector(VectorDraw::new(&plan, 0))
+            }];
+            let first_run = if skewed {
+                4000
+            } else {
+                [2047, 2048, 2049 + (unit() * 3000.0) as usize][case % 3]
+            };
+            let mut longest = first_run;
+            for index in 0..first_run {
+                let place = unit();
+                let dot = if !skewed {
+                    random_dot(&mut unit, eye, place, cut, false)
+                } else if index < first_run / 2 {
+                    random_dot(&mut unit, eye, 0.3 * place, 0.0, true)
+                } else {
+                    random_dot(&mut unit, eye, 0.6 + 0.2 * place, 0.0, false)
+                };
+                draws.push(ThreeDDraw::TrueDot(dot));
+            }
+            draws.push(ThreeDDraw::Surface(SurfaceDraw::new(&mesh)));
+            for (index, length) in [(unit() * 2600.0) as usize, (unit() * 300.0) as usize]
+                .into_iter()
+                .enumerate()
+            {
+                if index == 1 {
+                    draws.push(ThreeDDraw::Vector(VectorDraw::new(&plan, 0)));
+                }
+                longest = longest.max(length);
+                for _ in 0..length {
+                    let place = unit();
+                    let kind = if skewed { 0.6 + 0.2 * place } else { place };
+                    draws.push(ThreeDDraw::TrueDot(random_dot(
+                        &mut unit, eye, kind, cut, false,
+                    )));
+                }
+            }
+            // The clean scene's totals set the tight limits.
+            let (clean, clean_budget) =
+                sequential_compile(&camera, &draws, ThreeDPreparationLimits::default())
+                    .expect("clean scene compiles");
+            let total = clean_budget.raster_triangles;
+            let before = clean_budget.raster_triangles
+                - clean
+                    .iter()
+                    .skip(1)
+                    .map(|draw| slot_triangles(draw) as u64)
+                    .sum::<u64>();
+            many_rows += clean.iter().filter(|draw| slot_triangles(draw) > 2).count();
+            let bytes = clean_budget.working_bytes;
+            drop(clean);
+            // Every scene is compared clean, and three in four again with one
+            // dot broken.
+            let mut scenes = vec![draws.clone()];
+            if case % 4 != 0 {
+                let (at, mut bad) = loop {
+                    let at = 1 + (unit() * (draws.len() - 2) as f64) as usize;
+                    if let ThreeDDraw::TrueDot(dot) = draws[at] {
+                        break (at, dot);
+                    }
+                };
+                match case % 4 {
+                    1 => bad.center[1] = f64::NAN,
+                    2 => bad.radius = -0.5,
+                    _ => bad.anti_alias_width = -1.0,
+                }
+                let mut broken = draws.clone();
+                broken[at] = ThreeDDraw::TrueDot(bad);
+                scenes.push(broken);
+            }
+            let ample = ThreeDPreparationLimits::default();
+            let triangles = |max_raster_triangles| ThreeDPreparationLimits {
+                max_raster_triangles,
+                ..ample
+            };
+            let working = |max_working_bytes| ThreeDPreparationLimits {
+                max_working_bytes,
+                ..ample
+            };
+            let variants = [
+                ample,
+                triangles(total),
+                triangles(before + (unit() * (total - before) as f64) as u64),
+                triangles(before + 2 * PARALLEL_DOT_RUN as u64 - 1),
+                working(bytes),
+                working(bytes - (unit() * (total - before) as f64) as u64 * row_bytes),
+            ];
+            for (draws, limits) in scenes
+                .iter()
+                .flat_map(|draws| variants.map(|limits| (draws, limits)))
+            {
+                let oracle = compile_outcome(sequential_compile(&camera, draws, limits));
+                if oracle.is_ok() {
+                    passed += 1;
+                    mixed += usize::from(!skewed);
+                } else {
+                    failed += 1;
+                    limited += usize::from(
+                        oracle
+                            .as_ref()
+                            .is_err_and(|error| error.contains("PreparationLimitExceeded")),
+                    );
+                }
+                // What the first round must find admitted: the limits less
+                // the draw slots and the first draw.
+                let first_allowance = {
+                    let mut budget = PreparationBudget::new(limits);
+                    let mut compiled: Vec<CompiledDraw<'_>> = Vec::new();
+                    budget
+                        .reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())
+                        .expect("draw slots fit");
+                    let projection = camera.projection();
+                    compiled.push(
+                        compile_draw(&camera, &projection, eye, draws[0], &mut budget)
+                            .expect("the first draw fits"),
+                    );
+                    budget.remaining_rows::<RasterTriangle>(PreparationRows::RasterTriangles)
+                };
+                for threads in [1, 2, 3, 8] {
+                    DOT_ROUNDS.with_borrow_mut(Vec::clear);
+                    let outcome =
+                        compile_outcome(threaded_compile(&camera, draws, limits, threads));
+                    assert!(
+                        outcome == oracle,
+                        "case {case}, threads {threads}, limits {limits:?}: {:?} vs {:?}",
+                        outcome
+                            .as_ref()
+                            .map(|(bits, _, budget)| (bits.len(), budget)),
+                        oracle
+                            .as_ref()
+                            .map(|(bits, _, budget)| (bits.len(), budget)),
+                    );
+                    let records = DOT_ROUNDS.with_borrow_mut(std::mem::take);
+                    if threads == 1 || longest < PARALLEL_DOT_RUN {
+                        assert!(
+                            records.is_empty(),
+                            "case {case}, threads {threads}: {records:?}"
+                        );
+                    }
+                    if first_run >= PARALLEL_DOT_RUN
+                        && let Some(&(_, allowance, _, _)) = records.first()
+                    {
+                        assert_eq!(allowance, first_allowance, "case {case}");
+                    }
+                    for &(rows, allowance, ahead, size) in &records {
+                        assert!(rows <= allowance, "case {case}: {records:?}");
+                        assert!(ahead <= size && size <= allowance / 2, "case {case}");
+                        rounds += 1;
+                        if ahead < size {
+                            stopped += 1;
+                            if skewed && oracle.is_ok() {
+                                exhausted += 1;
+                            }
+                        }
+                    }
+                }
+                if limits == ample && oracle.is_ok() {
+                    let threaded =
+                        ThreeDJob::new_with_threads(&camera, draws, Tiling::default(), limits, 8)
+                            .expect("threaded job");
+                    let sequential =
+                        ThreeDJob::new_with_limits(&camera, draws, Tiling::default(), limits)
+                            .expect("sequential job");
+                    assert_eq!(
+                        compiled_record(&threaded.draws),
+                        compiled_record(&sequential.draws)
+                    );
+                    assert_eq!(threaded.preparation_bytes(), sequential.preparation_bytes());
+                    assert_eq!(
+                        format!("{:?}", threaded.draw_bins),
+                        format!("{:?}", sequential.draw_bins)
+                    );
+                    assert_eq!(
+                        format!("{:?}", threaded.triangle_bins),
+                        format!("{:?}", sequential.triangle_bins)
+                    );
+                    assert_eq!(threaded.sample_grid, sequential.sample_grid);
+                }
+            }
+        }
+        assert!(
+            rounds > 0 && stopped > 0 && exhausted > 0 && many_rows > 0,
+            "rounds {rounds}, stopped {stopped}, share ran out {exhausted}, \
+             dots of more than two rows {many_rows}"
+        );
+        assert!(
+            mixed > 0 && passed > mixed && failed > 0 && limited > 0,
+            "passed {passed} ({mixed} not skewed), failed {failed}, over a limit {limited}"
+        );
+    }
+
+    #[test]
+    fn worker_shares_never_sum_past_the_allowance() {
+        // Shares are in proportion and rounded down, so a round's shares sum
+        // to at most its allowance; and while the allowance holds two rows
+        // for each of the round's dots, each share holds two for each of its
+        // worker's, so a run of plain billboards never runs a share out.
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        for case in 0..20_000_usize {
+            let count = 1 + (unit() * 20_000.0) as usize;
+            let workers = (1 + (unit() * MAX_DOT_WORKERS as f64) as usize).min(count);
+            let allowance = match case % 4 {
+                0 => 2 * count + (unit() * 1000.0) as usize,
+                1 => 2 * count,
+                2 => (unit() * 3.0 * count as f64) as usize,
+                _ => usize::MAX - (unit() * 1000.0) as usize,
+            };
+            let per_worker = count.div_ceil(workers);
+            let mut sum = 0_u128;
+            let mut start = 0;
+            while start < count {
+                let dots = per_worker.min(count - start);
+                let share = allowance_share(allowance, dots, count);
+                if allowance >= 2 * count {
+                    assert!(share >= 2 * dots, "case {case}");
+                }
+                sum += share as u128;
+                start += dots;
+            }
+            assert!(sum <= allowance as u128, "case {case}");
+        }
     }
 
     #[test]
