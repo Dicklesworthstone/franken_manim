@@ -20,7 +20,7 @@ use fmn_hash::sha256;
 #[cfg(unix)]
 use fmn_output::{Boundary, BoundaryError, EncoderCapabilities, FfmpegTool, JobLimits};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat, negotiate};
-#[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+#[cfg(all(unix, feature = "exact-process"))]
 use fmn_platform::process::{
     ProcessCancellation, ProcessError, ProcessMechanism, ProcessSpec, ProcessStdinLimits,
     RunningProcess,
@@ -1714,6 +1714,206 @@ mod private_boundary {
             boundary.encode(&j, frames, &caps, &dir.join("c.mp4")),
             Err(BoundaryError::LogOverflow)
         ));
+    }
+
+    #[cfg(feature = "exact-process")]
+    #[derive(Clone, Copy, Debug)]
+    enum StartupFailure {
+        Cancelled,
+        TimedOut,
+        Loader,
+        DiskBudget,
+    }
+
+    #[cfg(feature = "exact-process")]
+    struct StartupRefusingRunner {
+        inner: ScriptedRunner,
+        failure: StartupFailure,
+        mux_only: bool,
+        refusals: AtomicU64,
+    }
+
+    #[cfg(feature = "exact-process")]
+    impl ProcessRunner for StartupRefusingRunner {
+        fn mechanism(&self) -> ProcessMechanism {
+            ProcessMechanism::Scripted
+        }
+
+        fn start(
+            &self,
+            spec: &ProcessSpec,
+            cancellation: ProcessCancellation,
+            stdin_limits: ProcessStdinLimits,
+        ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+            let probe = spec.argv == ["-version"] || spec.argv.iter().any(|arg| arg == "-h");
+            let mux = spec.argv.windows(2).any(|args| args == ["-c:v", "copy"]);
+            if probe || (self.mux_only && !mux) {
+                return self.inner.start(spec, cancellation, stdin_limits);
+            }
+            self.refusals.fetch_add(1, Ordering::Relaxed);
+            let mut refused = spec.clone();
+            match self.failure {
+                StartupFailure::Cancelled => cancellation.cancel(),
+                StartupFailure::TimedOut => refused.timeout = std::time::Duration::ZERO,
+                StartupFailure::Loader => {
+                    refused.program = spec.program.with_file_name("missing-native-image");
+                }
+                StartupFailure::DiskBudget => {
+                    std::fs::write(spec.argv.last().expect("artifact argument"), b"oversized")
+                        .expect("grow artifact before startup refusal");
+                    cancellation.cancel();
+                }
+            }
+            // Exercise the platform's real typed refusal. Cancellation and a
+            // spent deadline refuse before issuing any child; the missing
+            // image is an ordinary loader error and must stay a mechanism error.
+            StdProcessRunner.start(&refused, cancellation, stdin_limits)
+        }
+    }
+
+    #[cfg(feature = "exact-process")]
+    fn startup_refusal_boundary(
+        dir: &Path,
+        failure: StartupFailure,
+        mux_only: bool,
+    ) -> (Boundary, Arc<StartupRefusingRunner>) {
+        let (tool_path, mut inner) = scripted_tool(dir);
+        let tool = resolve_tool(&tool_path, &inner, dir).unwrap();
+        inner.script(first_bound_tool(dir), successful_scripted_outcome());
+        let runner = Arc::new(StartupRefusingRunner {
+            inner,
+            failure,
+            mux_only,
+            refusals: AtomicU64::new(0),
+        });
+        let limits = JobLimits {
+            timeout: std::time::Duration::from_millis(37),
+            max_artifact_bytes: if matches!(failure, StartupFailure::DiskBudget) {
+                8
+            } else {
+                1024
+            },
+            ..JobLimits::default()
+        };
+        let boundary = Boundary::new(tool, runner.clone(), limits, dir.to_path_buf()).unwrap();
+        (boundary, runner)
+    }
+
+    #[cfg(feature = "exact-process")]
+    fn assert_startup_refusal(error: BoundaryError, failure: StartupFailure) {
+        match failure {
+            StartupFailure::Cancelled => assert!(matches!(error, BoundaryError::Cancelled)),
+            StartupFailure::TimedOut => assert!(matches!(
+                error,
+                BoundaryError::JobTimedOut { timeout }
+                    if timeout == std::time::Duration::from_millis(37)
+            )),
+            StartupFailure::Loader => {
+                let BoundaryError::Mechanism(error) = error else {
+                    panic!("ordinary loader refusal was reclassified: {error}");
+                };
+                assert_eq!(error.startup_termination(), None);
+                assert!(error.to_string().contains("missing-native-image"));
+            }
+            StartupFailure::DiskBudget => assert!(matches!(
+                error,
+                BoundaryError::ArtifactOversized { bytes: 9, max: 8 }
+            )),
+        }
+    }
+
+    #[cfg(feature = "exact-process")]
+    #[test]
+    fn startup_encode_refusals_keep_job_categories_and_destination() {
+        for failure in [
+            StartupFailure::Cancelled,
+            StartupFailure::TimedOut,
+            StartupFailure::Loader,
+            StartupFailure::DiskBudget,
+        ] {
+            let (dir, _gate) = scratch("startup-encode");
+            let (boundary, runner) = startup_refusal_boundary(&dir, failure, false);
+            let destination = dir.join("prior.mp4");
+            std::fs::write(&destination, b"prior video").unwrap();
+            let error = boundary
+                .start_encode(
+                    &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
+                    &EncoderCapabilities::parse(ENCODERS_LISTING),
+                    &destination,
+                    None,
+                    ProcessCancellation::new(),
+                    ProcessStdinLimits::new(1, 0),
+                )
+                .err()
+                .expect("startup must be refused");
+            assert_startup_refusal(error, failure);
+            assert_eq!(runner.refusals.load(Ordering::Relaxed), 1);
+            assert_eq!(std::fs::read(destination).unwrap(), b"prior video");
+            assert!(!first_bound_tool(&dir).parent().unwrap().exists());
+        }
+    }
+
+    #[cfg(feature = "exact-process")]
+    #[test]
+    fn startup_artifact_refusals_keep_job_categories_and_destination() {
+        for failure in [
+            StartupFailure::Cancelled,
+            StartupFailure::TimedOut,
+            StartupFailure::Loader,
+            StartupFailure::DiskBudget,
+        ] {
+            let (dir, _gate) = scratch("startup-artifact");
+            let (boundary, runner) = startup_refusal_boundary(&dir, failure, false);
+            let input = dir.join("input.mp3");
+            std::fs::write(&input, b"private input").unwrap();
+            let destination = dir.join("prior.wav");
+            std::fs::write(&destination, b"prior audio").unwrap();
+            let error = boundary.transcode_audio(&input, &destination).unwrap_err();
+            assert_startup_refusal(error, failure);
+            assert_eq!(runner.refusals.load(Ordering::Relaxed), 1);
+            assert_eq!(std::fs::read(destination).unwrap(), b"prior audio");
+            assert!(!first_bound_tool(&dir).parent().unwrap().exists());
+        }
+    }
+
+    #[cfg(feature = "exact-process")]
+    #[test]
+    fn startup_mux_refusals_keep_job_categories_and_destination() {
+        for failure in [
+            StartupFailure::Cancelled,
+            StartupFailure::TimedOut,
+            StartupFailure::Loader,
+            StartupFailure::DiskBudget,
+        ] {
+            let (dir, _gate) = scratch("startup-mux");
+            let (boundary, runner) = startup_refusal_boundary(&dir, failure, true);
+            let audio = dir.join("input.wav");
+            std::fs::write(&audio, b"private input").unwrap();
+            let destination = dir.join("prior.mp4");
+            std::fs::write(&destination, b"prior video").unwrap();
+            let stream = boundary
+                .start_encode(
+                    &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
+                    &EncoderCapabilities::parse(ENCODERS_LISTING),
+                    &destination,
+                    Some(&audio),
+                    ProcessCancellation::new(),
+                    ProcessStdinLimits::new(1, 0),
+                )
+                .unwrap();
+            // The scripted first stage owns a valid private artifact; the
+            // second invocation must fail before publication can replace it.
+            std::fs::write(
+                first_bound_tool(&dir).parent().unwrap().join("video.mp4"),
+                b"video",
+            )
+            .unwrap();
+            let error = stream.prepare().err().expect("mux startup must be refused");
+            assert_startup_refusal(error, failure);
+            assert_eq!(runner.refusals.load(Ordering::Relaxed), 1);
+            assert_eq!(std::fs::read(destination).unwrap(), b"prior video");
+            assert!(!first_bound_tool(&dir).parent().unwrap().exists());
+        }
     }
 
     #[test]

@@ -1356,6 +1356,98 @@ mod std_runner {
     }
 
     #[test]
+    fn cancelled_start_never_issues_a_child() {
+        let marker = locator_scratch("cancelled_start")
+            .expect("private fixture directory")
+            .join("child-ran");
+        let request = spec(
+            &host_bin("touch"),
+            &[marker.to_str().expect("UTF-8 marker")],
+        );
+        let cancellation = ProcessCancellation::new();
+        cancellation.cancel();
+        let error = StdProcessRunner
+            .start(&request, cancellation, ProcessStdinLimits::new(1, 1))
+            .err()
+            .expect("an already cancelled request must not start");
+        assert!(
+            matches!(
+                error,
+                ProcessError::Spawn {
+                    err: asupersync::process::ProcessError::Io(ref error),
+                    ..
+                } if error.kind() == std::io::ErrorKind::Interrupted
+            ),
+            "startup cancellation must retain its typed source: {error}"
+        );
+        assert!(!marker.exists(), "cancellation allowed child side effects");
+    }
+
+    #[test]
+    fn expired_start_deadline_never_issues_a_child() {
+        let marker = locator_scratch("expired_start")
+            .expect("private fixture directory")
+            .join("child-ran");
+        let mut request = spec(
+            &host_bin("touch"),
+            &[marker.to_str().expect("UTF-8 marker")],
+        );
+        request.timeout = Duration::ZERO;
+        let error = StdProcessRunner
+            .run(&request)
+            .expect_err("an expired request must not start");
+        assert!(
+            matches!(
+                error,
+                ProcessError::Spawn {
+                    err: asupersync::process::ProcessError::Io(ref error),
+                    ..
+                } if error.kind() == std::io::ErrorKind::TimedOut
+            ),
+            "startup timeout must retain its typed source: {error}"
+        );
+        assert!(
+            !marker.exists(),
+            "expired startup allowed child side effects"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn busy_loader_retries_share_the_process_deadline() {
+        let path = locator_scratch("busy_start_deadline")
+            .expect("private fixture directory")
+            .join("native-image");
+        std::fs::copy(host_bin("true"), &path).expect("copy native executable");
+        let _writer = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("retain write-capable descriptor");
+        let mut request = spec(path.to_str().expect("UTF-8 executable path"), &[]);
+        // The loader's retry allowance is longer than this entire invocation.
+        // A held descriptor must not restart or outlive the caller's budget.
+        request.timeout = Duration::from_millis(20);
+        let started = std::time::Instant::now();
+        let error = StdProcessRunner
+            .run(&request)
+            .expect_err("the busy image cannot start within its deadline");
+        assert!(
+            matches!(
+                error,
+                ProcessError::Spawn {
+                    err: asupersync::process::ProcessError::Io(ref error),
+                    ..
+                } if error.kind() == std::io::ErrorKind::TimedOut
+            ),
+            "busy startup must honor the shared deadline: {error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "busy startup did not stop promptly at its deadline"
+        );
+    }
+
+    #[test]
     fn executable_text_without_shebang_never_issues_an_interpreter() {
         use std::os::unix::fs::PermissionsExt as _;
 

@@ -4,13 +4,23 @@
 use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer};
 use fmn_scene::{AssetRead, CommandKind, CommandRecord};
 
-use crate::ServiceError;
 use crate::protocol::{StudioInput, studio_input_payload};
+use crate::{ProtocolDigest, ServiceError};
 
 use super::NativeSceneProgram;
-use super::program::{execution_error, invalid};
+use super::program::{
+    NativePlayCursor, NativeProgramCheckpoint, NativeWaitCursor, NativeWaitTailCursor,
+    execution_error, invalid,
+};
 
 const EDIT_STATE_SCHEMA: Schema = Schema::new(*b"FMEI", 1, 2, 0);
+const RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 1, 0, 0);
+// Keep the all-wait record and its canonical bytes unchanged. A trailing-wait
+// continuation additionally binds the completed executable prefix's counters.
+const WAIT_TAIL_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 0, 0);
+// Prepared closed native plays have their own bounded data carrier. Earlier
+// wait-only envelopes retain their complete record layout and canonical bytes.
+const PLAY_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 3, 0, 0);
 /// Hard ceiling independent of caller policy; each label is separately bounded.
 pub(super) const MAX_RECORDED_INPUTS: usize = 65_536;
 
@@ -290,4 +300,214 @@ pub(super) fn decode_state<'a>(
     let state = reader.get_bytes().map_err(execution_error)?;
     reader.finish().map_err(execution_error)?;
     Ok(RestoredTrack { edits, state })
+}
+
+/// An admitted continuation binds executable declarations separately from the
+/// scene snapshot. The supervisor owns the expected digest; the envelope binds
+/// that state to this exact build, input closure, factory and journal position.
+pub(super) fn encode_resume_state(
+    scene: &str,
+    position: u64,
+    reads: &[AssetRead],
+    factory: ProtocolDigest,
+    cursor: &NativeProgramCheckpoint,
+    state: &[u8],
+    max_bytes: usize,
+) -> Result<Vec<u8>, ServiceError> {
+    if cursor.play.is_some() && (cursor.active.is_some() || cursor.tail.is_some()) {
+        return Err(invalid(
+            "native continuation cannot contain both play and wait cursors",
+        ));
+    }
+    let schema = if cursor.play.is_some() {
+        PLAY_RESUME_STATE_SCHEMA
+    } else if cursor.tail.is_some() {
+        WAIT_TAIL_RESUME_STATE_SCHEMA
+    } else {
+        RESUME_STATE_SCHEMA
+    };
+    let mut writer = Writer::with_limits(
+        schema,
+        Limits {
+            max_total: max_bytes,
+            max_field: max_bytes,
+        },
+    );
+    writer
+        .put_str(scene)
+        .put_u64(position)
+        .put_u32(reads.len() as u32);
+    for read in reads {
+        writer.put_str(&read.path).put_bytes(read.digest.as_bytes());
+    }
+    writer
+        .put_bytes(factory.as_bytes())
+        .put_u64(cursor.frame)
+        .put_u64(cursor.frame_shape[0])
+        .put_u64(cursor.frame_shape[1])
+        .put_u64(cursor.started_segments as u64)
+        .put_u8(cursor.effects);
+    if let Some(play) = &cursor.play {
+        writer
+            .put_u64(play.completed_plays)
+            .put_u64(play.admitted_segments as u64)
+            .put_u64(play.remaining_waits as u64)
+            .put_bytes(play.declaration.as_bytes())
+            .put_bytes(&play.continuation)
+            .put_bytes(state);
+        return writer.finish().map_err(execution_error);
+    }
+    if let Some(tail) = &cursor.tail {
+        writer
+            .put_u64(tail.index as u64)
+            .put_i64(tail.prefix_frames)
+            .put_u64(tail.prefix_segments as u64)
+            .put_u64(tail.prefix_plays);
+    }
+    writer.put_bool(cursor.active.is_some());
+    if let Some(wait) = &cursor.active {
+        writer
+            .put_i64(wait.base_frame)
+            .put_i64(wait.stepped)
+            .put_u8(wait.purity);
+    }
+    writer.put_bytes(state);
+    writer.finish().map_err(execution_error)
+}
+
+pub(super) struct RestoredContinuation<'a> {
+    pub cursor: NativeProgramCheckpoint,
+    pub state: &'a [u8],
+}
+
+pub(super) fn decode_resume_state<'a>(
+    bytes: &'a [u8],
+    scene: &str,
+    position: u64,
+    reads: &[AssetRead],
+    factory: ProtocolDigest,
+    max_bytes: usize,
+) -> Result<RestoredContinuation<'a>, ServiceError> {
+    // Select only a declared record id; Reader still validates the complete
+    // framing, version, reserved fields, limits and checksum before any data.
+    let is_tail =
+        bytes.get(4..8) == Some(WAIT_TAIL_RESUME_STATE_SCHEMA.id.to_le_bytes().as_slice());
+    let is_play = bytes.get(4..8) == Some(PLAY_RESUME_STATE_SCHEMA.id.to_le_bytes().as_slice());
+    let schema = if is_play {
+        PLAY_RESUME_STATE_SCHEMA
+    } else if is_tail {
+        WAIT_TAIL_RESUME_STATE_SCHEMA
+    } else {
+        RESUME_STATE_SCHEMA
+    };
+    let mut reader = Reader::open(
+        bytes,
+        schema,
+        Limits {
+            max_total: max_bytes,
+            max_field: max_bytes,
+        },
+        UnknownPolicy::Strict,
+    )
+    .map_err(execution_error)?;
+    if reader.get_str().map_err(execution_error)? != scene
+        || reader.get_u64().map_err(execution_error)? != position
+        || reader.get_u32().map_err(execution_error)? as usize != reads.len()
+    {
+        return Err(invalid(
+            "native continuation scene, position or input closure differs",
+        ));
+    }
+    for read in reads {
+        if reader.get_str().map_err(execution_error)? != read.path
+            || reader.get_bytes().map_err(execution_error)? != read.digest.as_bytes()
+        {
+            return Err(invalid("native continuation input closure differs"));
+        }
+    }
+    if reader.get_bytes().map_err(execution_error)? != factory.as_bytes() {
+        return Err(invalid("native continuation factory identity differs"));
+    }
+    let frame = reader.get_u64().map_err(execution_error)?;
+    let frame_shape = [
+        reader.get_u64().map_err(execution_error)?,
+        reader.get_u64().map_err(execution_error)?,
+    ];
+    let started_segments =
+        usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
+    let effects = reader.get_u8().map_err(execution_error)?;
+    if is_play {
+        let completed_plays = reader.get_u64().map_err(execution_error)?;
+        let admitted_segments =
+            usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
+        let remaining_waits =
+            usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
+        let declaration = reader
+            .get_bytes()
+            .map_err(execution_error)?
+            .try_into()
+            .map(ProtocolDigest::from_bytes)
+            .map_err(|_| invalid("native play declaration digest has an invalid length"))?;
+        let bytes = reader.get_bytes().map_err(execution_error)?;
+        let mut continuation = Vec::new();
+        continuation
+            .try_reserve_exact(bytes.len())
+            .map_err(execution_error)?;
+        continuation.extend_from_slice(bytes);
+        let state = reader.get_bytes().map_err(execution_error)?;
+        reader.finish().map_err(execution_error)?;
+        return Ok(RestoredContinuation {
+            cursor: NativeProgramCheckpoint {
+                frame,
+                frame_shape,
+                started_segments,
+                effects,
+                active: None,
+                tail: None,
+                play: Some(NativePlayCursor {
+                    completed_plays,
+                    admitted_segments,
+                    remaining_waits,
+                    declaration,
+                    continuation,
+                }),
+            },
+            state,
+        });
+    }
+    let tail = if is_tail {
+        Some(NativeWaitTailCursor {
+            index: usize::try_from(reader.get_u64().map_err(execution_error)?)
+                .map_err(execution_error)?,
+            prefix_frames: reader.get_i64().map_err(execution_error)?,
+            prefix_segments: usize::try_from(reader.get_u64().map_err(execution_error)?)
+                .map_err(execution_error)?,
+            prefix_plays: reader.get_u64().map_err(execution_error)?,
+        })
+    } else {
+        None
+    };
+    let active = if reader.get_bool().map_err(execution_error)? {
+        Some(NativeWaitCursor {
+            base_frame: reader.get_i64().map_err(execution_error)?,
+            stepped: reader.get_i64().map_err(execution_error)?,
+            purity: reader.get_u8().map_err(execution_error)?,
+        })
+    } else {
+        None
+    };
+    let state = reader.get_bytes().map_err(execution_error)?;
+    reader.finish().map_err(execution_error)?;
+    Ok(RestoredContinuation {
+        cursor: NativeProgramCheckpoint {
+            frame,
+            frame_shape,
+            started_segments,
+            effects,
+            active,
+            tail,
+            play: None,
+        },
+        state,
+    })
 }

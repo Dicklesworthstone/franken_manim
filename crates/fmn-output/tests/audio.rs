@@ -1,6 +1,8 @@
 //! Audio ingestion tests: native-only contracts plus real compressed fixtures.
 
-use fmn_codec::{SampleFormat, WavLimits, encode_wav};
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+use fmn_codec::WavLimits;
+use fmn_codec::{SampleFormat, encode_wav};
 use fmn_output::audio::{AudioDecodeError, AudioDecodeLimits, AudioDecoder, AudioInputFormat};
 
 #[test]
@@ -91,6 +93,92 @@ fn audio_native_only_refuses_transcode_without_substitution() {
 }
 
 #[test]
+fn audio_deferred_boundary_runs_only_after_native_and_byte_admission() {
+    use std::sync::{Arc, Mutex};
+
+    // Adding an injected resolver must preserve the decoder's thread traits.
+    fn send_sync<T: Send + Sync>() {}
+    send_sync::<AudioDecoder>();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let observed = Arc::clone(&requests);
+    let mut decoder = AudioDecoder::with_boundary_resolver(
+        AudioDecodeLimits {
+            max_input_bytes: 1024,
+            max_samples: 16,
+        },
+        move |format| {
+            observed.lock().unwrap().push(format);
+            Err(AudioDecodeError::Capability("injected refusal".into()))
+        },
+    )
+    .unwrap();
+    let wav = encode_wav(1, 8, SampleFormat::F32, &[0.25, -0.125]);
+    assert_eq!(decoder.decode(&wav).unwrap().audio.samples, [0.25, -0.125]);
+    assert!(matches!(
+        decoder.decode(b"#EXTM3U\nhttps://example.invalid/music.mp3"),
+        Err(AudioDecodeError::UnsupportedInput),
+    ));
+    assert!(matches!(
+        decoder.decode(&wav[..wav.len() - 1]),
+        Err(AudioDecodeError::Native(_)),
+    ));
+    assert!(matches!(
+        decoder.decode(&encode_wav(1, 8, SampleFormat::F32, &[0.0; 17])),
+        Err(AudioDecodeError::Native(
+            fmn_codec::WavError::TooLarge { .. }
+        )),
+    ));
+    assert!(matches!(
+        decoder.decode(&[0; 1025]),
+        Err(AudioDecodeError::InputOversized { .. }),
+    ));
+    assert!(requests.lock().unwrap().is_empty());
+    for (source, format) in [
+        (b"fLaCsource".as_slice(), AudioInputFormat::Flac),
+        (b"OggSsource".as_slice(), AudioInputFormat::Ogg),
+    ] {
+        assert!(matches!(
+            decoder.decode(source),
+            Err(AudioDecodeError::Capability(ref message)) if message == "injected refusal",
+        ));
+        assert_eq!(requests.lock().unwrap().last(), Some(&format));
+        // A refused external capability does not poison the native route.
+        assert!(decoder.decode(&wav).unwrap().report.invocation.is_none());
+    }
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+#[test]
+fn audio_deferred_boundary_validates_limits_and_owns_its_process_policy() {
+    use fmn_output::JobLimits;
+    for limits in [
+        AudioDecodeLimits {
+            max_input_bytes: 0,
+            max_samples: 1,
+        },
+        AudioDecodeLimits {
+            max_input_bytes: 1,
+            max_samples: u64::MAX,
+        },
+    ] {
+        assert!(matches!(
+            AudioDecoder::with_boundary_resolver(limits, |_| {
+                panic!("invalid admission resolved a boundary")
+            }),
+            Err(AudioDecodeError::InvalidLimits),
+        ));
+    }
+    let decoder = AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
+        panic!("configuration must not resolve a boundary")
+    })
+    .unwrap();
+    assert!(matches!(
+        decoder.with_job_limits(JobLimits::default()),
+        Err(AudioDecodeError::InvalidJobLimits(_)),
+    ));
+}
+
+#[test]
 fn audio_budgets_and_damaged_pcm_do_not_fall_through_to_ffmpeg() {
     let wav = encode_wav(1, 48_000, SampleFormat::F32, &[0.0; 64]);
     let mut decoder = AudioDecoder::new(
@@ -146,6 +234,78 @@ fn audio_budgets_and_damaged_pcm_do_not_fall_through_to_ffmpeg() {
 }
 
 #[test]
+fn audio_per_source_budgets_tighten_without_replacing_decoder_policy() {
+    use std::sync::{Arc, Mutex};
+
+    let calls = Arc::new(Mutex::new(0));
+    let observed = Arc::clone(&calls);
+    let mut decoder = AudioDecoder::with_boundary_resolver(
+        AudioDecodeLimits {
+            max_input_bytes: 256,
+            max_samples: 4,
+        },
+        move |_| {
+            *observed.lock().unwrap() += 1;
+            Err(AudioDecodeError::Capability("one retained resolver".into()))
+        },
+    )
+    .unwrap();
+    let wav = encode_wav(1, 8, SampleFormat::F32, &[0.25, -0.125]);
+    assert!(matches!(
+        decoder.decode_with_limits(
+            &wav,
+            &AudioDecodeLimits {
+                max_input_bytes: wav.len() as u64 - 1,
+                max_samples: 4,
+            },
+        ),
+        Err(AudioDecodeError::InputOversized { .. }),
+    ));
+    assert!(matches!(
+        decoder.decode_with_limits(
+            &wav,
+            &AudioDecodeLimits {
+                max_input_bytes: 256,
+                max_samples: 1,
+            },
+        ),
+        Err(AudioDecodeError::Native(
+            fmn_codec::WavError::TooLarge { .. }
+        )),
+    ));
+    assert!(matches!(
+        decoder.decode_with_limits(
+            b"fLaCsource",
+            &AudioDecodeLimits {
+                max_input_bytes: 256,
+                max_samples: 0,
+            },
+        ),
+        Err(AudioDecodeError::InvalidLimits),
+    ));
+    assert_eq!(*calls.lock().unwrap(), 0);
+    // Larger per-call allowances cannot relax the original policy.
+    assert!(matches!(
+        decoder.decode_with_limits(
+            &encode_wav(1, 8, SampleFormat::F32, &[0.25; 5]),
+            &AudioDecodeLimits::default(),
+        ),
+        Err(AudioDecodeError::Native(
+            fmn_codec::WavError::TooLarge { .. }
+        )),
+    ));
+    let later = decoder.decode(&wav).unwrap();
+    assert_eq!(later.audio.samples, [0.25, -0.125]);
+    assert!(later.report.invocation.is_none());
+    assert_eq!(*calls.lock().unwrap(), 0);
+    assert!(matches!(
+        decoder.decode_with_limits(b"fLaCsource", &AudioDecodeLimits::default()),
+        Err(AudioDecodeError::Capability(ref message)) if message == "one retained resolver",
+    ));
+    assert_eq!(*calls.lock().unwrap(), 1);
+}
+
+#[test]
 fn audio_rejects_unknown_channel_layouts_and_nonfinite_pcm() {
     let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None).unwrap();
     for wav in [
@@ -167,6 +327,7 @@ fn audio_rejects_unknown_channel_layouts_and_nonfinite_pcm() {
     assert_eq!(plus.report.pcm_digest, minus.report.pcm_digest);
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 #[test]
 fn audio_real_compressed_decode_keeps_pcm_and_records_exact_source() {
     let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {
@@ -273,6 +434,7 @@ fn audio_missing_decoder_does_not_disable_native_wav() {
     assert!(result.report.invocation.is_none());
 }
 
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 #[test]
 fn audio_real_file_cap_is_not_a_successfully_truncated_soundtrack() {
     let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {

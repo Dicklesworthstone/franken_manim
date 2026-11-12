@@ -40,6 +40,40 @@ fn picture(history: usize, reverse_allocation: bool) -> Stage {
 }
 
 #[test]
+fn snapshot_encoding_limits_bound_growth_without_changing_canonical_bytes() {
+    let stage = picture(3, false);
+    let snapshot = stage.snapshot();
+    let full = snapshot.to_bytes().unwrap();
+    let render = snapshot.to_render_bytes().unwrap();
+    let cap = |max_total| Limits {
+        max_total,
+        ..Limits::DEFAULT
+    };
+    assert_eq!(
+        snapshot.to_bytes_with_limits(cap(full.len())).unwrap(),
+        full
+    );
+    assert!(matches!(
+        snapshot.to_bytes_with_limits(cap(full.len() - 1)),
+        Err(SerialError::SizeLimit { limit, .. }) if limit == full.len() - 1
+    ));
+    assert_eq!(
+        snapshot
+            .to_render_bytes_with_encoding_limits(RenderSnapshotLimits::DEFAULT, cap(render.len()),)
+            .unwrap(),
+        render
+    );
+    assert!(matches!(
+        snapshot.to_render_bytes_with_encoding_limits(
+            RenderSnapshotLimits::DEFAULT,
+            cap(render.len() - 1),
+        ),
+        Err(RenderSnapshotError::Serial(SerialError::SizeLimit { limit, .. }))
+            if limit == render.len() - 1
+    ));
+}
+
+#[test]
 fn render_bytes_ignore_unrooted_history_and_allocation_order() {
     let clean = picture(0, false).snapshot();
     let noisy = picture(512, true).snapshot();
@@ -299,7 +333,8 @@ fn duplicate_roots_and_edges_are_not_silently_deduplicated() {
     ));
     source.roots.pop();
     let entry = source.slots[root.parts().0 as usize].1.as_mut().unwrap();
-    entry.submobjects.push(entry.submobjects[0]);
+    let duplicate_child = entry.submobjects[0];
+    entry.submobjects.push(duplicate_child);
     assert!(matches!(
         source.to_render_bytes(),
         Err(RenderSnapshotError::InvalidGraph("duplicate child edge"))
@@ -350,7 +385,8 @@ fn handle_generations_and_unrooted_parents_do_not_leak_into_picture_identity() {
     for (generation, slot) in &mut snapshot.slots {
         *generation = 7;
         if let Some(slot) = slot {
-            for handle in slot.submobjects.iter_mut().chain(&mut slot.parents) {
+            let data = &mut **slot;
+            for handle in data.submobjects.iter_mut().chain(&mut data.parents) {
                 *handle = Mob::from_parts(snapshot.stage_id, handle.parts().0, 7);
             }
         }

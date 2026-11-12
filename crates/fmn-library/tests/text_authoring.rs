@@ -160,3 +160,77 @@ fn source_styles_builders_retain_resolved_styles_and_owned_source() {
         assert!(built.layout.glyphs[2].fill.is_none());
     }
 }
+
+#[test]
+fn configured_scopes_and_inherited_styles_reach_both_native_builders() {
+    use fmn_library::text::{CharStyle, ScopedStyle, SizeChange, StyleFields};
+    let book = FontBook::bundled().unwrap();
+    let (text, markup) = {
+        let source = String::from("é<b>A</b>B");
+        let mut base = CharStyle::base();
+        base.family = Some("IBM Plex Sans".to_owned());
+        base.bold = true;
+        base.color = Some(Srgb::from_rgb8(200, 30, 40));
+        let scopes = [
+            ScopedStyle {
+                range: (2, 10),
+                fields: StyleFields {
+                    bold: Some(false),
+                    ..StyleFields::default()
+                },
+            },
+            ScopedStyle {
+                range: (10, 11),
+                fields: StyleFields {
+                    family: Some("Computer Modern"),
+                    bold: Some(false),
+                    underline: Some(true),
+                    size: Some(SizeChange::Absolute(0.5)),
+                    ..StyleFields::default()
+                },
+            },
+        ];
+        let text = Text::markup(&source)
+            .inherited_style(base.clone())
+            .scoped_styles(&scopes)
+            .build(&book)
+            .unwrap();
+        let markup = MarkupText::new(&source)
+            .inherited_style(base)
+            .scoped_styles(&scopes)
+            .build(&book)
+            .unwrap();
+        (text, markup)
+    };
+    assert_eq!(text.layout, markup.layout);
+    assert_eq!(&*text.source, "é<b>A</b>B");
+    assert_eq!(text.select((5, 6)), [1]);
+    let glyphs = &text.layout.glyphs;
+    assert!(glyphs[0].face.key.bold && glyphs[1].face.key.bold);
+    assert!(!glyphs[2].face.key.bold);
+    assert_eq!(glyphs[2].face.family, "Computer Modern");
+    assert_eq!(glyphs[2].size, 0.5);
+    assert_eq!(glyphs[2].span, (10, 11));
+    assert_eq!(text.layout.decorations.len(), 1);
+    assert_eq!(text.span_map().entries, markup.span_map().entries);
+}
+
+#[test]
+fn configured_source_scopes_refuse_invalid_utf8_without_a_partial_text() {
+    use fmn_library::text::{ScopedStyle, StyleFields};
+    let book = FontBook::bundled().unwrap();
+    let scopes = [ScopedStyle {
+        range: (1, 2),
+        fields: StyleFields {
+            bold: Some(true),
+            ..StyleFields::default()
+        },
+    }];
+    assert!(Text::new("éA").scoped_styles(&scopes).build(&book).is_err());
+    assert!(
+        MarkupText::new("éA")
+            .scoped_styles(&scopes)
+            .build(&book)
+            .is_err()
+    );
+}

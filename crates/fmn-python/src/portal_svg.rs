@@ -107,6 +107,7 @@ impl SvgSession {
                 digest: report.digest,
                 invocations: Vec::new(),
                 audio_inputs: Vec::new(),
+                audio_dither_seed: None,
                 image_inputs: Vec::new(),
                 routes: crate::PortalRoutes::default(),
                 tuning: None,

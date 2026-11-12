@@ -38,6 +38,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+mod linux_limits;
+
 /// The SIMD build tiers (§17.3, capped by R22 at exactly these four).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum SimdTier {
@@ -125,8 +127,14 @@ pub struct ProcessorGroup {
 /// The introspected machine shape (§17.4).
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct HardwareTopology {
-    /// Every online logical CPU, ascending by id.
+    /// Online logical CPUs available to the calling thread, ascending by id.
+    /// Linux intersects the online list with the caller's inherited affinity.
     pub cpus: Vec<LogicalCpu>,
+    /// CPU-bandwidth ceiling expressed as a whole number of workers, if known.
+    /// This is separate from CPU identity: a cgroup may permit many CPU ids
+    /// while granting only a fraction of their combined execution time.
+    /// Fractional CPU quotas round up, with at least one worker.
+    pub cpu_quota: Option<u32>,
     /// Distinct physical cores (unique `(package, core)` pairs).
     pub physical_cores: u32,
     /// Distinct physical packages (sockets).
@@ -143,7 +151,9 @@ pub struct HardwareTopology {
     pub processor_groups: Vec<ProcessorGroup>,
     /// The SIMD tier this machine supports.
     pub simd_tier: SimdTier,
-    /// Total physical memory in bytes, if known.
+    /// Effective memory ceiling in bytes, if known. On Linux this is the
+    /// smaller of physical RAM and all visible ancestor cgroup hard limits.
+    /// It is a capacity, not a sample of momentarily unused memory.
     pub total_memory_bytes: Option<u64>,
 }
 
@@ -605,6 +615,16 @@ impl HardwareTopology {
         u32::try_from(self.cpus.len()).unwrap_or(u32::MAX)
     }
 
+    /// Maximum CPU parallelism available to this process, without inventing
+    /// CPU identities for a bandwidth quota. Render planning still prefers
+    /// one worker per physical core within this ceiling.
+    #[must_use]
+    pub fn cpu_thread_budget(&self) -> u32 {
+        self.cpu_quota.map_or(self.logical_cores(), |quota| {
+            self.logical_cores().min(quota)
+        })
+    }
+
     /// Whether SMT is active (any core carries more than one logical CPU).
     #[must_use]
     pub fn smt_active(&self) -> bool {
@@ -670,6 +690,7 @@ impl HardwareTopology {
             processor_groups: Vec::new(),
             simd_tier: detect_simd_tier(),
             total_memory_bytes: None,
+            cpu_quota: None,
             cpus,
         };
         topo.processor_groups = group_by_split(&topo.cpu_ids());
@@ -733,18 +754,25 @@ impl HardwareTopology {
     }
 
     /// Introspect a Linux sysfs/procfs tree through the filesystem
-    /// capability. Required: the online-CPU list. Everything else degrades
-    /// gracefully (missing optional files leave `None`s / empty domains).
+    /// capability. Intersects online CPUs with the calling thread's affinity
+    /// and applies visible cgroup CPU-bandwidth and memory ceilings, including
+    /// ancestor limits. Cache and NUMA memberships retain only admitted CPUs.
+    /// Missing optional files leave `None`s / empty domains; malformed present
+    /// resource limits are refused rather than silently admitting the host.
     ///
     /// # Errors
     /// [`TopologyError`] when the online list is missing or malformed.
     pub fn detect_linux(fs: &dyn FileSystem) -> Result<Self, TopologyError> {
         let online_path = PathBuf::from(SYS_CPU).join("online");
         let online = read_string(fs, &online_path)?;
-        let ids = parse_cpu_list(&online)?;
+        let mut ids = parse_cpu_list(&online)?;
+        let limits = linux_limits::read(fs)?;
+        if let Some(allowed) = &limits.allowed_cpus {
+            ids.retain(|id| allowed.binary_search(id).is_ok());
+        }
         if ids.is_empty() {
             return Err(TopologyError::Invalid {
-                detail: "empty online CPU list".to_string(),
+                detail: "no online CPU is available to the calling thread".to_string(),
             });
         }
 
@@ -774,14 +802,28 @@ impl HardwareTopology {
         packages.sort_unstable();
         packages.dedup();
 
-        let (l2_domains, l3_domains) = read_cache_domains(fs, &ids);
-        let numa_nodes = read_numa_nodes(fs).unwrap_or_else(|| {
-            vec![NumaNode {
+        let (mut l2_domains, mut l3_domains) = read_cache_domains(fs, &ids);
+        for domains in [&mut l2_domains, &mut l3_domains] {
+            for domain in domains.iter_mut() {
+                domain.cpus.retain(|id| ids.binary_search(id).is_ok());
+            }
+            domains.retain(|domain| !domain.cpus.is_empty());
+        }
+        let mut numa_nodes = read_numa_nodes(fs).unwrap_or_default();
+        for node in &mut numa_nodes {
+            node.cpus.retain(|id| ids.binary_search(id).is_ok());
+        }
+        numa_nodes.retain(|node| !node.cpus.is_empty());
+        if numa_nodes.is_empty() {
+            numa_nodes.push(NumaNode {
                 id: 0,
                 cpus: ids.clone(),
-            }]
-        });
-        let total_memory_bytes = read_meminfo_total(fs);
+            });
+        }
+        let total_memory_bytes = match (read_meminfo_total(fs), limits.memory_bytes) {
+            (Some(physical), Some(limit)) => Some(physical.min(limit)),
+            (physical, limit) => physical.or(limit),
+        };
 
         Ok(Self {
             physical_cores: u32::try_from(cores.len()).unwrap_or(u32::MAX),
@@ -792,6 +834,7 @@ impl HardwareTopology {
             processor_groups: group_by_split(&ids),
             simd_tier: detect_simd_tier(),
             total_memory_bytes,
+            cpu_quota: limits.cpu_quota,
             cpus,
         })
     }
@@ -918,6 +961,7 @@ impl HardwareTopology {
             processor_groups: group_by_split(&ids),
             simd_tier: detect_simd_tier(),
             total_memory_bytes: sysctl_optional_u64(sysctl, "hw.memsize")?,
+            cpu_quota: None,
             cpus,
         })
     }
@@ -934,6 +978,9 @@ impl HardwareTopology {
         push(&mut out, format!("logical_cores\t{}", self.logical_cores()));
         push(&mut out, format!("physical_cores\t{}", self.physical_cores));
         push(&mut out, format!("packages\t{}", self.packages));
+        if let Some(quota) = self.cpu_quota {
+            push(&mut out, format!("cpu_quota\t{quota}"));
+        }
         push(&mut out, format!("smt\t{}", self.smt_active()));
         push(&mut out, format!("simd_tier\t{}", self.simd_tier.name()));
         push(

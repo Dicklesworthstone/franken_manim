@@ -212,7 +212,8 @@ pub enum Container {
     Mp4,
     /// Opaque QuickTime MOV.
     Mov,
-    /// Transparent MOV (`qtrle`, argb) — requires an alpha wire format.
+    /// Transparent MOV (`qtrle`, argb) — requires an alpha wire format and
+    /// the qtrle encoder. Other encoder/profile alpha contracts are not defined.
     MovTransparent,
     /// The retained ffmpeg GIF mode (the native GIF codec needs no
     /// ffmpeg at all; this mode exists for parity).
@@ -282,7 +283,8 @@ impl VideoJob {
     /// # Errors
     /// [`NegotiationError`] when the job's dimensions contradict each
     /// other (alpha container on an opaque wire, zero dimensions or frame
-    /// rate) or quality controls contradict the encoder/container/rate mode.
+    /// rate), a transparent MOV names an encoder outside its qtrle profile,
+    /// or quality controls contradict the encoder/container/rate mode.
     pub fn resolved_encoder(&self) -> Result<Option<String>, NegotiationError> {
         if self.width == 0 || self.height == 0 {
             return Err(NegotiationError("zero frame dimensions"));
@@ -306,6 +308,14 @@ impl VideoJob {
                 Some(name.clone())
             }
         };
+        // Alpha-bearing input does not prove that an encoder preserves alpha.
+        // Keep this invariant in the shared owner so direct Reel and boundary
+        // callers receive the same admission as the native and CLI front doors.
+        if self.container == Container::MovTransparent && encoder.as_deref() != Some("qtrle") {
+            return Err(NegotiationError(
+                "transparent video currently requires the qtrle encoder to preserve alpha; select auto or qtrle, or request opaque MOV",
+            ));
+        }
         self.merged_quality()?
             .validate(encoder.as_deref(), self.container)?;
         Ok(encoder)

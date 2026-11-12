@@ -5,7 +5,7 @@ use std::io::Cursor;
 use std::rc::Rc;
 
 use fmn_core::color::LinearRgba;
-use fmn_mobject::{Mobject, RecordBuffer, RecordSchema};
+use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
 };
@@ -13,7 +13,8 @@ use fmn_scene::{
     EffectClass, Entry, EventPayload, Journal, Key, Modifiers, MouseButton, RuntimeConfig, Scene,
 };
 use fmn_studio::native::{
-    NativeReplayPolicy, NativeSceneProgram, NativeSceneWorker, NativeSegment, NativeWorkerConfig,
+    NativeReplayPolicy, NativeRestoreMode, NativeSceneProgram, NativeSceneWorker, NativeSegment,
+    NativeUpdaterRegistry, NativeWorkerConfig,
 };
 use fmn_studio::protocol::studio_seek_command;
 use fmn_studio::{
@@ -24,6 +25,630 @@ use fmn_studio::{
 };
 
 const NAME: &str = "LiveSquare";
+
+thread_local! {
+    // Write-only execution witnesses: these counters never affect authored
+    // state or callback behavior. The model's actual counter is a Stage tracker.
+    static REGISTERED_CALLS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+    static TAIL_PREFIX_CALLS: Cell<(u64, u64, u64)> = const { Cell::new((0, 0, 0)) };
+}
+
+const CHECKPOINT_WAIT_SCHEDULE: [u64; 3] = [350, 450, 100];
+
+fn registered_counter_update(stage: &mut Stage, mob: Mob, dt: f64) {
+    REGISTERED_CALLS.with(|calls| {
+        let (total, zero_dt) = calls.get();
+        calls.set((total + 1, zero_dt + u64::from(dt == 0.0)));
+    });
+    let counter = stage.get(mob).unwrap().submobjects()[0];
+    stage.increment_tracker_value(counter, 1.0).unwrap();
+    let step = stage.tracker_value(counter).unwrap();
+    let shape = stage.frame_shape();
+    stage
+        .set_frame_shape([shape[0] + 1.0 / 1024.0, shape[1] + 1.0 / 2048.0])
+        .unwrap();
+    // Later samples depend on the previously authored frame shape, which is
+    // outside the durable arena document and must travel in the native cursor.
+    stage.shift(mob, [step * shape[0] * 0.000_000_1, 0.0, 0.0]);
+    let phase = (step as u64 % 16) as f32 / 16.0;
+    let fill = [0.25 + phase * 0.5, 1.0 - phase * 0.5, 0.125, 1.0];
+    let entry = stage.get_mut(mob).unwrap();
+    for index in 0..entry.buffer.len() {
+        entry.buffer.write(index, "fill_rgba", &fill);
+    }
+}
+
+fn checkpointed_program(
+    seed: u64,
+    version: fmn_studio::ProtocolDigest,
+    schedule: [u64; 3],
+) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), seed).unwrap();
+    let _ = scene.rng_mut().next_u64();
+    let _ = scene.rng_mut().next_u64();
+    let points = [
+        [-0.5_f32, -0.5, 0.0],
+        [0.0, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+        [-0.5, 0.0, 0.0],
+        [-0.5, -0.5, 0.0],
+    ];
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+    for (index, point) in points.iter().enumerate() {
+        buffer.write(index, "point", point);
+        buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 1.0]);
+        buffer.write(index, "stroke_width", &[0.0]);
+    }
+    let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+    let counter = scene.stage_mut().add_value_tracker(0.0);
+    scene.stage_mut().attach(root, counter).unwrap();
+    scene.add(&[root]).unwrap();
+    let mut registry = NativeUpdaterRegistry::new();
+    registry.register_dt(scene.stage_mut(), root, version, registered_counter_update)?;
+    let frame_limit = schedule.iter().sum();
+    NativeSceneProgram::new(
+        scene,
+        schedule
+            .into_iter()
+            .map(|frames| NativeSegment::WaitFrames { frames })
+            .collect(),
+        frame_limit,
+    )?
+    .with_checkpoint_registry(registry)
+}
+
+fn checkpointed_config() -> NativeWorkerConfig {
+    let mut config = config();
+    config.frame_count = 901;
+    config.replay = NativeReplayPolicy::Checkpointed;
+    config.source_digest = protocol_digest(b"registered-counter-and-grid-v1");
+    config
+}
+
+fn checkpointed_worker() -> NativeSceneWorker {
+    NativeSceneWorker::new(checkpointed_config(), || {
+        checkpointed_program(
+            71,
+            protocol_digest(b"registered-counter-v1"),
+            CHECKPOINT_WAIT_SCHEDULE,
+        )
+    })
+    .unwrap()
+}
+
+fn checkpoint_observation(
+    worker: &NativeSceneWorker,
+) -> (Vec<u8>, i64, u64, EffectClass, bool, [u64; 2]) {
+    let program = worker.program().unwrap();
+    let scene = program.preview().scene();
+    (
+        scene.stage().snapshot().to_bytes().unwrap(),
+        scene.time().frames(),
+        scene.play_count(),
+        program.effect_class(),
+        program.at_segment_boundary(),
+        scene.stage().frame_shape().map(f64::to_bits),
+    )
+}
+
+// Instrument the real native lifecycle. The counters are write-only witnesses;
+// all model state remains in the Stage and its one snapshotted RNG stream.
+struct CountedTailAnimation(Box<dyn fmn_anim::Animation>);
+
+impl fmn_anim::Animation for CountedTailAnimation {
+    fn state(&self) -> &fmn_anim::AnimState {
+        self.0.state()
+    }
+
+    fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+        self.0.state_mut()
+    }
+
+    fn begin(&mut self, stage: &mut Stage) -> Result<(), fmn_anim::AnimError> {
+        TAIL_PREFIX_CALLS.with(|calls| {
+            let (builds, begins, finishes) = calls.get();
+            calls.set((builds, begins + 1, finishes));
+        });
+        self.0.begin(stage)
+    }
+
+    fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], alpha: f64) {
+        self.0.interpolate_submobject(stage, mobs, alpha);
+    }
+
+    fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        self.0.interpolate(stage, alpha);
+    }
+
+    fn finish(&mut self, stage: &mut Stage) {
+        self.0.finish(stage);
+        TAIL_PREFIX_CALLS.with(|calls| {
+            let (builds, begins, finishes) = calls.get();
+            calls.set((builds, begins, finishes + 1));
+        });
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.0.abort(stage);
+    }
+}
+
+fn wait_tail_program(transient: u8, hold: f64) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            default_wait_time: hold,
+            ..RuntimeConfig::default()
+        },
+        71,
+    )
+    .unwrap();
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 9).unwrap();
+    for (index, point) in [
+        [-0.5_f32, -0.5, 0.0],
+        [0.0, -0.5, 0.0],
+        [0.5, -0.5, 0.0],
+        [0.5, 0.0, 0.0],
+        [0.5, 0.5, 0.0],
+        [0.0, 0.5, 0.0],
+        [-0.5, 0.5, 0.0],
+        [-0.5, 0.0, 0.0],
+        [-0.5, -0.5, 0.0],
+    ]
+    .iter()
+    .enumerate()
+    {
+        buffer.write(index, "point", point);
+        buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 1.0]);
+        buffer.write(index, "stroke_width", &[0.0]);
+    }
+    let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+    let counter = scene.stage_mut().add_value_tracker(0.0);
+    scene.stage_mut().attach(root, counter).unwrap();
+    scene.add(&[root]).unwrap();
+    let mut registry = NativeUpdaterRegistry::new();
+    registry.register_dt(
+        scene.stage_mut(),
+        root,
+        protocol_digest(b"registered-tail-counter-v1"),
+        registered_counter_update,
+    )?;
+    if transient == 5 {
+        scene
+            .stage_mut()
+            .add_updater(root, |_, _| {}, false)
+            .unwrap();
+    }
+    let listener_state = Rc::new(Cell::new(0.0));
+    if transient == 6 {
+        let captured = Rc::clone(&listener_state);
+        scene
+            .event_dispatcher_mut()
+            .add_listener(fmn_scene::EventListener::new(
+                fmn_scene::EventType::KeyPress,
+                fmn_scene::EventTarget::Global,
+                move |_, _, _, stage| {
+                    stage.shift(root, [captured.get(), 0.0, 0.0]);
+                    fmn_scene::EventPropagation::Continue
+                },
+            ))
+            .unwrap();
+    }
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            // This earlier wait is not resumable: executable work still lies
+            // ahead. The original tail starts only after the deferred prefix.
+            NativeSegment::WaitFrames { frames: 3 },
+            NativeSegment::defer(move |context| {
+                TAIL_PREFIX_CALLS.with(|calls| {
+                    let (builds, begins, finishes) = calls.get();
+                    calls.set((builds + 1, begins, finishes));
+                });
+                let displacement = (context.rng_mut().next_u64() % 13) as f64 / 16.0;
+                context.stage_mut().shift(root, [displacement, 0.0, 0.0]);
+                let buffer = context.stage().get(root).unwrap().buffer.deep_clone();
+                let later = context.stage_mut().add(Mobject::from_buffer(buffer));
+                context.stage_mut().shift(later, [1.5, 0.0, 0.0]);
+                context.stage_mut().add_to_scene(later)?;
+                match transient {
+                    1 => {
+                        context
+                            .spans_mut()
+                            .register(later, "x".into(), 0, 1, fmn_studio::SpanKind::MathGlyph)
+                            .unwrap();
+                    }
+                    2 => {
+                        context
+                            .event_dispatcher_mut()
+                            .add_listener(fmn_scene::EventListener::new(
+                                fmn_scene::EventType::KeyPress,
+                                fmn_scene::EventTarget::Global,
+                                |_, _, _, _| fmn_scene::EventPropagation::Continue,
+                            ))
+                            .unwrap();
+                    }
+                    3 => context.add_sound("cue.wav", 0.0, None, None)?,
+                    4 => {
+                        context
+                            .stage_mut()
+                            .add_updater(
+                                root,
+                                |stage, mob| {
+                                    stage.shift(mob, [0.001, 0.0, 0.0]);
+                                },
+                                false,
+                            )
+                            .unwrap();
+                    }
+                    5 => context.stage_mut().clear_updaters(root, true),
+                    // A completed build can alter an initial listener's
+                    // captured state without touching the dispatcher itself.
+                    6 => listener_state.set(3.0),
+                    _ => {}
+                }
+                Ok(vec![
+                    NativeSegment::Play {
+                        animations: vec![Box::new(CountedTailAnimation(Box::new(
+                            fmn_anim::rotate(root, std::f64::consts::FRAC_PI_4),
+                        )))],
+                        overrides: fmn_scene::PlayOverrides {
+                            // BN-02 ceilings the exact f64: 0.1 is greater
+                            // than 1/10, so this play emits four frames at 30fps.
+                            run_time: Some(0.1),
+                            ..fmn_scene::PlayOverrides::default()
+                        },
+                    },
+                    // Generated segments count against the original cumulative
+                    // budget, including waits which emit no nominal captures.
+                    NativeSegment::WaitFrames { frames: 0 },
+                ])
+            }),
+            NativeSegment::WaitFrames { frames: 0 },
+            NativeSegment::Wait { duration: None },
+            NativeSegment::WaitFrames { frames: 400 },
+            NativeSegment::Wait {
+                duration: Some(0.125),
+            },
+        ],
+        712,
+    )?
+    .with_checkpoint_registry(registry)
+}
+
+fn wait_tail_config(transient: u8) -> NativeWorkerConfig {
+    let mut policy = config();
+    policy.frame_count = 713;
+    policy.source_digest = protocol_digest(&[b'n', b'a', b't', b'i', b'v', b'e', transient]);
+    policy.replay = NativeReplayPolicy::Checkpointed;
+    policy
+}
+
+fn wait_tail_worker(transient: u8) -> NativeSceneWorker {
+    NativeSceneWorker::new(wait_tail_config(transient), move || {
+        wait_tail_program(transient, 10.01)
+    })
+    .unwrap()
+}
+
+#[test]
+fn trailing_wait_checkpoint_skips_completed_build_and_play_and_continues_exactly() {
+    let mut original = wait_tail_worker(0);
+    TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+    let entry = commit(&mut original, 600);
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (1, 1, 1));
+    let saved = checkpoint(&entry, 0);
+    assert_eq!(&saved.state[..8], b"FMNR\x02\0\0\0");
+    let at_checkpoint = checkpoint_observation(&original);
+    assert_eq!(at_checkpoint.1, 600);
+    assert_eq!(at_checkpoint.2, 5);
+    assert_eq!(
+        original.program().unwrap().preview().stage().roots().len(),
+        2
+    );
+    let expected_capture = seek(&mut original, 603);
+    let expected_observation = checkpoint_observation(&original);
+    let expected_entry = commit(&mut original, 603);
+
+    let mut policy = wait_tail_config(0);
+    policy.max_replay_frames = 3;
+    let mut recovered = NativeSceneWorker::new(policy, || wait_tail_program(0, 10.01)).unwrap();
+    TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+    REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap();
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+    assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+    assert_eq!(
+        recovered.last_restore().unwrap().mode,
+        NativeRestoreMode::Checkpoint
+    );
+    assert_eq!(recovered.last_restore().unwrap().fallback, None);
+
+    let actual_entry = commit(&mut recovered, 603);
+    assert_eq!(actual_entry.state_hash, expected_entry.state_hash);
+    assert_eq!(actual_entry.checkpoint, expected_entry.checkpoint);
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (3, 0));
+    assert_eq!(checkpoint_observation(&recovered), expected_observation);
+    assert_eq!(png(&seek(&mut recovered, 603)), png(&expected_capture));
+}
+
+#[test]
+fn trailing_wait_restore_preserves_zero_waits_seconds_rounding_and_pending_epilogues() {
+    for frame in [8, 308, 600, 708, 709, 712] {
+        let mut original = wait_tail_worker(0);
+        let entry = commit(&mut original, frame);
+        let at_checkpoint = checkpoint_observation(&original);
+        let next = (frame + 1).min(712);
+        let expected = seek(&mut original, next);
+        let expected_observation = checkpoint_observation(&original);
+        let mut policy = wait_tail_config(0);
+        policy.max_replay_frames = 1;
+        let mut recovered = NativeSceneWorker::new(policy, || wait_tail_program(0, 10.01)).unwrap();
+        TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        assert_eq!(
+            checkpoint_observation(&recovered),
+            at_checkpoint,
+            "frame {frame}"
+        );
+        assert_eq!(
+            TAIL_PREFIX_CALLS.with(Cell::get),
+            (0, 0, 0),
+            "frame {frame}"
+        );
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "frame {frame}");
+        assert_eq!(
+            png(&seek(&mut recovered, next)),
+            png(&expected),
+            "frame {frame}"
+        );
+        assert_eq!(
+            checkpoint_observation(&recovered),
+            expected_observation,
+            "frame {frame}"
+        );
+        assert_eq!(
+            TAIL_PREFIX_CALLS.with(Cell::get),
+            (0, 0, 0),
+            "frame {frame}"
+        );
+    }
+}
+
+#[test]
+fn pending_executable_work_and_transient_prefix_bindings_keep_verified_cold_restore() {
+    use fmn_studio::native::NativeCheckpointFallback;
+
+    for (transient, frame, fallback) in [
+        (0, 2, NativeCheckpointFallback::UnsupportedSchedule),
+        (0, 5, NativeCheckpointFallback::UnsupportedSchedule),
+        // Final nominal play capture still has its pending finish lifecycle.
+        (0, 7, NativeCheckpointFallback::UnsupportedSchedule),
+        (1, 8, NativeCheckpointFallback::TransientSceneState),
+        (2, 8, NativeCheckpointFallback::TransientSceneState),
+        (3, 8, NativeCheckpointFallback::TransientSceneState),
+        (4, 8, NativeCheckpointFallback::UnregisteredUpdater),
+        // Removing an opaque factory callback does not make its initial
+        // factory state admissible for registered continuation restoration.
+        (5, 8, NativeCheckpointFallback::UnregisteredUpdater),
+        (6, 8, NativeCheckpointFallback::TransientSceneState),
+    ] {
+        let mut original = wait_tail_worker(transient);
+        let entry = commit(&mut original, frame);
+        assert!(!entry.checkpoint.as_ref().unwrap().starts_with(b"FMNR"));
+        let at_checkpoint = checkpoint_observation(&original);
+        let mut recovered = wait_tail_worker(transient);
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+        let report = recovered.last_restore().unwrap();
+        assert_eq!(report.mode, NativeRestoreMode::ColdVerified);
+        assert_eq!(report.fallback, Some(fallback));
+        assert_eq!(
+            png(&seek(&mut recovered, frame + 1)),
+            png(&seek(&mut original, frame + 1))
+        );
+    }
+}
+
+#[test]
+fn trailing_wait_checkpoint_binds_original_seconds_grid_factory_and_source() {
+    let mut original = wait_tail_worker(0);
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    for case in 0..3 {
+        let mut policy = wait_tail_config(0);
+        if case == 0 {
+            policy.source_digest = protocol_digest(b"changed-native-tail-source");
+        }
+        let mut candidate = NativeSceneWorker::new(policy, move || {
+            // Both durations emit 301 frames, but their alpha laws differ.
+            // The factory identity binds their original values, not the ceil.
+            let program = wait_tail_program(0, if case == 1 { 10.02 } else { 10.01 })?;
+            if case == 2 {
+                program.with_segment_limit(100)
+            } else {
+                Ok(program)
+            }
+        })
+        .unwrap();
+        let before_png = seek(&mut candidate, 2);
+        let before = checkpoint_observation(&candidate);
+        TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        let error = candidate
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            WorkerErrorCode::CheckpointRejected,
+            "case {case}"
+        );
+        assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+        assert_eq!(checkpoint_observation(&candidate), before);
+        assert_eq!(candidate.journal_position(), 0);
+        assert_eq!(candidate.last_state_hash(), None);
+        assert_eq!(candidate.last_restore(), None);
+        assert_eq!(png(&seek(&mut candidate, 2)), png(&before_png));
+    }
+}
+
+#[test]
+fn rehashed_trailing_wait_cursors_refuse_atomically_without_executing_the_prefix() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+
+    let schema = Schema::new(*b"FMNR", 2, 0, 0);
+    let mut original = wait_tail_worker(0);
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let scene = reader.get_str().unwrap();
+    let position = reader.get_u64().unwrap();
+    let read_count = reader.get_u32().unwrap();
+    let mut reads = Vec::new();
+    for _ in 0..read_count {
+        reads.push((reader.get_str().unwrap(), reader.get_bytes().unwrap()));
+    }
+    let factory = reader.get_bytes().unwrap();
+    let frame = reader.get_u64().unwrap();
+    let shape = [reader.get_u64().unwrap(), reader.get_u64().unwrap()];
+    let started = reader.get_u64().unwrap();
+    let effects = reader.get_u8().unwrap();
+    let index = reader.get_u64().unwrap();
+    let prefix_frames = reader.get_i64().unwrap();
+    let prefix_segments = reader.get_u64().unwrap();
+    let prefix_plays = reader.get_u64().unwrap();
+    assert!(reader.get_bool().unwrap());
+    let base = reader.get_i64().unwrap();
+    let stepped = reader.get_i64().unwrap();
+    let purity = reader.get_u8().unwrap();
+    let state = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    assert_eq!(
+        (frame, started, index, base, stepped),
+        (600, 7, 2, 308, 292)
+    );
+    assert_eq!((prefix_frames, prefix_segments, prefix_plays), (7, 4, 3));
+
+    let mut recovered = wait_tail_worker(0);
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+        .unwrap();
+    let before = checkpoint_observation(&recovered);
+    let before_png = seek(&mut recovered, 600);
+    let before_report = recovered.last_restore();
+    for case in [
+        "tail index out of range",
+        "prefix clock changed",
+        "prefix clock negative",
+        "prefix segment count changed",
+        "prefix omitted original steps",
+        "prefix exceeded segment budget",
+        "prefix play count changed",
+        "prefix play count exceeds steps",
+        "started count changed",
+        "active base changed",
+        "zero stepped samples",
+        "stepped beyond active wait",
+        "unknown wait purity",
+        "lost deferred effect",
+        "missing active cursor",
+        "nonfinite frame shape",
+    ] {
+        let mut bad_index = index;
+        let mut bad_prefix_frames = prefix_frames;
+        let mut bad_prefix_segments = prefix_segments;
+        let mut bad_prefix_plays = prefix_plays;
+        let mut bad_started = started;
+        let mut bad_base = base;
+        let mut bad_stepped = stepped;
+        let mut bad_purity = purity;
+        let mut bad_effects = effects;
+        let mut bad_shape = shape;
+        let mut active = true;
+        match case {
+            "tail index out of range" => bad_index = 4,
+            "prefix clock changed" => bad_prefix_frames += 1,
+            "prefix clock negative" => bad_prefix_frames = -1,
+            "prefix segment count changed" => bad_prefix_segments += 1,
+            "prefix omitted original steps" => bad_prefix_segments = 0,
+            "prefix exceeded segment budget" => bad_prefix_segments = u64::MAX,
+            "prefix play count changed" => bad_prefix_plays += 1,
+            "prefix play count exceeds steps" => bad_prefix_plays = bad_prefix_segments + 1,
+            "started count changed" => bad_started += 1,
+            "active base changed" => bad_base += 1,
+            "zero stepped samples" => bad_stepped = 0,
+            "stepped beyond active wait" => bad_stepped = 401,
+            "unknown wait purity" => bad_purity |= 128,
+            "lost deferred effect" => bad_effects &= !4,
+            "missing active cursor" => active = false,
+            "nonfinite frame shape" => bad_shape[0] = f64::NAN.to_bits(),
+            _ => unreachable!(),
+        }
+        let mut writer = Writer::new(schema);
+        writer.put_str(scene).put_u64(position).put_u32(read_count);
+        for (path, digest) in &reads {
+            writer.put_str(path).put_bytes(digest);
+        }
+        writer
+            .put_bytes(factory)
+            .put_u64(frame)
+            .put_u64(bad_shape[0])
+            .put_u64(bad_shape[1])
+            .put_u64(bad_started)
+            .put_u8(bad_effects)
+            .put_u64(bad_index)
+            .put_i64(bad_prefix_frames)
+            .put_u64(bad_prefix_segments)
+            .put_u64(bad_prefix_plays)
+            .put_bool(active);
+        if active {
+            writer
+                .put_i64(bad_base)
+                .put_i64(bad_stepped)
+                .put_u8(bad_purity);
+        }
+        writer.put_bytes(state);
+        let bad_state = writer.finish().unwrap();
+        // Integrity framing is valid; the semantic cursor must still refuse.
+        let state_hash = protocol_digest(&bad_state);
+        TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        let error = recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                state_hash,
+                state: bad_state,
+                ..saved.clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected, "{case}");
+        assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0), "{case}");
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "{case}");
+        assert_eq!(checkpoint_observation(&recovered), before, "{case}");
+        assert_eq!(recovered.journal_position(), 1, "{case}");
+        assert_eq!(
+            recovered.last_state_hash(),
+            Some(entry.state_hash),
+            "{case}"
+        );
+        assert_eq!(recovered.last_restore(), before_report, "{case}");
+        assert!(recovered.journal_tail().is_empty(), "{case}");
+    }
+    assert_eq!(png(&seek(&mut recovered, 600)), png(&before_png));
+}
 
 fn program() -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
@@ -279,6 +904,505 @@ fn checkpoint_cold_execution_restores_real_callback_state_for_continuation() {
         count,
         "resuming the restored cursor must not rebuild callbacks again"
     );
+}
+
+#[test]
+fn registered_checkpoint_resumes_at_twenty_seconds_without_evaluating_the_prefix() {
+    let mut original = checkpointed_worker();
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    let at_checkpoint = checkpoint_observation(&original);
+    assert_eq!(at_checkpoint.1, 600);
+    assert_eq!(at_checkpoint.2, 1, "second wait is still open");
+    assert!(matches!(at_checkpoint.3, EffectClass::Stateful(_)));
+    let original_root = original.program().unwrap().preview().stage().roots()[0];
+    let mut expected = Vec::new();
+    for frame in [601, 603, 800, 801, 802] {
+        let capture = seek(&mut original, frame);
+        expected.push((
+            frame,
+            png(&capture).to_vec(),
+            checkpoint_observation(&original),
+        ));
+    }
+
+    let builds = Rc::new(Cell::new(0_u32));
+    let observed = Rc::clone(&builds);
+    let mut recovered = NativeSceneWorker::new(checkpointed_config(), move || {
+        observed.set(observed.get() + 1);
+        checkpointed_program(
+            71,
+            protocol_digest(b"registered-counter-v1"),
+            CHECKPOINT_WAIT_SCHEDULE,
+        )
+    })
+    .unwrap();
+    let before_builds = builds.get();
+    REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+    let ack = recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap();
+    assert_eq!(
+        ack,
+        WorkerResponse::Ack {
+            state_hash: Some(entry.state_hash),
+            journal_len: 1,
+        }
+    );
+    assert_eq!(
+        builds.get(),
+        before_builds + 1,
+        "one fresh callback registry"
+    );
+    assert_eq!(
+        REGISTERED_CALLS.with(Cell::get),
+        (0, 0),
+        "restoring data must not execute 600 historical updates or a wait prologue",
+    );
+    assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+    assert!(
+        !recovered
+            .program()
+            .unwrap()
+            .preview()
+            .stage()
+            .contains(original_root)
+    );
+    let report = recovered.last_restore().unwrap();
+    assert_eq!(report.mode, NativeRestoreMode::Checkpoint);
+    assert_eq!(report.frame, 600);
+    assert_eq!(report.fallback, None);
+    let WorkerResponse::StudioData { bytes, .. } = recovered
+        .handle(SupervisorRequest::Inspect { scene: NAME.into() })
+        .unwrap()
+    else {
+        panic!("inspection after checkpoint restoration")
+    };
+    assert!(
+        String::from_utf8(bytes).unwrap().contains(
+            "\"native_restore\":{\"mode\":\"checkpoint\",\"frame\":600,\"fallback\":null}"
+        )
+    );
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+
+    let bound_builds = builds.get();
+    for (frame, expected_png, expected_state) in expected {
+        let before_calls = REGISTERED_CALLS.with(Cell::get);
+        let actual = seek(&mut recovered, frame);
+        assert_eq!(png(&actual), expected_png, "PNG at frame {frame}");
+        assert_eq!(
+            checkpoint_observation(&recovered),
+            expected_state,
+            "frame {frame}"
+        );
+        let calls = REGISTERED_CALLS.with(Cell::get);
+        if frame == 601 {
+            assert_eq!(calls, (1, 0), "the next sample executes exactly once");
+        } else if frame == 801 {
+            assert_eq!(calls, (before_calls.0 + 2, before_calls.1 + 1));
+            assert_eq!(
+                recovered.program().unwrap().preview().scene().play_count(),
+                2
+            );
+        }
+    }
+    assert_eq!(
+        builds.get(),
+        bound_builds,
+        "forward continuation retains its owner"
+    );
+}
+
+#[test]
+fn registered_checkpoint_binds_seed_callback_version_schedule_and_read_closure() {
+    let mut original = checkpointed_worker();
+    let saved = checkpoint(&commit(&mut original, 600), 0);
+    for changed in 0..4 {
+        let mut config = checkpointed_config();
+        let seed = if changed == 0 { 72 } else { 71 };
+        let version = protocol_digest(if changed == 1 {
+            b"registered-counter-v2"
+        } else {
+            b"registered-counter-v1"
+        });
+        let schedule = if changed == 2 {
+            [400, 400, 100]
+        } else {
+            CHECKPOINT_WAIT_SCHEDULE
+        };
+        if changed == 3 {
+            config.source_digest = protocol_digest(b"changed-source-closure");
+        }
+        let mut candidate = NativeSceneWorker::new(config, move || {
+            checkpointed_program(seed, version, schedule)
+        })
+        .unwrap();
+        let before = seek(&mut candidate, 2);
+        let before_state = checkpoint_observation(&candidate);
+        let error = candidate
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap_err();
+        assert_eq!(
+            error.code,
+            WorkerErrorCode::CheckpointRejected,
+            "case {changed}"
+        );
+        assert_eq!(
+            checkpoint_observation(&candidate),
+            before_state,
+            "case {changed}"
+        );
+        assert_eq!(candidate.journal_position(), 0);
+        assert_eq!(candidate.last_state_hash(), None);
+        assert_eq!(candidate.last_restore(), None);
+        assert_eq!(png(&seek(&mut candidate, 2)), png(&before));
+    }
+}
+
+#[test]
+fn rehashed_native_continuations_reject_invalid_cursors_without_replacing_the_owner() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+    use fmn_mobject::SCENE_STATE_SCHEMA;
+
+    let schema = Schema::new(*b"FMNR", 1, 0, 0);
+    let mut original = checkpointed_worker();
+    let entry = commit(&mut original, 600);
+    let saved = checkpoint(&entry, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let scene_name = reader.get_str().unwrap();
+    let position = reader.get_u64().unwrap();
+    let read_count = reader.get_u32().unwrap();
+    let mut reads = Vec::new();
+    for _ in 0..read_count {
+        reads.push((reader.get_str().unwrap(), reader.get_bytes().unwrap()));
+    }
+    let factory = reader.get_bytes().unwrap();
+    let frame = reader.get_u64().unwrap();
+    let shape = [reader.get_u64().unwrap(), reader.get_u64().unwrap()];
+    let started = reader.get_u64().unwrap();
+    let effects = reader.get_u8().unwrap();
+    assert!(reader.get_bool().unwrap());
+    let base = reader.get_i64().unwrap();
+    let stepped = reader.get_i64().unwrap();
+    let purity = reader.get_u8().unwrap();
+    let scene_state = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    assert_eq!((frame, started, base, stepped), (600, 2, 350, 250));
+
+    let mut nested = Reader::open(
+        scene_state,
+        SCENE_STATE_SCHEMA,
+        Limits::DEFAULT,
+        UnknownPolicy::Strict,
+    )
+    .unwrap();
+    let frames_elapsed = nested.get_i64().unwrap();
+    let fps = nested.get_u32().unwrap();
+    let play_count = nested.get_u64().unwrap();
+    let rng = [
+        nested.get_u64().unwrap(),
+        nested.get_u64().unwrap(),
+        nested.get_u64().unwrap(),
+        nested.get_u64().unwrap(),
+    ];
+    let snapshot = nested.get_bytes().unwrap();
+    nested.finish().unwrap();
+
+    let mut recovered = checkpointed_worker();
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+        .unwrap();
+    let before = checkpoint_observation(&recovered);
+    let before_png = seek(&mut recovered, 600);
+    let report = recovered.last_restore();
+    for case in [
+        "base outside schedule",
+        "zero stepped samples",
+        "stepped beyond wait",
+        "unknown effect",
+        "unknown wait purity",
+        "missing current updater effects",
+        "nonfinite frame width",
+        "zero frame height",
+        "missing active cursor",
+        "nested clock mismatch",
+        "nested play count mismatch",
+        "malformed nested snapshot",
+    ] {
+        let mut malformed_shape = shape;
+        let mut malformed_effects = effects;
+        let mut malformed_base = base;
+        let mut malformed_stepped = stepped;
+        let mut malformed_purity = purity;
+        let mut active = true;
+        let mut nested_frames = frames_elapsed;
+        let mut nested_plays = play_count;
+        let mut nested_snapshot = snapshot;
+        match case {
+            "base outside schedule" => malformed_base += 1,
+            "zero stepped samples" => malformed_stepped = 0,
+            "stepped beyond wait" => malformed_stepped = 451,
+            "unknown effect" => malformed_effects |= 128,
+            "unknown wait purity" => malformed_purity |= 128,
+            "missing current updater effects" => {
+                malformed_effects = 0;
+                malformed_purity = 0;
+            }
+            "nonfinite frame width" => malformed_shape[0] = f64::NAN.to_bits(),
+            "zero frame height" => malformed_shape[1] = 0.0_f64.to_bits(),
+            "missing active cursor" => active = false,
+            "nested clock mismatch" => nested_frames += 1,
+            "nested play count mismatch" => nested_plays += 1,
+            "malformed nested snapshot" => nested_snapshot = b"invalid arena document",
+            _ => unreachable!(),
+        }
+        let mut nested_writer = Writer::new(SCENE_STATE_SCHEMA);
+        nested_writer
+            .put_i64(nested_frames)
+            .put_u32(fps)
+            .put_u64(nested_plays);
+        for word in rng {
+            nested_writer.put_u64(word);
+        }
+        nested_writer.put_bytes(nested_snapshot);
+        let nested_bytes = nested_writer.finish().unwrap();
+
+        let mut writer = Writer::new(schema);
+        writer
+            .put_str(scene_name)
+            .put_u64(position)
+            .put_u32(read_count);
+        for (path, digest) in &reads {
+            writer.put_str(path).put_bytes(digest);
+        }
+        writer
+            .put_bytes(factory)
+            .put_u64(frame)
+            .put_u64(malformed_shape[0])
+            .put_u64(malformed_shape[1])
+            .put_u64(started)
+            .put_u8(malformed_effects)
+            .put_bool(active);
+        if active {
+            writer
+                .put_i64(malformed_base)
+                .put_i64(malformed_stepped)
+                .put_u8(malformed_purity);
+        }
+        writer.put_bytes(&nested_bytes);
+        let state = writer.finish().unwrap();
+        // Both containers and the protocol digest are freshly valid. Refusal
+        // must come from continuation/Scene validation, not a stale checksum.
+        let state_hash = protocol_digest(&state);
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        let error = recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                state,
+                state_hash,
+                ..saved.clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected, "{case}");
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "{case}");
+        assert_eq!(checkpoint_observation(&recovered), before, "{case}");
+        assert_eq!(recovered.journal_position(), 1, "{case}");
+        assert_eq!(
+            recovered.last_state_hash(),
+            Some(entry.state_hash),
+            "{case}"
+        );
+        assert_eq!(recovered.last_restore(), report, "{case}");
+        assert!(recovered.journal_tail().is_empty(), "{case}");
+        assert_eq!(png(&seek(&mut recovered, 600)), png(&before_png), "{case}");
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0), "{case}");
+    }
+}
+
+#[test]
+fn pure_waits_with_empty_registry_resume_initial_and_boundary_states() {
+    fn pure_program() -> Result<NativeSceneProgram, ServiceError> {
+        let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
+        for (index, point) in [[-0.5_f32, 0.0, 0.0], [0.0, 0.5, 0.0], [0.5, 0.0, 0.0]]
+            .iter()
+            .enumerate()
+        {
+            buffer.write(index, "point", point);
+            buffer.write(index, "stroke_rgba", &[0.25, 1.0, 0.125, 1.0]);
+            buffer.write(index, "stroke_width", &[5.0]);
+        }
+        let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+        scene.stage_mut().shift(root, [0.25, -0.125, 0.0]);
+        scene.stage_mut().set_frame_shape([12.0, 7.0]).unwrap();
+        let temporary = scene.stage_mut().add_value_tracker(7.0);
+        scene.stage_mut().delete(temporary).unwrap();
+        assert!(!scene.stage().has_rollback_identity_history());
+        scene.add(&[root]).unwrap();
+        // No explicit registry is needed when no executable updater exists.
+        NativeSceneProgram::new(
+            scene,
+            vec![
+                NativeSegment::WaitFrames { frames: 3 },
+                NativeSegment::Wait {
+                    duration: Some(2.0 / 30.0),
+                },
+            ],
+            5,
+        )
+    }
+
+    for frame in [0, 3, 4] {
+        let mut policy = checkpointed_config();
+        policy.frame_count = 6;
+        let mut original = NativeSceneWorker::new(policy.clone(), pure_program).unwrap();
+        let entry = commit(&mut original, frame);
+        let saved = checkpoint(&entry, 0);
+        assert!(saved.state.starts_with(b"FMNR"));
+        let at_checkpoint = checkpoint_observation(&original);
+        let expected = seek(&mut original, frame + 1);
+        let expected_state = checkpoint_observation(&original);
+        // Even a boundary after several frames must restore without charging
+        // the old prefix against this one-frame continuation work budget.
+        policy.max_replay_frames = 1;
+        let mut recovered = NativeSceneWorker::new(policy, pure_program).unwrap();
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(saved))
+            .unwrap();
+        assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+        let report = recovered.last_restore().unwrap();
+        assert_eq!(report.mode, NativeRestoreMode::Checkpoint);
+        assert_eq!(report.frame, frame as u64);
+        assert_eq!(report.fallback, None);
+        assert_eq!(png(&seek(&mut recovered, frame + 1)), png(&expected));
+        assert_eq!(checkpoint_observation(&recovered), expected_state);
+    }
+}
+
+#[test]
+fn checkpoint_policy_reports_cold_fallback_for_opaque_mutable_callback_state() {
+    let mut config = config();
+    config.replay = NativeReplayPolicy::Checkpointed;
+    let mut original = NativeSceneWorker::new(config.clone(), program).unwrap();
+    let entry = commit(&mut original, 3);
+    let expected = seek(&mut original, 6);
+    let mut recovered = NativeSceneWorker::new(config, program).unwrap();
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+        .unwrap();
+    let report = recovered.last_restore().unwrap();
+    assert_eq!(report.mode, NativeRestoreMode::ColdVerified);
+    assert_eq!(report.frame, 3);
+    assert!(report.fallback.is_some());
+    let WorkerResponse::StudioData { bytes, .. } = recovered
+        .handle(SupervisorRequest::Inspect { scene: NAME.into() })
+        .unwrap()
+    else {
+        panic!("inspection after cold fallback")
+    };
+    assert!(String::from_utf8(bytes).unwrap().contains(
+        "\"native_restore\":{\"mode\":\"cold_verified\",\"frame\":3,\"fallback\":\"unregistered_updater\"}"
+    ));
+    assert_eq!(png(&seek(&mut recovered, 6)), png(&expected));
+    assert_eq!(
+        checkpoint_observation(&recovered),
+        checkpoint_observation(&original)
+    );
+}
+
+#[test]
+fn registered_suffix_charges_only_new_frames_and_commits_transactionally() {
+    let mut original = checkpointed_worker();
+    let first = commit(&mut original, 600);
+    let saved = checkpoint(&first, 0);
+    let at_checkpoint = checkpoint_observation(&original);
+    let checkpoint_png = seek(&mut original, 600);
+    let second = commit(&mut original, 602);
+    let third = commit(&mut original, 604);
+    let expected = seek(&mut original, 604);
+    let expected_state = checkpoint_observation(&original);
+    let mut journal = Journal::new();
+    for entry in [&first, &second, &third] {
+        journal.record(entry.clone()).unwrap();
+    }
+    let journal_bytes = journal.to_bytes().unwrap();
+    let mut divergent = Journal::new();
+    divergent.record(first.clone()).unwrap();
+    divergent.record(second.clone()).unwrap();
+    let mut wrong = third.clone();
+    wrong.state_hash = protocol_digest(b"wrong final suffix state");
+    wrong.checkpoint = None;
+    divergent.record(wrong).unwrap();
+
+    for budget in [3, 4] {
+        let mut policy = checkpointed_config();
+        policy.max_replay_frames = budget;
+        let mut recovered = NativeSceneWorker::new(policy, || {
+            checkpointed_program(
+                71,
+                protocol_digest(b"registered-counter-v1"),
+                CHECKPOINT_WAIT_SCHEDULE,
+            )
+        })
+        .unwrap();
+        REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+        recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap();
+        assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+        let restore_report = recovered.last_restore();
+        // A budget of three refuses the four-frame suffix before execution.
+        // A budget of four reaches the deliberately wrong *second* suffix hash.
+        let attempted = if budget == 3 {
+            journal_bytes.clone()
+        } else {
+            divergent.to_bytes().unwrap()
+        };
+        let error = recovered
+            .handle(SupervisorRequest::ReplayJournal(JournalReplay {
+                scene: NAME.into(),
+                from_entry: 1,
+                through_entry: 3,
+                journal: attempted,
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::ReplayFailed);
+        assert_eq!(
+            REGISTERED_CALLS.with(Cell::get),
+            if budget == 3 { (0, 0) } else { (4, 0) },
+            "only the uncommitted suffix candidate may run",
+        );
+        assert_eq!(checkpoint_observation(&recovered), at_checkpoint);
+        assert_eq!(recovered.journal_position(), 1);
+        assert_eq!(recovered.last_state_hash(), Some(first.state_hash));
+        assert_eq!(recovered.last_restore(), restore_report);
+        assert!(recovered.journal_tail().is_empty());
+        assert_eq!(png(&seek(&mut recovered, 600)), png(&checkpoint_png));
+
+        if budget == 4 {
+            REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+            let response = recovered
+                .handle(SupervisorRequest::ReplayJournal(JournalReplay {
+                    scene: NAME.into(),
+                    from_entry: 1,
+                    through_entry: 3,
+                    journal: journal_bytes.clone(),
+                }))
+                .unwrap();
+            assert_eq!(
+                response,
+                WorkerResponse::ReplayComplete {
+                    from_entry: 1,
+                    state_hashes: vec![second.state_hash, third.state_hash],
+                },
+            );
+            assert_eq!(REGISTERED_CALLS.with(Cell::get), (4, 0));
+            assert_eq!(recovered.journal_position(), 3);
+            assert_eq!(recovered.last_state_hash(), Some(third.state_hash));
+            assert_eq!(checkpoint_observation(&recovered), expected_state);
+            assert_eq!(png(&seek(&mut recovered, 604)), png(&expected));
+        }
+    }
 }
 
 #[test]
@@ -773,4 +1897,711 @@ fn presenter_boundaries_survive_worker_protocol_and_cold_seek_without_extra_samp
         read_response(&mut output, limits).unwrap().response,
         WorkerResponse::Bye
     );
+}
+
+// Durable play checkpoints must carry prepared native lifecycle state, not
+// repeat begin() against the saved frame or silently erase custom hooks.
+#[derive(Clone, Copy, Debug)]
+enum TerminalPlayKind {
+    Rotation,
+    FadeOut,
+    Replacement,
+    VectorFade,
+    PassingFlash,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum TerminalPlayPolicy {
+    Native,
+    OpaqueRate,
+    DelegatingWrapper,
+}
+
+thread_local! {
+    static ACTIVE_PLAY_CALLS: Cell<(u64, u64)> = const { Cell::new((0, 0)) };
+}
+
+struct DelegatingPlayAnimation(Box<dyn fmn_anim::Animation>);
+
+impl fmn_anim::Animation for DelegatingPlayAnimation {
+    fn state(&self) -> &fmn_anim::AnimState {
+        self.0.state()
+    }
+
+    fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+        self.0.state_mut()
+    }
+
+    fn begin(&mut self, stage: &mut Stage) -> Result<(), fmn_anim::AnimError> {
+        ACTIVE_PLAY_CALLS.with(|calls| {
+            let (begins, finishes) = calls.get();
+            calls.set((begins + 1, finishes));
+        });
+        self.0.begin(stage)
+    }
+
+    fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], alpha: f64) {
+        self.0.interpolate_submobject(stage, mobs, alpha);
+    }
+
+    fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+        self.0.interpolate(stage, alpha);
+    }
+
+    fn finish(&mut self, stage: &mut Stage) {
+        self.0.finish(stage);
+        ACTIVE_PLAY_CALLS.with(|calls| {
+            let (begins, finishes) = calls.get();
+            calls.set((begins, finishes + 1));
+        });
+    }
+
+    fn abort(&mut self, stage: &mut Stage) {
+        self.0.abort(stage);
+    }
+
+    fn effect_signature(&self) -> fmn_anim::AnimationSignature {
+        self.0.effect_signature()
+    }
+
+    fn freeze_interpolation(&self) -> Option<fmn_anim::pure_frame::FrozenAnimation> {
+        self.0.freeze_interpolation()
+    }
+}
+
+fn opaque_play_rate(alpha: f64) -> f64 {
+    alpha * alpha * (2.0 - alpha)
+}
+
+fn terminal_play_program(
+    kind: TerminalPlayKind,
+    policy: TerminalPlayPolicy,
+    tail: bool,
+    angle: f64,
+) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+    let _ = scene.rng_mut().next_u64();
+    let _ = scene.rng_mut().next_u64();
+    let points = [
+        [-0.7_f32, -0.4, 0.0],
+        [0.0, -0.4, 0.0],
+        [0.7, -0.4, 0.0],
+        [0.7, 0.0, 0.0],
+        [0.7, 0.4, 0.0],
+        [0.0, 0.4, 0.0],
+        [-0.7, 0.4, 0.0],
+        [-0.7, 0.0, 0.0],
+        [-0.7, -0.4, 0.0],
+    ];
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+    for (index, point) in points.iter().enumerate() {
+        buffer.write(index, "point", point);
+        buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 1.0]);
+        buffer.write(index, "stroke_width", &[0.0]);
+    }
+    let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
+    scene.add(&[root]).unwrap();
+    let mut animation: Box<dyn fmn_anim::Animation> = match kind {
+        TerminalPlayKind::Rotation => Box::new(
+            fmn_anim::Rotating::new(root)
+                .with_angle(angle)
+                .with_about_point([0.2, -0.1, 0.0])
+                .with_config(fmn_anim::AnimConfig {
+                    // The finish sample differs from the final nominal frame.
+                    // This exposes a lost or prematurely executed epilogue.
+                    final_alpha_value: 0.35,
+                    ..fmn_anim::AnimConfig::default()
+                }),
+        ),
+        TerminalPlayKind::FadeOut => {
+            Box::new(fmn_anim::fade_out(scene.stage_mut(), root, [1.25, -0.5, 0.0], 0.6).unwrap())
+        }
+        TerminalPlayKind::Replacement => {
+            let buffer = scene.stage().get(root).unwrap().buffer.deep_clone();
+            let target = scene.stage_mut().add(Mobject::from_buffer(buffer));
+            scene.stage_mut().shift(target, [1.5, 0.5, 0.0]);
+            Box::new(
+                fmn_anim::replacement_transform(root, target).with_path_arc(0.75, [0.0, 0.0, 1.0]),
+            )
+        }
+        TerminalPlayKind::VectorFade => Box::new(fmn_anim::v_fade_out(root)),
+        TerminalPlayKind::PassingFlash => Box::new(fmn_anim::show_passing_flash(root, 0.3)),
+    };
+    animation.state_mut().config.suspend_mobject_updating = true;
+    match policy {
+        TerminalPlayPolicy::Native => {}
+        TerminalPlayPolicy::OpaqueRate => {
+            animation.state_mut().config.rate_func = fmn_anim::RateFunc::Base(opaque_play_rate);
+        }
+        TerminalPlayPolicy::DelegatingWrapper => {
+            animation = Box::new(DelegatingPlayAnimation(animation));
+        }
+    }
+    let mut segments = vec![
+        NativeSegment::Play {
+            animations: vec![Box::new(fmn_anim::rotate(root, 0.4))],
+            overrides: fmn_scene::PlayOverrides {
+                run_time_frames: Some(4),
+                ..fmn_scene::PlayOverrides::default()
+            },
+        },
+        NativeSegment::WaitFrames { frames: 2 },
+        NativeSegment::Play {
+            animations: vec![animation],
+            overrides: fmn_scene::PlayOverrides {
+                run_time_frames: Some(8),
+                ..fmn_scene::PlayOverrides::default()
+            },
+        },
+    ];
+    if tail {
+        segments.extend([
+            NativeSegment::WaitFrames { frames: 0 },
+            // BN-02 ceilings this exact f64 to four frames at 30fps.
+            NativeSegment::Wait {
+                duration: Some(0.1),
+            },
+            NativeSegment::WaitFrames { frames: 3 },
+        ]);
+    }
+    NativeSceneProgram::new(scene, segments, if tail { 21 } else { 14 })
+}
+
+fn terminal_play_config(tail: bool) -> NativeWorkerConfig {
+    let mut config = config();
+    config.frame_count = if tail { 22 } else { 15 };
+    config.checkpoint_frames = 1;
+    config.replay = NativeReplayPolicy::Checkpointed;
+    config.source_digest = protocol_digest(b"terminal-prepared-play-v1");
+    config
+}
+
+fn terminal_play_worker(
+    kind: TerminalPlayKind,
+    policy: TerminalPlayPolicy,
+    tail: bool,
+    threads: usize,
+    replay_budget: u64,
+) -> NativeSceneWorker {
+    let mut config = terminal_play_config(tail);
+    config.renderer.threads = threads;
+    config.max_replay_frames = replay_budget;
+    NativeSceneWorker::new(config, move || {
+        terminal_play_program(kind, policy, tail, std::f64::consts::PI * 1.25)
+    })
+    .unwrap()
+}
+
+#[test]
+fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy};
+
+    for kind in [
+        TerminalPlayKind::Rotation,
+        TerminalPlayKind::FadeOut,
+        TerminalPlayKind::Replacement,
+        TerminalPlayKind::VectorFade,
+        TerminalPlayKind::PassingFlash,
+    ] {
+        for saved_frame in [7, 10, 14] {
+            let mut original = terminal_play_worker(kind, TerminalPlayPolicy::Native, true, 1, 100);
+            let entry = commit(&mut original, saved_frame);
+            let saved = checkpoint(&entry, 0);
+            Reader::open(
+                &saved.state,
+                Schema::new(*b"FMNR", 3, 0, 0),
+                Limits::DEFAULT,
+                UnknownPolicy::Strict,
+            )
+            .expect("prepared terminal native play must emit FMNR3");
+            let at_checkpoint = checkpoint_observation(&original);
+            let checkpoint_png = seek(&mut original, saved_frame);
+            let mut expected = Vec::new();
+            for frame in saved_frame + 1..=21 {
+                let rendered = seek(&mut original, frame);
+                expected.push((frame, rendered, checkpoint_observation(&original)));
+            }
+            for threads in [1, 4] {
+                // Only newly emitted suffix frames fit this budget: replaying
+                // the six-frame prefix or saved play would fail.
+                let mut restored =
+                    terminal_play_worker(kind, TerminalPlayPolicy::Native, true, threads, 1);
+                restored
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                    .unwrap();
+                let report = restored.last_restore().unwrap();
+                assert_eq!(report.mode, NativeRestoreMode::Checkpoint);
+                assert_eq!(report.frame, u64::try_from(saved_frame).unwrap());
+                assert_eq!(report.fallback, None);
+                assert_eq!(restored.journal_position(), 1);
+                assert_eq!(restored.last_state_hash(), Some(entry.state_hash));
+                assert_eq!(checkpoint_observation(&restored), at_checkpoint);
+                assert_eq!(png(&seek(&mut restored, saved_frame)), png(&checkpoint_png));
+                let root = restored
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .stage()
+                    .roots()[0];
+                {
+                    let stage = restored.program().unwrap().preview().scene().stage();
+                    assert!(stage.is_animating(root));
+                    assert!(stage.is_updating_suspended(root));
+                }
+                for (frame, rendered, observation) in &expected {
+                    assert_eq!(
+                        png(&seek(&mut restored, *frame)),
+                        png(rendered),
+                        "{kind:?}, saved {saved_frame}, frame {frame}, threads {threads}"
+                    );
+                    // Full Stage bytes include private begin-time copies as
+                    // well as visible roots, so replaying begin is observable.
+                    assert_eq!(
+                        &checkpoint_observation(&restored),
+                        observation,
+                        "{kind:?}, saved {saved_frame}, frame {frame}, threads {threads}"
+                    );
+                    let scene = restored.program().unwrap().preview().scene();
+                    let stage = scene.stage();
+                    if *frame == 14 {
+                        assert!(stage.roots().contains(&root));
+                        assert!(stage.is_animating(root));
+                        assert!(stage.is_updating_suspended(root));
+                        assert_eq!(scene.play_count(), 2);
+                    }
+                    if *frame >= 15 {
+                        assert!(!stage.is_animating(root));
+                        assert!(!stage.is_updating_suspended(root));
+                        match kind {
+                            TerminalPlayKind::Rotation => assert_eq!(stage.roots(), &[root]),
+                            TerminalPlayKind::FadeOut
+                            | TerminalPlayKind::VectorFade
+                            | TerminalPlayKind::PassingFlash => assert!(stage.roots().is_empty()),
+                            TerminalPlayKind::Replacement => {
+                                assert_eq!(stage.roots().len(), 1);
+                                assert_ne!(stage.roots()[0], root);
+                            }
+                        }
+                    }
+                    if *frame == 15 {
+                        // Play epilogue and zero-frame wait both complete once.
+                        assert_eq!(scene.play_count(), 4);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn terminal_play_without_waits_preserves_the_unfinished_last_capture() {
+    for frame in [10, 14] {
+        let mut original = terminal_play_worker(
+            TerminalPlayKind::FadeOut,
+            TerminalPlayPolicy::Native,
+            false,
+            1,
+            100,
+        );
+        let entry = commit(&mut original, frame);
+        let expected = checkpoint_observation(&original);
+        let expected_png = seek(&mut original, frame);
+        let mut restored = terminal_play_worker(
+            TerminalPlayKind::FadeOut,
+            TerminalPlayPolicy::Native,
+            false,
+            4,
+            1,
+        );
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        assert_eq!(
+            restored.last_restore().unwrap().mode,
+            NativeRestoreMode::Checkpoint
+        );
+        assert_eq!(checkpoint_observation(&restored), expected);
+        assert_eq!(png(&seek(&mut restored, frame)), png(&expected_png));
+        let scene = restored.program().unwrap().preview().scene();
+        let root = scene.stage().roots()[0];
+        assert!(scene.stage().is_animating(root));
+        assert!(scene.stage().is_updating_suspended(root));
+        assert_eq!(scene.play_count(), 2);
+    }
+}
+
+#[test]
+fn restored_active_play_can_be_checkpointed_again_without_changing_canonical_state() {
+    let make = || {
+        terminal_play_worker(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            1,
+            100,
+        )
+    };
+    let mut original = make();
+    let first = commit(&mut original, 10);
+    let second = commit(&mut original, 11);
+    let mut restored = make();
+    restored
+        .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&first, 0)))
+        .unwrap();
+    let repeated = commit(&mut restored, 11);
+    assert_eq!(repeated.state_hash, second.state_hash);
+    assert_eq!(repeated.checkpoint, second.checkpoint);
+    assert_eq!(
+        checkpoint_observation(&restored),
+        checkpoint_observation(&original)
+    );
+    let mut twice = make();
+    twice
+        .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(
+            &repeated, 1,
+        )))
+        .unwrap();
+    assert_eq!(
+        twice.last_restore().unwrap().mode,
+        NativeRestoreMode::Checkpoint
+    );
+    assert_eq!(twice.journal_position(), 2);
+    assert_eq!(
+        checkpoint_observation(&twice),
+        checkpoint_observation(&original)
+    );
+    for frame in 12..=21 {
+        assert_eq!(
+            png(&seek(&mut twice, frame)),
+            png(&seek(&mut original, frame))
+        );
+        assert_eq!(
+            checkpoint_observation(&twice),
+            checkpoint_observation(&original)
+        );
+    }
+}
+
+#[test]
+fn nonterminal_plays_opaque_rates_and_delegating_lifecycle_wrappers_stay_cold() {
+    for (policy, frame) in [
+        (TerminalPlayPolicy::Native, 2),
+        (TerminalPlayPolicy::OpaqueRate, 10),
+        (TerminalPlayPolicy::DelegatingWrapper, 10),
+    ] {
+        let make = || terminal_play_worker(TerminalPlayKind::Rotation, policy, true, 1, 100);
+        let mut original = make();
+        let entry = commit(&mut original, frame);
+        let expected = checkpoint_observation(&original);
+        let mut restored = make();
+        ACTIVE_PLAY_CALLS.with(|calls| calls.set((0, 0)));
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        let report = restored.last_restore().unwrap();
+        assert_eq!(report.mode, NativeRestoreMode::ColdVerified, "{policy:?}");
+        assert_eq!(
+            report.fallback,
+            Some(fmn_studio::native::NativeCheckpointFallback::UnsupportedSchedule),
+            "{policy:?}"
+        );
+        assert_eq!(checkpoint_observation(&restored), expected);
+        if matches!(policy, TerminalPlayPolicy::DelegatingWrapper) {
+            assert_eq!(ACTIVE_PLAY_CALLS.with(Cell::get), (1, 0));
+        }
+        for next in frame + 1..=21 {
+            assert_eq!(
+                png(&seek(&mut restored, next)),
+                png(&seek(&mut original, next))
+            );
+            assert_eq!(
+                checkpoint_observation(&restored),
+                checkpoint_observation(&original)
+            );
+        }
+        if matches!(policy, TerminalPlayPolicy::DelegatingWrapper) {
+            // One uninterrupted owner and one cold-restored owner each finish.
+            assert_eq!(ACTIVE_PLAY_CALLS.with(Cell::get), (1, 2));
+        }
+    }
+}
+
+#[test]
+fn active_play_restore_rejects_changed_factory_animation_declaration_atomically() {
+    let chosen_angle = Rc::new(Cell::new(1.25));
+    let source_angle = Rc::clone(&chosen_angle);
+    let mut original = NativeSceneWorker::new(terminal_play_config(true), move || {
+        terminal_play_program(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            source_angle.get(),
+        )
+    })
+    .unwrap();
+    let entry = commit(&mut original, 10);
+    let saved = checkpoint(&entry, 0);
+    // Scene construction bytes, seed and supplied source/build digests remain
+    // identical. The original declared animation is the only difference.
+    chosen_angle.set(0.75);
+    let target_angle = Rc::clone(&chosen_angle);
+    let mut restored = NativeSceneWorker::new(terminal_play_config(true), move || {
+        terminal_play_program(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            target_angle.get(),
+        )
+    })
+    .unwrap();
+    let before_png = seek(&mut restored, 2);
+    let before = checkpoint_observation(&restored);
+    let error = restored
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::CheckpointRejected);
+    assert_eq!(checkpoint_observation(&restored), before);
+    assert_eq!(restored.journal_position(), 0);
+    assert_eq!(restored.last_state_hash(), None);
+    assert_eq!(restored.last_restore(), None);
+    assert!(restored.journal_tail().is_empty());
+    assert_eq!(png(&seek(&mut restored, 2)), png(&before_png));
+}
+
+#[test]
+fn rehashed_active_play_continuations_refuse_atomically() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+
+    let make = || {
+        terminal_play_worker(
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::Native,
+            true,
+            1,
+            100,
+        )
+    };
+    let schema = Schema::new(*b"FMNR", 3, 0, 0);
+    let mut original = make();
+    let entry = commit(&mut original, 10);
+    let saved = checkpoint(&entry, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let scene = reader.get_str().unwrap();
+    let position = reader.get_u64().unwrap();
+    let read_count = reader.get_u32().unwrap();
+    let mut reads = Vec::new();
+    for _ in 0..read_count {
+        reads.push((reader.get_str().unwrap(), reader.get_bytes().unwrap()));
+    }
+    let factory = reader.get_bytes().unwrap();
+    let frame = reader.get_u64().unwrap();
+    let shape = [reader.get_u64().unwrap(), reader.get_u64().unwrap()];
+    let started = reader.get_u64().unwrap();
+    let effects = reader.get_u8().unwrap();
+    let completed_plays = reader.get_u64().unwrap();
+    let admitted_segments = reader.get_u64().unwrap();
+    let remaining_waits = reader.get_u64().unwrap();
+    let declaration = reader.get_bytes().unwrap();
+    assert_eq!(declaration.len(), 32);
+    let mut changed_declaration = declaration.to_vec();
+    changed_declaration[0] ^= 1;
+    let play = reader.get_bytes().unwrap();
+    let state = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    assert_eq!(
+        (frame, started, completed_plays, remaining_waits),
+        (10, 3, 2, 3)
+    );
+    let mut restored = make();
+    restored
+        .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+        .unwrap();
+    let before = checkpoint_observation(&restored);
+    let before_png = seek(&mut restored, 10);
+    let before_report = restored.last_restore();
+    for case in [
+        "clock changed",
+        "nonfinite shape",
+        "started count changed",
+        "unknown effects",
+        "completed plays changed",
+        "completed plays overflow",
+        "admitted count too small",
+        "admitted count overflow",
+        "missing remaining wait",
+        "remaining waits overflow",
+        "changed declaration",
+        "missing declaration",
+        "overlong declaration",
+        "empty prepared play",
+        "invalid prepared play",
+        "invalid scene state",
+    ] {
+        let mut bad_frame = frame;
+        let mut bad_shape = shape;
+        let mut bad_started = started;
+        let mut bad_effects = effects;
+        let mut bad_completed = completed_plays;
+        let mut bad_admitted = admitted_segments;
+        let mut bad_remaining = remaining_waits;
+        let mut bad_declaration = declaration;
+        let mut bad_play = play;
+        let mut bad_state = state;
+        match case {
+            "clock changed" => bad_frame += 1,
+            "nonfinite shape" => bad_shape[0] = f64::NAN.to_bits(),
+            "started count changed" => bad_started += 1,
+            "unknown effects" => bad_effects |= 128,
+            "completed plays changed" => bad_completed += 1,
+            "completed plays overflow" => bad_completed = u64::MAX,
+            "admitted count too small" => bad_admitted = 0,
+            "admitted count overflow" => bad_admitted = u64::MAX,
+            "missing remaining wait" => bad_remaining -= 1,
+            "remaining waits overflow" => bad_remaining = u64::MAX,
+            "changed declaration" => bad_declaration = &changed_declaration,
+            "missing declaration" => bad_declaration = &[],
+            "overlong declaration" => bad_declaration = &[0; 33],
+            "empty prepared play" => bad_play = &[],
+            "invalid prepared play" => bad_play = b"not a prepared native play",
+            "invalid scene state" => bad_state = b"not a SceneState",
+            _ => unreachable!(),
+        }
+        let mut writer = Writer::new(schema);
+        writer.put_str(scene).put_u64(position).put_u32(read_count);
+        for (path, digest) in &reads {
+            writer.put_str(path).put_bytes(digest);
+        }
+        writer
+            .put_bytes(factory)
+            .put_u64(bad_frame)
+            .put_u64(bad_shape[0])
+            .put_u64(bad_shape[1])
+            .put_u64(bad_started)
+            .put_u8(bad_effects)
+            .put_u64(bad_completed)
+            .put_u64(bad_admitted)
+            .put_u64(bad_remaining)
+            .put_bytes(bad_declaration)
+            .put_bytes(bad_play)
+            .put_bytes(bad_state);
+        let bytes = writer.finish().unwrap();
+        let error = restored
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                state_hash: protocol_digest(&bytes),
+                state: bytes,
+                ..saved.clone()
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected, "{case}");
+        assert_eq!(checkpoint_observation(&restored), before, "{case}");
+        assert_eq!(restored.journal_position(), 1, "{case}");
+        assert_eq!(restored.last_state_hash(), Some(entry.state_hash), "{case}");
+        assert_eq!(restored.last_restore(), before_report, "{case}");
+        assert!(restored.journal_tail().is_empty(), "{case}");
+    }
+    assert_eq!(png(&seek(&mut restored, 10)), png(&before_png));
+}
+
+fn active_play_checkpoint_with_wrong_schema(saved: &Checkpoint, starting: bool) -> Checkpoint {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+
+    let schema = Schema::new(*b"FMNR", 3, 0, 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let mut writer = Writer::new(schema);
+    writer
+        .put_str(reader.get_str().unwrap())
+        .put_u64(reader.get_u64().unwrap());
+    let read_count = reader.get_u32().unwrap();
+    writer.put_u32(read_count);
+    for _ in 0..read_count {
+        writer
+            .put_str(reader.get_str().unwrap())
+            .put_bytes(reader.get_bytes().unwrap());
+    }
+    writer.put_bytes(reader.get_bytes().unwrap()); // Factory identity.
+    for _ in 0..4 {
+        // Frame, both frame-shape components, and started-segment count.
+        writer.put_u64(reader.get_u64().unwrap());
+    }
+    writer.put_u8(reader.get_u8().unwrap());
+    for _ in 0..3 {
+        // Completed plays, admitted segments, and remaining waits.
+        writer.put_u64(reader.get_u64().unwrap());
+    }
+    writer.put_bytes(reader.get_bytes().unwrap()); // Declaration identity.
+    let play = reader.get_bytes().unwrap();
+    let scene_bytes = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+    scene.restore_state_bytes(scene_bytes).unwrap();
+    let mut clock = fmn_anim::RationalFrameClock::new(scene.fps()).unwrap();
+    clock.advance_frames(scene.time().frames()).unwrap();
+    let (animations, _) = fmn_anim::continuation::restore(scene.stage(), &clock, play).unwrap();
+    let target = if starting {
+        animations[0].state().starting_mobject().unwrap()
+    } else {
+        animations[0].state().mobject()
+    };
+    let len = scene.stage().get(target).unwrap().buffer.len();
+    assert!(len > 0);
+    scene.stage_mut().get_mut(target).unwrap().buffer =
+        RecordBuffer::new(RecordSchema::mobject(), len).unwrap();
+    let changed_scene = scene.state_bytes().unwrap();
+    writer.put_bytes(play).put_bytes(&changed_scene);
+    let state = writer.finish().unwrap();
+    Checkpoint {
+        state_hash: protocol_digest(&state),
+        state,
+        ..saved.clone()
+    }
+}
+
+#[test]
+fn active_vector_fade_and_partial_reveal_reject_wrong_prepared_schemas_atomically() {
+    for kind in [TerminalPlayKind::VectorFade, TerminalPlayKind::PassingFlash] {
+        let make = || terminal_play_worker(kind, TerminalPlayPolicy::Native, true, 1, 100);
+        let mut original = make();
+        let entry = commit(&mut original, 10);
+        let saved = checkpoint(&entry, 0);
+        let mut restored = make();
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap();
+        assert_eq!(
+            restored.last_restore().unwrap().mode,
+            NativeRestoreMode::Checkpoint
+        );
+        let before = checkpoint_observation(&restored);
+        let before_png = seek(&mut restored, 10);
+        let before_report = restored.last_restore();
+        for starting in [false, true] {
+            // All three document checksums and the outer digest are correct.
+            // The malformed buffer preserves its handle, family and flags;
+            // only the mechanism's required VMobject schema has changed.
+            let malformed = active_play_checkpoint_with_wrong_schema(&saved, starting);
+            let error = restored
+                .handle(SupervisorRequest::RestoreCheckpoint(malformed))
+                .unwrap_err();
+            assert_eq!(
+                error.code,
+                WorkerErrorCode::CheckpointRejected,
+                "{kind:?}, starting {starting}"
+            );
+            assert_eq!(checkpoint_observation(&restored), before);
+            assert_eq!(restored.journal_position(), 1);
+            assert_eq!(restored.last_state_hash(), Some(entry.state_hash));
+            assert_eq!(restored.last_restore(), before_report);
+            assert!(restored.journal_tail().is_empty());
+            assert_eq!(png(&seek(&mut restored, 10)), png(&before_png));
+        }
+        assert_eq!(png(&seek(&mut restored, 15)), png(&seek(&mut original, 15)));
+        assert_eq!(
+            checkpoint_observation(&restored),
+            checkpoint_observation(&original)
+        );
+    }
 }

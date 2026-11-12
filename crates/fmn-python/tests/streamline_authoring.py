@@ -6,6 +6,8 @@ portal and is also suitable for an installed wheel outside the source tree.
 from __future__ import annotations
 
 import gc
+from pathlib import Path
+import tempfile
 import unittest
 
 import manimlib as m
@@ -225,10 +227,146 @@ class StreamlineAuthoringTests(unittest.TestCase):
         lines.init_style()
         self.assertEqual(calls, [lines, lines])
 
+    def test_custom_gradient_helpers_clip_magnitudes_and_keep_qualified_aliases(self):
+        from manimlib.mobject.vector_field import get_rgb_gradient_function, get_vectorized_rgb_gradient_function
+        self.assertIs(get_rgb_gradient_function, m.get_rgb_gradient_function)
+        self.assertIs(get_vectorized_rgb_gradient_function, m.get_vectorized_rgb_gradient_function)
+        seen = []
+        class Map:
+            __hash__ = None
+            def __bool__(self):
+                raise AssertionError("color-map truth must not be inspected")
+            def __eq__(self, other):
+                raise AssertionError("color-map equality must not be inspected")
+            def __call__(self, alphas):
+                seen.append(alphas.copy())
+                return np.column_stack([alphas, 1. - alphas, np.full(len(alphas), .25), np.zeros(len(alphas))])
+        palette = Map()
+        gradient = get_vectorized_rgb_gradient_function(2., 4., palette)
+        colors = gradient([0., 2., 3., 4., 8.])
+        np.testing.assert_array_equal(colors[:, 0], [0., 0., .5, 1., 1.])
+        np.testing.assert_array_equal(seen, [[0., 0., .5, 1., 1.]])
+        self.assertEqual(colors.shape, (5, 3))
+        self.assertEqual(gradient([]).shape, (0, 3))
+        self.assertEqual(len(seen), 1)
+        scalar = get_rgb_gradient_function(2., 4., palette)
+        np.testing.assert_array_equal(scalar(3.), [.5, .5, .25])
+        constant = get_vectorized_rgb_gradient_function(2., 2., palette)
+        np.testing.assert_array_equal(constant([2., 9.]), [[0., 1., .25]] * 2)
 
-suite = unittest.defaultTestLoader.loadTestsFromTestCase(StreamlineAuthoringTests)
-assert suite.countTestCases() == 15, "native streamline-authoring inventory changed"
+    def test_custom_color_map_survives_live_restyle_redraw_and_flow_cleanup(self):
+        phase, seen = [.25], []
+        def mapping(alphas):
+            seen.append(alphas.copy())
+            return np.column_stack([alphas, np.full(len(alphas), phase[0]),
+                                    np.full(len(alphas), .125), np.zeros(len(alphas))])
+        lines = self.lines(color_map=mapping, stroke_opacity=.6, taper_stroke_width=True)
+        self.assertIs(lines.color_map, mapping)
+        self.assertTrue(seen)
+        for alphas in seen:
+            np.testing.assert_array_equal(alphas, np.full(len(alphas), .5))
+        scene = m.Scene()
+        scene.add(lines)
+        children = tuple(lines)
+        views = [line.data["stroke_rgba"] for line in lines]
+        points = [line.get_points().copy() for line in lines]
+        phase[0] = .75
+        lines.init_style()
+        self.assertEqual(tuple(lines), children)
+        for line, view, original in zip(lines, views, points):
+            np.testing.assert_array_equal(line.get_points(), original)
+            np.testing.assert_allclose(view, np.tile([.5, .75, .125, .6], (len(view), 1)))
+        lines.draw_lines()
+        self.assertIs(scene.mobjects[1], lines)
+        self.assertTrue(all(new is not old for new, old in zip(lines, children)))
+        for line in lines:
+            np.testing.assert_allclose(line.data["stroke_rgba"],
+                                       np.tile([.5, .75, .125, .6], (line.get_num_points(), 1)))
+        colors = [line.data["stroke_rgba"].copy() for line in lines]
+        flow = m.AnimatedStreamLines(lines, lag_range=0)
+        flow.update(.07)
+        flow.clear_updaters()
+        for line, color in zip(lines, colors):
+            np.testing.assert_array_equal(line.data["stroke_rgba"], color)
+
+    def test_custom_color_failure_keeps_displayed_family_and_can_recover(self):
+        lines = self.lines()
+        children, records = tuple(lines), [line.data.copy() for line in lines]
+        failure, calls = LookupError("late color callback failure"), []
+        def mapping(alphas):
+            calls.append(len(alphas))
+            if len(calls) == 2:
+                raise failure
+            return np.tile([1., 0., 0.], (len(alphas), 1))
+        lines.color_map = mapping
+        for operation in (lines.init_style, lines.draw_lines):
+            calls.clear()
+            with self.assertRaises(LookupError) as caught:
+                operation()
+            self.assertIs(caught.exception, failure)
+            self.assertEqual(tuple(lines), children)
+            for line, record in zip(lines, records):
+                np.testing.assert_array_equal(line.data, record)
+        lines.color_map = lambda alphas: np.full((len(alphas), 3), np.nan)
+        with self.assertRaisesRegex(ValueError, "finite"):
+            lines.init_style()
+        for line, record in zip(lines, records):
+            np.testing.assert_array_equal(line.data, record)
+        # A uniform stroke never consults the map, even during native redraw.
+        def forbidden(alphas):
+            raise AssertionError("uniform style invoked a custom color map")
+        lines.color_map, lines.color_by_magnitude = forbidden, False
+        lines.stroke_color = m.GREEN
+        lines.draw_lines()
+        for line in lines:
+            np.testing.assert_allclose(line.data["stroke_rgba"][:, :3],
+                                       np.tile(m.color_to_rgb(m.GREEN), (line.get_num_points(), 1)))
+
+    def test_custom_colors_match_independent_native_frames_at_each_worker_count(self):
+        palette = ([.75, .125, .25], [.125, .75, .25])
+        def render(path, threads, authored):
+            phase = [0]
+            def mapping(alphas):
+                return np.tile(palette[phase[0]], (len(alphas), 1))
+            config = dict(color_map=mapping) if authored else dict(
+                color_by_magnitude=False, stroke_color=m.rgb_to_color(palette[0]))
+            lines = self.lines(stroke_width=16, **config)
+            scene = m.Scene()
+            with scene.render_session(path, format="png_sequence", resolution=(96, 64),
+                                      fps=4, threads=threads) as output:
+                scene.add(lines)
+                scene.wait(.25)
+                phase[0] = 1
+                if authored:
+                    lines.init_style()
+                else:
+                    lines.set_stroke(m.rgb_to_color(palette[1]))
+                scene.wait(.25)
+            self.assertEqual(output.result.frame_count, 2)
+            frames = [file.read_bytes() for file in sorted(path.glob("*.png"))]
+            self.assertEqual(len(frames), 2)
+            self.assertNotEqual(frames[0], frames[1], "color changes must reach visible native pixels")
+            return frames
+        with tempfile.TemporaryDirectory(prefix="fmn-streamline-colors-") as directory:
+            root = Path(directory)
+            expected = render(root / "literal", 1, False)
+            for threads in (1, 4, 16):
+                self.assertEqual(render(root / f"authored-{threads}", threads, True), expected)
+
+
+_COLOR_CASES = (
+    "test_custom_gradient_helpers_clip_magnitudes_and_keep_qualified_aliases",
+    "test_custom_color_map_survives_live_restyle_redraw_and_flow_cleanup",
+    "test_custom_color_failure_keeps_displayed_family_and_can_recover",
+    "test_custom_colors_match_independent_native_frames_at_each_worker_count",
+)
+if globals().get("_fmn_streamline_colors_only", False):
+    suite = unittest.TestSuite(StreamlineAuthoringTests(name) for name in _COLOR_CASES)
+else:
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(StreamlineAuthoringTests)
+    assert suite.countTestCases() == 19, "native streamline-authoring inventory changed"
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 gc.collect()
 if not result.wasSuccessful():
     raise AssertionError("native streamline-authoring acceptance failed")
+_fmn_streamline_color_checks = len(_COLOR_CASES)

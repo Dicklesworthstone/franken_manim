@@ -99,6 +99,48 @@ ligature is one submobject), so scene code indexes identically.
   `x\;=y` loses the relation spacing around `=`, and `a\!\!b` does not
   compile. A formula that asks for a space gets it.
 
+## Native legacy and preset TeX constructors
+
+The native Rust facade and `fmn::prelude` expose `SingleStringTex`,
+`OldTexText` and `TexTextFromPresetString` alongside `Tex`, `TexText` and
+`OldTex`. They use the same bundled `TexEngine`, geometry and source-span
+tables as the modern constructors; no external typesetter is involved.
+
+`SingleStringTex` is the legacy single-string surface. It trims the authored
+string and repairs the legacy incomplete-expression cases before native
+layout: unmatched braces, incomplete trailing scripts and a small set of
+partial commands, and unbalanced `\left`/`\right` delimiters. Delimiter repair
+recognizes the delimiter commands and leaves names such as `\leftarrow`
+intact. `get_tex()` returns the authored string, while the built mobject's
+source and spans refer to the normalized expression that was actually laid
+out. Modern `Tex` continues to report malformed input rather than applying
+these legacy repairs.
+
+The builder accepts math or text mode, ordinary size and style controls,
+optional height, and `organize_left_to_right`. Ordering changes move glyph
+geometry, source-span entries and layout order together, so subsequent source
+selection still refers to the displayed glyph. Font size and explicit height
+must be finite and nonnegative; calibration must be finite and positive.
+Unrepresentable scales or geometry return `TexMobjectError::InvalidParameter`
+instead of publishing nonfinite records. Both authored and normalized source
+remain subject to the native input budget.
+
+`OldTexText::new(&["Old ", "$x^2$"])` is `OldTex`'s text-mode constructor:
+it joins arguments for one layout and then restores legacy argument groups.
+A single empty argument retains its empty group; empty arguments in a
+multi-argument construction are omitted. Modern text and inline math semantics
+are shared with `TexText`. `TexTextFromPresetString::from_preset(source, color)`
+provides the Reference's preset-string pattern without Python subclassing;
+`.new(source)` uses the ordinary white default, and `.color(...)` or
+`.style(...)` explicitly overrides the preset style. Preset strings use modern
+text parsing and do not inherit legacy expression repair.
+
+The `render_matrix.native_tex_constructors.v1` scenario exercises all three
+through the public Rust facade and compares their PNG output to independently
+authored modern constructors at one, four and sixteen threads. Native unit
+tests cover normalization, size admission, group identity, preset precedence
+and span-preserving ordering.
+
 ## TeX constructs beyond the 3b1b corpus
 
 fmd-math's first vocabulary was ranked by 3b1b's own videos. These constructs from the
@@ -333,3 +375,92 @@ string's widest line and total height with real TeX's.
 
 Migration: none. A long `TexText` that the Reference breaks now breaks the same way, where it
 used to be one line up to 185 em wide.
+
+
+## Authored global and local text configuration
+
+`Text` and `MarkupText` accept the supported native attributes in
+`global_config` and `local_configs`. Global attributes establish an inherited
+style before parsing markup. A local configuration maps an ordinary string,
+regular expression, character range, or composite selector to an attribute
+dictionary. Selectors run against the original source; the portal converts their
+character ranges to UTF-8 byte ranges for Scribe without inserting markup or
+changing glyph provenance.
+
+| Attribute | Supported native meaning |
+|---|---|
+| `foreground`, `fgcolor`, `color` | A finite RGB color; the native foreground channel. |
+| `font_family`, `face` | An explicitly available bundled or registered family. |
+| `font_style`, `style` | `normal`, `italic`, or `oblique`; the last two select the native italic face. |
+| `font_weight`, `weight` | `normal`/`400` and `bold`/`700`. |
+| `underline` | `none` or `single`. |
+| `strikethrough` | `true` or `false`. |
+| `font_size`, `size` | Integer Pango units (1/1024 point), point strings such as `24pt`, percentages such as `150%`, or `larger`/`smaller`. |
+
+A size in points or Pango units is absolute relative to the constructor's
+`font_size`. Percentages and larger/smaller multiply the inherited size at
+that scope. Regeneration reads the original public size and current configuration
+again; it does not multiply an already enlarged result on each rebuild.
+
+Global `line_height` accepts a positive factor below 1024 or an integer
+absolute length in Pango units. Factors scale the native 1.2-em baseline skip;
+absolute lengths set that baseline distance independently of glyph size. This
+uses Scribe's fixed line metrics documented above, rather than host-font logical
+extents. Local line-height overrides are not representable by this layout and
+raise a named error.
+
+Global `font_features` can select the existing native bundled-ligature
+switch by setting all four of `liga`, `dlig`, `clig`, and `hlig` uniformly
+to 0 or uniformly to 1. Partial or mixed feature settings, arbitrary OpenType
+features, foreground alpha, letter spacing, font-description strings in
+`font`/`font_desc`, unsupported decoration variants, and host-dependent
+named absolute sizes raise an error naming the unsupported attribute. They are
+not silently discarded.
+
+### Scope precedence and deliberate overlap behavior
+
+The exact pinned Reference's `MarkupText.get_configured_items` and
+`StringMobject.parse` establish the following rules, retained by the native
+scope path:
+
+- A contained range is inside its enclosing range and overrides only its
+  supplied fields, regardless of dictionary order.
+- Equal ranges apply in authored order, with later values taking precedence.
+- An entire markup element selected by a configuration remains outside its
+  inline tags. For example, setting normal weight on the source
+  `<b>A</b>` still leaves the inner A bold. Selecting only A with normal
+  weight overrides that inner bold style.
+- Source entities retain their whole original byte span; selecting only part
+  of an entity does not style the decoded character.
+
+The Reference drops partly overlapping configured ranges and issues a warning.
+Native scopes retain both: independently supplied fields compose, and conflicting
+fields follow authored order except where containment requires the enclosing
+scope to be applied first. Thus bold on ABC and italic on CDE render the shared C
+with both styles instead of losing both configurations. This is a deliberate
+improvement over the Reference's discarded formatting.
+
+When local configurations are present, the font-family, slant, and weight t2
+maps enter the same scope stack before local configurations. With no local
+configurations, the existing ordered source-style-map path is unchanged.
+Per-glyph gradients retain their existing native map behavior. The public final
+gradient and t2c color hooks still run after construction, preserving authored
+hook dispatch and final recoloring.
+
+The object's configuration dictionaries remain writable. `init_points()`
+uses their current contents, while a failed validation or native layout leaves
+the published glyph family and source spans in place. Deep copies retain
+independent configurations and native glyph families. Resolved configured and
+inline style layers share the native 4096-layer limit. Before publication, the
+portal validates the actual scaled glyph and decoration coordinates against
+finite f32 scene records. Large relative size factors remain valid when a small
+authored font size makes the resulting scene geometry representable.
+
+Primary semantic sources are the pinned Reference
+[text mobject](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/text_mobject.py),
+[string mobject](https://github.com/3b1b/manim/blob/6199a00d4c1b1127ebe45cb629c3f22538b10e13/manimlib/mobject/svg/string_mobject.py),
+and [Pango's attribute units and aliases](https://docs.gtk.org/Pango/pango_markup.html).
+The acceptance suites are `crates/fmn-text/tests/text_layout.rs`,
+`crates/fmn-library/tests/text_authoring.rs`,
+`crates/fmn-python/tests/test_text_configuration_protocol.py`, and
+`crates/fmn-python/tests/text_authoring.py`.

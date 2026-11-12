@@ -3,10 +3,10 @@ use super::*;
 
 fn point_cloud_schema(target: &Bound<'_, BridgeMobject>) -> PyResult<RecordSchema> {
     let schema = parse_schema(target)?;
-    for (name, width) in [("point", 3), ("radius", 1), ("rgba", 4), ("glow_factor", 1)] {
+    for (name, width) in [("point", 3), ("radius", 1), ("rgba", 4)] {
         if schema.field_width(name) != Some(width) {
             return Err(PyValueError::new_err(
-                "dot-cloud records require point[3], radius[1], rgba[4] and glow_factor[1]",
+                "dot-cloud records require point[3], radius[1] and rgba[4]",
             ));
         }
     }
@@ -68,19 +68,24 @@ fn _validate_point_cloud(target: &Bound<'_, BridgeMobject>) -> PyResult<()> {
                 "point-cloud schema or native primitive changed during construction",
             ));
         }
-        for name in ["point", "radius", "rgba", "glow_factor"] {
+        for name in ["point", "radius", "rgba"] {
             let values = entry
                 .buffer
                 .read_column(name)
                 .ok_or_else(|| PyValueError::new_err("point-cloud record field is missing"))?;
             if values.iter().any(|value| !value.is_finite())
-                || (matches!(name, "radius" | "glow_factor")
-                    && values.iter().any(|&value| value < 0.0))
+                || (name == "radius" && values.iter().any(|&value| value < 0.0))
             {
                 return Err(PyValueError::new_err(
-                    "point-cloud records must be finite with non-negative radii and glow factors",
+                    "point-cloud records must be finite with non-negative radii",
                 ));
             }
+        }
+        let glow = entry.uniforms().glow_factor;
+        if !glow.is_finite() || glow < 0.0 {
+            return Err(PyValueError::new_err(
+                "point-cloud glow factor must be finite and non-negative",
+            ));
         }
         let aa = entry.uniforms().anti_alias_width;
         if !aa.is_finite() || aa < 0.0 {
@@ -108,6 +113,30 @@ pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
+/// Exercise packed Reference records and native scalar materials through the
+/// production Python portal, including actual retained-frame Lumen output.
+///
+/// # Errors
+/// Returns the original Python/native acceptance failure.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_point_cloud_uniforms() -> Result<u64, String> {
+    crate::with_python_test_module("live point-cloud materials", |py, _module, globals| {
+        let code = std::ffi::CString::new(include_str!("../tests/native_point_cloud_materials.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("run_native_point_cloud_materials")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "point-cloud material acceptance entry point is absent".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<u64>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -133,20 +162,9 @@ mod tests {
 
     #[test]
     fn live_point_cloud_materials_and_retained_frames() {
-        crate::with_python_test_module("live point-cloud materials", |py, _module, globals| {
-            let code =
-                std::ffi::CString::new(include_str!("../tests/native_point_cloud_materials.py"))
-                    .unwrap();
-            py.run(code.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py))
-                .unwrap();
-            globals
-                .get_item("run_native_point_cloud_materials")
-                .unwrap()
-                .unwrap()
-                .call0()
-                .inspect_err(|error| error.print(py))
-                .unwrap();
-        });
+        assert_eq!(
+            super::run_portal_gauntlet_point_cloud_uniforms().unwrap(),
+            26
+        );
     }
 }

@@ -60,7 +60,7 @@ migration guidance users read:
 | BN-24 | Live affine axes invert their chart instead of projecting onto each axis | [BN-24-live-affine-coordinate-inversion.md](BN-24-live-affine-coordinate-inversion.md) | W7/W10 | Draft |
 | BN-25 | A camera at any resolution keeps square pixels | [BN-25-camera-output-aspect.md](BN-25-camera-output-aspect.md) | W5/W10 | Draft |
 | BN-26 | Arrow rebuilds keep a same-count NumPy view live | [BN-26-arrow-rebuilds-keep-live-views.md](BN-26-arrow-rebuilds-keep-live-views.md) | W10 | Draft |
-| BN-27 | Explicit holes in native parametric surfaces | [BN-27-explicit-surface-holes.md](BN-27-explicit-surface-holes.md) | W7 | Implemented |
+| BN-27 | Explicit holes in parametric surfaces | [BN-27-explicit-surface-holes.md](BN-27-explicit-surface-holes.md) | W7 | Implemented |
 
 BN-10 and BN-12 through BN-27 grew past §16.8's seed list, which is expected — the
 seed names the differences the plan could foresee, and a workstream that finds

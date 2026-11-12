@@ -82,8 +82,13 @@ impl CoordinateFrame {
         for &color in &config.colors {
             validate_fill(color, config.fill_opacity)?;
         }
-        if !config.stroke_width.is_finite() || config.stroke_width < 0.0 {
-            return Err(invalid("stroke width must be finite and nonnegative"));
+        if !config.stroke_width.is_finite()
+            || config.stroke_width < 0.0
+            || config.stroke_width > f64::from(f32::MAX)
+        {
+            return Err(invalid(
+                "stroke width must fit nonnegative finite f32 records",
+            ));
         }
         let [start, stop] = x_range.unwrap_or([self.ranges[0][0], self.ranges[0][1]]);
         let bins = riemann_bins(
@@ -156,8 +161,9 @@ impl CoordinateFrame {
 
     /// Styled integral region from the source's own quadratic point run.
     /// Child-bearing groups must be flattened explicitly. Input and output
-    /// point counts share this chart's sampling budget. The source geometry,
-    /// styles and Stage are never modified.
+    /// point counts share this chart's sampling budget. Projection uniforms
+    /// and the source style are preserved, with zero stroke width and the
+    /// requested fill. The source geometry, styles and Stage are never modified.
     pub fn area_under_graph_styled(
         &self,
         graph: &VMobject,
@@ -185,9 +191,11 @@ impl CoordinateFrame {
             .path()
             .map_err(|_| invalid("area requires a shared-anchor quadratic path"))?;
         let mut result = QuadPath::new();
-        let style = Style::default().stroke_width(0.0).fill(color, opacity);
+        let style = graph.style().stroke_width(0.0).fill(color, opacity);
         if x_range.is_some_and(|[left, right]| left == right) {
-            return Ok(VMobject::new().with_style(style));
+            return Ok(VMobject::new()
+                .with_style(style)
+                .with_uniforms(graph.uniforms()));
         }
         for component in path.subpaths() {
             if component.len() < 3 {
@@ -285,7 +293,9 @@ impl CoordinateFrame {
                 .add_subpath(region.points())
                 .map_err(|_| invalid("could not join integral components"))?;
         }
-        Ok(VMobject::from_path(&result).with_style(style))
+        Ok(VMobject::from_path(&result)
+            .with_style(style)
+            .with_uniforms(graph.uniforms()))
     }
 }
 

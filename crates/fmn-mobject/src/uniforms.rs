@@ -8,7 +8,8 @@
 //! (a float *mix*, per the kept camera model — not a bool), the `shading` triple
 //! (reflectiveness, gloss, shadow), and four clip-plane slots; VMobjects add the
 //! anti-alias width, joint type, and the `flat_stroke` / `scale_stroke_with_zoom`
-//! flags. `stroke_behind` and `depth_test` are per-object flags the Reference
+//! flags. Dot clouds add the radial `glow_factor`, shared by all their points.
+//! `stroke_behind` and `depth_test` are per-object flags the Reference
 //! stores alongside the dict.
 //!
 //! # Appendix C rulings owned here
@@ -77,6 +78,9 @@ pub struct Uniforms {
     pub clip_planes: [[f64; 4]; 4],
     /// Per-kind anti-alias width in pixels. Reference default `1.5`.
     pub anti_alias_width: f64,
+    /// Dot-cloud radial exponent, shared by every point: `0.0` is a hard disc
+    /// and `2.0` is the default GlowDot falloff. Other primitive kinds ignore it.
+    pub glow_factor: f64,
     /// Stroke joint style.
     pub joint_type: JointType,
     /// Whether the stroke is drawn flat (in the xy-plane) vs. billboarded.
@@ -98,6 +102,7 @@ impl Default for Uniforms {
             shading: [0.0, 0.0, 0.0],
             clip_planes: [[0.0; 4]; 4],
             anti_alias_width: 1.5,
+            glow_factor: 0.0,
             joint_type: JointType::Auto,
             flat_stroke: false,
             scale_stroke_with_zoom: false,
@@ -150,6 +155,7 @@ mod tests {
         assert_eq!(u.shading(), [0.0, 0.0, 0.0]);
         assert_eq!(u.clip_planes, [[0.0; 4]; 4]);
         assert_eq!(u.anti_alias_width, 1.5);
+        assert_eq!(u.glow_factor, 0.0);
         assert_eq!(u.joint_type, JointType::Auto);
         assert!(!u.flat_stroke);
         assert!(!u.scale_stroke_with_zoom);

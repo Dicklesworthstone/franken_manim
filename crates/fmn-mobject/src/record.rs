@@ -439,9 +439,10 @@ impl RecordBuffer {
         Some(self.storage.field_revisions[index].load(Ordering::Acquire))
     }
 
-    /// Stable identity of the current storage generation. Test hook for
-    /// CoW / detach / O(touched) assertions; mirrors also use it to detect
-    /// generation swaps.
+    /// Address of the current storage allocation, useful for CoW / detach /
+    /// O(touched) assertions while the compared allocations remain alive.
+    /// Allocators can reuse this address after release; retained cache keys
+    /// must use [`Self::storage_generation`] or [`Self::storage_identity`].
     #[must_use]
     pub fn storage_id(&self) -> usize {
         Arc::as_ptr(&self.storage) as usize
@@ -542,6 +543,25 @@ impl RecordBuffer {
         let cells = self.storage.cells.read().expect("storage lock poisoned");
         let start = index * self.schema.stride() + off;
         Some(cells[start..start + width].to_vec())
+    }
+
+    /// Inspect a constant one-lane field without allocating a column. Empty
+    /// records use the phantom default, or zero when no default was stored.
+    /// Used by durable-format migrations that must respect the decode budget.
+    pub(crate) fn constant_scalar_field(&self, field: &str) -> Option<f32> {
+        if self.schema.field_width(field)? != 1 {
+            return None;
+        }
+        if self.len == 0 {
+            return Some(self.default_record_slice(field).map_or(0.0, |row| row[0]));
+        }
+        let offset = self.schema.offset(field)?;
+        let stride = self.schema.stride();
+        let cells = self.storage.cells.read().expect("storage lock poisoned");
+        let value = cells[offset];
+        (1..self.len)
+            .all(|record| cells[record * stride + offset] == value)
+            .then_some(value)
     }
 
     /// Extract the whole column of `field`, record-major
@@ -1415,7 +1435,7 @@ struct FieldMirror {
     lanes: Vec<f32>,
     len: usize,
     seen_revision: u64,
-    seen_storage: usize,
+    seen_generation: u64,
 }
 
 /// The lazy revisioned render mirrors (§8.2 Rev 4, D-20): what the hot
@@ -1454,12 +1474,12 @@ impl MirrorSet {
         let width = buffer.schema().field_width(field)?;
         let stride = buffer.schema().stride();
         let len = buffer.len();
-        let storage = buffer.storage_id();
+        let generation = buffer.storage_generation();
         let forced = buffer.writable_view_affects(field);
 
         if let Some(mirror) = self.fields.get_mut(field) {
             if mirror.seen_revision != revision
-                || mirror.seen_storage != storage
+                || mirror.seen_generation != generation
                 || mirror.len != len
                 || forced
             {
@@ -1473,7 +1493,7 @@ impl MirrorSet {
                 }
                 mirror.len = len;
                 mirror.seen_revision = revision;
-                mirror.seen_storage = storage;
+                mirror.seen_generation = generation;
                 self.materializations += 1;
             }
         } else {
@@ -1491,7 +1511,7 @@ impl MirrorSet {
                     lanes,
                     len,
                     seen_revision: revision,
-                    seen_storage: storage,
+                    seen_generation: generation,
                 },
             );
             self.materializations += 1;

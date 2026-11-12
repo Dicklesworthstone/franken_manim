@@ -3,6 +3,7 @@
 Marker files prove orchestration only; recording_sessions.py uses native pixels.
 """
 from contextlib import contextmanager
+import ast
 import hashlib
 import os
 from pathlib import Path
@@ -14,7 +15,7 @@ import unittest
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "python"))
-from fmn_python.recording import RecordingSession, record_scene
+from fmn_python.recording import RecordingSession, record_scene, install_file_writer_recording
 from fmn_python.scene_console import SceneConsole
 from fmn_python import record_scene as public_record_scene
 
@@ -98,6 +99,17 @@ def begin(scene, *request):
 
 native = types.SimpleNamespace(Scene=Scene, CheckpointManager=CheckpointManager,
     _portal_scene_clock=lambda scene: (scene.fps, scene.frame), _portal_begin_recording=begin)
+
+# Execute the shipping writer's path/configuration methods, not a hand-written
+# approximation of its naming rules. Only the scene/output boundary is doubled.
+bootstrap = Path(__file__).resolve().parents[1] / "python" / "manimlib_bootstrap.py"
+writer_class = next(node for node in ast.parse(bootstrap.read_text()).body
+                    if isinstance(node, ast.ClassDef) and node.name == "SceneFileWriter")
+writer_namespace = {"Scene": Scene, "_pathlib": __import__("pathlib"), "_CapabilityError": RuntimeError}
+# ubs:ignore -- executes only the SceneFileWriter definition from this repository's fixed bootstrap file.
+exec(compile(ast.Module(body=[writer_class], type_ignores=[]), str(bootstrap), "exec"), writer_namespace)
+native.SceneFileWriter = writer_namespace["SceneFileWriter"]
+install_file_writer_recording(native)
 
 
 class RecordingTests(unittest.TestCase):
@@ -334,6 +346,189 @@ class RecordingTests(unittest.TestCase):
             self.console(shell=shell).run_cell("pass", record_to=self.root / "error.y4m")
         self.assertIs(caught.exception, error)
         self.assertEqual(self.scene.events, ["begin", "abort"])
+
+
+class FileWriterInsertTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.scene = Scene()
+        self.writer = native.SceneFileWriter(self.scene, output_directory=str(self.root),
+            file_name="lesson.part", movie_file_extension=".y4m", quiet=True)
+        self.scene.file_writer = self.writer
+
+    def test_native_publication_uses_first_free_insert_and_preserves_original(self):
+        original = Path(self.writer.get_movie_file_path())
+        original.write_bytes(b"original movie")
+        occupied = self.root / "inserts" / "lesson.part_0.y4m"
+        occupied.parent.mkdir()
+        occupied.write_bytes(b"first clip")
+        mob, camera, movie_path = self.scene.mobjects[0], self.scene.camera, self.writer.movie_file_path
+        self.assertIsNone(self.writer.begin_insert())
+        session = vars(self.scene)["_fmn_owned_render_session"]
+        self.assertIsInstance(session, RecordingSession)
+        self.assertEqual(session.start_frame, 90)
+        self.assertEqual(self.writer.inserted_file_path, occupied.with_name("lesson.part_1.y4m"))
+        self.assertTrue(self.writer.write_to_movie)
+        self.scene.frame += 4
+        self.assertIsNone(self.writer.end_insert())
+        self.assertEqual((session.result.frame_count, session.start_frame, session.end_frame), (4, 90, 94))
+        self.assertEqual(session.result.digest, hashlib.sha256(self.writer.inserted_file_path.read_bytes()).hexdigest())
+        self.assertEqual(original.read_bytes(), b"original movie")
+        self.assertEqual(occupied.read_bytes(), b"first clip")
+        self.assertEqual(self.writer.movie_file_path, movie_path)
+        self.assertIs(self.scene.mobjects[0], mob)
+        self.assertIs(self.scene.camera, camera)
+        self.assertFalse(self.writer.write_to_movie)
+        self.assertNotIn("_fmn_owned_render_session", vars(self.scene))
+        self.assertNotIn("_fmn_file_writer_insert", vars(self.scene))
+        self.assertNotIn("_fmn_file_writer_insert", vars(self.writer))
+        self.writer.begin_insert()
+        self.assertEqual(self.writer.inserted_file_path.name, "lesson.part_2.y4m")
+        self.writer.end_insert()
+
+    def test_path_queries_are_lazy_and_keep_dotted_names(self):
+        self.assertEqual(self.writer.get_insert_file_path(2),
+                         str(self.root / "inserts" / "lesson.part_2.y4m"))
+        self.assertFalse((self.root / "inserts").exists())
+
+    def test_directories_and_dangling_links_are_occupied(self):
+        first = Path(self.writer.get_insert_file_path(0))
+        first.mkdir(parents=True)
+        link = Path(self.writer.get_insert_file_path(1))
+        try:
+            link.symlink_to(self.root / "absent")
+        except (OSError, NotImplementedError):
+            self.skipTest("this host does not permit creating a symlink")
+        self.writer.begin_insert()
+        self.assertEqual(self.writer.inserted_file_path.name, "lesson.part_2.y4m")
+        self.writer.end_insert()
+        self.assertTrue(first.is_dir())
+        self.assertTrue(link.is_symlink())
+
+    def test_nested_and_external_owners_cannot_be_stolen(self):
+        self.writer.begin_insert()
+        first = vars(self.scene)["_fmn_owned_render_session"]
+        with self.assertRaisesRegex(RuntimeError, "active insert"):
+            self.writer.begin_insert()
+        self.assertIs(vars(self.scene)["_fmn_owned_render_session"], first)
+        self.writer.end_insert()
+        external = RecordingSession(self.scene, self.root / "external.y4m", _native=native)
+        with external:
+            with self.assertRaisesRegex(RuntimeError, "already has"):
+                self.writer.begin_insert()
+            self.assertIs(vars(self.scene)["_fmn_owned_render_session"], external)
+            self.assertFalse(self.writer.write_to_movie)
+        self.assertNotIn("abort", self.scene.events)
+
+    def test_native_start_failure_preserves_writer_state(self):
+        self.writer.write_to_movie = True
+        self.writer.inserted_file_path = "prior successful clip"
+        self.scene.start_error = OSError("sink admission failed")
+        with self.assertRaisesRegex(OSError, "sink admission"):
+            self.writer.begin_insert()
+        self.assertTrue(self.writer.write_to_movie)
+        self.assertEqual(self.writer.inserted_file_path, "prior successful clip")
+        self.assertNotIn("_fmn_insert_starting", vars(self.writer))
+        self.assertNotIn("_fmn_owned_render_session", vars(self.scene))
+        self.assertEqual(self.scene.events, ["begin"])
+        self.assertFalse((self.root / "inserts").exists())
+
+    def test_finish_failure_aborts_and_allows_retry(self):
+        self.writer.begin_insert()
+        path = self.writer.inserted_file_path
+        self.scene.finish_error = OSError("disk full")
+        with self.assertRaisesRegex(OSError, "disk full"):
+            self.writer.end_insert()
+        self.assertFalse(path.exists())
+        self.assertFalse(self.writer.write_to_movie)
+        self.assertNotIn("_fmn_owned_render_session", vars(self.scene))
+        self.assertEqual(self.scene.events, ["begin", "finish", "abort"])
+        self.scene.finish_error = None
+        self.writer.begin_insert()
+        self.assertEqual(self.writer.inserted_file_path, path)
+        self.writer.end_insert()
+
+    def test_post_admission_registration_failure_aborts_and_restores_writer(self):
+        class FailRegistrationOnce(dict):
+            failed = False
+            def __setitem__(self, key, value):
+                if key == "_fmn_file_writer_insert" and not self.failed:
+                    self.failed = True
+                    raise MemoryError("insert owner registration")
+                super().__setitem__(key, value)
+        self.scene.__dict__ = FailRegistrationOnce(vars(self.scene))
+        self.writer.write_to_movie = True
+        self.writer.inserted_file_path = "previous clip"
+        with self.assertRaisesRegex(MemoryError, "insert owner registration"):
+            self.writer.begin_insert()
+        self.assertTrue(self.writer.write_to_movie)
+        self.assertEqual(self.writer.inserted_file_path, "previous clip")
+        self.assertFalse(self.scene.active)
+        self.assertNotIn("_fmn_owned_render_session", vars(self.scene))
+        self.assertNotIn("_fmn_file_writer_insert", vars(self.writer))
+        self.assertEqual(self.scene.events, ["begin", "abort"])
+
+    def test_publication_race_preserves_competing_file(self):
+        self.writer.begin_insert()
+        path = self.writer.inserted_file_path
+        path.parent.mkdir()
+        path.write_bytes(b"competitor")
+        with self.assertRaises(FileExistsError):
+            self.writer.end_insert()
+        self.assertEqual(path.read_bytes(), b"competitor")
+        self.assertFalse(self.writer.write_to_movie)
+        self.assertNotIn("_fmn_owned_render_session", vars(self.scene))
+
+    def test_no_active_insert_and_detached_writer_refuse_without_side_effects(self):
+        with self.assertRaisesRegex(RuntimeError, "no active insert"):
+            self.writer.end_insert()
+        detached = native.SceneFileWriter(self.scene)
+        with self.assertRaisesRegex(RuntimeError, "attached"):
+            detached.begin_insert()
+        self.assertEqual(self.scene.events, [])
+
+    def test_number_search_is_bounded(self):
+        with patch("fmn_python.recording.os.path.lexists", return_value=True) as exists:
+            with self.assertRaisesRegex(ValueError, "10,000"):
+                self.writer.begin_insert()
+        self.assertEqual(exists.call_count, 10_000)
+        self.assertEqual(self.scene.events, [])
+        self.assertFalse(self.writer.write_to_movie)
+
+    def test_end_on_wrong_thread_preserves_active_owner(self):
+        self.writer.begin_insert()
+        errors = []
+        def end():
+            try:
+                self.writer.end_insert()
+            except RuntimeError as error:
+                errors.append(error)
+        worker = threading.Thread(target=end)
+        worker.start()
+        worker.join()
+        self.assertEqual(len(errors), 1)
+        self.assertIn("creating thread", str(errors[0]))
+        self.assertTrue(self.writer.write_to_movie)
+        self.writer.end_insert()
+
+    def test_print_hook_failure_keeps_published_clip_and_releases_owner(self):
+        self.writer.print_file_ready_message = lambda path: (_ for _ in ()).throw(OSError("stdout closed"))
+        self.writer.begin_insert()
+        with self.assertRaisesRegex(OSError, "stdout closed"):
+            self.writer.end_insert()
+        self.assertTrue(self.writer.inserted_file_path.is_file())
+        self.assertFalse(self.writer.write_to_movie)
+        self.assertNotIn("_fmn_owned_render_session", vars(self.scene))
+        self.assertNotIn("abort", self.scene.events)
+
+    def test_installer_is_idempotent_and_in_canonical_startup(self):
+        from fmn_python.initialization import _STEPS
+        before = native.SceneFileWriter.begin_insert, native.SceneFileWriter.end_insert
+        install_file_writer_recording(native)
+        self.assertEqual(before, (native.SceneFileWriter.begin_insert, native.SceneFileWriter.end_insert))
+        self.assertIn(("recording", "install_file_writer_recording"), _STEPS)
 
 
 if __name__ == "__main__":

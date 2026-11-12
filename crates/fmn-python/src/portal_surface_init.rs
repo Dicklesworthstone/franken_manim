@@ -69,6 +69,7 @@ fn _initialize_surface_grid(
                 Ok((
                     world_column(entry, "point")?,
                     world_column(entry, "d_normal_point")?,
+                    fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)?,
                 ))
             })?
         })
@@ -84,11 +85,14 @@ fn _initialize_surface_grid(
         let original = stage
             .get(mob)
             .ok_or_else(|| StaleHandleError::new_err("surface is stale"))?;
-        if original.buffer.schema() != &schema {
+        // Sampling may have promoted only the optional presence lane during
+        // init_points. Authored data_dtype still describes the original fields.
+        if !fmn_mobject::stage::compatible_surface_schemas(original.buffer.schema(), &schema) {
             return Err(PyValueError::new_err(
                 "surface schema changed during initialization",
             ));
         }
+        fmn_mobject::stage::surface_validity(&original.buffer).map_err(native_error)?;
         if !original.submobjects().is_empty() {
             return Err(PyValueError::new_err(
                 "surface initialization cannot replace an arena family",
@@ -118,12 +122,26 @@ fn _initialize_surface_grid(
             .get(copy)
             .ok_or_else(|| StaleHandleError::new_err("surface preparation is stale"))?;
         let mut buffer = entry.buffer.snapshot_clone();
-        if let Some((points, normals)) = &geometry {
+        if let Some((points, normals, validity)) = &geometry {
             buffer
                 .resize_preserving_order(count)
                 .map_err(record_error_to_py)?;
             buffer.write_range("point", 0, points);
             buffer.write_range("d_normal_point", 0, normals);
+            if let Some(validity) = validity {
+                buffer = fmn_mobject::stage::with_surface_validity(&buffer, validity)
+                    .map_err(native_error)?;
+            } else if buffer
+                .schema()
+                .field_width(fmn_mobject::stage::SURFACE_VALIDITY_FIELD)
+                .is_some()
+            {
+                buffer.write_range(
+                    fmn_mobject::stage::SURFACE_VALIDITY_FIELD,
+                    0,
+                    &vec![1.0; count],
+                );
+            }
         } else {
             // Authored point tables receive the same finite world-space proof
             // as sampled candidates before they gain durable surface topology.

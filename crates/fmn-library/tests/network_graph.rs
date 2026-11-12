@@ -694,6 +694,48 @@ fn traversal_network() -> NetworkGraph {
 }
 
 #[test]
+fn host_animation_planners_need_no_layout_or_stage_and_share_native_schedules() {
+    let network = NetworkGraph::from_edge_list(
+        &["r", "z", "a", "isolated"],
+        &[("r", "z"), ("r", "a"), ("z", "a"), ("r", "r")],
+    );
+    assert!(network.position("r").is_none());
+    assert_eq!(
+        network
+            .traversal_order("r", GraphTraversal::BreadthFirst)
+            .unwrap(),
+        ["r", "z", "a"]
+    );
+    assert_eq!(
+        network
+            .traversal_order("isolated", GraphTraversal::DepthFirst)
+            .unwrap(),
+        ["isolated"]
+    );
+    let visits = [("z", "r", 1.0), ("r", "r", 3.0)];
+    assert_eq!(network.flow_durations(&visits).unwrap(), [0.25, 0.75]);
+    assert_eq!(
+        network
+            .flow_durations(&[("z", "r", 1e308), ("r", "r", 1e308)])
+            .unwrap(),
+        [0.5, 0.5]
+    );
+    assert!(matches!(
+        network.flow_durations(&[("r", "isolated", 1.0)]),
+        Err(GraphAnimationError::MissingEdge { .. })
+    ));
+    let mut stage = Stage::new();
+    let graph = network
+        .laid_out(&GraphLayout::Circular)
+        .unwrap()
+        .add_to(&mut stage)
+        .unwrap();
+    let flow = FlowAlongEdges::new(&mut stage, &graph, &visits).unwrap();
+    assert_eq!(flow.timings()[0].end - flow.timings()[0].start, 0.25);
+    assert_eq!(flow.timings()[1].end - flow.timings()[1].start, 0.75);
+}
+
+#[test]
 fn traversal_matches_fnx_neighbor_order_and_highlights_only_visited_nodes() {
     let network = traversal_network();
     for (kind, expected) in [

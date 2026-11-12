@@ -1,11 +1,19 @@
 //! Explicit native audio export: one real scene run, one shared mix, one bundle.
 //!
-//! Asset access is a caller capability. This entry point supports native WAV;
-//! it never starts a transcoder or stores a path/callback in the artifact.
+//! Asset access and optional transcoding are explicit caller capabilities.
+//! Native WAV needs no process; standard-mode compressed input may use the
+//! governed ffmpeg boundary. Only mixed PCM enters the portable artifact.
 use super::{BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport};
-use crate::rendering::{PreparedSceneSoundtrack, SoundtrackPreparationLimits};
+use crate::rendering::{
+    FfmpegCapability, PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits,
+    SoundtrackReport,
+};
 use crate::{SceneConstruct, rendering::RenderError};
-use fmn_output::{AudioDecodeLimits, AudioDecoder, MixerConfig, SoundMixer, frames_to_samples};
+use fmn_config::{Config, config::DeterminismMode};
+use fmn_output::{
+    AudioDecodeError, AudioDecodeLimits, AudioDecoder, Boundary, FfmpegTool, InvocationReport,
+    JobLimits, MixerConfig, SoundMixer, frames_to_samples,
+};
 use fmn_platform::fs::FileSystem;
 use fmn_render::CameraConfig;
 use fmn_scene::CameraRig;
@@ -19,12 +27,20 @@ use std::{path::Path, sync::Arc};
 pub struct BundleSoundtrackOptions {
     /// Native sample clock, output channels and final mix duration ceiling.
     pub mixer: MixerConfig,
-    /// Per-source native WAV decoding bounds; no transcoder capability is added.
+    /// Per-source input and decoded-sample bounds, including external expansion.
     pub decode: AudioDecodeLimits,
     /// Cumulative source, decoded and per-cue prepared-storage admission.
     pub preparation: SoundtrackPreparationLimits,
     /// Native mixer workers, validated before authored scene execution.
     pub workers: usize,
+    /// Explicit authority to decode recognized compressed sources in standard
+    /// mode. Native WAV, malformed native PCM and unknown bytes never consult
+    /// this capability. The executable request and determinism mode come from
+    /// [`BundleExportOptions::config`]; no ambient fallback is installed.
+    pub ffmpeg: Option<FfmpegCapability>,
+    /// Bounds for each governed external decode. Native decode uses `decode`.
+    /// Invalid limits are refused before executing the scene or the camera factory.
+    pub ffmpeg_limits: JobLimits,
 }
 impl Default for BundleSoundtrackOptions {
     fn default() -> Self {
@@ -33,11 +49,13 @@ impl Default for BundleSoundtrackOptions {
             decode: AudioDecodeLimits::default(),
             preparation: SoundtrackPreparationLimits::default(),
             workers: 1,
+            ffmpeg: None,
+            ffmpeg_limits: JobLimits::default(),
         }
     }
 }
 impl BundleSoundtrackOptions {
-    fn validate(&self) -> Result<(), BundleExportError> {
+    fn validate(&self, config: &Config) -> Result<(), BundleExportError> {
         // Empty native work validates thread bounds without allocating PCM.
         SoundMixer::new(self.mixer)
             .and_then(|mix| mix.mix(self.workers))
@@ -51,10 +69,10 @@ impl BundleSoundtrackOptions {
                 "soundtrack preparation budgets must be nonzero",
             ));
         }
-        self.decoder()?;
+        self.decoder(config)?;
         Ok(())
     }
-    fn decoder(&self) -> Result<AudioDecoder, BundleExportError> {
+    fn decoder(&self, config: &Config) -> Result<AudioDecoder, BundleExportError> {
         let mut limits = self.decode.clone();
         limits.max_input_bytes = limits
             .max_input_bytes
@@ -62,14 +80,82 @@ impl BundleSoundtrackOptions {
         limits.max_samples = limits
             .max_samples
             .min(self.preparation.max_decoded_samples as u64);
-        AudioDecoder::new(limits, None).map_err(|error| {
+        let decode_error = |error| {
             sound(RenderError::SoundDecode {
                 path: Default::default(),
                 error,
             })
+        };
+        // Validate both independent policies without resolving a tool. The
+        // decoder still enforces its sample-derived expansion ceiling inside
+        // Boundary::decode_audio_bytes after the capability is resolved.
+        let job_limits = fmn_output::admit_render_ffmpeg_limits(
+            &self.ffmpeg_limits,
+            self.ffmpeg_limits.max_artifact_bytes,
+        )
+        .map_err(|error| decode_error(AudioDecodeError::InvalidJobLimits(error)))?;
+        let native = AudioDecoder::new(limits.clone(), None).map_err(decode_error)?;
+        let capability = self.ffmpeg.clone();
+        let certified = config.determinism.mode == DeterminismMode::Certified;
+        if capability.is_none() && !certified {
+            return Ok(native);
+        }
+        let executable = config.file_writer.ffmpeg_bin.clone();
+        if capability.is_some() && (executable.is_empty() || executable.contains('\0')) {
+            return Err(BundleExportError::InvalidOptions(
+                "soundtrack ffmpeg executable must not be empty or contain NUL",
+            ));
+        }
+        AudioDecoder::with_boundary_resolver(limits, move |format| {
+            if certified {
+                return Err(AudioDecodeError::Capability(format!(
+                    "{} decoding through ffmpeg is outside certified bundle preparation; supply native PCM WAV",
+                    format.demuxer(),
+                )));
+            }
+            let capability = capability
+                .as_ref()
+                .ok_or(AudioDecodeError::TranscoderRequired { format })?;
+            let located = capability
+                .locator
+                .locate_ffmpeg(Path::new(&executable))
+                .map_err(|error| AudioDecodeError::Capability(error.to_string()))?;
+            let tool = FfmpegTool::resolve(
+                located,
+                capability.runner.as_ref(),
+                &capability.workdir_root,
+            )?;
+            Boundary::new(
+                tool,
+                Arc::clone(&capability.runner),
+                job_limits.clone(),
+                capability.workdir_root.clone(),
+            )
+            .map_err(AudioDecodeError::Boundary)
         })
+        .map_err(decode_error)
     }
 }
+
+/// Audio actually embedded in a completed native bundle, with its input receipts.
+///
+/// These receipts describe the exact sources and any governed decoder work;
+/// they do not certify arbitrary scene inputs or external compressed decoding.
+/// Playback needs only the bundle's PCM, never these source bytes or paths.
+#[derive(Clone, Debug)]
+pub struct BundleSoundtrackReport {
+    /// Native mix shape, cue count and clipping count.
+    pub mix: SoundtrackReport,
+    /// Actual native mixer workers, independent of picture capture policy.
+    pub workers_used: usize,
+    /// Exact source snapshots and decoder identities in authored cue order.
+    /// Repeated cues share their source allocation; receipts never reopen paths.
+    pub inputs: Vec<SoundtrackInput>,
+    /// Governed decode invocations in first-source-use order. Native WAV adds
+    /// none, and repeated paths do not add another external invocation.
+    pub audio_decodes: Vec<InvocationReport>,
+}
+
 fn sound(error: RenderError) -> BundleExportError {
     BundleExportError::Soundtrack(error)
 }
@@ -89,7 +175,7 @@ pub fn export_bundle_with_soundtrack_bytes<P: SceneConstruct + ?Sized>(
     audio: &BundleSoundtrackOptions,
     assets: &dyn FileSystem,
 ) -> Result<SceneBundleExport, BundleExportError> {
-    audio.validate()?;
+    audio.validate(&options.config)?;
     super::export_bundle_bytes_inner(program, options, Some((audio, assets)))
 }
 
@@ -108,7 +194,7 @@ where
     F: FnOnce(&mut Scene, &CameraConfig) -> crate::Result<(P, CameraRig)>,
     P: SceneConstruct,
 {
-    audio.validate()?;
+    audio.validate(&options.config)?;
     super::camera::export_camera_bundle_bytes_inner(factory, camera, options, Some((audio, assets)))
 }
 
@@ -167,9 +253,9 @@ pub(super) fn finish_recording(
     scene: &Scene,
     options: &BundleExportOptions,
     audio: Option<(&BundleSoundtrackOptions, &dyn FileSystem)>,
-) -> Result<RecordedSceneBundle, BundleExportError> {
+) -> Result<(RecordedSceneBundle, Option<BundleSoundtrackReport>), BundleExportError> {
     if scene.sound_requests().is_empty() {
-        return Ok(bundle);
+        return Ok((bundle, None));
     }
     let (audio, assets) = audio.ok_or(BundleExportError::Capability(
         "sound cues require explicit soundtrack export",
@@ -198,7 +284,7 @@ pub(super) fn finish_recording(
     let prepared = PreparedSceneSoundtrack::new_with_limits(
         assets,
         scene.sound_requests(),
-        &mut audio.decoder()?,
+        &mut audio.decoder(&options.config)?,
         config,
         None,
         audio.preparation,
@@ -206,9 +292,22 @@ pub(super) fn finish_recording(
     .map_err(sound)?
     .with_timeline_frames(minimum);
     let mix = prepared.mix(audio.workers).map_err(sound)?;
+    let report = BundleSoundtrackReport {
+        mix: SoundtrackReport {
+            cues_mixed: mix.cues_mixed,
+            sample_frames: mix.audio.samples.len() as u64 / u64::from(mix.audio.channels),
+            sample_rate: mix.audio.sample_rate,
+            channels: mix.audio.channels,
+            clipped_samples: mix.clipped_samples,
+        },
+        workers_used: mix.workers_used,
+        inputs: prepared.inputs().to_vec(),
+        audio_decodes: prepared.invocations(),
+    };
     let pcm = BundleSoundtrack::new(mix.audio.sample_rate, mix.audio.channels, mix.audio.samples)
         .map_err(|e| sound(RenderError::Bundle(e)))?;
-    bundle
+    let bundle = bundle
         .with_soundtrack(&pcm, options.max_output_bytes)
-        .map_err(|e| sound(RenderError::Bundle(e)))
+        .map_err(|e| sound(RenderError::Bundle(e)))?;
+    Ok((bundle, Some(report)))
 }

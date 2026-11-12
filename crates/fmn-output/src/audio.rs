@@ -230,9 +230,13 @@ pub struct AudioDecoder {
     job_limits: JobLimits,
     ffmpeg_bin: Option<PathBuf>,
     boundary: Option<Boundary>,
+    boundary_resolver: Option<Box<BoundaryResolver>>,
     locator: StdFfmpegLocator,
     workdir_root: Option<PathBuf>,
 }
+
+type BoundaryResolver =
+    dyn FnMut(AudioInputFormat) -> Result<Boundary, AudioDecodeError> + Send + Sync;
 
 impl AudioDecoder {
     pub fn new(
@@ -278,6 +282,7 @@ impl AudioDecoder {
             limits,
             ffmpeg_bin,
             boundary: None,
+            boundary_resolver: None,
             locator,
             workdir_root,
         })
@@ -288,11 +293,12 @@ impl AudioDecoder {
     /// the tighter of this artifact ceiling and the native sample budget.
     ///
     /// # Errors
-    /// Refuses invalid bounds or replacing an already-resolved boundary's policy.
+    /// Refuses invalid bounds or replacing an injected boundary's policy. A
+    /// deferred boundary resolver also owns the policy of the boundary it returns.
     pub fn with_job_limits(mut self, limits: JobLimits) -> Result<Self, AudioDecodeError> {
-        if self.boundary.is_some() {
+        if self.boundary.is_some() || self.boundary_resolver.is_some() {
             return Err(AudioDecodeError::InvalidJobLimits(
-                "cannot replace limits after the decoder boundary is resolved",
+                "cannot replace limits of an injected or resolved decoder boundary",
             ));
         }
         self.job_limits = crate::admit_render_ffmpeg_limits(&limits, limits.max_artifact_bytes)
@@ -315,22 +321,75 @@ impl AudioDecoder {
             limits,
             ffmpeg_bin: None,
             boundary: Some(boundary),
+            boundary_resolver: None,
             locator: StdFfmpegLocator::default(),
             workdir_root: None,
         })
     }
 
+    /// Defer an explicit governed capability until a recognized source needs it.
+    ///
+    /// Native PCM, unknown containers, damaged PCM, oversized source bytes and
+    /// exhausted native PCM budgets never call the resolver. Compressed sample
+    /// limits are enforced by the returned boundary during and after expansion.
+    /// Its first successful result is retained for this decoder's lifetime,
+    /// so later sources use the same tool identity.
+    /// A failed resolution remains retryable and does not disable native WAV.
+    /// The callback receives the byte-recognized format for precise policy
+    /// refusals; it returns the existing bounded, fingerprinted [`Boundary`],
+    /// never a replacement media parser. No ambient process capability is added.
+    ///
+    /// # Errors
+    /// Invalid native decode limits, before the resolver is called. Resolution
+    /// and external decode failures are returned by [`Self::decode`].
+    pub fn with_boundary_resolver(
+        limits: AudioDecodeLimits,
+        resolver: impl FnMut(AudioInputFormat) -> Result<Boundary, AudioDecodeError>
+        + Send
+        + Sync
+        + 'static,
+    ) -> Result<Self, AudioDecodeError> {
+        let mut decoder = Self::new(limits, None)?;
+        decoder.boundary_resolver = Some(Box::new(resolver));
+        Ok(decoder)
+    }
+
     pub fn decode(&mut self, bytes: &[u8]) -> Result<DecodedAudio, AudioDecodeError> {
-        if bytes.len() as u64 > self.limits.max_input_bytes {
+        let limits = self.limits.clone();
+        self.decode_with_limits(bytes, &limits)
+    }
+
+    /// Decode one source under the remaining budget of a larger preparation.
+    ///
+    /// The supplied bounds can only tighten this decoder's construction-time
+    /// limits. They apply before native allocation and to external expansion,
+    /// without replacing the retained executable identity or process policy.
+    /// Each call is independent: a refused source does not consume a future
+    /// source's allowance or disable native WAV decoding.
+    ///
+    /// # Errors
+    /// The same typed refusals as [`Self::decode`], including a zero effective
+    /// budget. No external capability is resolved before source admission.
+    pub fn decode_with_limits(
+        &mut self,
+        bytes: &[u8],
+        remaining: &AudioDecodeLimits,
+    ) -> Result<DecodedAudio, AudioDecodeError> {
+        let limits = AudioDecodeLimits {
+            max_input_bytes: self.limits.max_input_bytes.min(remaining.max_input_bytes),
+            max_samples: self.limits.max_samples.min(remaining.max_samples),
+        };
+        limits.decoded_byte_limit()?;
+        if bytes.len() as u64 > limits.max_input_bytes {
             return Err(AudioDecodeError::InputOversized {
                 bytes: bytes.len() as u64,
-                max: self.limits.max_input_bytes,
+                max: limits.max_input_bytes,
             });
         }
         match decode_wav(
             bytes,
             &WavLimits {
-                max_samples: self.limits.max_samples,
+                max_samples: limits.max_samples,
             },
         ) {
             Ok(audio) => return decoded_audio(bytes, audio, AudioInputFormat::Wav, None),
@@ -345,6 +404,12 @@ impl AudioDecoder {
         }
         let format =
             AudioInputFormat::recognize(bytes).ok_or(AudioDecodeError::UnsupportedInput)?;
+        if self.boundary.is_none()
+            && let Some(resolve) = self.boundary_resolver.as_mut()
+        {
+            self.boundary = Some(resolve(format)?);
+            self.boundary_resolver = None;
+        }
         if self.boundary.is_none() {
             let path = self
                 .ffmpeg_bin
@@ -376,6 +441,6 @@ impl AudioDecoder {
         self.boundary
             .as_ref()
             .ok_or(AudioDecodeError::TranscoderRequired { format })?
-            .decode_audio_bytes(bytes, format, &self.limits)
+            .decode_audio_bytes(bytes, format, &limits)
     }
 }

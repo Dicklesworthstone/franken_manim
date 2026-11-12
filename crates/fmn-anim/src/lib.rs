@@ -50,6 +50,7 @@ pub mod apply_method;
 pub mod bundle;
 pub mod clock;
 pub mod composition;
+pub mod continuation;
 pub mod creation;
 pub mod fading;
 pub mod frame;
@@ -96,13 +97,13 @@ pub use fading::{
 };
 pub use frame::{
     AnimationBoundary, BeginState, FrameMetadata, FramePacket, OpenSegment, OpenWait,
-    SceneUpdaterBoundary, abort_open_play, abort_open_wait, advance_play,
+    OpenWaitCheckpoint, SceneUpdaterBoundary, abort_open_play, abort_open_wait, advance_play,
     advance_play_with_boundary, complete_play_frame, complete_play_frame_with_capture,
     complete_wait_frame, complete_wait_frame_with_capture, finish_open_play,
     finish_open_play_animations, finish_open_wait, open_play, open_play_with_mode, open_wait,
     open_wait_after_updaters, play_segment, play_segment_with_boundary, prepare_play_animation,
-    prepare_play_frame, prepare_wait_frame, validate_play, wait_segment, wait_segment_upto,
-    wait_segment_with_boundary, wait_segment_with_capture,
+    prepare_play_frame, prepare_wait_frame, resume_open_wait, validate_play, wait_segment,
+    wait_segment_upto, wait_segment_with_boundary, wait_segment_with_capture,
 };
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};
 pub use indication::{

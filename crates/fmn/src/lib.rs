@@ -72,15 +72,22 @@ use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionRep
 pub mod autotune;
 pub mod controls;
 pub mod exporting;
+pub mod images;
 pub mod prelude;
 pub mod rendering;
 mod typesetting;
 pub use typesetting::TexPreflightError;
 
 pub use exporting::{
-    BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport, export_bundle,
-    export_bundle_bytes, export_bundle_with_fs, export_camera_bundle, export_camera_bundle_bytes,
+    BundleExportError, BundleExportOptions, BundleExportReport, BundleStorage,
+    CompactRecordingLimits, SceneBundleExport, export_bundle, export_bundle_bytes,
+    export_bundle_with_fs, export_camera_bundle, export_camera_bundle_bytes,
     export_camera_bundle_with_fs,
+};
+
+pub use images::{
+    ImageColorIntent, ImageDecodeError, ImageDecodeLimits, ImageDecodeReport, ImageInputFormat,
+    ImageLoadError, ImageLoadOptions, ImageLoadReport, ImageLoader, PreparedImage,
 };
 
 pub use rendering::{
@@ -1199,6 +1206,9 @@ impl LibraryError {
             | Self::Graph(GraphError::Sampling(error)) => sampling(error),
             Self::TextMatching(TextMatchingError::BudgetExceeded { .. }) => true,
             Self::TexBinding(error) => error.is_budget_exceeded(),
+            Self::NeuralNetwork(
+                NeuralNetworkError::TooManyParts { .. } | NeuralNetworkError::TooManyValues { .. },
+            ) => true,
             _ => false,
         }
     }
@@ -1548,9 +1558,62 @@ impl Stage<'_> {
             .map_err(Error::from)
     }
 
+    /// Wait until a predicate succeeds, bounded by `max_time` seconds.
+    ///
+    /// During timed playback, the predicate reads the live arena after each
+    /// frame's updaters, input events, and capture. It is not called before
+    /// the first frame, so an initially true predicate still completes one
+    /// frame unless the bound is zero. A zero bound emits no frames and
+    /// never calls it. Like [`Self::wait`], presenter mode uses the shared
+    /// hold loop, whose release controls completion; use
+    /// [`Self::wait_until_frames`] for a finite predicate-controlled budget.
+    ///
+    /// # Errors
+    /// Rejects non-finite, negative, or unrepresentable bounds before the
+    /// wait begins. Preserves updater, event, and capture failures.
+    pub fn wait_until(
+        &mut self,
+        max_time: f64,
+        mut stop_condition: impl FnMut(&MobjectStage) -> bool,
+    ) -> Result<SegmentReport> {
+        self.scene
+            .wait_until(max_time, &mut stop_condition, self.sink)
+            .map_err(Error::from)
+    }
+
+    /// Wait until a predicate succeeds, bounded by exactly `max_frames`.
+    ///
+    /// The predicate observes each completed frame as in [`Self::wait_until`].
+    /// Zero frames never calls it. This keeps the budget integral on the
+    /// active scene grid and bypasses presenter holds.
+    ///
+    /// # Errors
+    /// Rejects unrepresentable frame budgets or clock overflow before the
+    /// wait begins. Preserves updater, event, and capture failures.
+    pub fn wait_until_frames(
+        &mut self,
+        max_frames: u64,
+        mut stop_condition: impl FnMut(&MobjectStage) -> bool,
+    ) -> Result<SegmentReport> {
+        self.scene
+            .wait_until_frames(max_frames, &mut stop_condition, self.sink)
+            .map_err(Error::from)
+    }
+
     /// Wait for the configured default duration.
     pub fn wait_default(&mut self) -> Result<SegmentReport> {
         self.scene.wait(None, self.sink).map_err(Error::from)
+    }
+
+    /// Capture the current scene without advancing its clock or play count.
+    ///
+    /// Runs the shared zero-delta updater and pending-input boundary before
+    /// forwarding the capture to the active renderer or other scene sink.
+    ///
+    /// # Errors
+    /// Preserves preflight, updater, event, and capture failures.
+    pub fn show(&mut self) -> Result<()> {
+        self.scene.show(self.sink).map_err(Error::from)
     }
 
     /// End construction through Proscenium's normal early-termination path.

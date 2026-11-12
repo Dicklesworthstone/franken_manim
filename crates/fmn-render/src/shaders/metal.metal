@@ -19,8 +19,9 @@ using namespace metal;
 #define STYLE_STRIDE 20
 #define THREE_D_VERTEX_STRIDE 17
 #define THREE_D_TRIANGLE_STRIDE 51
-#define THREE_D_DRAW_U32_STRIDE 4
+#define THREE_D_DRAW_U32_STRIDE 5
 #define THREE_D_DRAW_F32_STRIDE 24
+#define THREE_D_TEXTURE_U32_STRIDE 8
 #define THREE_D_MAX_SAMPLES 16
 
 #define DRAW_FILL 1u
@@ -30,6 +31,11 @@ using namespace metal;
 #define MULTI_CONTOUR_GRADIENT 16u
 #define THREE_D_SHADER_GOURAUD 1u
 #define THREE_D_SHADER_DOT 2u
+#define THREE_D_SHADER_TEXTURE 3u
+#define THREE_D_NO_TEXTURE 0xffffffffu
+#define THREE_D_DARK_SHIFT 0.2f
+#define THREE_D_WRAP_CLAMP 1u
+#define THREE_D_WRAP_MIRRORED 2u
 #define CLASS_INTERIOR 1u
 #define STATUS_COMPLETE 0x464d4e4du
 #define TRANSFER_TABLE_WORDS_PER_PLANE 16384
@@ -1324,10 +1330,168 @@ static float4 three_d_finalize_color(
     );
 }
 
+// Texture addressing as the CPU sampler's wrap_index: repeat by Euclidean
+// remainder, clamp to the edge texels, or reflect every other interval.
+// Indices are pre-clamped to +-2^30, so no step overflows; the host refuses
+// textures wider or taller than 2^30 - 1 texels.
+static uint three_d_wrap(int index, uint size, uint wrap) {
+    int extent = (int)size;
+    if (wrap == THREE_D_WRAP_CLAMP) {
+        return (uint)clamp(index, 0, extent - 1);
+    }
+    if (wrap == THREE_D_WRAP_MIRRORED) {
+        int period = extent * 2;
+        int value = index % period;
+        if (value < 0) value += period;
+        return (uint)(value < extent ? value : period - 1 - value);
+    }
+    int value = index % extent;
+    if (value < 0) value += extent;
+    return (uint)value;
+}
+
+static float4 three_d_texel(
+    device const float *texels,
+    uint first,
+    uint width,
+    uint x,
+    uint y
+) {
+    uint base = (first + y * width + x) * 4u;
+    return float4(
+        texels[base + 0u],
+        texels[base + 1u],
+        texels[base + 2u],
+        texels[base + 3u]
+    );
+}
+
+// Texture::sample: bilinear over premultiplied texels whose centres sit at
+// (x + 0.5) / width, then unpremultiplied; a non-finite coordinate samples
+// transparent black.
+static float4 three_d_sample(
+    device const float *texels,
+    uint first,
+    uint width,
+    uint height,
+    uint wrap,
+    float2 uv
+) {
+    if (!isfinite(uv.x) || !isfinite(uv.y)) return float4(0.0f);
+    float x = uv.x * (float)width - 0.5f;
+    float y = uv.y * (float)height - 0.5f;
+    float floor_x = clamp(floor(x), -1073741824.0f, 1073741823.0f);
+    float floor_y = clamp(floor(y), -1073741824.0f, 1073741823.0f);
+    int x0 = (int)floor_x;
+    int y0 = (int)floor_y;
+    float fx = x - floor_x;
+    float fy = y - floor_y;
+    uint wrap_u = wrap & 0xfu;
+    uint wrap_v = wrap >> 4u;
+    uint xa = three_d_wrap(x0, width, wrap_u);
+    uint xb = three_d_wrap(x0 + 1, width, wrap_u);
+    uint ya = three_d_wrap(y0, height, wrap_v);
+    uint yb = three_d_wrap(y0 + 1, height, wrap_v);
+    float4 a = three_d_texel(texels, first, width, xa, ya);
+    float4 b = three_d_texel(texels, first, width, xb, ya);
+    float4 c = three_d_texel(texels, first, width, xa, yb);
+    float4 d = three_d_texel(texels, first, width, xb, yb);
+    float4 top = a + (b - a) * fx;
+    float4 bottom = c + (d - c) * fx;
+    float4 value = top + (bottom - top) * fy;
+    if (value.a <= 0.0f) return float4(0.0f);
+    return float4(value.rgb / value.a, value.a);
+}
+
+// The CPU shader's Texture arm: the light sample, crossfaded towards the dark
+// texture on the side facing away from the light, a zero-alpha discard for
+// surfaces, per-fragment lighting, and the vertex opacity (replacing a
+// surface's alpha, multiplying an image's).
+static bool three_d_shade_texture(
+    device const float *draw_f32,
+    device const uint *texture_u32,
+    device const float *texels,
+    uint draw,
+    uint row,
+    ThreeDAttributes attributes,
+    thread float4 *source
+) {
+    uint t = row * (uint)THREE_D_TEXTURE_U32_STRIDE;
+    uint wrap = texture_u32[t + 6u];
+    float4 color = three_d_sample(
+        texels,
+        texture_u32[t + 0u],
+        texture_u32[t + 1u],
+        texture_u32[t + 2u],
+        wrap,
+        attributes.uv
+    );
+    uint base = draw * (uint)THREE_D_DRAW_F32_STRIDE;
+    float3 shading = float3(
+        draw_f32[base + 0u],
+        draw_f32[base + 1u],
+        draw_f32[base + 2u]
+    );
+    float3 light_position = float3(
+        draw_f32[base + 3u],
+        draw_f32[base + 4u],
+        draw_f32[base + 5u]
+    );
+    float3 camera_position = float3(
+        draw_f32[base + 6u],
+        draw_f32[base + 7u],
+        draw_f32[base + 8u]
+    );
+    float3 normal = attributes.normal;
+    if (texture_u32[t + 3u] != THREE_D_NO_TEXTURE) {
+        float4 dark = three_d_sample(
+            texels,
+            texture_u32[t + 3u],
+            texture_u32[t + 4u],
+            texture_u32[t + 5u],
+            wrap,
+            attributes.uv
+        );
+        float3 to_light;
+        if (!three_d_normalize(light_position - attributes.world, &to_light)) {
+            to_light = float3(0.0f);
+        }
+        float edge = clamp(
+            (dot(to_light, normal) + THREE_D_DARK_SHIFT)
+                / (2.0f * THREE_D_DARK_SHIFT),
+            0.0f,
+            1.0f
+        );
+        float alpha = edge * edge * (3.0f - 2.0f * edge);
+        color = dark + (color - dark) * alpha;
+    }
+    bool discard_transparent = texture_u32[t + 7u] != 0u;
+    if (discard_transparent && color.a == 0.0f) return false;
+    color = three_d_finalize_color(
+        color,
+        attributes.world,
+        normal,
+        shading,
+        light_position,
+        camera_position
+    );
+    float opacity = clamp(attributes.opacity, 0.0f, 1.0f);
+    if (discard_transparent) {
+        color.a = opacity;
+    } else {
+        color.a *= opacity;
+    }
+    *source = color;
+    return true;
+}
+
 static bool three_d_shade(
     device const float *draw_f32,
+    device const uint *texture_u32,
+    device const float *texels,
     uint draw,
     uint shader,
+    uint texture_row,
     ThreeDAttributes attributes,
     thread float4 *source
 ) {
@@ -1335,6 +1499,17 @@ static bool three_d_shade(
         *source = attributes.color;
         source->a *= clamp(attributes.opacity, 0.0f, 1.0f);
         return true;
+    }
+    if (shader == THREE_D_SHADER_TEXTURE) {
+        return three_d_shade_texture(
+            draw_f32,
+            texture_u32,
+            texels,
+            draw,
+            texture_row,
+            attributes,
+            source
+        );
     }
     if (shader != THREE_D_SHADER_DOT) return false;
 
@@ -1417,9 +1592,16 @@ kernel void fmn_render_three_d(
     device const uint *tile_draws [[buffer(6)]],
     device half4 *surface [[buffer(7)]],
     device uint *status [[buffer(8)]],
+    device const uint *command_triangles [[buffer(9)]],
+    device const uint *tile_triangles [[buffer(10)]],
+    device const uint *texture_u32 [[buffer(11)]],
+    device const float *texels [[buffer(12)]],
     uint2 group_id [[threadgroup_position_in_grid]],
     uint2 local_id [[thread_position_in_threadgroup]]
 ) {
+    // Each tile command lists only its draw's triangles whose pixel bounds
+    // meet this tile, in draw order; the rest fail
+    // three_d_pixel_in_triangle_bounds at every pixel here.
     uint width = params_u32[0];
     uint height = params_u32[1];
     uint tile = params_u32[2];
@@ -1441,12 +1623,11 @@ kernel void fmn_render_three_d(
                  command++) {
                 uint draw = tile_draws[command];
                 if (draw >= draw_count) continue;
-                uint draw_base = draw * (uint)THREE_D_DRAW_U32_STRIDE;
-                uint triangle_lo = draw_u32[draw_base + 0u];
-                uint triangle_hi = triangle_lo + draw_u32[draw_base + 1u];
-                for (uint triangle = triangle_lo;
-                     triangle < triangle_hi;
-                     triangle++) {
+                uint entry_hi = command_triangles[command + 1u];
+                for (uint entry = command_triangles[command];
+                     entry < entry_hi;
+                     entry++) {
+                    uint triangle = tile_triangles[entry];
                     if (three_d_triangle_marks_boundary(
                             triangles, triangle, px, py)) {
                         boundary = true;
@@ -1479,13 +1660,14 @@ kernel void fmn_render_three_d(
             uint draw = tile_draws[command];
             if (draw >= draw_count) continue;
             uint draw_base = draw * (uint)THREE_D_DRAW_U32_STRIDE;
-            uint triangle_lo = draw_u32[draw_base + 0u];
-            uint triangle_hi = triangle_lo + draw_u32[draw_base + 1u];
             uint shader = draw_u32[draw_base + 2u];
             bool depth_test = draw_u32[draw_base + 3u] != 0u;
-            for (uint triangle = triangle_lo;
-                 triangle < triangle_hi;
-                 triangle++) {
+            uint texture_row = draw_u32[draw_base + 4u];
+            uint entry_hi = command_triangles[command + 1u];
+            for (uint entry = command_triangles[command];
+                 entry < entry_hi;
+                 entry++) {
+                uint triangle = tile_triangles[entry];
                 if (!three_d_pixel_in_triangle_bounds(
                         triangles, triangle, px, py)) {
                     continue;
@@ -1516,8 +1698,11 @@ kernel void fmn_render_three_d(
                         float4 source;
                         if (!three_d_shade(
                                 draw_f32,
+                                texture_u32,
+                                texels,
                                 draw,
                                 shader,
+                                texture_row,
                                 attributes,
                                 &source)) {
                             continue;
@@ -1743,5 +1928,90 @@ kernel void fmn_rgba16f_to_p010(
     if (local_id.x == 0u && local_id.y == 0u) {
         uint groups_x = (quad_width + group_size.x - 1u) / group_size.x;
         status[group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
+    }
+}
+
+// Controlled bloom over the raw Rgba16F surface (bloom.rs). The arithmetic is
+// the CPU route's, in its order: taps in ascending order, each a multiply then
+// a separate add, f32 row sums, edges clamped, and a round-to-nearest-even
+// encode of `in * keep + blur * strength`. It runs in bands (bloom.rs): the
+// row sums of row `y` are kept in slot `y % ring` of a ring of `ring` rows,
+// taken before any band that reaches row `y` is mixed. Both kernels take one
+// band's sizes: width, height, radius, ring rows; the rows to sum (first,
+// count, first status word); the band's rows (first, count, first status
+// word).
+
+// Tap `k` of pixel `p`'s window reads pixel `min(max(p + k - radius, 0), last)`.
+static uint bloom_source(uint p, uint k, uint radius, uint last) {
+    uint shifted = p + k;
+    return min(shifted > radius ? shifted - radius : 0u, last);
+}
+
+kernel void fmn_bloom_rows(
+    constant uint *params [[buffer(0)]],
+    constant float *taps [[buffer(1)]],
+    device const half4 *surface [[buffer(2)]],
+    device float4 *sums [[buffer(3)]],
+    device uint *status [[buffer(4)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]]
+) {
+    uint px = group_id.x * group_size.x + local_id.x;
+    uint row = group_id.y * group_size.y + local_id.y;
+    uint width = params[0];
+    uint radius = params[2];
+    uint ring = params[3];
+    if (px < width && row < params[5]) {
+        uint py = params[4] + row;
+        float4 acc = float4(0.0f);
+        for (uint k = 0u; k <= 2u * radius; ++k) {
+            uint sx = bloom_source(px, k, radius, width - 1u);
+            float4 product = taps[k] * float4(surface[py * width + sx]);
+            acc = acc + product;
+        }
+        sums[(py % ring) * width + px] = acc;
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (local_id.x == 0u && local_id.y == 0u) {
+        uint groups_x = (width + group_size.x - 1u) / group_size.x;
+        status[params[6] + group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
+    }
+}
+
+kernel void fmn_bloom_columns(
+    constant uint *params [[buffer(0)]],
+    constant float *taps [[buffer(1)]],
+    constant float *mix [[buffer(2)]], // keep, strength
+    device const float4 *sums [[buffer(3)]],
+    device half4 *surface [[buffer(4)]],
+    device uint *status [[buffer(5)]],
+    uint2 group_id [[threadgroup_position_in_grid]],
+    uint2 local_id [[thread_position_in_threadgroup]],
+    uint2 group_size [[threads_per_threadgroup]]
+) {
+    uint px = group_id.x * group_size.x + local_id.x;
+    uint row = group_id.y * group_size.y + local_id.y;
+    uint width = params[0];
+    uint height = params[1];
+    uint radius = params[2];
+    uint ring = params[3];
+    if (px < width && row < params[8]) {
+        uint py = params[7] + row;
+        float4 acc = float4(0.0f);
+        for (uint k = 0u; k <= 2u * radius; ++k) {
+            uint sy = bloom_source(py, k, radius, height - 1u);
+            float4 product = taps[k] * sums[(sy % ring) * width + px];
+            acc = acc + product;
+        }
+        uint at = py * width + px;
+        float4 kept = float4(surface[at]) * mix[0];
+        float4 spread = acc * mix[1];
+        surface[at] = half4(kept + spread);
+    }
+    threadgroup_barrier(mem_flags::mem_device);
+    if (local_id.x == 0u && local_id.y == 0u) {
+        uint groups_x = (width + group_size.x - 1u) / group_size.x;
+        status[params[9] + group_id.y * groups_x + group_id.x] = STATUS_COMPLETE;
     }
 }

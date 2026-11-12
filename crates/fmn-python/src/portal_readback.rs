@@ -222,13 +222,14 @@ impl CameraCapture {
             threads,
         })
         .map_err(native_error)?;
-        let baseline = fmn_render::CameraConfig::default().frame;
-        let [frame_width, frame_height] = baseline.shape();
-        let planar_map_matches =
-            (frame_width - frame_height * f64::from(width) / f64::from(height)).abs() < 1e-9;
-        // Match file output's retained +Y-up route when its map applies.
-        // Moved cameras, other aspects and nonplanar content still project.
-        if fmn::rendering::planar_capture_refusal(&stage, &camera, planar_map_matches).is_none() {
+        let planar_policy = fmn_render::PlanarCapturePolicy::for_output(
+            (width, height),
+            fmn_core::constants::FRAME_HEIGHT,
+        )
+        .map_err(native_error)?;
+        // Match file output's retained +Y-up route at every output aspect.
+        // Live camera edits and nonplanar content still require projection.
+        if planar_policy.refusal(&stage, &camera).is_none() {
             renderer.render(&stage, 0).map_err(native_error)?;
         } else {
             renderer
@@ -396,19 +397,12 @@ pub fn run_portal_gauntlet_camera_frame_points() -> Result<u64, String> {
 /// thread-dependent rendering through the production retained frame pipeline.
 #[cfg(any(test, feature = "gauntlet"))]
 pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), String> {
-    use fmn_render::fill::{FillKernel, instance_translation};
+    use fmn_render::fill::FillKernel;
 
-    crate::with_python_test_module("portal rectangle recovery", |py, _module, globals| {
-        py.run(c"import numpy as np\nfrom manimlib import Scene, Rectangle, BLUE, WHITE\nscene = Scene()\nbricks = [Rectangle(width=0.28, height=0.08).set_fill(BLUE, 0.8).set_stroke(WHITE, 2).move_to((-2.5 + i * 0.35, 0.5, 0)) for i in range(16)]\nscene.add(*bricks)\npoint_views = [brick.get_points() for brick in bricks]\n", Some(globals), Some(globals))
-            .map_err(|error| error.to_string())?;
-        let scene = globals
-            .get_item("scene")
-            .map_err(|error| error.to_string())?
-            .ok_or_else(|| "portal rectangle scene is absent".to_owned())?;
-        let scene = scene
-            .cast::<crate::PyScene>()
-            .map_err(|error| error.to_string())?;
-        let frame = FrameConfig::new(
+    run_portal_recovery(RecoveryFixture {
+        name: "portal rectangle recovery",
+        setup: c"import numpy as np\nfrom manimlib import Scene, Rectangle, BLUE, WHITE\nscene = Scene()\nshapes = [Rectangle(width=0.28, height=0.08).set_fill(BLUE, 0.8).set_stroke(WHITE, 2).move_to((-2.5 + i * 0.35, 0.5, 0)) for i in range(16)]\nscene.add(*shapes)\npoint_views = [shape.get_points() for shape in shapes]\n",
+        frame: FrameConfig::new(
             Viewport {
                 width: 96,
                 height: 54,
@@ -424,7 +418,126 @@ pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), St
                 b: 0.06,
                 a: 1.0,
             },
-        );
+        ),
+        accepts: |shape, segments, _pieces, map, translate| {
+            matches!(
+                FillKernel::from_exact_rectangle(shape, segments, map, translate),
+                FillKernel::Rect { .. }
+            )
+        },
+    })
+}
+
+/// Exercise bounded disc recovery through actual Dot/Circle construction,
+/// retained point views, immutable captures and the standard CPU renderer.
+/// The two-unit Circle is outside the screen-space approximation budget and
+/// must remain general even though its constructor knows it is a circle.
+/// Returns `(proved_discs, rendered_frames, final_raw_digest)`.
+///
+/// # Errors
+/// Reports lost view invalidation, unsound shape admission, changed frozen
+/// pixels, or worker-count-dependent output.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_disc_recovery() -> Result<(u64, u64, String), String> {
+    use fmn_render::fill::FillKernel;
+
+    run_portal_recovery(RecoveryFixture {
+        name: "portal disc recovery",
+        setup: c"import numpy as np\nfrom manimlib import Scene, Circle, Dot, BLUE, WHITE\nscene = Scene()\nshapes = [(Dot(radius=0.08) if i % 2 == 0 else Circle(radius=0.08)).set_fill(BLUE, 0.8).set_stroke(WHITE, 2).move_to((-1.05 + i * 0.14, 0, 0)) for i in range(16)]\nshapes.append(Circle(radius=2).set_fill(BLUE, 0.8).move_to((5, 3, 0)))\nscene.add(*shapes)\npoint_views = [shape.get_points() for shape in shapes]\n",
+        frame: FrameConfig::new(
+            Viewport {
+                width: 320,
+                height: 180,
+            },
+            ScreenMap {
+                scale: 135.0,
+                origin: [160.0, 90.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.04,
+                g: 0.04,
+                b: 0.06,
+                a: 1.0,
+            },
+        ),
+        accepts: |shape, segments, _pieces, map, translate| {
+            matches!(
+                FillKernel::from_bounded_disc(shape, segments, map, translate),
+                FillKernel::Disc { .. }
+            )
+        },
+    })
+}
+
+/// Exercise exact quadratic-corner recovery through real RoundedRectangle
+/// construction and the same live-view lifecycle as rectangle/disc recovery.
+/// These corners exceed the circular approximation budget at this screen scale;
+/// their authored quadratic curves must be retained in the recovered evaluator.
+/// Returns `(proved_rounded_rectangles, rendered_frames, final_raw_digest)`.
+///
+/// # Errors
+/// Reports lost view invalidation, unsound geometry admission, changed frozen
+/// pixels, or worker-count-dependent output.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_rounded_rectangle_recovery() -> Result<(u64, u64, String), String> {
+    use fmn_render::fill::QuadraticRoundedRect;
+
+    run_portal_recovery(RecoveryFixture {
+        name: "portal quadratic rounded rectangle recovery",
+        setup: c"import numpy as np\nfrom manimlib import Scene, RoundedRectangle, Circle, BLUE, WHITE\nscene = Scene()\nshapes = [RoundedRectangle(width=0.38, height=0.22, corner_radius=0.06).set_fill(BLUE, 0.8).set_stroke(WHITE, 2).move_to((-0.78 + (i % 4) * 0.52, -0.45 + (i // 4) * 0.3, 0)) for i in range(16)]\nshapes.append(Circle(radius=0.5).set_fill(BLUE, 0.8).move_to((5, 3, 0)))\nscene.add(*shapes)\npoint_views = [shape.get_points() for shape in shapes]\n",
+        frame: FrameConfig::new(
+            Viewport {
+                width: 320,
+                height: 180,
+            },
+            ScreenMap {
+                scale: 135.0,
+                origin: [160.0, 90.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.04,
+                g: 0.04,
+                b: 0.06,
+                a: 1.0,
+            },
+        ),
+        accepts: |shape, _segments, pieces, _map, _translate| {
+            QuadraticRoundedRect::from_shape(shape, pieces).is_some()
+        },
+    })
+}
+
+#[cfg(any(test, feature = "gauntlet"))]
+struct RecoveryFixture {
+    name: &'static str,
+    setup: &'static std::ffi::CStr,
+    frame: FrameConfig,
+    accepts: fn(
+        &fmn_render::table::Shape,
+        &[fmn_render::table::Segment],
+        &[fmn_render::fill::MonoPiece],
+        ScreenMap,
+        [f64; 2],
+    ) -> bool,
+}
+
+#[cfg(any(test, feature = "gauntlet"))]
+fn run_portal_recovery(fixture: RecoveryFixture) -> Result<(u64, u64, String), String> {
+    use fmn_render::fill::instance_translation;
+
+    crate::with_python_test_module(fixture.name, |py, _module, globals| {
+        py.run(fixture.setup, Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        let scene = globals
+            .get_item("scene")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| format!("{} scene is absent", fixture.name))?;
+        let scene = scene
+            .cast::<crate::PyScene>()
+            .map_err(|error| error.to_string())?;
+        let frame = fixture.frame;
         let mut first_frozen = None;
         let mut first_pixels = Vec::new();
         let mut previous_pixels = Vec::new();
@@ -435,7 +548,7 @@ pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), St
                 0 => c"pass",
                 1 => c"for points in point_views:\n    points[:, 0] += np.float32(0.375)",
                 2 => c"point_views[0][1, 1] += np.float32(0.25)",
-                _ => c"replacement = point_views[1].copy()\nreplacement[:, 0] += np.float32(0.5) * replacement[:, 1]\nbricks[1].set_points(replacement)\npoint_views[1] = bricks[1].get_points()",
+                _ => c"replacement = point_views[1].copy()\nreplacement[:, 0] += np.float32(0.5) * replacement[:, 1]\nshapes[1].set_points(replacement)\npoint_views[1] = shapes[1].get_points()",
             };
             py.run(edit, Some(globals), Some(globals))
                 .map_err(|error| error.to_string())?;
@@ -458,25 +571,26 @@ pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), St
                     .render(&frozen, 0)
                     .map_err(|error| error.to_string())?;
                 let plan = renderer.plan();
+                let mono = fmn_render::fill::MonoTable::build(plan, frame.map)
+                    .map_err(|error| error.to_string())?;
                 let mut admitted = 0;
                 for instance in plan.shapes().instances() {
                     if !instance.volatile || !instance.hint_unsafe {
-                        return Err(
-                            "rectangle recovery weakened live point-view invalidation".into()
-                        );
+                        return Err(format!(
+                            "{} weakened live point-view invalidation",
+                            fixture.name
+                        ));
                     }
                     let shape = &plan.shapes().shapes()[instance.shape as usize];
                     let start = shape.first_segment as usize;
                     let segments = &plan.segments()[start..start + shape.segment_count as usize];
                     if instance.placement.is_translation()
-                        && matches!(
-                            FillKernel::from_exact_rectangle(
-                                shape,
-                                segments,
-                                frame.map,
-                                instance_translation(instance, frame.map)
-                            ),
-                            FillKernel::Rect { .. }
+                        && (fixture.accepts)(
+                            shape,
+                            segments,
+                            mono.pieces_of(instance.shape),
+                            frame.map,
+                            instance_translation(instance, frame.map),
                         )
                     {
                         admitted += 1;
@@ -484,7 +598,8 @@ pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), St
                 }
                 if admitted != expected {
                     return Err(format!(
-                        "mutation {mutation}: expected {expected} current rectangles, found {admitted}"
+                        "{} mutation {mutation}: expected {expected} candidates, found {admitted}",
+                        fixture.name
                     ));
                 }
                 let pixels = renderer.frame().as_bytes();
@@ -493,7 +608,8 @@ pub fn run_portal_gauntlet_rectangle_recovery() -> Result<(u64, u64, String), St
                     proved += admitted;
                 } else if pixels != expected_pixels {
                     return Err(format!(
-                        "mutation {mutation}: rectangle pixels differ at {threads} threads"
+                        "{} mutation {mutation}: pixels differ at {threads} threads",
+                        fixture.name
                     ));
                 }
                 frames += 1;
@@ -533,6 +649,21 @@ mod tests {
         let (rectangles, frames, _) = super::run_portal_gauntlet_rectangle_recovery()
             .expect("portal rectangle recovery through native retained rendering");
         assert_eq!((rectangles, frames), (61, 13));
+    }
+
+    #[test]
+    fn production_disc_recovery_preserves_views_snapshots_and_pixels() {
+        let (discs, frames, _) = super::run_portal_gauntlet_disc_recovery()
+            .expect("portal disc recovery through native retained rendering");
+        assert_eq!((discs, frames), (61, 13));
+    }
+
+    #[test]
+    fn production_rounded_rectangle_recovery_preserves_views_snapshots_and_pixels() {
+        let (rounded_rectangles, frames, _) =
+            super::run_portal_gauntlet_rounded_rectangle_recovery()
+                .expect("portal quadratic rounded rectangle recovery through retained rendering");
+        assert_eq!((rounded_rectangles, frames), (61, 13));
     }
 
     #[test]

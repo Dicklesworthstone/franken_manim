@@ -123,9 +123,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 The `Tex` mobject above is laid out by fmd-math from bundled Computer Modern (same paths, every platform, every time), and `MoveAlongPath`, dashes, tips, and tracers all place by *true* arc length.
 
+Native scenes can wait for updater-driven state with
+`stage.wait_until(10.0, |arena| arena.get_center(mob)[0] >= 1.0)?`, or use
+`stage.wait_until_frames(240, predicate)?` for an exact frame budget that bypasses
+presenter holds. During timed playback, the predicate reads the live arena after
+each completed updater/event/capture boundary; an initially true predicate still
+completes one frame when its budget is positive. Zero budgets never call it.
+The seconds-based form follows configured presenter pauses, as ordinary `wait`
+does. `stage.show()?` explicitly captures the current state through the active
+renderer after zero-delta updaters and pending input, without advancing the clock
+or adding a play segment. Bounds and callback/capture failures keep their typed
+runtime errors.
+
 `RenderOptions::with_format("still.png", RenderFormat::Png)` renders one final-state PNG after the scene completes. Animations and updaters keep their normal timing, and post-play edits appear in the still; intermediate captures count against the frame budget without being rasterized. The camera render route samples the final camera rig, and bundle rendering selects the last recorded sample. PNG publication preserves existing destinations and uses canonical bytes under certified determinism. `RenderFormat::Gif` and `RenderFormat::Y4m` select the other native codecs.
 
 For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
+
+For raster assets, prepare an image once before constructing the scene:
+
+```rust,no_run
+use fmn::prelude::*;
+
+struct Photo(PreparedImage);
+
+impl SceneConstruct for Photo {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        stage.add(self.0.mobject().with_height(3.0))?;
+        Ok(())
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut loader = ImageLoader::new(ImageLoadOptions::default())?;
+    let image = loader.load("assets/photo.png")?;
+    println!("source SHA-256: {}", image.report().decode().source_digest);
+    let mut options = RenderOptions::with_format("media/photo.png", RenderFormat::Png)?;
+    options.camera = Some(options.camera_config()?);
+    render(&mut Photo(image), options)?;
+    Ok(())
+}
+```
+
+`ImageLoader::load_with_fs(path, &fs)` accepts a host-supplied or virtual filesystem; `decode(&bytes)` accepts already-owned bytes. Files are read once under the input budget (64 MiB by default), and the prepared image shares immutable pixels across copies while preserving orientation, alpha, and PNG gamma intent. PNG/JPEG decoding is native. GIF/BMP/WebP/TIFF require an explicit `ImageLoadOptions::ffmpeg` capability; animated inputs select their first frame. With the `ffmpeg` feature, callers may explicitly set `Some(FfmpegCapability::host())`. Native inputs never discover or run that tool. Set `ImageLoadOptions::determinism` to the render's determinism mode: certified preparation refuses external decoding before discovery. Retain `image.report()` for the exact source and decoded-raster digests and any tool invocation; this receipt is not a complete scene input-closure manifest and is not automatically added to the render report.
 
 For a standalone WAV soundtrack, call `render_soundtrack(&mut scene, SoundtrackRenderOptions::new("media/soundtrack.wav")?)`. The ordinary scene and its updaters execute once; `scene_mut().add_sound(…)` cues retain their offsets, gains, background ducking, and tails, with skipped time removed from the output clock. A cue-free scene produces silence of the correct duration. This route uses native PCM source decoding and canonical signed 16-bit WAV publication without a pixel renderer or ffmpeg. `SoundtrackRenderOptions` exposes the sample rate/channel matrix, mixer worker ceiling, scene duration, source/decoded/prepared audio budgets, and a 64 MiB default artifact ceiling. Existing destinations are preserved, and the report includes actual sample frames, clipping counts, and the exact inputs decoded. Compressed source files return a named decoder-capability error.
 
@@ -151,6 +190,65 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Live neural-network values (Rust)
+
+Supply layer sizes, activations and weights from your own model or training
+loop. `NeuralNetworkMobject::add_to` installs the visual family and returns a
+`NeuralNetworkBinding`; `sync_values` refreshes its neuron colors and synapse
+colors, widths and opacity while preserving handles, geometry and placement.
+Use a direct refresh for discrete changes or a fallible updater for live values:
+
+```rust,no_run
+use fmn::prelude::*;
+use std::{cell::RefCell, rc::Rc};
+
+struct TrainingReadout;
+
+impl SceneConstruct for TrainingReadout {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let mut model = NeuralNetworkMobject::from_layer_sizes(&[2, 4, 1])?;
+        let mut live = model.add_to(stage.arena_mut())?;
+        let root = live.mobject();
+        stage.arena_mut().add_to_scene(root)?;
+
+        model.set_layer_activations(1, &[0.2, 0.5, 0.8, 1.0])?;
+        model.set_synapse_weight(0, 0, 3, -0.9)?;
+        live.sync_values(stage.arena_mut(), &model)?;
+
+        let values = Rc::new(RefCell::new(model));
+        let source = Rc::clone(&values);
+        let updater = stage.arena_mut().add_try_updater(
+            root,
+            move |arena, _| {
+                live.sync_values(arena, &source.borrow())
+                    .map_err(|error| UpdaterError::callback("neural values", error))
+            },
+            false,
+        )?;
+
+        // Updates from the caller reach the same objects on the next tick.
+        values.borrow_mut().set_neuron_activation(2, 0, 0.95)?;
+        stage.wait(1.0)?;
+        stage.arena_mut().remove_updater(root, updater);
+        Ok(())
+    }
+}
+```
+
+Before moving the binding into an updater, use `live.neuron(layer, index)` or
+`live.synapse(layer, from, to)` to retain individual `Mob` handles for ordinary
+animations. Compressed layers show the first and last neurons with their
+original model indices; elided neurons and connections return `None`. Configure
+the display cap and layout before installing the binding.
+
+Refreshes require the same layer sizes, configuration and bound family shape.
+Deleting, regrouping or replacing a bound child requires a new binding;
+removing the root from the draw list and readding it is supported. Invalid
+displayed values or a stale binding fail before any style update. Neuron opacity
+and stroke styling remain caller-controlled, and unchanged values leave record
+revisions unchanged. A live updater makes its playback segment stateful under
+the normal purity rules.
 
 For a long-form example ("Made with FrankenManim"), [`crates/fmn/examples/hoeffding_d`](crates/fmn/examples/hoeffding_d/main.rs) is an eight-chapter explainer of Hoeffding's D, about 4,000 lines of Rust, paired with a source-unedited Python portal counterpart in [`crates/fmn-python/tests/hoeffding_portal.py`](crates/fmn-python/tests/hoeffding_portal.py). It runs over four minutes at 1080p60 (`15,144` frames) with a procedurally synthesized score mixed natively and muxed through the governed `ffmpeg` boundary (`render_matrix.hoeffding_d_full_mp4.v1`). Its readouts recompute the statistic from live dot positions every frame. Run `cargo run --release -p fmn --example hoeffding_d -- render all` for MP4 (ffmpeg on `PATH`), or add `--format png --res 480x270 --fps 15` for a fully native draft. The e2e suite renders all eight native chapters (`render_matrix.hoeffding_d_chapters.v1`) and the portal segments (`render_matrix.hoeffding_d_portal.v1`) on every commit.
 

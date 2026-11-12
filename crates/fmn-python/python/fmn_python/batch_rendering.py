@@ -18,7 +18,7 @@ from typing import Any
 from .batch_checkpoint import BatchCheckpoint
 from .batch_provenance import BatchProvenance, has_provenance, validate_batch_mode
 from .bundle_export import (
-    BundleExportResult, _validated_audio_options, _validated_limits, export_bundle,
+    BundleExportResult, _validated_audio_options, _validated_bundle_output_options, export_bundle,
     require_bundle_capability,
 )
 from .render_selection import animation_range as _animation_range, output_stem, planned_destination
@@ -225,7 +225,9 @@ def render_scenes(
     bundle_camera: bool = False,
     bundle_limits: Mapping[str, int] | None = None,
     bundle_audio: bool = False,
-    bundle_audio_options: Mapping[str, int] | None = None,
+    bundle_audio_options: Mapping[str, int | bool] | None = None,
+    bundle_storage: str = "recorded",
+    bundle_compact_limits: Mapping[str, int] | None = None,
 ) -> BatchRenderResult:
     """Render named scenes in input order using independent native sessions.
 
@@ -293,11 +295,22 @@ def render_scenes(
 
     bundle_audio=True includes native WAV cues through the existing bounded
     soundtrack exporter. bundle_audio_options may set audio_sample_rate,
-    audio_channels, audio_threads and max_audio_bytes per scene. Those settings
+    audio_channels, audio_threads and max_audio_bytes per scene. audio_ffmpeg=True
+    explicitly admits compressed sources through the scene's governed decoder
+    configuration; decoder work remains lazy and the bundle embeds mixed PCM.
+    Those settings
     are validated and copied before planning any jobs and bound into checkpoint
     identity. A no-cue scene retains its ordinary picture-only receipt; an
     attached soundtrack retains rate/channel/frame metadata through recovery.
     Audio workers belong to the native mixer, never to Python scene execution.
+
+    bundle_storage="compact" records the same frames in lossless minor-3
+    blocks. bundle_compact_limits controls max_retained_bytes,
+    max_snapshot_bytes and max_snapshot_work_bytes per scene. bundle_limits
+    still supplies max_frames/max_output_bytes; its max_capture_bytes must stay
+    at the recorded-mode default. All compact limits are normalized and frozen
+    before jobs are consumed, and form part of checkpoint identity. Changing
+    storage or any budget refuses resume before constructing a scene.
     """
     if not isinstance(format, str) or format not in _FORMATS | {"fmtl"}:
         raise ValueError("render format must be png, png_sequence, gif, y4m, wav, svg, mp4, mov, or fmtl")
@@ -306,18 +319,20 @@ def render_scenes(
     if type(bundle_audio) is not bool:
         raise TypeError("bundle_audio must be bool")
     if format != "fmtl" and (bundle_camera or bundle_limits is not None
-                             or bundle_audio or bundle_audio_options is not None):
-        raise ValueError("bundle camera, audio and limits require format='fmtl'")
+                             or bundle_audio or bundle_audio_options is not None
+                             or bundle_storage != "recorded" or bundle_compact_limits is not None):
+        raise ValueError("bundle camera, audio, storage and limits require format='fmtl'")
     if bundle_audio_options is not None and not isinstance(bundle_audio_options, Mapping):
         raise TypeError("bundle_audio_options must be a mapping or None")
     if bundle_audio_options is not None and not bundle_audio:
         raise ValueError("bundle_audio_options require bundle_audio=True")
     audio_options = {}
     if bundle_audio:
-        rate, channels, audio_threads, budget = _validated_audio_options(
+        rate, channels, audio_threads, budget, decoder = _validated_audio_options(
             audio=True, **({} if bundle_audio_options is None else dict(bundle_audio_options)))
         audio_options = {"audio_sample_rate": rate, "audio_channels": channels,
-                         "audio_threads": audio_threads, "max_audio_bytes": budget}
+                         "audio_threads": audio_threads, "max_audio_bytes": budget,
+                         **({"audio_ffmpeg": True} if decoder else {})}
     if not isinstance(save_last_frame, bool):
         raise TypeError("save_last_frame must be bool")
     if not isinstance(subdivide, bool):
@@ -345,12 +360,23 @@ def render_scenes(
     fps = None if fps is None else _positive_integer(fps, "fps")
     threads = None if threads is None else _positive_integer(threads, "threads")
     native = importlib.import_module("manimlib")
-    limits = None
+    limits, storage_options = None, {}
     if format == "fmtl":
-        require_bundle_capability(native, camera=bundle_camera, audio=bundle_audio)
+        from .bundle_export import _validated_batch_storage
+
+        limits, storage_options = _validated_batch_storage(
+            storage=bundle_storage, compact_limits=bundle_compact_limits, limits=bundle_limits)
+        require_bundle_capability(native, camera=bundle_camera, audio=bundle_audio,
+                                  storage=bundle_storage,
+                                  audio_ffmpeg=audio_options.get("audio_ffmpeg", False))
+        decoder_options = _validated_bundle_output_options(
+            _output_options, audio=bundle_audio,
+            audio_ffmpeg=audio_options.get("audio_ffmpeg", False))
+        if _output_options is not None:
+            _output_options = decoder_options
         if (threads is not None or selection is not None or subdivide or save_last_frame
                 or reproducible or sources is not None
-                or runtime_identities is not None or _output_options):
+                or runtime_identities is not None):
             raise native._CapabilityError(
                 "FMTL batches require complete scene capture without pixel-output options, "
                 "threads, subdivision, paired output or source certification"
@@ -358,9 +384,6 @@ def render_scenes(
         if ((resolution is not None and resolution[0] * resolution[1] > 16_777_216)
                 or (fps is not None and fps > 240)):
             raise ValueError("bundle export requires at most 16M pixels and 1..240 FPS")
-        if bundle_limits is not None and not isinstance(bundle_limits, Mapping):
-            raise TypeError("bundle_limits must be a mapping or None")
-        limits = _validated_limits(**({} if bundle_limits is None else dict(bundle_limits)))
     if subdivide and ((resolution is not None and resolution[0] * resolution[1] > 16_777_216)
                       or (threads is not None and threads > 96)):
         raise ValueError("subdivision requires at most 16777216 pixels and 1..96 threads")
@@ -399,6 +422,7 @@ def render_scenes(
                    if format == "fmtl" else {}),
                 **({"bundle_audio": True, "bundle_audio_options": audio_options}
                    if bundle_audio else {}),
+                **storage_options,
             })
             completed = journal.completed
             for index, job in enumerate(jobs):
@@ -418,7 +442,12 @@ def render_scenes(
                     if format == "fmtl":
                         receipt = export_bundle(job.scene, path, resolution=resolution, fps=fps,
                                                 camera=bundle_camera, scene_kwargs=kwargs, **limits,
-                                                **({"audio": True, **audio_options} if bundle_audio else {}))
+                                                **({"storage": "compact", "compact_limits":
+                                                    storage_options["bundle_compact_limits"]}
+                                                   if storage_options else {}),
+                                                **({"audio": True, **audio_options} if bundle_audio else {}),
+                                                **({"_output_options": _output_options}
+                                                   if _output_options else {}))
                     else:
                         receipt = render(job.scene, path, format=format, resolution=resolution,
                                            fps=fps, threads=threads, scene_kwargs=kwargs,
@@ -513,6 +542,11 @@ def _restored_outcome(row):
             continue
         if type(value) is not int or value < (1 if name in {"fps", "threads"} else 0):
             raise ValueError("invalid checkpoint receipt field: " + name)
+    dither_seed = data.get("audio_dither_seed")
+    if dither_seed is not None and (
+            data.get("format") != "wav" or type(dither_seed) is not int
+            or not 0 <= dither_seed < 1 << 64):
+        raise ValueError("invalid checkpoint receipt field: audio_dither_seed")
     resolution = data.get("resolution")
     if not isinstance(resolution, list) or len(resolution) != 2 or any(type(value) is not int or value <= 0 for value in resolution):
         raise ValueError("invalid checkpoint receipt resolution")

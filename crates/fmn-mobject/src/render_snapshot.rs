@@ -19,7 +19,7 @@ use fmn_hash::{Limits, SerialError};
 
 use crate::StageError;
 use crate::shape::ShapeSlot;
-use crate::stage::{Mob, Snapshot, SnapshotEntry};
+use crate::stage::{Mob, Snapshot, SnapshotEntry, SnapshotEntryData};
 
 /// Graph workspace admitted while projecting a recorded frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -263,6 +263,7 @@ fn project(
     };
     let mut slots = Vec::new();
     budget.reserve(&mut slots, order.len(), "projected slots")?;
+    budget.charge::<[u8; SnapshotEntry::ALLOCATION_BYTES]>(order.len(), "projected metadata")?;
     for &mob in &order {
         let source = entry(snapshot, mob)?;
         let mut children = Vec::new();
@@ -294,7 +295,7 @@ fn project(
         };
         slots.push((
             0,
-            Some(SnapshotEntry {
+            Some(SnapshotEntry::new(SnapshotEntryData {
                 buffer,
                 placement: source.placement,
                 placement_revision: 0,
@@ -317,7 +318,7 @@ fn project(
                 image: source.image.clone(),
                 image_revision: u64::from(source.image.is_some()),
                 family_cache: None,
-            }),
+            })),
         ));
     }
     // Rebuild reciprocal parents in canonical source/child order. Filtering
@@ -372,8 +373,24 @@ impl Snapshot {
         &self,
         limits: RenderSnapshotLimits,
     ) -> Result<Vec<u8>, RenderSnapshotError> {
-        project(self, limits)?
-            .to_bytes()
+        self.to_render_bytes_with_encoding_limits(limits, Limits::DEFAULT)
+    }
+
+    /// Render-only encoding with independent graph and canonical byte budgets.
+    ///
+    /// The byte budget is enforced before each encoder growth. The graph
+    /// budget still bounds projection workspace; neither changes the source
+    /// snapshot or the bytes emitted for a successful encoding.
+    ///
+    /// # Errors
+    /// As [`Self::to_render_bytes`], including a narrowed encoding size limit.
+    pub fn to_render_bytes_with_encoding_limits(
+        &self,
+        graph_limits: RenderSnapshotLimits,
+        encoding_limits: Limits,
+    ) -> Result<Vec<u8>, RenderSnapshotError> {
+        project(self, graph_limits)?
+            .to_bytes_with_limits(encoding_limits)
             .map_err(RenderSnapshotError::Serial)
     }
 }

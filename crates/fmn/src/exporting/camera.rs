@@ -82,8 +82,7 @@ where
     }
     Camera::new(camera.clone()).map_err(|error| scene_error(error.into()))?;
     let mut scene = Scene::new(runtime, options.config.determinism.seed).map_err(scene_error)?;
-    let recorder = SceneBundleRecorder::new_render_only_with_camera(fps, options.limits)
-        .map_err(recording_error)?;
+    let recorder = options.recorder(fps, true).map_err(recording_error)?;
     let (mut program, rig) = factory(&mut scene, &camera).map_err(BundleExportError::Scene)?;
     if scene.time().frames() != 0 || scene.play_count() != 0 {
         return Err(BundleExportError::InvalidOptions(
@@ -138,10 +137,12 @@ where
         .recorder
         .finish_with_max_bytes(options.max_output_bytes)
         .map_err(recording_error)?;
-    let bundle = super::soundtrack::finish_recording(bundle, &scene, &options, audio)?;
+    let (bundle, soundtrack) =
+        super::soundtrack::finish_recording(bundle, &scene, &options, audio)?;
     Ok(SceneBundleExport {
         scene: report,
         bundle,
+        soundtrack,
     })
 }
 

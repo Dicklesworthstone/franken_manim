@@ -10,9 +10,9 @@ use fmn_anim::FramePacket;
 use fmn_codec::SampleFormat;
 use fmn_config::Config;
 use fmn_output::{
-    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DecodedAudio, DitherPolicy,
-    InvocationReport, MixReport, MixerConfig, SoundCue, SoundMixer, WavPublicationConfig,
-    WavPublicationReport, frames_to_samples, publish_wav_new,
+    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy, InvocationReport, MixReport,
+    MixerConfig, SoundCue, SoundMixer, WavPublicationConfig, WavPublicationReport,
+    frames_to_samples, publish_wav_new,
 };
 use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};
@@ -98,14 +98,15 @@ impl SoundtrackTimeline {
 
 /// Exact source bytes and native decode identity of one insertion-ordered cue.
 ///
-/// Shared bytes let several subdivision receipts name the same prepared input
-/// without copying its buffer. Provenance may use `report.source_digest`
-/// directly; it must not reopen the authored path after decoding.
+/// Shared bytes and reports let repeated cues and subdivision receipts name
+/// the same prepared input without copying its buffer or captured decoder log.
+/// Provenance may use `report.source_digest` directly; it must not reopen the
+/// authored path after decoding.
 #[derive(Clone, Debug)]
 pub struct SoundtrackInput {
     pub path: PathBuf,
     pub bytes: Arc<[u8]>,
-    pub report: AudioDecodeReport,
+    pub report: Arc<AudioDecodeReport>,
 }
 
 /// Cumulative admission limits for retained audio preparation, independent of
@@ -227,14 +228,14 @@ impl PreparedSceneSoundtrack {
         inputs
             .try_reserve_exact(requests.len())
             .map_err(|_| RenderError::InvalidOptions("soundtrack input allocation failed"))?;
-        let mut sources: BTreeMap<PathBuf, (Arc<[u8]>, DecodedAudio)> = BTreeMap::new();
+        let mut sources = BTreeMap::new();
         let mut invocations = Vec::new();
         for request in requests {
             let frame = match timeline {
                 Some(timeline) => timeline.output_frame(request.time.frames())?,
                 None => request.time.frames(),
             };
-            let (bytes, decoded) = match sources.entry(request.sound_file.clone()) {
+            let (bytes, audio, report) = match sources.entry(request.sound_file.clone()) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let bytes = fs
@@ -265,20 +266,21 @@ impl PreparedSceneSoundtrack {
                         limits.max_decoded_samples,
                         "soundtrack decoded-sample budget exceeded",
                     )?;
-                    if let Some(invocation) = decoded.report.invocation.clone() {
+                    let report = Arc::new(decoded.report);
+                    if let Some(invocation) = &report.invocation {
                         invocations.try_reserve(1).map_err(|_| {
                             RenderError::InvalidOptions("soundtrack invocation allocation failed")
                         })?;
-                        invocations.push(invocation);
+                        invocations.push(invocation.clone());
                     }
-                    entry.insert((Arc::from(bytes), decoded))
+                    entry.insert((Arc::<[u8]>::from(bytes), decoded.audio, report))
                 }
             };
             // Budget sizing only: the native mixer's resampler owns the actual
             // channel mapping and samples. Its output uses ceil(n * out / in).
-            let input_frames = decoded.audio.samples.len() / usize::from(decoded.audio.channels);
+            let input_frames = audio.samples.len() / usize::from(audio.channels);
             let output_frames = ((input_frames as u128) * u128::from(config.sample_rate))
-                .div_ceil(u128::from(decoded.audio.sample_rate));
+                .div_ceil(u128::from(audio.sample_rate));
             let count = output_frames
                 .checked_mul(u128::from(config.channels))
                 .and_then(|n| usize::try_from(n).ok())
@@ -293,7 +295,7 @@ impl PreparedSceneSoundtrack {
             )?;
             mixer
                 .add(SoundCue {
-                    audio: decoded.audio.clone(),
+                    audio: audio.clone(),
                     frame,
                     fps: request.time.fps(),
                     time_offset: request.time_offset,
@@ -304,7 +306,7 @@ impl PreparedSceneSoundtrack {
             inputs.push(SoundtrackInput {
                 path: request.sound_file.clone(),
                 bytes: Arc::clone(bytes),
-                report: decoded.report.clone(),
+                report: Arc::clone(report),
             });
         }
         Ok(Self {
@@ -369,8 +371,10 @@ impl PreparedSceneSoundtrack {
 /// The scene still executes its normal animations and updaters. No pixel
 /// buffers, render teams, or video encoder are created. Input is native PCM
 /// WAV; compressed media returns the decoder's named capability refusal.
-/// Output is canonical signed 16-bit PCM without dither, at the explicit
-/// mixer's sample rate and mono/stereo layout. AAC/video quality settings
+/// Output is canonical signed 16-bit PCM, at the explicit mixer's sample rate
+/// and mono/stereo layout. Dither is disabled by default; callers can request
+/// seeded, sample-counter TPDF when reducing the mixed floating-point audio.
+/// AAC/video quality settings
 /// are irrelevant to this native artifact and are not consulted.
 #[derive(Debug, Clone)]
 pub struct SoundtrackRenderOptions {
@@ -382,6 +386,9 @@ pub struct SoundtrackRenderOptions {
     /// Output sample rate, mono/stereo layout and per-cue/timeline frame bound.
     /// The output-byte ceiling below can impose a smaller sample-frame bound.
     pub mixer: MixerConfig,
+    /// Explicit PCM reduction policy. TPDF is keyed by the interleaved output
+    /// sample index, so a seed produces identical bytes at every worker count.
+    pub dither: DitherPolicy,
     /// Per-source native WAV decoding bounds. No transcoder is admitted.
     pub decode: AudioDecodeLimits,
     /// Cumulative source, decoded and per-cue prepared-storage admission.
@@ -411,6 +418,7 @@ impl SoundtrackRenderOptions {
             output: output.into(),
             config: Config::resolve(&[], None)?.config,
             mixer: MixerConfig::default(),
+            dither: DitherPolicy::None,
             decode: AudioDecodeLimits::default(),
             preparation: SoundtrackPreparationLimits::default(),
             threads: NonZeroUsize::MIN,
@@ -507,6 +515,8 @@ pub struct SoundtrackRenderReport {
     pub sample_rate: u32,
     /// Native output channels (one or two).
     pub channels: u16,
+    /// PCM reduction policy actually applied to the published artifact.
+    pub dither: DitherPolicy,
     /// Actual native mixer workers, zero for an empty mix.
     pub workers_used: usize,
     /// Insertion-ordered exact source bytes and decoder identities. Repeated
@@ -615,7 +625,7 @@ pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
         &WavPublicationConfig {
             destination: options.output,
             format: SampleFormat::S16,
-            dither: DitherPolicy::None,
+            dither: options.dither,
             max_artifact_bytes: options.max_output_bytes,
             profile: None,
         },
@@ -627,6 +637,7 @@ pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
         artifact,
         sample_rate: mix.audio.sample_rate,
         channels: mix.audio.channels,
+        dither: options.dither,
         workers_used: mix.workers_used,
         inputs: prepared.inputs().to_vec(),
         typesetting: completed.typesetting_report().clone(),
@@ -829,6 +840,15 @@ mod tests {
         assert!(Arc::ptr_eq(
             &prepared.inputs()[0].bytes,
             &prepared.inputs()[1].bytes,
+        ));
+        assert!(Arc::ptr_eq(
+            &prepared.inputs()[0].report,
+            &prepared.inputs()[1].report,
+        ));
+        let retained_inputs = prepared.inputs().to_vec();
+        assert!(Arc::ptr_eq(
+            &prepared.inputs()[0].report,
+            &retained_inputs[1].report,
         ));
         assert_eq!(
             prepared.inputs()[0].report.source_digest,

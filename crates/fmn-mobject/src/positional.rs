@@ -113,6 +113,12 @@ fn mapped_auxiliary_points(
     columns
 }
 
+/// The existing world-space map, prepared without touching record generations.
+struct MappedPointlikes {
+    points: Option<Vec<Vec3>>,
+    columns: Vec<(String, Vec<f32>)>,
+}
+
 // --- small f64 vector helpers (kept local; the geometry kernel's Vec3 math is
 // pub(crate)-internal to fmn-geom and not a dependency here) ---
 
@@ -758,6 +764,15 @@ impl Stage {
         mob: Mob,
         map: impl Fn(Vec3) -> Vec3,
     ) -> Result<(), StageError> {
+        let mapped = self.prepare_world_pointlikes(mob, map)?;
+        self.publish_world_pointlikes(mob, mapped)
+    }
+
+    fn prepare_world_pointlikes(
+        &self,
+        mob: Mob,
+        map: impl Fn(Vec3) -> Vec3,
+    ) -> Result<MappedPointlikes, StageError> {
         let validity = self
             .get(mob)
             .and_then(|entry| entry.buffer.read_column(SURFACE_VALIDITY_FIELD));
@@ -776,6 +791,55 @@ impl Stage {
         });
         let entry = self.get(mob).ok_or(StageError::StaleHandle)?;
         let columns = mapped_auxiliary_points(&entry.buffer, entry.placement(), &map);
+        Ok(MappedPointlikes { points, columns })
+    }
+
+    fn validate_world_pointlikes(
+        &self,
+        mob: Mob,
+        mapped: &MappedPointlikes,
+    ) -> Result<(), StageError> {
+        let entry = self.try_get(mob)?;
+        if entry
+            .buffer
+            .schema()
+            .field_width("point")
+            .is_some_and(|width| width != 3)
+        {
+            return Err(StageError::SchemaMismatch);
+        }
+        if let Some(points) = &mapped.points {
+            if points
+                .iter()
+                .flatten()
+                .any(|value| !(*value as f32).is_finite())
+            {
+                return Err(StageError::InvalidPointMap(
+                    "mapped points must fit finite f32 records",
+                ));
+            }
+            if self.is_vmobject_schema(mob)? {
+                QuadPath::from_points(points.clone()).map_err(StageError::Geometry)?;
+            }
+        }
+        if mapped
+            .columns
+            .iter()
+            .any(|(_, values)| values.iter().any(|value| !value.is_finite()))
+        {
+            return Err(StageError::InvalidPointMap(
+                "mapped auxiliary points must fit finite f32 records",
+            ));
+        }
+        Ok(())
+    }
+
+    fn publish_world_pointlikes(
+        &mut self,
+        mob: Mob,
+        mapped: MappedPointlikes,
+    ) -> Result<(), StageError> {
+        let MappedPointlikes { points, columns } = mapped;
         if let Some(points) = points {
             self.write_points(mob, &points)?;
         } else {
@@ -977,6 +1041,82 @@ impl Stage {
         let pivot = self.resolve_pivot(mob, about_point, about_edge);
         self.transform_points(mob, pivot, f);
         self.refresh_bounding_box(mob, true, true)
+    }
+
+    /// Apply a world-space point map to the complete family after validating
+    /// every result. Shared descendants are visited once. Primary points and
+    /// auxiliary pointlike fields use the same mapping and retained placement
+    /// as [`Self::apply_points_function`]; absent surface samples stay absent.
+    /// Existing record views remain attached when the prepared values publish.
+    ///
+    /// No geometry changes if a later family member fails validation. The map
+    /// is evaluated once per present pointlike sample during preparation, so
+    /// arbitrary callback effects cannot be rolled back.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`], [`StageError::SchemaMismatch`], malformed
+    /// vector geometry, or [`StageError::InvalidPointMap`] for an invalid pivot
+    /// or mapped value outside finite f32 storage.
+    pub fn try_apply_points_function(
+        &mut self,
+        mob: Mob,
+        f: impl Fn(Vec3) -> Vec3,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> Result<&mut Self, StageError> {
+        self.try_get(mob)?;
+        if about_point
+            .into_iter()
+            .chain(about_edge)
+            .flatten()
+            .any(|value| !value.is_finite())
+        {
+            return Err(StageError::InvalidPointMap("pivot and edge must be finite"));
+        }
+        let pivot = self.resolve_pivot(mob, about_point, about_edge);
+        if pivot.is_some_and(|point| point.into_iter().any(|value| !value.is_finite())) {
+            return Err(StageError::InvalidPointMap("resolved pivot must be finite"));
+        }
+        let mut prepared = Vec::new();
+        for member in self.family(mob) {
+            let mapped = self.prepare_world_pointlikes(member, |point| match pivot {
+                Some(pivot) => add(f(sub(point, pivot)), pivot),
+                None => f(point),
+            })?;
+            self.validate_world_pointlikes(member, &mapped)?;
+            prepared.push((member, mapped));
+        }
+        for (member, mapped) in prepared {
+            self.publish_world_pointlikes(member, mapped)?;
+        }
+        Ok(self.refresh_bounding_box(mob, true, true))
+    }
+
+    /// Translate a family through the ordinary retained-placement path after
+    /// checking that its complete world geometry remains representable.
+    ///
+    /// # Errors
+    /// As [`Self::try_apply_points_function`]. Refusal changes neither geometry
+    /// nor placement; successful shifts retain [`Self::shift`]'s box semantics.
+    pub fn try_shift(&mut self, mob: Mob, vector: Vec3) -> Result<&mut Self, StageError> {
+        self.try_get(mob)?;
+        if vector.into_iter().any(|value| !value.is_finite()) {
+            return Err(StageError::InvalidPointMap("translation must be finite"));
+        }
+        for member in self.family(mob) {
+            let mapped = self.prepare_world_pointlikes(member, |point| add(point, vector))?;
+            self.validate_world_pointlikes(member, &mapped)?;
+            if self.try_get(member)?.buffer.is_empty()
+                && add(self.get_center(member), vector)
+                    .into_iter()
+                    .any(|value| !value.is_finite())
+            {
+                return Err(StageError::InvalidPointMap(
+                    "translated anchor must be finite",
+                ));
+            }
+        }
+        Ok(self.shift(mob, vector))
     }
 
     /// Reference `wag`: displace each point by `direction` times its
@@ -1839,6 +1979,11 @@ impl Stage {
     /// `set_anti_alias_width`).
     pub fn set_anti_alias_width(&mut self, mob: Mob, width: f64, recurse: bool) -> &mut Self {
         self.edit_uniforms(mob, recurse, |u| u.anti_alias_width = width)
+    }
+    /// Set the shared radial glow exponent (`0.0` gives a hard disc).
+    /// The dot renderer reads this uniform; record columns stay untouched.
+    pub fn set_glow_factor(&mut self, mob: Mob, value: f64, recurse: bool) -> &mut Self {
+        self.edit_uniforms(mob, recurse, |u| u.glow_factor = value)
     }
     /// Set the `[reflectiveness, gloss, shadow]` shading triple.
     pub fn set_shading(&mut self, mob: Mob, shading: Vec3, recurse: bool) -> &mut Self {

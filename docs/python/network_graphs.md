@@ -2,9 +2,10 @@
 
 `fmn_python.network_graph.NetworkGraph` connects the enhanced Atlas network
 library to Python scenes. It does not require a Python `networkx` installation.
-Native Rust owns circular, shell, breadth-first and seeded spring layouts;
-existing `Dot`, `Line`, `Circle`, `Text` and `Transform` objects own drawing,
-typography, animation and rendering. This is an enhanced API, not a claim that
+Native Rust owns circular, shell, breadth-first and seeded spring layouts,
+graph traversal order and weighted flow schedules. Existing `Dot`, `Line`,
+`Circle`, `Text` and animation kernels own drawing, typography and rendering.
+This is an enhanced API, not a claim that
 a `Graph` class existed in the pinned upstream `manimlib` surface.
 
 ```python
@@ -24,6 +25,10 @@ class ExplainNetwork(Scene):
         self.play(graph.vertices['b'].animate.shift(UP))
         graph.add_edges(('c', 'new'), positions={'new': (2, -1, 0)})
         self.play(graph.animate_layout('spring', layout_config={'seed': 7}))
+        self.play(graph.animate_traversal('a', order='depth_first', color=YELLOW))
+        self.play(graph.animate_flow([
+            ('a', 'b', 1), ('b', 'c', 3), ('c', 'new', 1),
+        ], run_time_frames=60))
 ```
 
 ## Data and ownership
@@ -68,6 +73,47 @@ origin) apply to the new layout's coordinates. These are world-coordinate
 targets; a previous shift, rotation or scale of the graph is not implicitly
 reapplied to a later layout. A layout animation currently requires the same
 ordered topology and label membership at both endpoints.
+
+## Traversal and edge flow
+
+`graph.animate_traversal(root, order='breadth_first', color=YELLOW)` returns a
+`TraverseGraph` animation. Import that class directly from
+`fmn_python.network_graph` to subclass its ordinary animation lifecycle. Both
+`breadth_first` and `depth_first` use the same native traversal planner as Rust
+`TraverseGraph`: neighbors follow edge insertion order, each reachable vertex
+is visited once, and disconnected vertices are left alone. An isolated root is
+visited once. This traversal order differs deliberately from the layout's
+sorted-neighbor placement rule. `animation.visit_order` exposes the scheduled
+labels. Each vertex keeps its highlight after its interval; edges, labels and
+unvisited vertices keep their styles. Moving or styling the graph between
+animation construction and playback is supported.
+
+`graph.animate_flow(steps, color=YELLOW, stroke_width=5, time_width=.25)` returns
+`FlowAlongEdges`. Each step is `(source, destination, positive_weight)` for an
+existing edge. The source and destination set pulse direction independently
+of the undirected edge's stored orientation. Repeated visits and self-loops
+are supported. Weights `1` and `3` receive one quarter and three quarters of
+the total time; `animation.durations` exposes the native normalized durations.
+Normalization supports large finite weights whose raw sum would overflow,
+and rejects weights too small to occupy a distinct timeline interval.
+
+Pulses use the existing native `ShowPassingFlash` and `VFadeIn` kernels.
+`time_width` controls the passing segment's width in normalized edge progress;
+opacity falls to zero at both ends of each visit. The temporary
+`animation.pulses` overlay freezes live edge paths and rendering uniforms at
+begin. Later edge motion does not retarget a running pulse. Cleanup removes
+only this overlay and restores the original graph pixels; the source graph's
+geometry, styles, ownership and attached annotations are never modified.
+An aborted callback also releases the overlay and shared animation state.
+
+Both animations default to two seconds and support the ordinary `run_time`,
+`run_time_frames`, easing and composition controls. `Scene.play` overrides and
+nested groups use the shared native timing machinery. Define custom `begin`,
+`interpolate`, `finish` or cleanup hooks by subclassing and calling `super()`.
+Topology is checked again at begin: construct a new animation after editing
+connectivity. Flow is bounded to 8,192 steps and shares the bridge's label-data
+budget. Invalid roots, absent edges and nonpositive/nonfinite weights fail
+explicitly before changing the graph.
 
 ## Changing connectivity
 
@@ -116,7 +162,13 @@ omitting graph content.
 
 No second graph database, force solver, renderer or RNG is implemented in
 Python. This delivery does not add directed or parallel edges, animated topology
-correspondence, weighted spring forces, graph-algorithm execution or a
+correspondence, weighted spring forces, general graph-algorithm execution or a
 certified-layout claim.
 `demo/python/network_layouts.py` is a runnable no-assets scene. The native layout
 and full scene acceptance suites include independent geometry and Y4M witnesses.
+Traversal and flow acceptance also exercise real PNG sequences at one, four
+and sixteen rendering threads, assert byte equality and visible intermediate
+motion, and verify that flow cleanup restores the initial graph frame. The
+installed-wheel script runs these sequences in certified mode with explicit
+source bytes; embedded Rust tests use standard mode because they have no
+installed extension identity.

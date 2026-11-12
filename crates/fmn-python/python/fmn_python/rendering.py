@@ -139,6 +139,8 @@ class RenderResult:
     # are deliberately outside the certified artifact/input-closure digest.
     performance: dict[str, Any] | None = None
     autotune: dict[str, Any] | None = None
+    # Frozen explicit WAV TPDF seed; None preserves the ordinary PCM policy.
+    audio_dither_seed: int | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -162,6 +164,8 @@ class RenderResult:
             result["autotune"] = copy.deepcopy(self.autotune)
         if self.format == "wav":
             result.update(sample_rate=48000, channels=2)
+            if self.audio_dither_seed is not None:
+                result["audio_dither_seed"] = self.audio_dither_seed
         if self.manifest is not None:
             result["manifest"] = {
                 "path": str(self.manifest),
@@ -403,6 +407,8 @@ class RenderSession:
             if self.format in _VIDEO_FORMATS or self.format == "wav":
                 audio_inputs = tuple(copy.deepcopy(self.scene._render_audio_inputs))
                 ffmpeg_limits = copy.deepcopy(getattr(self.scene, "_render_ffmpeg_limits", None))
+            audio_dither_seed = (getattr(self.scene, "_render_audio_dither_seed", None)
+                                 if self.format == "wav" else None)
             manifest_path, closure_digest = None, None
             if self.reproducible:
                 cues = audio_inputs or getattr(self.scene, "_render_audio_inputs", ())
@@ -411,7 +417,7 @@ class RenderSession:
                     self.fps, self.threads, self.seed,
                     {"path": str(path), "digest": digest,
                      "routes": tuple(getattr(self.scene, "_render_routes", (0, 0, None))),
-                     "image_inputs": image_inputs},
+                     "image_inputs": image_inputs, "audio_dither_seed": audio_dither_seed},
                     sources, self.runtime_identities, _cue_assets(cues),
                 )
                 manifest_path = Path(manifest_file_str)
@@ -424,6 +430,7 @@ class RenderSession:
                 certified=self.reproducible, manifest=manifest_path,
                 closure_digest=closure_digest, ffmpeg_invocations=invocations,
                 audio_inputs=audio_inputs, image_inputs=image_inputs, ffmpeg_limits=ffmpeg_limits,
+                audio_dither_seed=audio_dither_seed,
                 performance=(copy.deepcopy(getattr(self.scene, "_render_performance", None))
                              if self.format not in {"wav", "svg"} else None),
                 autotune=copy.deepcopy(getattr(self.scene, "_render_autotune", None)),

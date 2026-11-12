@@ -1,15 +1,18 @@
-//! Transactional native command replay and cold checkpoint reconstruction.
+//! Transactional native command replay and registered checkpoint continuation.
 //!
 //! A forward journal run keeps one independent executable candidate. Every
 //! entry still verifies its actual state hash before the transaction can be
-//! published. Backward seeks reconstruct fresh callback captures; decoded
-//! snapshots are never mistaken for executable animation or editor state.
+//! published. Admitted waits bind restored data to fresh registered functions;
+//! backward seeks and opaque captures reconstruct independent callback owners.
 
 use fmn_scene::Journal;
 use fmn_scene::studio_bridge::SceneState;
 
-use super::super::edits::decode_state;
-use super::{NativeSceneWorker, execution_error, refuse_owned};
+use super::super::edits::{EditTrack, decode_state, encode_state};
+use super::{
+    CheckpointAdmission, NativeCheckpointFallback, NativeRestoreMode, NativeRestoreReport,
+    NativeSceneWorker, execution_error, refuse_owned,
+};
 use crate::{
     Checkpoint, JournalReplay, ServiceError, WorkerErrorCode, WorkerResponse, protocol_digest,
 };
@@ -63,7 +66,14 @@ impl NativeSceneWorker {
         let mut simulated = self.edits.try_clone()?;
         let mut total_frames = 0_u64;
         let mut total_inputs = 0_u64;
-        let mut previous_frame = None;
+        let continuation = if entries.is_empty() {
+            None
+        } else {
+            self.continuation_bytes(true)?
+        };
+        let mut previous_frame = continuation
+            .as_ref()
+            .and_then(|_| self.program.as_ref().map(|program| program.frame_index()));
         let mut previous_inputs = 0_u64;
         let mut steps = Vec::new();
         steps
@@ -133,7 +143,22 @@ impl NativeSceneWorker {
         hashes
             .try_reserve_exact(entries.len())
             .map_err(execution_error)?;
-        let mut candidate = None;
+        let mut candidate = if steps
+            .first()
+            .is_some_and(|step| step.applied_inputs.is_some())
+        {
+            Some(
+                self.resumed_program(
+                    continuation
+                        .as_deref()
+                        .ok_or_else(|| refuse("native replay continuation is absent"))?,
+                    self.position,
+                )
+                .map_err(|error| refuse_owned(WorkerErrorCode::ReplayFailed, error))?,
+            )
+        } else {
+            None
+        };
         let mut last_checkpoint = self.last_checkpoint;
         for ((offset, entry), step) in entries.iter().enumerate().zip(steps) {
             let position = replay.from_entry + offset as u64;
@@ -222,6 +247,32 @@ impl NativeSceneWorker {
             .after_entry
             .checked_add(1)
             .ok_or_else(|| refuse("native checkpoint journal position exhausted"))?;
+        if checkpoint.state.starts_with(b"FMNR") {
+            let program = self
+                .resumed_program(&checkpoint.state, next)
+                .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
+            let frame = program.frame_index();
+            let response = self.checked(WorkerResponse::Ack {
+                state_hash: Some(checkpoint.state_hash),
+                journal_len: next,
+            })?;
+            let raster = self.new_raster()?;
+            self.program = Some(program);
+            self.edits = EditTrack::default();
+            self.pending_inputs.clear();
+            self.preview_clean = true;
+            self.raster = raster;
+            self.position = next;
+            self.last_hash = Some(checkpoint.state_hash);
+            self.last_checkpoint = Some(frame);
+            self.last_restore = Some(NativeRestoreReport {
+                mode: NativeRestoreMode::Checkpoint,
+                frame,
+                fallback: None,
+            });
+            self.tail.clear();
+            return Ok(response);
+        }
         let restored = decode_state(
             &checkpoint.state,
             &self.config.scene,
@@ -250,8 +301,19 @@ impl NativeSceneWorker {
         // untrusted until this independent factory/input execution agrees.
         self.require_input_budget(&restored.edits, frame)
             .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
-        let mut program = self.fresh_at(frame, &restored.edits)?;
-        let state = self.state_bytes(&mut program, &restored.edits, next)?;
+        let mut program = self
+            .fresh_at(frame, &restored.edits)
+            .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
+        // Legacy snapshots are independently verified in their original wire
+        // format even when this factory now supports a registered continuation.
+        let state = encode_state(
+            &self.config.scene,
+            next,
+            &self.reads,
+            &restored.edits,
+            program.state_bytes()?,
+            self.config.limits.max_checkpoint_bytes,
+        )?;
         if state != checkpoint.state {
             return Err(refuse(
                 "native checkpoint does not match fresh callback and input execution",
@@ -262,6 +324,14 @@ impl NativeSceneWorker {
             journal_len: next,
         })?;
         let raster = self.new_raster()?;
+        let fallback = if !restored.edits.is_empty() {
+            NativeCheckpointFallback::EditedInput
+        } else {
+            match program.checkpoint_admission(self.config.limits.max_checkpoint_bytes)? {
+                CheckpointAdmission::Resume(_) => NativeCheckpointFallback::LegacyCheckpoint,
+                CheckpointAdmission::Replay(reason) => reason,
+            }
+        };
         self.program = Some(program);
         self.edits = restored.edits;
         self.pending_inputs.clear();
@@ -270,6 +340,11 @@ impl NativeSceneWorker {
         self.position = next;
         self.last_hash = Some(checkpoint.state_hash);
         self.last_checkpoint = Some(frame);
+        self.last_restore = Some(NativeRestoreReport {
+            mode: NativeRestoreMode::ColdVerified,
+            frame,
+            fallback: Some(fallback),
+        });
         self.tail.clear();
         Ok(response)
     }

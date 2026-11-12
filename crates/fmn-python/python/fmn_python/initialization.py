@@ -30,6 +30,7 @@ _STEPS = (
     ("derived_curves", "install_derived_curves"),
     ("functional_color", "install_functional_color"),
     ("rendering", "install_scene_rendering"),
+    ("recording", "install_file_writer_recording"),
     ("camera_capture", "install_camera_capture"),
     ("surface_textures", "install_surface_textures"),
     ("image_authoring", "install_image_authoring"),

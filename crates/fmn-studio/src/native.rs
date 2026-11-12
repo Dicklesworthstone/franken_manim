@@ -7,6 +7,7 @@
 
 mod build;
 mod camera;
+mod checkpoint_registry;
 mod edits;
 mod program;
 mod raster;
@@ -14,5 +15,12 @@ mod service;
 
 pub use build::{NativeBuild, NativeBuildContext};
 pub use camera::camera_capture_backend;
-pub use program::{MAX_NATIVE_SEGMENTS, NativeSceneProgram, NativeSeekWork, NativeSegment};
-pub use service::{NativeReplayPolicy, NativeSceneWorker, NativeWorkerConfig};
+pub use checkpoint_registry::NativeUpdaterRegistry;
+pub use program::{
+    MAX_NATIVE_SEGMENTS, NativeCheckpointFallback, NativeSceneProgram, NativeSeekWork,
+    NativeSegment,
+};
+pub use service::{
+    NativeReplayPolicy, NativeRestoreMode, NativeRestoreReport, NativeSceneWorker,
+    NativeWorkerConfig,
+};

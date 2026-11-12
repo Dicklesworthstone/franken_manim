@@ -68,7 +68,7 @@ pub use ffmpeg_limits::{
 };
 pub use pipeline::{
     NativeAdaptiveCamera, NativeAdaptiveRoutes, NativeFrameError, NativeFramePipeline,
-    planar_capture_refusal, planar_stage_refusal,
+    PlanarCapturePolicy, planar_stage_refusal,
 };
 pub use soundtrack::{
     PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackRenderOptions,

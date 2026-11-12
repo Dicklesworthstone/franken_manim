@@ -174,6 +174,27 @@ class ExecutionTests(unittest.TestCase):
         self.assertEqual(anim.events, ["begin", ("helpers", .25), "interpolate", "finish", "cleanup"])
         self.assertIs(self.scene._last_specs[0], anim)
         self.assertNotIn(execution._OWNER_KEY, vars(self.scene))
+
+    def test_failed_execution_cancels_only_its_manual_insert_owner(self):
+        cancelled = []
+        self.scene._fmn_file_writer_insert = types.SimpleNamespace(_cancel_preserving=cancelled.append)
+        error = LookupError("insert wait failed")
+        self.scene.native_failure = error
+        with self.assertRaises(LookupError) as caught:
+            self.scene.wait()
+        self.assertIs(caught.exception, error)
+        self.assertEqual(cancelled, [error])
+
+    def test_normal_end_scene_preserves_insert_prefix_for_publication(self):
+        class EndScene(Exception):
+            pass
+        self.g.EndScene = EndScene
+        cancelled = []
+        self.scene._fmn_file_writer_insert = types.SimpleNamespace(_cancel_preserving=cancelled.append)
+        self.scene.native_failure = EndScene("selected range completed")
+        with self.assertRaises(EndScene):
+            self.scene.wait()
+        self.assertEqual(cancelled, [])
     def test_begin_failure_releases_its_own_partial_state(self):
         anim = self.animation(fail="begin")
         with self.assertRaises(LookupError) as result:

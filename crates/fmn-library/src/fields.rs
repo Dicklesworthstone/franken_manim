@@ -2789,17 +2789,24 @@ impl AnimatedBoundary {
 /// the field every tick. Updater-bound.
 ///
 /// # Errors
-/// [`FieldError::Stage`] on a stale handle.
+/// A stale handle or failed updater registration. Invalid deltas, field output,
+/// or overflowing translated geometry are retained by [`Stage::updater_error`]
+/// without changing the family.
 pub fn move_along_vector_field(
     stage: &mut Stage,
     mob: Mob,
     func: impl Fn(Vec3) -> Vec3 + 'static,
 ) -> Result<(), FieldError> {
-    stage.add_dt_updater(
+    stage.add_try_dt_updater(
         mob,
         move |stage: &mut Stage, mob: Mob, dt: f64| {
+            const OPERATION: &str = "move_along_vector_field";
+            check_field_delta(OPERATION, dt)?;
             let center = stage.get_center(mob);
-            let _ = stage.shift(mob, scale3(func(center), dt));
+            check_field_point(OPERATION, center, "mobject center must be finite")?;
+            let delta = field_displacement(OPERATION, func(center), dt)?;
+            stage.try_shift(mob, delta)?;
+            Ok(())
         },
         false,
     )?;
@@ -2811,25 +2818,63 @@ pub fn move_along_vector_field(
 /// comparison kept exactly (`abs(x) < FRAME_WIDTH`, not the radius).
 ///
 /// # Errors
-/// [`FieldError::Stage`] on a stale handle.
+/// A stale handle or failed updater registration. Later failures are retained
+/// by [`Stage::updater_error`]. All child shifts are prepared before any publish;
+/// a bad later field sample cannot leave earlier children partly advanced.
 pub fn move_submobjects_along_vector_field(
     stage: &mut Stage,
     mob: Mob,
     func: impl Fn(Vec3) -> Vec3 + 'static,
 ) -> Result<(), FieldError> {
-    stage.add_dt_updater(
+    stage.add_try_dt_updater(
         mob,
         move |stage: &mut Stage, mob: Mob, dt: f64| {
-            let children = stage
-                .get(mob)
-                .map(|e| e.submobjects().to_vec())
-                .unwrap_or_default();
+            const OPERATION: &str = "move_submobjects_along_vector_field";
+            check_field_delta(OPERATION, dt)?;
+            let children = stage.try_get(mob)?.submobjects().to_vec();
+            if children.is_empty() {
+                return Ok(());
+            }
+            // Reference iteration is sequential: shared descendants moved by
+            // an earlier child affect a later child's center. Evaluate that
+            // exact order on a CoW snapshot before publishing the shifts.
+            let pinned: Vec<_> = stage
+                .family(mob)
+                .into_iter()
+                .filter(|&member| {
+                    stage
+                        .get(member)
+                        .is_some_and(|entry| entry.buffer.live_view_count() > 0)
+                })
+                .collect();
+            let mut prepared = stage.snapshot().materialize();
+            // Affine writes through a live view bake to f32 immediately.
+            // Preserve that choice in the preview, including the centers
+            // observed by callbacks after a shared member has moved.
+            let mut views = Vec::with_capacity(pinned.len());
+            for member in pinned {
+                views.push(
+                    prepared
+                        .get_mut(member)
+                        .ok_or(StageError::StaleHandle)?
+                        .buffer
+                        .export_view(false),
+                );
+            }
+            let mut shifts = Vec::new();
             for child in children {
-                let center = stage.get_center(child);
+                let center = prepared.get_center(child);
+                check_field_point(OPERATION, center, "submobject center must be finite")?;
                 if center[0].abs() < FRAME_WIDTH && center[1].abs() < FRAME_HEIGHT {
-                    let _ = stage.shift(child, scale3(func(center), dt));
+                    let delta = field_displacement(OPERATION, func(center), dt)?;
+                    prepared.try_shift(child, delta)?;
+                    shifts.push((child, delta));
                 }
             }
+            for (child, delta) in shifts {
+                stage.shift(child, delta);
+            }
+            Ok(())
         },
         false,
     )?;
@@ -2837,36 +2882,100 @@ pub fn move_submobjects_along_vector_field(
 }
 
 /// `move_points_along_vector_field` (vector_field.py:105): nudge every
-/// point through the coordinate system — `p + (c2p(func(p2c(p))) −
-/// origin) · dt`. Updater-bound.
+/// family point through the coordinate system — `p + (c2p(func(p2c(p))) −
+/// origin) · dt` in world space. Shared descendants and auxiliary pointlike
+/// fields (including surface normal control points) use the shared mapper.
+/// Updater-bound.
 ///
 /// # Errors
-/// [`FieldError::Stage`] on a stale handle.
+/// A stale handle or failed updater registration. Later invalid deltas,
+/// coordinates or mapped records are retained by [`Stage::updater_error`].
+/// The whole family's geometry and live views stay unchanged on refusal.
 pub fn move_points_along_vector_field(
     stage: &mut Stage,
     mob: Mob,
     func: impl Fn(f64, f64) -> [f64; 2] + 'static,
     cs: impl CoordinateSystem + 'static,
 ) -> Result<(), FieldError> {
-    stage.add_dt_updater(
+    stage.add_try_dt_updater(
         mob,
         move |stage: &mut Stage, mob: Mob, dt: f64| {
+            const OPERATION: &str = "move_points_along_vector_field";
+            check_field_delta(OPERATION, dt)?;
             let origin = cs.origin();
-            let points = stage.get_object_points(mob).unwrap_or_default();
-            let moved: Vec<Vec3> = points
-                .iter()
-                .map(|&p| {
+            check_field_point(OPERATION, origin, "coordinate origin must be finite")?;
+            let failure = std::cell::Cell::new(None);
+            let mapped = stage.try_apply_points_function(
+                mob,
+                |p| {
+                    if failure.get().is_some() {
+                        return [f64::NAN; 3];
+                    }
                     let coords = cs.p2c(p);
+                    if !coords.into_iter().all(f64::is_finite) {
+                        failure.set(Some("inverse coordinates must be finite"));
+                        return [f64::NAN; 3];
+                    }
                     let out = func(coords[0], coords[1]);
+                    if !out.into_iter().all(f64::is_finite) {
+                        failure.set(Some("field function must return finite coordinates"));
+                        return [f64::NAN; 3];
+                    }
                     let target = cs.c2p(&[out[0], out[1], 0.0]);
+                    if !target.into_iter().all(f64::is_finite) {
+                        failure.set(Some("coordinate mapping must return finite points"));
+                        return [f64::NAN; 3];
+                    }
                     add3(p, scale3(sub3(target, origin), dt))
-                })
-                .collect();
-            let _ = stage.set_points(mob, &moved);
+                },
+                None,
+                None,
+            );
+            if let Some(reason) = failure.get() {
+                return Err(UpdaterError::callback(OPERATION, reason));
+            }
+            mapped?;
+            Ok(())
         },
         false,
     )?;
     Ok(())
+}
+
+fn check_field_delta(operation: &'static str, dt: f64) -> Result<(), UpdaterError> {
+    if !dt.is_finite() || dt < 0.0 {
+        return Err(UpdaterError::callback(
+            operation,
+            "dt must be finite and nonnegative",
+        ));
+    }
+    Ok(())
+}
+
+fn check_field_point(
+    operation: &'static str,
+    point: Vec3,
+    reason: &'static str,
+) -> Result<(), UpdaterError> {
+    if !point.into_iter().all(f64::is_finite) {
+        return Err(UpdaterError::callback(operation, reason));
+    }
+    Ok(())
+}
+
+fn field_displacement(
+    operation: &'static str,
+    velocity: Vec3,
+    dt: f64,
+) -> Result<Vec3, UpdaterError> {
+    check_field_point(
+        operation,
+        velocity,
+        "field function must return finite coordinates",
+    )?;
+    let delta = scale3(velocity, dt);
+    check_field_point(operation, delta, "field displacement must be finite")?;
+    Ok(delta)
 }
 
 // ------------------------------------------------------- stage plumbing
@@ -4525,6 +4634,284 @@ mod tests {
         assert_ne!(widths(&stage, copied), before);
         stage.update_mobject(original, 0.25);
         assert_eq!(widths(&stage, original), widths(&stage, copied));
+    }
+
+    #[test]
+    fn vector_field_points_advect_placed_shared_family_and_copied_updaters() {
+        let mut stage = Stage::new();
+        let root = stage.add(VMobject::new());
+        let left = stage.add(VMobject::new());
+        let right = stage.add(VMobject::new());
+        let path = stage.add(VMobject::from_points(vec![
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        stage.attach(root, left).unwrap();
+        stage.attach(root, right).unwrap();
+        stage.attach(left, path).unwrap();
+        stage.attach(right, path).unwrap();
+        stage.shift(root, [2.0, 1.0, 0.5]);
+        let view = stage.get_mut(path).unwrap().buffer.export_view(false);
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sampled = std::rc::Rc::clone(&calls);
+        let mut chart = axes();
+        chart.unit = 2.0;
+        move_points_along_vector_field(
+            &mut stage,
+            root,
+            move |_, _| {
+                sampled.set(sampled.get() + 1);
+                [1.0, -0.5]
+            },
+            chart,
+        )
+        .unwrap();
+        stage.update_mobject(root, 0.25);
+        assert_eq!(calls.get(), 3, "shared geometry is sampled only once");
+        assert_eq!(
+            stage.get_points(path).unwrap(),
+            [[2.5, 0.75, 0.5], [3.0, 0.75, 0.5], [3.5, 0.75, 0.5]]
+        );
+        assert!(view.is_attached_to(&stage.get(path).unwrap().buffer));
+        assert_eq!(view.read(0, "point").unwrap(), [2.5, 0.75, 0.5]);
+
+        let copied = stage.copy_family(root).unwrap();
+        let copied_path = stage
+            .family(copied)
+            .into_iter()
+            .find(|&member| {
+                stage
+                    .get_points(member)
+                    .is_some_and(|points| !points.is_empty())
+            })
+            .unwrap();
+        let snapshot = stage.snapshot();
+        stage.update_mobject(copied, 0.25);
+        let mut control = snapshot.materialize();
+        control.update_mobject(copied, 0.25);
+        assert_eq!(
+            stage.get_points(copied_path).unwrap(),
+            control.get_points(copied_path).unwrap()
+        );
+        assert_eq!(stage.get_points(copied_path).unwrap()[0], [3.0, 0.5, 0.5]);
+        assert_eq!(stage.get_points(path).unwrap()[0], [2.5, 0.75, 0.5]);
+        stage.add_to_scene(root).unwrap();
+        assert!(!classify_wait(&stage, false).is_pure());
+    }
+
+    #[test]
+    fn vector_field_point_failure_keeps_every_family_member_and_view() {
+        let mut stage = Stage::new();
+        let root = stage.add(crate::vmobject::v_group([
+            VMobject::from_points(vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]),
+            VMobject::from_points(vec![[3.0, 0.0, 0.0], [3.5, 0.0, 0.0], [4.0, 0.0, 0.0]]),
+        ]));
+        let children = stage.get(root).unwrap().submobjects().to_vec();
+        let view = stage
+            .get_mut(children[0])
+            .unwrap()
+            .buffer
+            .export_view(false);
+        let before: Vec<_> = children
+            .iter()
+            .map(|&child| stage.get_points(child).unwrap())
+            .collect();
+        let mode = std::rc::Rc::new(std::cell::Cell::new(0));
+        let sampled_mode = std::rc::Rc::clone(&mode);
+        move_points_along_vector_field(
+            &mut stage,
+            root,
+            move |x, _| {
+                if x > 2.0 {
+                    match sampled_mode.get() {
+                        1 => return [f64::NAN, 0.0],
+                        2 => return [f64::MAX, 0.0],
+                        _ => {}
+                    }
+                }
+                [1.0, 0.0]
+            },
+            axes(),
+        )
+        .unwrap();
+        for refusal in [1, 2] {
+            mode.set(refusal);
+            stage.update_mobject(root, 0.5);
+            let failure = stage.updater_error().unwrap();
+            assert_eq!(failure.mobject, root);
+            if refusal == 1 {
+                assert_eq!(
+                    failure.error,
+                    UpdaterError::callback(
+                        "move_points_along_vector_field",
+                        "field function must return finite coordinates"
+                    )
+                );
+            } else {
+                assert!(matches!(
+                    failure.error,
+                    UpdaterError::Stage(StageError::InvalidPointMap(_))
+                ));
+            }
+            for (&child, points) in children.iter().zip(&before) {
+                assert_eq!(&stage.get_points(child).unwrap(), points);
+            }
+            assert_eq!(view.read(0, "point").unwrap(), [0.0; 3]);
+            mode.set(0);
+            stage.update_mobject(root, 0.5);
+            assert_eq!(view.read(0, "point").unwrap(), [0.0; 3]);
+            stage.take_updater_error().unwrap().unwrap();
+        }
+        stage.update_mobject(root, 0.5);
+        assert_eq!(view.read(0, "point").unwrap(), [0.5, 0.0, 0.0]);
+        assert_eq!(stage.get_points(children[1]).unwrap()[0], [3.5, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn vector_field_submobject_step_is_atomic_and_keeps_sequential_shared_centers() {
+        for dt in [0.5, 0.2] {
+            let mut stage = Stage::new();
+            let root = stage.add(VMobject::new());
+            let a = stage.add(VMobject::new());
+            let b = stage.add(VMobject::new());
+            let shared = stage.add(VMobject::from_points(vec![
+                [0.0, 0.0, 0.0],
+                [0.5, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+            ]));
+            stage.attach(root, a).unwrap();
+            stage.attach(root, b).unwrap();
+            stage.attach(a, shared).unwrap();
+            stage.attach(b, shared).unwrap();
+            let view = stage.get_mut(shared).unwrap().buffer.export_view(false);
+            let samples = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+            let sampled = std::rc::Rc::clone(&samples);
+            move_submobjects_along_vector_field(&mut stage, root, move |center| {
+                sampled.borrow_mut().push(center[0]);
+                [center[0], 0.0, 0.0]
+            })
+            .unwrap();
+            stage.update_mobject(root, dt);
+            // A pinned view rounds the first nudge to f32 before the second
+            // callback observes the shared child's center. The 0.2 case detects
+            // a preview that accidentally retains an unrounded placement.
+            let first = [0.0, 0.5, 1.0].map(|x| (x + 0.5 * dt) as f32);
+            let second_center = (f64::from(first[0]) + f64::from(first[2])) / 2.0;
+            let expected = first.map(|x| {
+                [
+                    f64::from((f64::from(x) + second_center * dt) as f32),
+                    0.0,
+                    0.0,
+                ]
+            });
+            assert_eq!(&*samples.borrow(), &[0.5, second_center]);
+            assert_eq!(stage.get_points(shared).unwrap(), expected);
+            assert_eq!(
+                view.read(0, "point").unwrap(),
+                expected[0].map(|x| x as f32)
+            );
+        }
+
+        let mut stage = Stage::new();
+        let root = stage.add(crate::vmobject::v_group([
+            VMobject::from_points(vec![[0.0; 3]]),
+            VMobject::from_points(vec![[3.0, 0.0, 0.0]]),
+        ]));
+        let children = stage.get(root).unwrap().submobjects().to_vec();
+        let view = stage
+            .get_mut(children[0])
+            .unwrap()
+            .buffer
+            .export_view(false);
+        move_submobjects_along_vector_field(&mut stage, root, |p| {
+            if p[0] > 2.0 {
+                [f64::NAN, 0.0, 0.0]
+            } else {
+                [1.0, 0.0, 0.0]
+            }
+        })
+        .unwrap();
+        stage.update_mobject(root, 0.5);
+        assert_eq!(
+            stage.updater_error().unwrap().error,
+            UpdaterError::callback(
+                "move_submobjects_along_vector_field",
+                "field function must return finite coordinates"
+            )
+        );
+        assert_eq!(view.read(0, "point").unwrap(), [0.0; 3]);
+        assert_eq!(stage.get_points(children[1]).unwrap()[0], [3.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn vector_field_helpers_refuse_invalid_deltas_and_stale_registration() {
+        for kind in 0..3 {
+            let mut stage = Stage::new();
+            let root = stage.add(crate::vmobject::v_group([VMobject::from_points(vec![
+                [0.0; 3],
+            ])]));
+            let child = stage.get(root).unwrap().submobjects()[0];
+            let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+            let sampled = std::rc::Rc::clone(&calls);
+            let operation = match kind {
+                0 => {
+                    move_along_vector_field(&mut stage, root, move |_| {
+                        sampled.set(sampled.get() + 1);
+                        [1.0, 0.0, 0.0]
+                    })
+                    .unwrap();
+                    "move_along_vector_field"
+                }
+                1 => {
+                    move_submobjects_along_vector_field(&mut stage, root, move |_| {
+                        sampled.set(sampled.get() + 1);
+                        [1.0, 0.0, 0.0]
+                    })
+                    .unwrap();
+                    "move_submobjects_along_vector_field"
+                }
+                _ => {
+                    move_points_along_vector_field(
+                        &mut stage,
+                        root,
+                        move |_, _| {
+                            sampled.set(sampled.get() + 1);
+                            [1.0, 0.0]
+                        },
+                        axes(),
+                    )
+                    .unwrap();
+                    "move_points_along_vector_field"
+                }
+            };
+            for dt in [-0.5, f64::NAN, f64::INFINITY] {
+                stage.update_mobject(root, dt);
+                assert_eq!(calls.get(), 0);
+                assert_eq!(stage.get_points(child).unwrap(), [[0.0; 3]]);
+                assert_eq!(
+                    stage.take_updater_error().unwrap().unwrap().error,
+                    UpdaterError::callback(operation, "dt must be finite and nonnegative")
+                );
+            }
+            stage.update_mobject(root, 0.5);
+            assert_eq!(stage.get_points(child).unwrap(), [[0.5, 0.0, 0.0]]);
+        }
+
+        let mut stage = Stage::new();
+        let foreign = Stage::new().add(VMobject::new());
+        assert!(matches!(
+            move_along_vector_field(&mut stage, foreign, |_| [0.0; 3]),
+            Err(FieldError::Stage(StageError::StaleHandle))
+        ));
+        assert!(matches!(
+            move_submobjects_along_vector_field(&mut stage, foreign, |_| [0.0; 3]),
+            Err(FieldError::Stage(StageError::StaleHandle))
+        ));
+        assert!(matches!(
+            move_points_along_vector_field(&mut stage, foreign, |_, _| [0.0; 2], axes()),
+            Err(FieldError::Stage(StageError::StaleHandle))
+        ));
     }
 
     #[test]

@@ -57,6 +57,10 @@ impl SceneSink for Capture {
 }
 
 fn recording() -> (RecordedSceneBundle, Vec<(Vec<u8>, CameraSample)>) {
+    recording_with_storage(false)
+}
+
+fn recording_with_storage(compact: bool) -> (RecordedSceneBundle, Vec<(Vec<u8>, CameraSample)>) {
     let mut scene = Scene::new(
         RuntimeConfig {
             fps: 8,
@@ -79,15 +83,69 @@ fn recording() -> (RecordedSceneBundle, Vec<(Vec<u8>, CameraSample)>) {
         )
         .unwrap();
     let mut sink = Capture {
-        recorder: SceneBundleRecorder::new_render_only_with_camera(
-            8,
-            BundleExportLimits::default(),
-        )
-        .unwrap(),
+        recorder: if compact {
+            SceneBundleRecorder::new_compact_with_camera(8, Default::default()).unwrap()
+        } else {
+            SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default())
+                .unwrap()
+        },
         observed: Vec::new(),
     };
     scene.wait(Some(0.5), &mut sink).unwrap();
     (sink.recorder.finish().unwrap(), sink.observed)
+}
+
+#[test]
+fn compact_camera_recordings_keep_exact_samples_and_accept_final_soundtracks() {
+    use fmn_scene::timeline_bundle::{BundleSegmentKind, BundleSoundtrack};
+
+    let (artifact, observed) = recording_with_storage(true);
+    assert_eq!(&artifact.bytes[10..12], &[3, 0]);
+    assert_eq!(artifact.bytes, recording_with_storage(true).0.bytes);
+    assert!(
+        Reader::open(
+            &artifact.bytes,
+            fmn_scene::timeline_bundle::SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA,
+            Limits::DEFAULT,
+            UnknownPolicy::Strict,
+        )
+        .is_err(),
+        "old readers must refuse compact input rather than omit its changes",
+    );
+    let pcm = BundleSoundtrack::new(8, 1, vec![0.25, -0.5, 0.0, 1.0]).unwrap();
+    let narrated = artifact
+        .with_soundtrack(&pcm, Limits::DEFAULT.max_total)
+        .unwrap();
+    let mut bundle = TimelineBundle::from_bytes(&narrated.bytes).unwrap();
+    assert!(bundle.has_soundtrack());
+    assert!(bundle.has_camera_track());
+    assert!(matches!(
+        bundle.stage_at_with_camera(0, RESOLUTION),
+        Err(BundleReadError::SoundtrackRequired),
+    ));
+    assert_eq!(bundle.take_soundtrack().unwrap(), pcm);
+    assert_eq!(
+        bundle.segment_kind(0),
+        Some(BundleSegmentKind::CompactRecorded)
+    );
+    let shared = bundle.into_shared().unwrap();
+    let mut cache = TimelineFrameCache::default();
+    for index in [3, 0, 2, 1, 0] {
+        let job = shared.frame_job(index).unwrap();
+        assert!(matches!(
+            cache.materialize(&job),
+            Err(BundleReadError::CameraTrackRequired)
+        ));
+        let (stage, camera) = cache.materialize_with_camera(&job, RESOLUTION).unwrap();
+        assert_eq!(
+            stage.snapshot().to_render_bytes().unwrap(),
+            observed[index as usize].0
+        );
+        assert_eq!(
+            CameraSample::capture(&camera.unwrap()).unwrap(),
+            observed[index as usize].1
+        );
+    }
 }
 
 #[test]

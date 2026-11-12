@@ -682,19 +682,19 @@ impl AnimConfig {
 /// the zipped family table, the updater-suspension memo).
 #[derive(Debug, Clone)]
 pub struct AnimState {
-    mobject: Mob,
+    pub(crate) mobject: Mob,
     /// The constructor surface (public: the Reference exposes these as
     /// plain attributes).
     pub config: AnimConfig,
-    starting_mobject: Option<Mob>,
+    pub(crate) starting_mobject: Option<Mob>,
     // A begin-time table is immutable. Sampling retains it cheaply while a
     // callback may inspect the current table or replace it through begin().
-    families: Arc<[Vec<Mob>]>,
-    mobject_was_updating: bool,
+    pub(crate) families: Arc<[Vec<Mob>]>,
+    pub(crate) mobject_was_updating: bool,
     // Resolved only at the play boundary. The count authority remains in
     // the authored duration; this float is the interpolation denominator.
-    frame_units: Option<f64>,
-    prepared_duration: Option<crate::clock::FrameDuration>,
+    pub(crate) frame_units: Option<f64>,
+    pub(crate) prepared_duration: Option<crate::clock::FrameDuration>,
 }
 
 impl AnimState {
@@ -856,7 +856,9 @@ pub enum AnimationSignature {
 /// [`Animation::interpolate_submobject`] (the Reference's "typically
 /// implemented by subclass") and extend `begin` through the
 /// [`Animation::setup`] hook rather than overriding the order.
-pub trait Animation {
+/// The `Any` bound lets durable recovery identify closed native lifecycle
+/// implementations without trusting a wrapper's interpolation declaration.
+pub trait Animation: std::any::Any {
     /// The runtime state (mobject handle, config, begin-time products).
     fn state(&self) -> &AnimState;
 

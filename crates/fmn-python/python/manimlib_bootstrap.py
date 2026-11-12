@@ -630,11 +630,16 @@ class _LiveUniforms(dict):
         del self._extras[key]
 
     def __iter__(self):
-        yield from self._owner()._uniform_names()
-        yield from self._extras
+        native = self._owner()._uniform_names()
+        yield from native
+        # A material-changing become can give an existing extension key a
+        # native meaning. Expose that key once, with the native value, while
+        # retaining the authored extension if the material changes again.
+        yield from (key for key in self._extras if key not in native)
 
     def __len__(self):
-        return len(self._owner()._uniform_names()) + len(self._extras)
+        native = self._owner()._uniform_names()
+        return len(native) + sum(key not in native for key in self._extras)
 
     def __contains__(self, key):
         return key in self._owner()._uniform_names() or key in self._extras
@@ -917,12 +922,20 @@ def _copy_member_state(old, new, mapping, deep, memo):
     if deep:
         attributes = _copy.deepcopy(attributes, memo)
     else:
-        attributes = {
-            key: mapping.get(value, value)
-            if isinstance(value, _BridgeMobject)
-            else value
-            for key, value in attributes.items()
-        }
+        def remap(value):
+            if isinstance(value, _BridgeMobject):
+                return mapping.get(value, value)
+            if (isinstance(value, _types.MethodType)
+                    and isinstance(value.__self__, _BridgeMobject)):
+                receiver = mapping.get(value.__self__)
+                if receiver is not None:
+                    return _types.MethodType(value.__func__, receiver)
+            return value
+        # A stored bound method is also a family-internal reference. Sharing
+        # its receiver would make a copied field read the original's clock or
+        # a generated target edit the original child. Ordinary functions and
+        # the updater list below retain the established shared-callable rule.
+        attributes = {key: remap(value) for key, value in attributes.items()}
     new.__dict__.update(attributes)
     # A CameraFrame's pose lives in its camera core. A shallow attribute copy
     # would share it, so a saved copy would move with the live frame; give
@@ -3245,7 +3258,10 @@ class Mobject(_BridgeMobject):
             # changes, as the Stage does for a bound family: a refused
             # become (or restore) leaves the receiver exactly as it was.
             for receiver, source in zip(receiver_family, source_family):
-                if receiver.data.dtype != source.data.dtype:
+                # The native preflight admits only the optional surface
+                # presence lane beyond exact schemas, and validates every
+                # paired mask before any earlier family member can change.
+                if not _become_schema_compatible(receiver, source):
                     raise RuntimeError("become between records of different schemas")
         self._become(mobject, match_updaters)
         if not self._is_bound():
@@ -10606,7 +10622,7 @@ class PGroup(PMobject):
 
 class DotCloud(PMobject):
     """The Reference's DotCloud over the pointcloud shelf: the native
-    point/radius/rgba/glow_factor record schema (NOT a VMobject — the
+    point/radius/rgba record schema and scalar glow uniform (NOT a VMobject — the
     VMobject stroke/fill surface does not exist here; Mobject-level
     set_color/set_opacity write the real rgba records)."""
 
@@ -10920,12 +10936,17 @@ class TimeVaryingVectorField(VectorField):
         self.time = 0.0
         self.time_func = time_func
         super().__init__(
-            lambda coords: self.time_func(coords, self.time),
+            self._evaluate_at_current_time,
             coordinate_system,
             **kwargs,
         )
         self.add_updater(lambda m, dt: m.increment_time(dt))
         self.always.update_vectors()
+
+    def _evaluate_at_current_time(self, coords):
+        # A bound method participates in the family-copy remap. A closure
+        # capturing self would keep every copy tied to the original clock.
+        return self.time_func(coords, self.time)
 
     def increment_time(self, dt):
         self.time += float(dt)
@@ -11238,6 +11259,16 @@ class Surface(Mobject):
         d = verts_by_uv[u_int_plus, v_int_plus, :]
         u_res = scaled_u % 1
         v_res = scaled_v % 1
+        if "surface_validity" in self.data.dtype.names:
+            present = self.get_sample_validity().reshape((nu, nv))
+            for i, j, weight in (
+                (u_int, v_int, (1 - u_res) * (1 - v_res)),
+                (u_int, v_int_plus, (1 - u_res) * v_res),
+                (u_int_plus, v_int, u_res * (1 - v_res)),
+                (u_int_plus, v_int_plus, u_res * v_res),
+            ):
+                if weight != 0 and not present[i, j]:
+                    raise ValueError("UV query touches an undefined surface sample")
         return _interpolate(
             _interpolate(a, b, v_res),
             _interpolate(c, d, v_res),
@@ -11261,7 +11292,15 @@ class Surface(Mobject):
         return self.triangle_indices
 
     def get_triangle_indices(self):
+        if "surface_validity" in self.data.dtype.names:
+            indices = self.triangle_indices.reshape((-1, 3))
+            present = self.get_sample_validity()
+            return indices[present[indices].all(axis=1)].reshape(-1)
         return self.triangle_indices
+
+    def get_sample_validity(self):
+        """Copy the native presence mask; raw point rows at holes are inert."""
+        return _np.asarray(_surface_sample_validity(self), dtype=bool)
 
     def get_unit_normals(self):
         # Reference surface.py:171 over the live normal-seed records.
@@ -11271,7 +11310,10 @@ class Surface(Mobject):
         )
         norms = _np.sqrt((normals * normals).sum(axis=1))
         norms[norms == 0] = 1
-        return normals / norms[:, _np.newaxis]
+        normals = normals / norms[:, _np.newaxis]
+        if "surface_validity" in self.data.dtype.names:
+            normals[~self.get_sample_validity()] = 0
+        return normals
 
     def get_partial_points_array(self, points, a, b, resolution, axis):
         if len(points) == 0:
@@ -18408,7 +18450,8 @@ class SceneFileWriter:
         # optional None, and the refusal of lossy numeric conversions.
         encode_options = {
             name: kwargs.pop(name)
-            for name in ("video_crf", "video_preset", "video_tune", "video_bitrate", "audio_bitrate")
+            for name in ("video_crf", "video_preset", "video_tune", "video_bitrate", "audio_bitrate",
+                         "audio_dither_seed")
             if name in kwargs
         }
         if kwargs:
@@ -18498,11 +18541,10 @@ class SceneFileWriter:
         return self.get_output_file_rootname() + self._movie_extension()
 
     def get_insert_file_path(self, index):
-        return (
-            self.get_output_file_rootname()
-            + f"_{int(index)}"
-            + self._movie_extension()
-        )
+        movie = _pathlib.Path(self.get_movie_file_path())
+        return str(movie.parent / "inserts" / (
+            movie.stem + f"_{int(index)}" + self._movie_extension()
+        ))
 
     def get_next_partial_movie_path(self):
         # The clip the next play or wait publishes under subdivision (BN-15),
@@ -18591,17 +18633,8 @@ class SceneFileWriter:
         if self.should_open_file():
             self.open_file()
 
-    def begin_insert(self):
-        raise NotImplementedError(
-            "partial movie files are produced by the native render"
-            " pipeline; SceneFileWriter has no Python-side insert to open"
-        )
-
-    def end_insert(self):
-        raise NotImplementedError(
-            "partial movie files are produced by the native render"
-            " pipeline; SceneFileWriter has no Python-side insert to close"
-        )
+    # begin_insert/end_insert are installed by fmn_python.recording, sharing
+    # the live Scene's native clip owner and no-clobber Reel publication.
 
     def set_progress_display_description(
         self, file="", sub_desc=""
@@ -21169,22 +21202,11 @@ def _install_vector_field_functions():
     native_ode_solution_points = _FMN_MODULE._ode_solution_points
 
     def get_vectorized_rgb_gradient_function(min_value, max_value, color_map):
-        if color_map != "3b1b_colormap":
-            raise NotImplementedError(
-                "field gradients support the bundled '3b1b_colormap'; "
-                f"{color_map!r} requires non-bundled matplotlib data"
-            )
-
-        def gradient(values):
-            flat = _np.asarray(values, dtype=float).reshape(-1)
-            return _np.asarray(
-                _BridgeMobject._vector_field_gradient(
-                    float(min_value), float(max_value), flat.tolist()
-                ),
-                dtype=float,
-            )
-
-        return gradient
+        from fmn_python.streamline_authoring import _magnitude_gradient
+        return _magnitude_gradient(
+            _np, _BridgeMobject._vector_field_gradient,
+            min_value, max_value, color_map,
+        )
 
     def get_rgb_gradient_function(min_value, max_value, color_map):
         gradient = get_vectorized_rgb_gradient_function(

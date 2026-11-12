@@ -146,6 +146,7 @@ impl FrozenRenderEntry {
     }
 
     fn take_snapshot(entry: SnapshotEntry) -> Self {
+        let entry = entry.into_data();
         // The fields not moved below (updaters and updater_states) are dropped
         // HERE on the scene owner, never in materialize on another thread.
         Self {
@@ -198,6 +199,7 @@ impl FrozenRenderEntry {
             children_epoch: fresh_epoch(),
             family_cache: RefCell::new(self.family_cache),
             bbox: RefCell::new(BboxCache::default()),
+            snapshot_cache: RefCell::new(None),
         }
     }
 }

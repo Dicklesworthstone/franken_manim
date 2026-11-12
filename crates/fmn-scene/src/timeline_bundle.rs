@@ -62,12 +62,18 @@ pub use audio::{BundleSoundtrack, SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA, attach_bund
 mod camera;
 pub use camera::CAMERA_TIMELINE_BUNDLE_SCHEMA;
 
+pub(crate) mod compact;
+
 mod shared;
 pub use shared::{SharedTimelineBundle, TimelineFrameCache, TimelineFrameJob};
 
 /// The canonical container schema for an FMTL/1 timeline bundle — the
 /// §6.7 registration for the timeline-bundle format family, id 1.
 pub const TIMELINE_BUNDLE_SCHEMA: Schema = Schema::new(*b"FMTL", 1, 0, 0);
+
+/// Losslessly compact recorded pictures, with an explicit optional camera track.
+/// Compact storage preserves captured bytes; it does not infer animation purity.
+pub const COMPACT_TIMELINE_BUNDLE_SCHEMA: Schema = Schema::new(*b"FMTL", 1, 0, 3);
 
 /// Maximum bytes accepted by the production FMTL/1 reader.
 pub const DEFAULT_MAX_BUNDLE_BYTES: usize = Limits::DEFAULT.max_total;
@@ -127,6 +133,8 @@ pub enum BundleSegmentKind {
     Pure,
     /// Every frame is stored as a canonical snapshot.
     Stateful,
+    /// Captured snapshots stored as independent block bases and byte patches.
+    CompactRecorded,
 }
 
 impl BundleSegmentKind {
@@ -136,6 +144,7 @@ impl BundleSegmentKind {
         match self {
             Self::Pure => 0,
             Self::Stateful => 1,
+            Self::CompactRecorded => 2,
         }
     }
 }
@@ -242,13 +251,15 @@ enum SegmentData {
     Stateful {
         frames: Vec<Snapshot>,
     },
+    Compact(compact::CompactFrames),
 }
 
-/// A validated, eagerly decoded FMTL/1 artifact.
+/// A validated FMTL/1 artifact.
 ///
 /// Frame reconstruction is random-access and order-independent: pure
 /// segments apply the exporter's proven interpolation law, while stateful
-/// segments materialize one recorded snapshot.
+/// segments materialize one recorded snapshot. Compact recorded segments
+/// retain encoded blocks and reconstruct directly from a block base.
 pub struct TimelineBundle {
     plan: TimelinePlan,
     segments: Vec<SegmentData>,
@@ -262,15 +273,16 @@ impl TimelineBundle {
     /// Decode and validate an FMTL/1 artifact.
     ///
     /// The engine identity is checked before any later field is interpreted.
-    /// Every snapshot is decoded eagerly, so malformed input refuses at load
-    /// rather than during rendering or scrubbing.
+    /// Every snapshot is validated at load, so malformed input refuses before
+    /// rendering or scrubbing. Compact recordings release decoded snapshots
+    /// as they are validated instead of retaining an arena for every frame.
     ///
     /// # Errors
     /// [`BundleReadError`] for every named FMTL/1 refusal.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, BundleReadError> {
         let mut reader = Reader::open(
             bytes,
-            SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA,
+            COMPACT_TIMELINE_BUNDLE_SCHEMA,
             Limits::DEFAULT,
             UnknownPolicy::Strict,
         )
@@ -318,6 +330,18 @@ impl TimelineBundle {
         }
 
         let binding = Stage::new();
+        let mut compact_work = compact::MAX_SNAPSHOT_WORK;
+        let mut compact_storage = DEFAULT_MAX_BUNDLE_BYTES;
+        if reader.version().1 == 3 {
+            let needed = segment_count.saturating_mul(std::mem::size_of::<SegmentData>());
+            compact_storage =
+                compact_storage
+                    .checked_sub(needed)
+                    .ok_or(BundleReadError::Malformed(SerialError::SizeLimit {
+                        needed,
+                        limit: DEFAULT_MAX_BUNDLE_BYTES,
+                    }))?;
+        }
         let mut segments = Vec::new();
         segments.try_reserve_exact(segment_count).map_err(|_| {
             BundleReadError::AllocationFailed {
@@ -385,13 +409,25 @@ impl TimelineBundle {
                     }
                     SegmentData::Stateful { frames }
                 }
+                2 if reader.version().1 == 3 => {
+                    let expected = u32::try_from(planned.n_frames)
+                        .map_err(|_| BundleReadError::PlanInconsistent("compact frame count"))?;
+                    let frames = compact::CompactFrames::read_from(
+                        &mut reader,
+                        expected,
+                        &mut compact_work,
+                        &mut compact_storage,
+                    )?;
+                    SegmentData::Compact(frames)
+                }
                 _ => {
                     return Err(BundleReadError::PlanInconsistent("segment kind tag"));
                 }
             };
             segments.push(segment);
         }
-        let cameras = camera::read_track(&mut reader, frame_count)?;
+        let camera_budget = (reader.version().1 == 3).then_some(&mut compact_storage);
+        let cameras = camera::read_track(&mut reader, frame_count, camera_budget)?;
         reader.finish().map_err(BundleReadError::Malformed)?;
         Ok(Self {
             plan,
@@ -469,6 +505,7 @@ impl TimelineBundle {
         self.segments.get(index).map(|segment| match segment {
             SegmentData::Pure { .. } => BundleSegmentKind::Pure,
             SegmentData::Stateful { .. } => BundleSegmentKind::Stateful,
+            SegmentData::Compact(_) => BundleSegmentKind::CompactRecorded,
         })
     }
 
@@ -505,6 +542,7 @@ impl TimelineBundle {
                             needs_camera(begin) || needs_camera(end)
                         }
                         SegmentData::Stateful { frames } => frames.iter().any(needs_camera),
+                        SegmentData::Compact(frames) => frames.requires_camera(),
                     }
             })
     }
@@ -561,6 +599,9 @@ impl TimelineBundle {
                         "stateful segment shorter than the plan",
                     ))?;
                 snapshot.materialize()
+            }
+            SegmentData::Compact(frames) => {
+                frames.materialize(usize::try_from(offset - 1).unwrap_or(usize::MAX))?
             }
         };
         stage.set_time_from_clock(global as f64 / f64::from(fps));
@@ -863,6 +904,7 @@ fn rooted_states_equal(left: &Stage, right: &Stage) -> bool {
                     left_uniforms.anti_alias_width,
                     right_uniforms.anti_alias_width,
                 )
+                || !canonical_f64_equal(left_uniforms.glow_factor, right_uniforms.glow_factor)
                 || left_uniforms.joint_type != right_uniforms.joint_type
                 || left_uniforms.flat_stroke != right_uniforms.flat_stroke
                 || left_uniforms.scale_stroke_with_zoom != right_uniforms.scale_stroke_with_zoom
@@ -1229,6 +1271,17 @@ mod tests {
         let mob = stage.add(test_mobject(TRIANGLE));
         stage.add_to_scene(mob).expect("fresh handle roots");
         (stage, mob)
+    }
+
+    #[test]
+    fn pure_proof_compares_glow_uniforms_even_when_records_are_identical() {
+        let (mut stage, mob) = stage_with_mob();
+        let before = stage.snapshot().materialize();
+        assert!(rooted_states_equal(&before, &stage));
+        stage.set_glow_factor(mob, 2.0, false);
+        assert!(!rooted_states_equal(&before, &stage));
+        stage.set_glow_factor(mob, 0.0, false);
+        assert!(rooted_states_equal(&before, &stage));
     }
 
     /// Read the container's top-level fields with the format's own Reader

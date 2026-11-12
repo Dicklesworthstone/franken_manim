@@ -8,6 +8,7 @@
 
 use std::sync::Arc;
 
+use super::compact::{CompactBlock, CompactFrames};
 use super::{
     BundleReadError, BundleSegmentKind, DEFAULT_MAX_BUNDLE_BYTES, SegmentData, TimelineBundle,
 };
@@ -28,19 +29,25 @@ enum Source {
         rate: RateFunc,
     },
     Recorded(Arc<[u8]>),
+    Compact {
+        block: Arc<CompactBlock>,
+        frame: usize,
+    },
 }
 
 #[derive(Debug)]
 enum Segment {
     Pure(Arc<Source>),
     Recorded(Vec<Arc<Source>>),
+    Compact(CompactFrames),
 }
 
 /// A validated FMTL timeline whose frame inputs may cross worker boundaries.
 ///
 /// Conversion never guesses purity: only the ordinary reader's proven kind-0
-/// segments retain the pure reconstruction route. Kind-1 segments retain their
-/// verbatim recorded snapshots, including the results of stateful callbacks.
+/// segments retain the pure reconstruction route. Recorded segments retain
+/// either verbatim snapshots or lossless compact blocks, including the results
+/// of stateful callbacks. Compact blocks stay compact across worker handoff.
 /// This is replay of a compiled artifact, not speculative execution of arbitrary
 /// live scene callbacks or a new RNG stream.
 #[derive(Debug)]
@@ -122,6 +129,17 @@ impl TimelineBundle {
                     }
                     Segment::Recorded(shared)
                 }
+                SegmentData::Compact(frames) => {
+                    let next = snapshot_bytes.saturating_add(frames.retained_bytes());
+                    if next > DEFAULT_MAX_BUNDLE_BYTES {
+                        return Err(BundleReadError::Malformed(SerialError::SizeLimit {
+                            needed: next,
+                            limit: DEFAULT_MAX_BUNDLE_BYTES,
+                        }));
+                    }
+                    snapshot_bytes = next;
+                    Segment::Compact(frames)
+                }
             };
             segments.push(shared);
         }
@@ -180,7 +198,8 @@ impl SharedTimelineBundle {
     pub fn engine_version(&self) -> &str {
         &self.engine_version
     }
-    /// Exact bytes held by the immutable canonical snapshot payloads.
+    /// Bytes charged to immutable snapshot storage. Compact recordings include
+    /// their encoded bases, changes and block indexes without expansion.
     #[must_use]
     pub const fn snapshot_bytes(&self) -> usize {
         self.snapshot_bytes
@@ -196,13 +215,14 @@ impl SharedTimelineBundle {
         self.segments.get(index).map(|segment| match segment {
             Segment::Pure(_) => BundleSegmentKind::Pure,
             Segment::Recorded(_) => BundleSegmentKind::Stateful,
+            Segment::Compact(_) => BundleSegmentKind::CompactRecorded,
         })
     }
 
     /// Select an immutable frame input without reconstructing its Stage.
     ///
-    /// Only the selected endpoint pair or recorded frame is retained by the
-    /// job; dropping this bundle does not leave every unselected segment alive.
+    /// Only the selected endpoint pair, recorded frame or compact block is
+    /// retained by the job; dropping this bundle does not retain other blocks.
     /// Jobs may execute in any order, and independently of the reader's lifetime.
     ///
     /// # Errors
@@ -226,6 +246,14 @@ impl SharedTimelineBundle {
                         "shared frame table is shorter than its plan",
                     ))?,
             ),
+            Segment::Compact(frames) => {
+                let (block, frame) = frames
+                    .frame(usize::try_from(offset - 1).unwrap_or(usize::MAX))
+                    .ok_or(BundleReadError::PlanInconsistent(
+                        "compact frame table is shorter than its plan",
+                    ))?;
+                Arc::new(Source::Compact { block, frame })
+            }
         };
         Ok(TimelineFrameJob {
             source,
@@ -277,6 +305,7 @@ impl TimelineFrameJob {
         match self.source.as_ref() {
             Source::Pure { .. } => BundleSegmentKind::Pure,
             Source::Recorded(_) => BundleSegmentKind::Stateful,
+            Source::Compact { .. } => BundleSegmentKind::CompactRecorded,
         }
     }
     /// Reconstruct without retaining a worker cache.
@@ -297,13 +326,22 @@ struct DecodedPure {
     rate: RateFunc,
 }
 
+struct DecodedCompact {
+    block: Arc<CompactBlock>,
+    frame: usize,
+    snapshot: Snapshot,
+}
+
 /// Worker-local endpoint cache. It contains ordinary non-Send snapshots and
-/// must be created, used and dropped on that worker. At most one pure segment
-/// is retained. Switching to recorded frames releases its decoded endpoints.
+/// must be created, used and dropped on that worker. At most one pure endpoint
+/// pair or one compact recorded snapshot is retained. Repeated captures of a
+/// block's base reuse that decoded snapshot. Switching storage releases the
+/// previous decoded state.
 /// Cache identity affects work only, never the reconstruction law or pixels.
 #[derive(Default)]
 pub struct TimelineFrameCache {
     pure: Option<DecodedPure>,
+    compact: Option<DecodedCompact>,
     decoded_snapshots: u64,
 }
 
@@ -373,6 +411,7 @@ impl TimelineFrameCache {
                 let cached = self.pure.as_ref().ok_or(BundleReadError::PlanInconsistent(
                     "missing decoded endpoints",
                 ))?;
+                self.compact = None;
                 // The authoritative schedule computes alpha before this job
                 // is shared, preserving its exact-frame or seconds law.
                 interpolate_between(
@@ -383,13 +422,45 @@ impl TimelineFrameCache {
                 )
             }
             Source::Recorded(bytes) => {
-                self.pure = None;
                 let binding = Stage::new();
                 let snapshot = Snapshot::from_bytes(bytes, &binding)
                     .map_err(BundleReadError::Snapshot)?
                     .snapshot;
+                self.pure = None;
+                self.compact = None;
                 self.decoded_snapshots = self.decoded_snapshots.saturating_add(1);
                 snapshot.materialize()
+            }
+            Source::Compact { block, frame } => {
+                let frame =
+                    block
+                        .snapshot_index(*frame)
+                        .ok_or(BundleReadError::PlanInconsistent(
+                            "compact block frame missing",
+                        ))?;
+                if self.compact.as_ref().is_none_or(|cached| {
+                    !Arc::ptr_eq(&cached.block, block) || cached.frame != frame
+                }) {
+                    let bytes = block.snapshot_bytes(frame)?;
+                    let binding = Stage::new();
+                    let snapshot = Snapshot::from_bytes(&bytes, &binding)
+                        .map_err(BundleReadError::Snapshot)?
+                        .snapshot;
+                    self.compact = Some(DecodedCompact {
+                        block: Arc::clone(block),
+                        frame,
+                        snapshot,
+                    });
+                    self.decoded_snapshots = self.decoded_snapshots.saturating_add(1);
+                }
+                self.pure = None;
+                self.compact
+                    .as_ref()
+                    .ok_or(BundleReadError::PlanInconsistent(
+                        "missing compact snapshot",
+                    ))?
+                    .snapshot
+                    .materialize()
             }
         };
         stage.set_time_from_clock((i64::from(job.index) + 1) as f64 / f64::from(job.fps));

@@ -44,6 +44,20 @@ impl Builtin {
         )
     }
 
+    fn replay_policy(&self) -> NativeReplayPolicy {
+        match self {
+            // Original trailing waits can resume after construction and plays
+            // finish. Native admission keeps active plays and transient state
+            // on verified replay; committed edits still use that route.
+            Self::Primitive(_)
+            | Self::TexSpan
+            | Self::FormulaSheet
+            | Self::SemanticWitness { .. }
+            | Self::Interactive => NativeReplayPolicy::Checkpointed,
+            Self::SoundCue | Self::Camera(_) => NativeReplayPolicy::ColdVerified,
+        }
+    }
+
     fn durations(&self) -> &'static [f64] {
         use fmn::builtins::*;
         match self {
@@ -314,7 +328,7 @@ fn configuration(fs: &dyn FileSystem, command: &StudioCommand) -> Result<Configu
         fps,
         renderer,
     );
-    native.replay = NativeReplayPolicy::ColdVerified;
+    native.replay = registered.replay_policy();
     native.presenter_mode = command.render.presenter_mode;
     native.checkpoint_frames = command.checkpoint_frames;
     if camera {
@@ -567,12 +581,110 @@ mod tests {
                 "native/capture-contract",
                 "native/input-track-semantics",
                 "native/effect-inventory-semantics",
+                "native/checkpoint-continuation-semantics",
             ]
         );
         assert_eq!(
             reads[4].digest,
             fmn_studio::protocol_digest(b"cumulative-native-prefix-effects-v1")
         );
+        assert_eq!(
+            reads[5].digest,
+            fmn_studio::protocol_digest(b"registered-native-wait-continuation-v1")
+        );
+    }
+
+    #[test]
+    fn wait_builtins_restore_real_checkpoints_under_a_suffix_only_work_budget() {
+        use fmn_studio::WorkerService as _;
+
+        let fs = fmn_platform::fs::VirtualFs::new();
+        for name in [
+            fmn::builtins::TEX_SPAN_SCENE_NAME,
+            fmn::builtins::SEMANTIC_WITNESS_SCENE_NAME,
+            camera_route::SEMANTIC_WITNESS_CAMERA_SCENE_NAME,
+            fmn::builtins::INTERACTIVE_SCENE_NAME,
+        ] {
+            let command = camera_command(name);
+            let expected_reads = source_reads(&fs, &command).unwrap();
+            let mut original = worker(&fs, &command).unwrap();
+            let fmn_studio::WorkerResponse::JournalSegment { journal, .. } = original
+                .handle(fmn_studio::SupervisorRequest::Play {
+                    scene: name.into(),
+                    command: fmn_studio::protocol::studio_seek_command(name, 4).unwrap(),
+                })
+                .unwrap()
+            else {
+                panic!("committed builtin checkpoint for {name}");
+            };
+            let journal = fmn_scene::Journal::from_bytes(&journal).unwrap();
+            let entry = &journal.entries()[0];
+            assert_eq!(entry.reads, expected_reads, "host read closure for {name}");
+            let state = entry
+                .checkpoint
+                .clone()
+                .expect("first committed checkpoint");
+            assert!(state.starts_with(b"FMNR"), "resumable builtin {name}");
+
+            let Configuration {
+                mut native,
+                runtime,
+                seed,
+                template,
+            } = configuration(&fs, &command).unwrap();
+            assert_eq!(native.replay, NativeReplayPolicy::Checkpointed, "{name}");
+            // Replaying four prefix frames cannot fit; restoring the exact
+            // cursor and executing only the next sample can.
+            native.max_replay_frames = 1;
+            let limit = native.frame_count - 1;
+            let threads = native.renderer.threads;
+            let registered = Builtin::named(name).unwrap();
+            let mut restored = NativeSceneWorker::new(native, move || {
+                registered.program(runtime.clone(), seed, limit, &template, threads)
+            })
+            .unwrap();
+            restored
+                .handle(fmn_studio::SupervisorRequest::RestoreCheckpoint(
+                    fmn_studio::Checkpoint {
+                        scene: name.into(),
+                        after_entry: 0,
+                        state_hash: entry.state_hash,
+                        state,
+                    },
+                ))
+                .unwrap();
+            let fmn_studio::WorkerResponse::StudioData { bytes, .. } = restored
+                .handle(fmn_studio::SupervisorRequest::Inspect { scene: name.into() })
+                .unwrap()
+            else {
+                panic!("restored builtin inspector for {name}");
+            };
+            assert!(
+                String::from_utf8(bytes).unwrap().contains(
+                    "\"native_restore\":{\"mode\":\"checkpoint\",\"frame\":4,\"fallback\":null}"
+                ),
+                "actual restoration mechanism for {name}"
+            );
+            let request = fmn_studio::SupervisorRequest::Scrub {
+                scene: name.into(),
+                frame: 5,
+            };
+            let fmn_studio::WorkerResponse::Frame(expected) =
+                original.handle(request.clone()).unwrap()
+            else {
+                panic!("uninterrupted builtin PNG for {name}");
+            };
+            let fmn_studio::WorkerResponse::Frame(actual) = restored.handle(request).unwrap()
+            else {
+                panic!("restored builtin PNG for {name}");
+            };
+            assert_eq!(actual.frame_index, 5, "{name}");
+            assert_eq!(actual.encoding, fmn_studio::FrameEncoding::Png, "{name}");
+            assert_eq!(
+                actual, expected,
+                "next builtin frame and backend for {name}"
+            );
+        }
     }
     #[test]
     fn live_factory_rejects_offline_skip_before_execution() {
@@ -737,6 +849,17 @@ mod tests {
                 (30, expected_frames)
             );
             assert_eq!(config.native.camera.is_some(), registered.camera());
+            assert_eq!(
+                config.native.replay,
+                match registered {
+                    Builtin::Primitive(_)
+                    | Builtin::TexSpan
+                    | Builtin::FormulaSheet
+                    | Builtin::SemanticWitness { .. } => NativeReplayPolicy::Checkpointed,
+                    _ => NativeReplayPolicy::ColdVerified,
+                },
+                "authored replay policy for {name}"
+            );
             let mut service = worker(&fs, &command).unwrap();
             let fmn_studio::WorkerResponse::StudioData { bytes, .. } = service
                 .handle(fmn_studio::SupervisorRequest::Inspect { scene: name.into() })

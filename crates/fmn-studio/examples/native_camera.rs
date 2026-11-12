@@ -117,7 +117,7 @@ fn image() -> Result<Mobject> {
 
 fn glow() -> Result<Mobject> {
     let schema = RecordSchema::new(
-        &[("point", 3), ("rgba", 4), ("radius", 1), ("glow_factor", 1)],
+        &[("point", 3), ("radius", 1), ("rgba", 4)],
         &["point"],
         &["point"],
     )?;
@@ -125,8 +125,9 @@ fn glow() -> Result<Mobject> {
     buffer.write(0, "point", &[-3.0, 0.0, 0.8]);
     buffer.write(0, "rgba", &[0.1, 1.0, 0.6, 1.0]);
     buffer.write(0, "radius", &[1.2]);
-    buffer.write(0, "glow_factor", &[2.0]);
-    Ok(Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::DotCloud))
+    let mut object = Mobject::from_buffer(buffer).with_render_primitive(RenderPrimitive::DotCloud);
+    object.uniforms.glow_factor = 2.0;
+    Ok(object)
 }
 
 fn camera_config() -> Result<CameraConfig> {

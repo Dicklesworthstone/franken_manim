@@ -1,11 +1,11 @@
 //! FMTL/1 minor 2: immutable pictures plus an already mixed native PCM track.
 //!
-//! The nested picture document is verbatim minor 0 or 1, not another audio
+//! The nested picture document is verbatim minor 0, 1 or 3, not another audio
 //! envelope. Its existing clock, camera codec and reconstruction law stay intact.
 use fmn_hash::serial::{Limits, Reader, Schema, UnknownPolicy, Writer};
 
 use super::{
-    BundleReadError, CAMERA_TIMELINE_BUNDLE_SCHEMA, DEFAULT_MAX_BUNDLE_BYTES, TimelineBundle,
+    BundleReadError, COMPACT_TIMELINE_BUNDLE_SCHEMA, DEFAULT_MAX_BUNDLE_BYTES, TimelineBundle,
     bundle_engine_version,
 };
 
@@ -204,6 +204,20 @@ fn envelope_limits(max_bytes: usize) -> Limits {
     }
 }
 
+fn validate_picture_container(pictures: &[u8]) -> Result<(), BundleReadError> {
+    let reader = Reader::open(
+        pictures,
+        COMPACT_TIMELINE_BUNDLE_SCHEMA,
+        Limits::DEFAULT,
+        UnknownPolicy::Strict,
+    )
+    .map_err(BundleReadError::Malformed)?;
+    if reader.version().1 == 2 {
+        return Err(invalid("nested soundtrack envelopes are unsupported"));
+    }
+    Ok(())
+}
+
 /// Package an existing visual bundle and final PCM into one content-bound artifact.
 ///
 /// The original visual bytes are unchanged. The only enlarged field limit is
@@ -220,13 +234,7 @@ pub fn attach_bundle_soundtrack(
     max_bytes: usize,
 ) -> Result<Vec<u8>, BundleReadError> {
     // Refuse recursive audio envelopes before entering the shared visual reader.
-    Reader::open(
-        pictures,
-        CAMERA_TIMELINE_BUNDLE_SCHEMA,
-        Limits::DEFAULT,
-        UnknownPolicy::Strict,
-    )
-    .map_err(BundleReadError::Malformed)?;
+    validate_picture_container(pictures)?;
     let identity = bundle_engine_version();
     let mut header = Writer::new(SOUNDTRACK_TIMELINE_BUNDLE_SCHEMA);
     header
@@ -284,13 +292,7 @@ pub(super) fn read_envelope(bytes: &[u8]) -> Result<TimelineBundle, BundleReadEr
         });
     }
     let pictures = reader.get_bytes().map_err(BundleReadError::Malformed)?;
-    Reader::open(
-        pictures,
-        CAMERA_TIMELINE_BUNDLE_SCHEMA,
-        Limits::DEFAULT,
-        UnknownPolicy::Strict,
-    )
-    .map_err(BundleReadError::Malformed)?;
+    validate_picture_container(pictures)?;
     let sample_rate = reader.get_u32().map_err(BundleReadError::Malformed)?;
     let channels = reader.get_u16().map_err(BundleReadError::Malformed)?;
     validate_layout(sample_rate, channels)?;

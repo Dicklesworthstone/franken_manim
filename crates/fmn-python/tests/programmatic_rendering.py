@@ -206,4 +206,58 @@ with wave.open(str(audio.destination), "rb") as decoded:
     assert (decoded.getnchannels(), decoded.getframerate(), decoded.getnframes()) == (2, 48000, audio.sample_frames)
     assert any(decoded.readframes(decoded.getnframes()))
 
-print(f"programmatic native output acceptance passed: 11 cases; artifacts retained at {root}")
+assert audio.audio_dither_seed is None and "audio_dither_seed" not in audio.as_dict()
+dithered = {}
+for dither_seed in (0, (1 << 64) - 1):
+    for workers in (1, 4, 16):
+        scene = Sound(file_writer_config={"audio_dither_seed": dither_seed})
+        result = render_scene(scene, root / f"seeded-{dither_seed}-{workers}.wav", threads=workers)
+        receipt_matches_file(result)
+        assert result.audio_dither_seed == result.as_dict()["audio_dither_seed"] == dither_seed
+        encoded = result.destination.read_bytes()
+        assert encoded != audio.destination.read_bytes()
+        assert encoded == dithered.setdefault(dither_seed, encoded)
+assert dithered[0] != dithered[(1 << 64) - 1]
+
+
+class MutatesDither(Sound):
+    def construct(self):
+        self.file_writer.audio_dither_seed = 123
+        super().construct()
+
+
+mutating = MutatesDither(file_writer_config={"audio_dither_seed": 0})
+frozen = render_scene(mutating, root / "frozen-dither.wav", threads=4)
+assert mutating.file_writer.audio_dither_seed == 123
+assert frozen.audio_dither_seed == 0 and frozen.destination.read_bytes() == dithered[0]
+
+constructed = []
+
+
+class GuardedSound(Sound):
+    def construct(self):
+        constructed.append(True)
+        super().construct()
+
+
+for index, invalid_seed in enumerate((True, -1, 1 << 64, 1.0, "17")):
+    destination = root / f"invalid-dither-{index}.wav"
+    scene = GuardedSound(file_writer_config={"audio_dither_seed": invalid_seed})
+    try:
+        render_scene(scene, destination, threads=1)
+    except (TypeError, ValueError, OverflowError):
+        pass
+    else:
+        raise AssertionError(f"invalid WAV dither seed accepted: {invalid_seed!r}")
+    assert not constructed and not destination.exists()
+
+try:
+    render_scene(GuardedSound(file_writer_config={"audio_dither_seed": 0}),
+                 root / "wrong-dither-format.png", threads=1)
+except ValueError as error:
+    assert "native wav" in str(error)
+else:
+    raise AssertionError("WAV dither was silently ignored for PNG")
+assert not constructed and not (root / "wrong-dither-format.png").exists()
+
+print(f"programmatic native output acceptance passed; artifacts retained at {root}")

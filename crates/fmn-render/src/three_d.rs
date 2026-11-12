@@ -25,6 +25,7 @@ use fmn_frame::{
 
 use crate::arena::{Pool, Sink};
 use crate::bin::{ScreenMap, Tiling};
+use crate::bloom::Bloom;
 use crate::camera::{Camera, CameraError, ClippedFillQuadratic, ClippedQuadratic, EdgeSampleLimit};
 use crate::engine::{NativeScopedSpawner, ScopedSpawner, run_scoped_workers};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
@@ -2085,6 +2086,7 @@ impl PreparedThreeDProjection {
             preparation_bytes: self.preparation_bytes,
             preparation_limits: self.preparation_limits,
             scratch_pool: Arc::clone(&self.scratch_pool),
+            bloom: None,
         })
     }
 }
@@ -2116,6 +2118,8 @@ pub struct ThreeDJob<'a> {
     preparation_bytes: u64,
     preparation_limits: ThreeDPreparationLimits,
     scratch_pool: Arc<TileScratchPool>,
+    /// Applied to the raw frame after the raster, on every route.
+    bloom: Option<Bloom>,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -2178,7 +2182,24 @@ impl<'a> ThreeDJob<'a> {
             preparation_bytes: budget.working_bytes,
             preparation_limits: limits,
             scratch_pool: Arc::new(TileScratchPool::new()),
+            bloom: None,
         })
+    }
+
+    /// Bloom the frame after its raster ([`Bloom`]): the CPU route in
+    /// [`ThreeDJob::render_into`], the Metal route on the device, with the
+    /// same bits. It holds [`Bloom::scratch_bytes`] while it runs, outside
+    /// the preparation limits, which bound the job's rows.
+    #[must_use]
+    pub fn with_bloom(mut self, bloom: Bloom) -> Self {
+        self.bloom = Some(bloom);
+        self
+    }
+
+    /// The bloom the frame gets, if any.
+    #[must_use]
+    pub const fn bloom(&self) -> Option<&Bloom> {
+        self.bloom.as_ref()
     }
 
     /// Freeze the projected rows without retaining any borrowed texture.
@@ -2311,13 +2332,18 @@ impl<'a> ThreeDJob<'a> {
     /// for a mismatched destination, and [`FrameError::TooLarge`] if covered
     /// scratch geometry is not addressable or cannot be reserved. Returns
     /// [`FrameError::WorkerSpawnFailed`] if the host cannot start the complete
-    /// requested CPU render team.
+    /// requested CPU render team. With a bloom, as [`Bloom::apply`] after the
+    /// raster.
     pub fn render_into(
         &self,
         threads: usize,
         destination: &mut FrameBuffer,
     ) -> Result<(), FrameError> {
-        self.render_into_with_spawner(threads, destination, &NativeScopedSpawner)
+        self.render_into_with_spawner(threads, destination, &NativeScopedSpawner)?;
+        match &self.bloom {
+            Some(bloom) => bloom.apply(destination, threads),
+            None => Ok(()),
+        }
     }
 
     fn render_into_with_spawner<S: ScopedSpawner>(
@@ -2589,7 +2615,7 @@ fn compile_vector<'a>(
         .shapes()
         .shape(instance.shape)
         .ok_or(ThreeDError::InvalidVectorInstance)?;
-    let style = draw
+    let mut style = draw
         .plan
         .styles()
         .get(instance.style)
@@ -2642,6 +2668,33 @@ fn compile_vector<'a>(
         segment.p0 = add(segment.p0, translation);
         segment.p1 = add(segment.p1, translation);
         segment.p2 = add(segment.p2, translation);
+    }
+
+    // The canonical XY view has the same affine stroke construction as
+    // FrameJob, even when a mixed scene makes this vector use the camera
+    // route. Point-facing billboard offsets tilt out of that plane and
+    // spuriously widen off-axis strokes after perspective division. Prove
+    // the entire transformed vector and its camera/style here, then reuse
+    // the existing flat construction in this private prepared style only.
+    // True perspective, lighting, depth and clipping keep their authored
+    // construction, and the retained Style/Stage uniform is never rewritten.
+    if !style.flat_stroke
+        && !style.depth_test
+        && style.shading == [0.0; 3]
+        && style.clip_planes == [[0.0; 4]; 4]
+        && style.is_fixed_in_frame == 0.0
+        && !style.scale_stroke_with_zoom
+        && world_segments
+            .iter()
+            .flat_map(|segment| [segment.p0, segment.p1, segment.p2])
+            .all(|point| point[2] == 0.0)
+        && crate::PlanarCapturePolicy::for_output(
+            camera.pixel_shape(),
+            fmn_core::constants::FRAME_HEIGHT,
+        )
+        .is_ok_and(|policy| policy.camera_refusal(camera).is_none())
+    {
+        style.flat_stroke = true;
     }
 
     let draws_fill = style.draws_fill();
@@ -3571,6 +3624,117 @@ fn append_clipped_triangle(
     output: &mut Vec<RasterTriangle>,
     budget: &mut PreparationBudget,
 ) -> Result<(), ThreeDError> {
+    // A clipping pass over a polygon whose every vertex is inside its plane
+    // returns that polygon unchanged and in order, so a triangle inside every
+    // active plane leaves the clipper as itself. Skip the clipper for those
+    // (most of a mesh): the bytes are the clipper's. A pass over a polygon
+    // whose every vertex is outside its plane returns nothing, so a triangle
+    // the clipper's passes leave unchanged up to a plane it is wholly outside
+    // leaves the clipper empty (off-screen dots): skip the clipper for those
+    // too.
+    match unclipped(camera, triangle, fixed, clip_planes) {
+        Ok(projected) => {
+            if let Some(triangle) = raster_triangle(projected, camera.pixel_shape()) {
+                budget.reserve_rows(output, PreparationRows::RasterTriangles, 1)?;
+                output.push(triangle);
+            }
+            Ok(())
+        }
+        Err(Clipper::Empty) => Ok(()),
+        Err(Clipper::Needed) => {
+            append_clipped_polygon(camera, triangle, fixed, clip_planes, output, budget)
+        }
+    }
+}
+
+/// `distance`'s side as the clippers decide it: on the plane is inside, and
+/// NaN is outside.
+fn inside(distance: f64) -> bool {
+    distance >= 0.0
+}
+
+/// What the clipper would do with a triangle it does not return unchanged,
+/// decided without running it.
+#[derive(Debug)]
+enum Clipper {
+    /// Every vertex is inside every active world plane, and at the first
+    /// homogeneous plane (in the clipper's order) not holding all three
+    /// inside, all three are outside: the clipper returns nothing.
+    Empty,
+    /// Anything else: only the clipper can tell.
+    Needed,
+}
+
+/// The distance to homogeneous clip plane `plane` (0 to 5, the clipper's
+/// order: left, right, bottom, top, near, far) of a clip-space point.
+fn homogeneous_distance([x, y, z, w]: [f64; 4], plane: usize) -> f64 {
+    match plane {
+        0 => x + w,
+        1 => w - x,
+        2 => y + w,
+        3 => w - y,
+        4 => z + w,
+        _ => w - z,
+    }
+}
+
+/// `triangle` projected, if every vertex is inside every active world plane
+/// (by the world clipper's own distance) and inside the whole homogeneous clip
+/// volume (by the projected clipper's), as the clipper would return it;
+/// otherwise what the clipper would do, as [`Clipper`] says.
+fn unclipped(
+    camera: &Camera,
+    triangle: &[WorldVertex; 3],
+    fixed: f64,
+    clip_planes: [[f64; 4]; 4],
+) -> Result<[ProjectedVertex; 3], Clipper> {
+    for plane in clip_planes {
+        if plane[..3].iter().all(|value| *value == 0.0) {
+            continue;
+        }
+        for vertex in triangle {
+            let point = vertex.attributes.world;
+            if !inside(point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]) {
+                return Err(Clipper::Needed);
+            }
+        }
+    }
+    let projected = triangle.map(|vertex| ProjectedVertex {
+        clip: camera.project(vertex.attributes.world, fixed).clip,
+        attributes: vertex.attributes,
+    });
+    homogeneous_clipper(&projected)?;
+    Ok(projected)
+}
+
+/// What the six homogeneous clipping passes would do with `projected`:
+/// return it unchanged (`Ok`), return nothing, or something only they can
+/// tell, as [`Clipper`] says.
+fn homogeneous_clipper(projected: &[ProjectedVertex; 3]) -> Result<(), Clipper> {
+    for plane in 0..6 {
+        let inside_count = projected
+            .iter()
+            .filter(|vertex| inside(homogeneous_distance(vertex.clip, plane)))
+            .count();
+        match inside_count {
+            3 => {}
+            0 => return Err(Clipper::Empty),
+            _ => return Err(Clipper::Needed),
+        }
+    }
+    Ok(())
+}
+
+/// The general path: clip against every active world plane, project, clip
+/// against the six homogeneous planes, and fan the polygon into triangles.
+fn append_clipped_polygon(
+    camera: &Camera,
+    triangle: &[WorldVertex; 3],
+    fixed: f64,
+    clip_planes: [[f64; 4]; 4],
+    output: &mut Vec<RasterTriangle>,
+    budget: &mut PreparationBudget,
+) -> Result<(), ThreeDError> {
     const MAX_CLIPPED_POLYGON_VERTICES: usize = 3 + 4 + 6;
 
     let mut polygon = [triangle[0]; MAX_CLIPPED_POLYGON_VERTICES];
@@ -3607,15 +3771,7 @@ fn append_clipped_triangle(
     for plane in 0..6 {
         (projected, projected_len) =
             clip_projected_polygon(&projected[..projected_len], |vertex| {
-                let [x, y, z, w] = vertex.clip;
-                match plane {
-                    0 => x + w,
-                    1 => w - x,
-                    2 => y + w,
-                    3 => w - y,
-                    4 => z + w,
-                    _ => w - z,
-                }
+                homogeneous_distance(vertex.clip, plane)
             })?;
         if projected_len < 3 {
             return Ok(());
@@ -3864,6 +4020,20 @@ fn is_top_left_edge(start: [f64; 2], end: [f64; 2]) -> bool {
     dy < 0.0 || (dy == 0.0 && dx > 0.0)
 }
 
+fn edge_covers_point(start: [f64; 2], end: [f64; 2], point: [f64; 2], weight: f64) -> bool {
+    // Reversed edges must use the same subtraction anchor. Evaluating each
+    // direction independently can round one to zero and the other negative,
+    // leaving a crack, or make both triangles cover a translucent sample.
+    // Reuse the existing determinant when its endpoints are already ordered;
+    // otherwise evaluate that same canonical edge and negate its result.
+    let coverage = if start[0] < end[0] || (start[0] == end[0] && start[1] <= end[1]) {
+        weight
+    } else {
+        -orient(end, start, point)
+    };
+    coverage > 0.0 || (coverage == 0.0 && is_top_left_edge(start, end))
+}
+
 fn barycentric(triangle: &RasterTriangle, point: [f64; 2]) -> Option<[f64; 3]> {
     let [a, b, c] = triangle.vertices.map(|vertex| vertex.screen);
     let area = orient(a, b, c);
@@ -3876,12 +4046,12 @@ fn barycentric(triangle: &RasterTriangle, point: [f64; 2]) -> Option<[f64; 3]> {
     if weights
         .into_iter()
         .zip(edges)
-        .any(|(weight, (start, end))| {
-            weight < 0.0 || (weight == 0.0 && !is_top_left_edge(start, end))
-        })
+        .any(|(weight, (start, end))| !edge_covers_point(start, end, point, weight))
     {
         return None;
     }
+    // Coverage alone uses canonical edge signs. Preserve the established
+    // interpolation arithmetic, including its bits at ordinary interior pixels.
     Some([weights[0] / area, weights[1] / area, weights[2] / area])
 }
 
@@ -6451,6 +6621,39 @@ mod tests {
     }
 
     #[test]
+    fn a_job_with_a_bloom_renders_its_plain_frame_then_blooms_it() {
+        // FrankenLife FL-019: the CPU route blooms its raw frame after the
+        // raster, at any thread count; a job without a bloom has none.
+        use crate::bloom::Bloom;
+
+        let camera = camera();
+        let white = color("#FFFFFF", 1.0);
+        let draws = [ThreeDDraw::TrueDot(TrueDotDraw::glow(
+            [0.0, 0.0, 0.5],
+            0.4,
+            white,
+        ))];
+        let plain = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("job");
+        assert!(plain.bloom().is_none());
+        let bloom = Bloom::new(0.3, 2.0).expect("bloom");
+        let bloomed = ThreeDJob::new(&camera, &draws, Tiling::default())
+            .expect("job")
+            .with_bloom(bloom.clone());
+        assert_eq!(bloomed.bloom(), Some(&bloom));
+        let unbloomed = plain.render(1).expect("frame");
+        let mut expected = unbloomed.clone();
+        bloom.apply(&mut expected, 1).expect("blooms");
+        assert_ne!(expected.as_bytes(), unbloomed.as_bytes());
+        for threads in [1, 4] {
+            assert_eq!(
+                bloomed.render(threads).expect("frame").as_bytes(),
+                expected.as_bytes(),
+                "{threads}"
+            );
+        }
+    }
+
+    #[test]
     fn zero_radius_dots_have_no_coverage_or_depth_and_keep_validation() {
         let camera = camera();
         let white = color("#FFFFFF", 1.0);
@@ -7083,6 +7286,174 @@ mod tests {
         let center = pixel(&frame, 16, 12);
         assert!(center[1] > center[0], "painter overlay must remain on top");
         assert!(center[2] > center[0], "far red must fail against near blue");
+    }
+
+    fn canonical_xy_stroke_stage() -> (Stage, fmn_mobject::Mob) {
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), 3).unwrap();
+        buffer.write_range(
+            "point",
+            0,
+            &[0.75, -0.25, 0.0, 0.75, 0.0, 0.0, 0.75, 0.25, 0.0],
+        );
+        buffer.write_range("stroke_rgba", 0, &[0.8, 0.9, 1.0, 1.0].repeat(3));
+        buffer.write_range("stroke_width", 0, &[4.0; 3]);
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        stage.add_to_scene(mob).unwrap();
+        stage.apply_affine(
+            mob,
+            fmn_mobject::Placement::new(
+                [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]],
+                [0.25, 0.0, 0.0],
+            ),
+        );
+        (stage, mob)
+    }
+
+    #[test]
+    fn canonical_xy_camera_strokes_use_affine_widths_without_mutating_authored_style() {
+        let camera = Camera::new(crate::CameraConfig {
+            resolution: (480, 854),
+            ..crate::CameraConfig::default()
+        })
+        .unwrap();
+        let (stage, mob) = canonical_xy_stroke_stage();
+        let authored_uniforms = *stage.get(mob).unwrap().uniforms();
+        assert!(!authored_uniforms.flat_stroke);
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, camera.revision()).unwrap();
+        let instance = &plan.shapes().instances()[0];
+        let authored_style = plan.styles().get(instance.style).unwrap().clone();
+        let authored_segments = plan.segments().to_vec();
+        let job = ThreeDJob::new(
+            &camera,
+            &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+            Tiling::default(),
+        )
+        .unwrap();
+        let vector = compiled_vector(&job);
+        let map = ScreenMap {
+            scale: f64::from(camera.pixel_height()) / fmn_core::constants::FRAME_HEIGHT,
+            origin: [240.0, 427.0],
+            y_up: true,
+        };
+        let expected = crate::stroke::half_width_px(&authored_style, map, 0.5);
+        assert!(
+            expected > 2.0,
+            "the portrait witness has a real stroke width"
+        );
+        let widths = projected_half_widths(
+            &camera,
+            &vector.style,
+            vector.normal,
+            vector.curves[0].world,
+            0.5,
+            0.5,
+        );
+        for width in widths {
+            assert!(
+                (width - expected).abs() < 1e-11,
+                "off-axis canonical XY width {width} differs from affine width {expected}"
+            );
+        }
+        let mut prepared_style = authored_style.clone();
+        prepared_style.flat_stroke = true;
+        assert_eq!(vector.style, prepared_style);
+        assert_eq!(plan.styles().get(instance.style), Some(&authored_style));
+        assert_eq!(plan.segments(), authored_segments);
+        assert_eq!(*stage.get(mob).unwrap().uniforms(), authored_uniforms);
+    }
+
+    #[test]
+    fn canonical_xy_camera_stroke_proof_preserves_real_camera_semantics() {
+        for case in [
+            "camera translation",
+            "camera zoom",
+            "camera rotation",
+            "camera field of view",
+            "camera width",
+            "pixel reset",
+            "depth",
+            "shading",
+            "user clip",
+            "fixed frame",
+            "zoom-scaled stroke",
+            "off-plane control",
+            "off-plane translation",
+            "affine tilt",
+        ] {
+            let mut camera = Camera::new(crate::CameraConfig {
+                resolution: (480, 854),
+                ..crate::CameraConfig::default()
+            })
+            .unwrap();
+            let (mut stage, mob) = canonical_xy_stroke_stage();
+            match case {
+                "camera translation" => {
+                    camera.frame_mut().set_center([0.25, 0.0, 0.0]).unwrap();
+                }
+                "camera zoom" => {
+                    camera.frame_mut().set_height(4.0).unwrap();
+                }
+                "camera rotation" => {
+                    camera
+                        .frame_mut()
+                        .set_orientation([0.0, 0.0, 0.6, 0.8])
+                        .unwrap();
+                }
+                "camera field of view" => {
+                    camera.frame_mut().set_field_of_view(0.9).unwrap();
+                }
+                "camera width" => {
+                    let width = camera.frame().width();
+                    camera.frame_mut().set_width(width * 1.1).unwrap();
+                }
+                "pixel reset" => camera.set_pixel_shape(481, 854).unwrap(),
+                "depth" => stage.uniforms_mut(mob).unwrap().depth_test = true,
+                "shading" => stage.uniforms_mut(mob).unwrap().shading = [0.2, 0.0, 0.0],
+                "user clip" => {
+                    stage.uniforms_mut(mob).unwrap().clip_planes[0] = [1.0, 0.0, 0.0, -1.0];
+                }
+                "fixed frame" => stage.uniforms_mut(mob).unwrap().is_fixed_in_frame = 0.5,
+                "zoom-scaled stroke" => {
+                    stage.uniforms_mut(mob).unwrap().scale_stroke_with_zoom = true;
+                }
+                "off-plane control" => {
+                    stage
+                        .set_points(
+                            mob,
+                            &[[1.75, -0.5, 0.0], [1.75, 0.0, 0.25], [1.75, 0.5, 0.0]],
+                        )
+                        .unwrap();
+                }
+                "off-plane translation" => {
+                    stage.shift(mob, [0.0, 0.0, 0.25]);
+                }
+                "affine tilt" => {
+                    stage.apply_affine(
+                        mob,
+                        fmn_mobject::Placement::new(
+                            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.25, 1.0]],
+                            [0.0; 3],
+                        ),
+                    );
+                }
+                _ => unreachable!("the fixture names every exclusion"),
+            }
+            let mut plan = RenderPlan::new();
+            plan.sync(&stage, camera.revision()).unwrap();
+            let instance = &plan.shapes().instances()[0];
+            let authored_style = plan.styles().get(instance.style).unwrap().clone();
+            assert!(!authored_style.flat_stroke);
+            let job = ThreeDJob::new(
+                &camera,
+                &[ThreeDDraw::Vector(VectorDraw::new(&plan, 0))],
+                Tiling::default(),
+            )
+            .unwrap();
+            assert_eq!(compiled_vector(&job).style, authored_style, "{case}");
+            assert!(!stage.get(mob).unwrap().uniforms().flat_stroke, "{case}");
+        }
     }
 
     #[test]
@@ -8054,6 +8425,250 @@ mod tests {
         );
     }
 
+    /// Every row of a raster triangle, as bits.
+    fn raster_bits(triangles: &[RasterTriangle]) -> Vec<u64> {
+        let mut bits = Vec::new();
+        for triangle in triangles {
+            for vertex in &triangle.vertices {
+                let a = vertex.attributes;
+                bits.extend(
+                    a.world
+                        .iter()
+                        .chain(&a.normal)
+                        .chain(&a.color)
+                        .chain(&a.uv)
+                        .map(|v| v.to_bits()),
+                );
+                bits.push(a.opacity.to_bits());
+                bits.extend(vertex.screen.iter().map(|v| v.to_bits()));
+                bits.push(vertex.inverse_w.to_bits());
+                bits.push(vertex.ndc_z.to_bits());
+            }
+            bits.extend(triangle.bounds.iter().map(|v| v.to_bits()));
+        }
+        bits
+    }
+
+    #[test]
+    fn unclipped_triangles_skip_the_clipper_with_its_exact_output() {
+        // Random triangles from well inside the view to far outside and
+        // behind the camera, with and without user planes, a few vertices
+        // exactly on a user plane, and non-finite coordinates; and, one case
+        // in five, triangles near the eye that cross only the near plane
+        // (`z + w`, which binds only there). The fast path must equal the
+        // general clipper bit for bit, result for result, and budget for
+        // budget, and every path must be exercised.
+        let camera = camera();
+        let eye = camera.location();
+        let mut state = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let none = [[0.0; 4]; 4];
+        let mut one = none;
+        one[0] = [1.0, 0.0, 0.0, 0.0];
+        let mut two = none;
+        two[1] = [0.3, -0.7, 0.2, 1.5];
+        two[3] = [0.0, 1.0, 0.0, 2.0];
+        let plane_sets = [none, one, two];
+        let (mut fast, mut rejected, mut general, mut empty, mut split, mut near) =
+            (0, 0, 0, 0, 0, 0);
+        for case in 0..60_000_usize {
+            let scale = [0.5, 3.0, 9.0, 40.0][case % 4];
+            let center: [f64; 3] = std::array::from_fn(|_| (unit() - 0.5) * scale);
+            let mut corners: [[f64; 3]; 3] = if case % 5 == 4 {
+                std::array::from_fn(|_| {
+                    let t = 0.02 + 0.2 * unit();
+                    let lateral = [8.0 * t * (unit() - 0.5), 5.0 * t * (unit() - 0.5), 0.0];
+                    std::array::from_fn(|axis| eye[axis] * (1.0 - t) + lateral[axis])
+                })
+            } else {
+                std::array::from_fn(|_| {
+                    std::array::from_fn(|axis| center[axis] + (unit() - 0.5) * scale * 0.5)
+                })
+            };
+            match case % 97 {
+                0 => corners[1][0] = 0.0,
+                1 => corners[2][0] = -0.0,
+                2 => corners[0][2] = f64::NAN,
+                3 => corners[1][1] = f64::INFINITY,
+                _ => {}
+            }
+            let triangle = corners.map(|world| WorldVertex {
+                attributes: Attributes {
+                    world,
+                    normal: [unit(), unit(), 1.0],
+                    color: [unit(), unit(), unit(), 1.0],
+                    uv: [unit(), unit()],
+                    opacity: unit(),
+                },
+            });
+            let planes = plane_sets[case % 3];
+            let fixed = if case % 11 == 0 { 1.0 } else { 0.0 };
+            let mut quick = Vec::new();
+            let mut quick_budget = PreparationBudget::new(ThreeDPreparationLimits::default());
+            let quick_result = append_clipped_triangle(
+                &camera,
+                &triangle,
+                fixed,
+                planes,
+                &mut quick,
+                &mut quick_budget,
+            );
+            let mut slow = Vec::new();
+            let mut slow_budget = PreparationBudget::new(ThreeDPreparationLimits::default());
+            let slow_result = append_clipped_polygon(
+                &camera,
+                &triangle,
+                fixed,
+                planes,
+                &mut slow,
+                &mut slow_budget,
+            );
+            assert_eq!(
+                format!("{quick_result:?}"),
+                format!("{slow_result:?}"),
+                "case {case}"
+            );
+            assert_eq!(raster_bits(&quick), raster_bits(&slow), "case {case}");
+            assert_eq!(
+                quick_budget.rows(PreparationRows::RasterTriangles),
+                slow_budget.rows(PreparationRows::RasterTriangles),
+                "case {case}"
+            );
+            let clips = triangle.map(|vertex| camera.project(vertex.attributes.world, fixed).clip);
+            if planes == none
+                && clips
+                    .iter()
+                    .all(|&[x, y, _, w]| [x + w, w - x, y + w, w - y].into_iter().all(inside))
+                && clips.iter().any(|&[_, _, z, w]| !inside(z + w))
+            {
+                near += 1;
+            }
+            match unclipped(&camera, &triangle, fixed, planes) {
+                Ok(_) => fast += 1,
+                Err(Clipper::Empty) => {
+                    assert!(
+                        slow.is_empty(),
+                        "case {case}: a rejected triangle the clipper keeps"
+                    );
+                    rejected += 1;
+                }
+                Err(Clipper::Needed) => {
+                    general += 1;
+                    match slow.len() {
+                        0 => empty += 1,
+                        1 => {}
+                        _ => split += 1,
+                    }
+                }
+            }
+        }
+        assert!(fast > 5_000, "fast path taken {fast} times");
+        assert!(
+            rejected > 1_000,
+            "rejected without the clipper {rejected} times"
+        );
+        assert!(general > 5_000, "general path taken {general} times");
+        assert!(empty > 1_000, "clipped away {empty} times");
+        assert!(
+            split > 1_000,
+            "clipped into several triangles {split} times"
+        );
+        assert!(near > 1_000, "crossed only the near plane {near} times");
+    }
+
+    #[test]
+    fn homogeneous_clipper_decides_as_the_clipping_passes_on_the_planes() {
+        // Random world triangles almost never put a corner exactly on a clip
+        // plane. These clip-space corners are exact multiples of w, so many
+        // do (at +0 and -0), with w zero and negative, NaN and infinities.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut pick = move |count: u64| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            usize::try_from(state % count).expect("a small index")
+        };
+        let attributes = Attributes {
+            world: [0.0; 3],
+            normal: [0.0, 0.0, 1.0],
+            color: [1.0; 4],
+            uv: [0.0; 2],
+            opacity: 1.0,
+        };
+        let multiples = [-1.5, -1.0, -0.5, -0.0, 0.0, 0.5, 1.0, 1.5];
+        let (mut kept, mut kept_flat_on_a_plane, mut empty, mut needed) = (0, 0, 0, 0);
+        for case in 0..60_000 {
+            let w = [1.0, 2.0, 0.75, 0.0, -1.0][pick(5)];
+            let projected: [ProjectedVertex; 3] = std::array::from_fn(|_| {
+                let mut clip = [0.0, 0.0, 0.0, w];
+                for coordinate in &mut clip[..3] {
+                    *coordinate = multiples[pick(8)] * w;
+                }
+                match pick(40) {
+                    0 => clip[pick(4)] = f64::NAN,
+                    1 => clip[pick(3)] = f64::INFINITY,
+                    _ => {}
+                }
+                ProjectedVertex { clip, attributes }
+            });
+            let mut polygon = [projected[0]; 13];
+            polygon[..3].copy_from_slice(&projected);
+            let mut polygon_len = 3;
+            for plane in 0..6 {
+                (polygon, polygon_len) =
+                    clip_projected_polygon(&polygon[..polygon_len], |vertex| {
+                        homogeneous_distance(vertex.clip, plane)
+                    })
+                    .expect("clips");
+                if polygon_len < 3 {
+                    break;
+                }
+            }
+            match homogeneous_clipper(&projected) {
+                Ok(()) => {
+                    assert_eq!(polygon_len, 3, "case {case}: kept, but clipped");
+                    for (clipped, vertex) in polygon[..3].iter().zip(&projected) {
+                        assert_eq!(
+                            clipped.clip.map(f64::to_bits),
+                            vertex.clip.map(f64::to_bits),
+                            "case {case}: kept, but moved"
+                        );
+                    }
+                    kept += 1;
+                    if w > 0.0
+                        && (0..6).any(|plane| {
+                            projected
+                                .iter()
+                                .all(|vertex| homogeneous_distance(vertex.clip, plane) == 0.0)
+                        })
+                    {
+                        kept_flat_on_a_plane += 1;
+                    }
+                }
+                Err(Clipper::Empty) => {
+                    assert!(
+                        polygon_len < 3,
+                        "case {case}: rejected, but clipped to {polygon_len}"
+                    );
+                    empty += 1;
+                }
+                Err(Clipper::Needed) => needed += 1,
+            }
+        }
+        assert!(kept > 1_000, "kept {kept} times");
+        assert!(
+            kept_flat_on_a_plane > 20,
+            "kept lying on a plane, w > 0, {kept_flat_on_a_plane} times"
+        );
+        assert!(empty > 1_000, "rejected {empty} times");
+        assert!(needed > 1_000, "left to the clipper {needed} times");
+    }
+
     #[test]
     fn homogeneous_clip_volume_rejects_geometry_behind_the_camera() {
         let camera = camera();
@@ -8252,6 +8867,161 @@ mod tests {
             .filter(|triangle| barycentric(triangle, sample).is_some())
             .count();
         assert_eq!(accepted, 1, "a shared edge must composite exactly once");
+    }
+
+    fn shared_edge_camera() -> Camera {
+        let mut frame = crate::camera::CameraFrame::default();
+        frame.set_shape([6.0, 4.0]).unwrap();
+        Camera::new(crate::camera::CameraConfig {
+            resolution: (96, 64),
+            frame,
+            background: color("#000000", 0.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .unwrap()
+    }
+
+    fn shared_edge_quad() -> [SurfaceVertex; 4] {
+        let half = 25.0 / 16.0;
+        [
+            ([-half, half, 0.0], [0.0, 0.0]),
+            ([-half, -half, 0.0], [0.0, 1.0]),
+            ([half, half, 0.0], [1.0, 0.0]),
+            ([half, -half, 0.0], [1.0, 1.0]),
+        ]
+        .map(|(point, uv)| SurfaceVertex::textured(point, [0.0, 0.0, 1.0], uv, 0.5))
+    }
+
+    #[test]
+    fn projected_shared_edge_has_one_owner_without_changing_interior_weights() {
+        let camera = shared_edge_camera();
+        let projected = shared_edge_quad().map(|vertex| ProjectedVertex {
+            clip: camera.project(vertex.point, 0.0).clip,
+            attributes: Attributes {
+                world: vertex.point,
+                normal: vertex.normal,
+                color: rgba_array(vertex.color),
+                uv: vertex.uv,
+                opacity: vertex.opacity,
+            },
+        });
+        let make_triangle = |indices: [usize; 3]| {
+            raster_triangle(indices.map(|index| projected[index]), camera.pixel_shape()).unwrap()
+        };
+        let original = [[0, 1, 2], [3, 2, 1]];
+        let triangles = original.map(make_triangle);
+        let [ul, ur, dl] = triangles[0].vertices.map(|vertex| vertex.screen);
+        // This real image projection rounds only the left x coordinate up.
+        assert_eq!(ul, [23.0_f64.next_up(), 7.0]);
+        assert_eq!(ur, [73.0, 7.0]);
+        assert_eq!(dl, [23.0_f64.next_up(), 57.0]);
+        let formerly_missing = [35.5, 44.5];
+        assert_eq!(orient(ur, dl, formerly_missing), 0.0);
+        assert!(orient(dl, ur, formerly_missing) < 0.0);
+
+        // Keep the pre-fix interpolation bits at an ordinary interior sample.
+        assert_eq!(
+            barycentric(&triangles[0], [35.5, 19.5])
+                .unwrap()
+                .map(f64::to_bits),
+            [
+                0x3fe0_0000_0000_0000,
+                0x3fcf_ffff_ffff_fffd,
+                0x3fd0_0000_0000_0000
+            ]
+        );
+        for permutation in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 2, 0],
+            [1, 0, 2],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let triangles =
+                original.map(|indices| make_triangle(permutation.map(|index| indices[index])));
+            for x in 23..73 {
+                let y = f64::from(79 - x) + 0.5;
+                for y in [y.next_down(), y, y.next_up()] {
+                    let sample = [f64::from(x) + 0.5, y];
+                    assert_eq!(
+                        triangles
+                            .iter()
+                            .filter(|triangle| barycentric(triangle, sample).is_some())
+                            .count(),
+                        1,
+                        "shared sample {sample:?}, vertex order {permutation:?}"
+                    );
+                }
+            }
+            // No epsilon may expand the quad, even by one representable step.
+            for sample in [
+                [23.0, 19.5],
+                [73.0_f64.next_up(), 19.5],
+                [35.5, 7.0_f64.next_down()],
+                [35.5, 57.0_f64.next_up()],
+            ] {
+                assert!(
+                    triangles
+                        .iter()
+                        .all(|triangle| barycentric(triangle, sample).is_none()),
+                    "outside sample {sample:?}, vertex order {permutation:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn projected_shared_edge_composites_once_across_winding_order_and_threads() {
+        let camera = shared_edge_camera();
+        let texture =
+            Texture::from_rgba8(1, 1, &[255; 4], crate::texture::TextureEncoding::Linear).unwrap();
+        let mut expected = None;
+        for reverse_winding in [false, true] {
+            for reverse_order in [false, true] {
+                let mut triangles = [[0, 1, 2], [3, 2, 1]];
+                if reverse_winding {
+                    for triangle in &mut triangles {
+                        triangle.swap(1, 2);
+                    }
+                }
+                if reverse_order {
+                    triangles.swap(0, 1);
+                }
+                let mesh = SurfaceMesh::new(
+                    shared_edge_quad().to_vec(),
+                    triangles.into_iter().flatten().collect(),
+                )
+                .unwrap();
+                let draws = [ThreeDDraw::Surface(SurfaceDraw::image(&mesh, &texture))];
+                let job = ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+                let one = job.render(1).unwrap();
+                // A single half-opacity white quad over transparent black is
+                // exactly [1, 1, 1, .5]. A gap gives alpha 0; overlap gives .75.
+                for y in 0..64 {
+                    for x in 0..96 {
+                        let wanted = if (23..73).contains(&x) && (7..57).contains(&y) {
+                            [1.0, 1.0, 1.0, 0.5]
+                        } else {
+                            [0.0; 4]
+                        };
+                        assert_eq!(
+                            pixel(&one, x, y),
+                            wanted,
+                            "pixel {x},{y}, reversed winding {reverse_winding}, order {reverse_order}"
+                        );
+                    }
+                }
+                if let Some(expected) = &expected {
+                    assert_eq!(one.as_bytes(), expected);
+                } else {
+                    expected = Some(one.as_bytes().to_vec());
+                }
+                for threads in [4, 16] {
+                    assert_eq!(job.render(threads).unwrap().as_bytes(), one.as_bytes());
+                }
+            }
+        }
     }
 
     #[test]

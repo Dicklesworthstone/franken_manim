@@ -319,3 +319,145 @@ fn every_catalog_export_round_trips_through_eager_and_shared_readers() {
     let shared = SharedTimelineBundle::from_bytes(&bytes).unwrap();
     assert_eq!(shared.segment_kind(0), Some(BundleSegmentKind::Stateful));
 }
+
+#[test]
+fn compact_static_jobs_keep_blocks_compressed_and_reuse_decoded_bases() {
+    use fmn_scene::recording::{CompactRecordingLimits, SceneBundleRecorder};
+    use fmn_scene::{RuntimeConfig, Scene};
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 17).unwrap();
+    for row in 0..24 {
+        let points = (0..96)
+            .map(|column| [f64::from(column) / 16.0, f64::from(row), 0.0])
+            .collect::<Vec<_>>();
+        scene.add_mobject(Mobject::from_points(&points)).unwrap();
+    }
+    let expected = scene.stage().snapshot().to_render_bytes().unwrap();
+    let mut recorder =
+        SceneBundleRecorder::new_compact(scene.fps(), CompactRecordingLimits::default()).unwrap();
+    scene.wait_frames(130, &mut recorder).unwrap();
+    let artifact = recorder.finish().unwrap();
+    assert!(artifact.bytes.len() * 8 < expected.len() * 130);
+    let bundle = SharedTimelineBundle::from_bytes(&artifact.bytes).unwrap();
+    assert_eq!(
+        bundle.segment_kind(0),
+        Some(BundleSegmentKind::CompactRecorded)
+    );
+    assert!(bundle.snapshot_bytes() * 8 < expected.len() * 130);
+    let jobs = (0..130)
+        .map(|index| bundle.frame_job(index).unwrap())
+        .collect::<Vec<_>>();
+    drop(bundle);
+    let mut cache = TimelineFrameCache::default();
+    for job in &jobs {
+        let frame = cache.materialize(job).unwrap();
+        assert_eq!(frame.snapshot().to_render_bytes().unwrap(), expected);
+        assert_eq!(
+            frame.time().to_bits(),
+            ((f64::from(job.index()) + 1.0) / f64::from(scene.fps())).to_bits(),
+        );
+    }
+    assert_eq!(
+        cache.decoded_snapshots(),
+        3,
+        "one decode for each 64-frame block"
+    );
+}
+
+#[test]
+fn compact_stateful_jobs_outlive_the_reader_and_match_observed_frames_in_parallel() {
+    use fmn_anim::FramePacket;
+    use fmn_scene::recording::{CompactRecordingLimits, SceneBundleRecorder};
+    use fmn_scene::{
+        CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig, Scene, SceneSink,
+    };
+
+    struct Oracle {
+        recorder: SceneBundleRecorder,
+        observed: Vec<Vec<u8>>,
+    }
+    impl SceneSink for Oracle {
+        fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+            self.recorder.event(event)
+        }
+        fn capture(
+            &mut self,
+            reason: CaptureReason,
+            packet: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.observed
+                .push(packet.state().to_render_bytes().unwrap());
+            self.recorder.capture(reason, packet)
+        }
+    }
+    let mut scene = Scene::new(RuntimeConfig::default(), 19).unwrap();
+    let moving = scene
+        .add_mobject(Mobject::from_points(&[[0.0, 1.0, 0.0]]))
+        .unwrap();
+    let background = (0..256)
+        .map(|index| [f64::from(index), -2.0, 0.0])
+        .collect::<Vec<_>>();
+    scene
+        .add_mobject(Mobject::from_points(&background))
+        .unwrap();
+    let calls = Rc::new(Cell::new(0u32));
+    let counter = Rc::clone(&calls);
+    scene
+        .stage_mut()
+        .add_dt_updater(
+            moving,
+            move |stage, mob, _dt| {
+                let next = counter.get() + 1;
+                counter.set(next);
+                stage.set_x(mob, f64::from(next * next) / 1024.0);
+            },
+            false,
+        )
+        .unwrap();
+    let mut oracle = Oracle {
+        recorder: SceneBundleRecorder::new_compact(scene.fps(), CompactRecordingLimits::default())
+            .unwrap(),
+        observed: Vec::new(),
+    };
+    scene.wait_frames(130, &mut oracle).unwrap();
+    let callback_count = calls.get();
+    assert_ne!(oracle.observed[0], oracle.observed[129]);
+    let artifact = oracle.recorder.finish().unwrap();
+    let bundle = SharedTimelineBundle::from_bytes(&artifact.bytes).unwrap();
+    let jobs = (0..130)
+        .rev()
+        .map(|index| bundle.frame_job(index).unwrap())
+        .collect::<Vec<_>>();
+    drop(bundle);
+    let frames = std::thread::scope(|scope| {
+        let workers = jobs
+            .chunks(33)
+            .map(|chunk| {
+                scope.spawn(move || {
+                    let mut cache = TimelineFrameCache::default();
+                    chunk
+                        .iter()
+                        .map(|job| {
+                            assert_eq!(job.kind(), BundleSegmentKind::CompactRecorded);
+                            let frame = cache.materialize(job).unwrap();
+                            (job.index(), frame.snapshot().to_render_bytes().unwrap())
+                        })
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        workers
+            .into_iter()
+            .flat_map(|worker| worker.join().unwrap())
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(frames.len(), 130);
+    for (index, bytes) in frames {
+        assert_eq!(bytes, oracle.observed[index as usize], "frame {index}");
+    }
+    assert_eq!(
+        calls.get(),
+        callback_count,
+        "playback must never invoke an updater"
+    );
+}

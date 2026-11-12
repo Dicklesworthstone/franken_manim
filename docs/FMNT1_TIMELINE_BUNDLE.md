@@ -11,8 +11,10 @@ this bundle is `FMTL`, format version 1.
 
 ## Container
 
-One `fmn_hash::serial` document: `Schema::new(*b"FMTL", 1, 0, 0)`. Field order
-below is fixed and serialized in order. Integers are the container's canonical
+One `fmn_hash::serial` document. The original picture layout uses
+`Schema::new(*b"FMTL", 1, 0, 0)`; the explicit camera, soundtrack and compact
+extensions below use minors 1, 2 and 3. Field order is fixed and serialized in
+order. Integers are the container's canonical
 little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
 `bytes` fields are length-prefixed octets.
 
@@ -33,6 +35,7 @@ little-endian; floats are IEEE-754 bits; strings are length-prefixed UTF-8;
 4. `segments: u32` — MUST equal `plan.segments().len()`.
 5. Per segment entry, in authored order:
    a. `kind: u8` — `0` = pure-reconstructible, `1` = stateful (recorded).
+      Minor 3 additionally admits `2` = compact recorded, defined below.
    b. If `kind == 0`:
       - `begin: bytes` — the begin-state Stage snapshot (the scene-side
         snapshot machinery's canonical document, verbatim).
@@ -80,6 +83,31 @@ Two exports of the same scene run MUST produce identical bytes: fixed field
 order, canonical floats, no timestamps, no host paths, no hash-map iteration
 (wherever maps appear, serialize in sorted key order).
 
+### Nested dot-cloud material snapshots
+
+The nested arena codec supports FMNA/1 version 1.9. It appends one liveness
+marker per arena slot and one f64 `glow_factor` for each live object, after the
+1.8 dark-image table. Dot-cloud records use `point: f32[3]`, `radius: f32[1]`
+and `rgba: f32[4]`; glow is an object-wide numeric uniform and interpolates
+alongside other numeric uniforms. User-authored record columns, including a
+column also named `glow_factor`, never control the radial material.
+
+The writer retains version 1.8 and its exact bytes when all glow uniforms are
+zero and no dot cloud is present. Every dot cloud requires version 1.9, even a
+hard dot with zero glow: older renderers require the former per-point lane and
+cannot render the new packed dtype. A nonzero glow uniform on any other object
+also requires version 1.9. Strict older readers reject that newer nested snapshot.
+
+When reading older snapshots, a constant legacy per-point glow lane promotes
+exactly from f32 to the new f64 uniform. The original record schema and values
+are retained, including the field list used by Python pickle state. A legacy
+empty cloud can recover its glow from its phantom default record. Historical
+heterogeneous or nonfinite per-point glow cannot be represented by one finite
+uniform and is refused with an explicit malformed-snapshot error; it is never
+silently replaced by the first point's value. Such old recordings must be
+re-exported from source using uniform glow values (or separate clouds for
+different glow values).
+
 
 ## Camera-bearing FMTL/1 minor 1
 
@@ -119,8 +147,32 @@ storage-reuse contract; minor-0 bundles retain their existing planar path.
 WASM playback remains standard-only, not part of the certified platform matrix.
 Other geometry-only consumers must adopt the paired reconstruction API before
 claiming support.
-Minor-0/minor-1 pictures contain no audio. Minor 2 below packages final PCM
+Minor-0/minor-1/minor-3 pictures contain no audio. Minor 2 below packages final PCM
 with these pictures; arbitrary external effects remain unrepresented.
+
+### Offline selection of recorded segments
+
+The CLI accepts `-n START,END` for picture-only and camera-bearing recordings,
+using zero-based authored play/wait ordinals and an exclusive end. `-n START`
+selects the remaining segments. For example, `fmn --format png_sequence -n 2,5
+lesson.fmtl Lesson` exports segments 2, 3 and 4. Native render and `fmn batch`
+use the same selection contract as narrated FMTL export.
+
+Selection uses the stored segment frame boundaries. Original frame indices
+continue to select geometry, camera, background and lighting; output frame
+numbers restart at zero. The recording's FPS is unchanged, and the CLI neither
+executes the skipped prefix nor resamples the selected interval. PNG and SVG
+stills capture the last recorded frame inside the selection. `--subdivide`
+keeps the original segment ordinals in its output names, and `--prerun` counts
+only selected frames and segments. Robot render receipts expose the original
+half-open `source_frames` and `source_segments` intervals; the manifest's C10
+configuration digest binds the requested start and exclusive end.
+
+Empty or out-of-bounds selections fail before publication. Zero-frame segments
+may border a nonempty selection; selecting only zero-frame segments fails.
+Subdivision refuses a zero-frame segment inside its selected interval before
+publishing any selected generation. The output frame budget applies to selected
+work. Studio continues to preview the complete recording.
 
 Regression coverage lives in `crates/fmn-conformance/tests/camera_bundle.rs`:
 actual camera-rig captures versus decoded native frames at 1/4/16 threads,
@@ -144,13 +196,13 @@ scene, change FMTL reconstruction or alter offline output sampling.
 
 ## Sound-bearing FMTL/1 minor 2
 
-Schema `(FMTL, 1, 0, 2)` is a nonrecursive envelope around a complete minor-0
-or minor-1 visual document. The visual bytes, their existing trailer, the
+Schema `(FMTL, 1, 0, 2)` is a nonrecursive envelope around a complete minor-0,
+minor-1 or minor-3 visual document. The visual bytes, their existing trailer, the
 picture clock, camera samples and reconstruction law remain unchanged.
 The envelope's canonical fields are:
 
 1. `engine_version: string`, checked before interpreting later fields.
-2. `pictures: bytes`, a complete minor-0 or minor-1 FMTL document. Another
+2. `pictures: bytes`, a complete minor-0, minor-1 or minor-3 FMTL document. Another
    minor-2 envelope is refused before recursive decoding. Only this nested
    document field admits up to the 256 MiB total limit; the nested reader
    retains its own original 64 MiB per-field/snapshot limit.
@@ -189,3 +241,115 @@ therefore fail closed through the shared reader/replay contract.
 `BundleSoundtrack`. `fmn-scene/tests/soundtrack_bundle.rs` exercises exact PCM,
 legacy preservation, camera/geometry round trips, arbitrary frame order at
 1/4/16 workers, consumer refusals, nesting, corruption and output limits.
+
+
+## Lossless compact recordings: FMTL/1 minor 3
+
+Schema `(FMTL, 1, 0, 3)` adds storage for actual imperative captures without
+declaring the source pure. The engine identity, FPS, FMNA/5 plan and segment
+table have the same order and meaning as minor 0. Segment kind `2`, exposed as
+`BundleSegmentKind::CompactRecorded`, stores the exact canonical snapshot bytes
+emitted by the recorder. Stateful updaters, noncatalog easing, transient draw
+state and all sampled wait frames retain their recorded values. Decoding does
+not interpolate, execute callbacks, consume source RNG or replay a prefix.
+Kind 0 remains the separate proven reconstruction law; compact recording is
+never evidence for that proof.
+
+### Block layout
+
+A kind-2 segment begins with `frame_count: u32`, which must equal the segment's
+scheduled output count. Frames are partitioned into consecutive blocks of at
+most 64; the count implies the number of blocks and the size of the final
+block. There is no extra block-count field, and an empty segment has no blocks.
+Each block contains:
+
+1. `base: bytes`, the complete canonical snapshot of its first frame.
+2. One entry for each remaining frame in the block, in capture order:
+
+| Entry tag | Following fields | Reconstruction |
+|---|---|---|
+| `0` — Same | None | Use the block's base snapshot bytes. |
+| `1` — Literal | `snapshot: bytes` | Use the complete supplied snapshot. |
+| `2` — Patch | `target_len: u32`, `span_count: u32`, then each span's `offset: u32` and `replacement: bytes` | Resize a copy of the base to `target_len` and replace the specified byte intervals. |
+
+Each `bytes` field above uses the canonical `u64` length prefix. Block and span
+tables are implied or counted as specified; no unlisted offsets or indexes
+appear in the wire payload.
+
+Every patch refers directly to its block's base, including after a Literal or
+another Patch. There are no dependency chains between frames. Span offsets are
+ordered, nonoverlapping and within the target length; any part extending past
+the base length must be covered by replacement bytes. The reconstructed result
+must pass the ordinary canonical snapshot decoder. Count and length arithmetic
+is checked before reservation or copying, so an oversized count cannot create
+an unchecked allocation or a partial accepted movie.
+
+The writer deterministically merges changed-byte runs separated by at most
+12 unchanged bytes. It emits Same for byte-identical frames and uses a Patch
+only when its complete encoded entry is strictly smaller than a Literal.
+This is a storage choice over observed bytes, with no approximate numeric
+comparison. Incompressible captures remain exact Literals.
+
+### Camera, sound and worker ownership
+
+After the segment table, minor 3 always writes `has_camera: bool`. A false
+value ends the visual payload. A true value is followed by the same `u32`
+sample count and exact 153-byte camera-sample table used by minor 1. The count
+must equal the whole plan's output frame count. Camera-paired reconstruction,
+viewport handling and refusal of geometry-only access retain the minor-1
+contract.
+
+The existing minor-2 envelope can wrap a complete minor-3 visual document,
+including its camera table. It introduces no second compact stream or nested
+sound envelope. Audio transfer remains explicit: consumers take the soundtrack
+before dispatching ordinary or camera-paired picture jobs.
+
+`TimelineBundle::stage_at`, the paired camera API and owned shared frame jobs
+all decode the same recorded bytes. Shared conversion retains immutable compact
+blocks; it does not first expand every frame into a whole-movie snapshot table.
+Each worker cache materializes only the frame it requests and can reuse its
+decoded block base. Jobs own their required input and remain valid after the
+original reader is dropped. Reverse or parallel access does not depend on
+prior frame order.
+
+### Admission budgets and compatibility
+
+The production limits distinguish compact storage from work needed to observe
+and validate the captures:
+
+| Budget | Default/format ceiling | Charged content |
+|---|---:|---|
+| Export frames | 1,000,000 | Every captured output frame. |
+| Retained compact frame storage | 256 MiB | Compact bases, replacement bytes, fixed 63-entry tail tables, shared-block headers and pointer capacities, plus the shared parent-segment and camera tables. |
+| One canonical snapshot | 64 MiB | The complete captured or reconstructed snapshot, before any compaction. |
+| Cumulative snapshot work | 16 GiB | Every complete canonical snapshot, including every Same entry and every block base. |
+| Complete encoded artifact | 256 MiB | The entire visual document or the outer picture-plus-PCM document, including all headers, tables and trailers. |
+
+Compact exporter options may impose tighter budgets. A long repeated still
+therefore saves retained storage but continues to consume frame and snapshot
+work budgets. The reader charges reconstructed sizes across all compact
+segments against one whole-document work ceiling and validates every captured
+snapshot before admitting the movie. Sound wrapping does not reset this budget
+or loosen the complete-artifact limit. A failed capture remains sticky, even
+when authored code catches the error, and encoding/validation completes before
+publication.
+
+The retained budget accounts for compact blocks plus the shared segment and
+camera tables; it is not a total process-memory limit. The nested plan,
+original input, bounded temporary snapshot decoding and independently bounded
+PCM retain their own admission contracts. Kinds 0 and 1 keep their existing
+snapshot limits, including when present in a minor-3 document. Legacy
+minor-0/minor-1 reader accounting is unchanged.
+
+Compact storage is explicitly selected by the authoring API. Existing recorded
+exports keep their original minor-0/minor-1 layouts and bytes; compact input is
+not silently downgraded for an older reader. Strict readers that do not support
+minor 3 refuse it. The standalone, shared and WASM paths use the same production
+reader and require no source-language runtime to replay these recordings.
+
+The registered `lifecycle.compact_scene_bundle.v1` scenario compares a dynamic
+native updater's actual serial captures against reverse and permuted decoded
+frames across a 64-frame boundary, detached jobs at 1/4/16 workers, deterministic
+re-export and explicit PCM transfer. Focused shared, camera and WASM tests cover
+their adapters. These definitions become execution evidence only after the
+corresponding test run succeeds.

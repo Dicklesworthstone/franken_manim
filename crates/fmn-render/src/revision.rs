@@ -36,8 +36,8 @@
 //! depends on differs from the axis value it was built at. Monotonicity is
 //! therefore not required, and this matters — `RecordBuffer::swap_in` bumps
 //! every counter past the old ones on a resize, and a *different* buffer
-//! generation can legitimately restart. [`Revisions`] folds the storage identity
-//! into the axes for exactly that reason.
+//! generation can legitimately restart. [`Revisions`] folds the non-reused
+//! storage generation into the axes for exactly that reason.
 
 use fmn_mobject::{Entry, ImageColorSpace, ImageWrap, Mob, Stage, Uniforms};
 
@@ -169,8 +169,10 @@ impl Revisions {
         // generation and restarts nothing — but a *snapshot restore* can install
         // an older generation whose counters are lower than the ones an artifact
         // was built at, and comparison-not-ordering only saves us if the
-        // identity is in the key.
-        let generation = buffer.storage_id() as u64;
+        // identity is in the key. Public Dependency values can outlive the
+        // allocation without retaining a Weak witness, so an allocator address
+        // is insufficient: it may already belong to an unrelated new buffer.
+        let generation = buffer.storage_generation();
 
         let field = |name: &str| buffer.field_revision(name).unwrap_or(0);
 
@@ -395,6 +397,11 @@ fn uniform_key(u: &Uniforms) -> u64 {
     mixer.write_u64(u.stroke_behind as u64);
     mixer.write_u64(u.depth_test as u64);
     mixer.write_u64(u.use_winding_fill as u64);
+    // Zero glow is the prior material. Preserve its identity while recording
+    // every new exponent, including a distinct signed zero, by its exact bits.
+    if u.glow_factor.to_bits() != 0 {
+        mixer.write_u64(u.glow_factor.to_bits());
+    }
     mixer.finish()
 }
 
@@ -537,6 +544,7 @@ mod tests {
                 [13.0, 14.0, 15.0, 16.0],
             ],
             anti_alias_width: 1.75,
+            glow_factor: 0.0,
             joint_type: fmn_mobject::JointType::Miter,
             flat_stroke: true,
             scale_stroke_with_zoom: false,
@@ -550,6 +558,14 @@ mod tests {
             legacy_uniform_key(&Uniforms::default())
         );
         assert_eq!(uniform_key(&uniforms), legacy_uniform_key(&uniforms));
+        assert_ne!(
+            uniform_key(&Uniforms {
+                glow_factor: 2.0,
+                ..uniforms
+            }),
+            uniform_key(&uniforms),
+            "changing the dot material must invalidate retained resources"
+        );
     }
 
     #[test]

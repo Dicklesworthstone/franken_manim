@@ -137,7 +137,9 @@ pub use coords::{
     Axes, AxisConfig, CoordinateFrame, CoordinateFrameError, CoordinateSystem, CoordsError,
     LiveCoordinateSystem, NumberLine, RiemannConfig, Slider, UnitInterval, create_axis,
 };
-pub use data_mobjects::{BarChart, DataMobjectError, TableMobject};
+pub use data_mobjects::{
+    BarChart, BarChartBinding, ChangeBarValues, DataMobjectError, TableMobject,
+};
 pub use fields::{
     AnimatedBoundary, AnimatedStreamLines, FieldError, IntegratorTune, OdeError, OdeSamples,
     STREAM_LINES_SUBSTREAM, StreamLineMeta, StreamLineStyle, StreamLines, StreamLinesMobject,
@@ -172,7 +174,8 @@ pub use network_graph::{
 pub use neural_network::{
     DEFAULT_LAYER_SPACING, DEFAULT_MAX_DISPLAYED_NEURONS, DEFAULT_NEURON_RADIUS,
     DEFAULT_NEURON_SPACING, DEFAULT_SYNAPSE_STROKE_WIDTH, LayerKind, LayerSpec,
-    NeuralNetworkConfig, NeuralNetworkError, NeuralNetworkMobject,
+    MAX_NEURAL_NETWORK_PARTS, MAX_NEURAL_NETWORK_VALUES, NeuralNetworkBinding, NeuralNetworkConfig,
+    NeuralNetworkError, NeuralNetworkMobject,
 };
 pub use numbers::{DEFAULT_MAX_NUMBER_CHARACTERS, DecimalNumber, Integer};
 pub use obj_materials::{
@@ -208,8 +211,9 @@ pub use svg::{
     svg_document_mobject, svg_mobject, svg_reference_frame, vmobject_from_svg_path,
 };
 pub use tex::{
-    LineAlign, OldTex, OldTexMobject, Tex, TexBindingError, TexMobject, TexMobjectError,
-    TexNumberBinding, TexSpanBinding, TexText,
+    LineAlign, OldTex, OldTexMobject, OldTexText, SingleStringTex, Tex, TexBindingError,
+    TexMobject, TexMobjectError, TexNumberBinding, TexSpanBinding, TexText,
+    TexTextFromPresetString,
 };
 pub use text::{MarkupText, Text, TextMobject, TextMobjectError};
 pub use text_matching::{

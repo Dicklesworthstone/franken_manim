@@ -170,6 +170,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                          subdivide=False, max_segments=10_000, save_last_frame=False,
                          reproducible=False, bundle_camera=False, bundle_limits=None,
                          bundle_audio=False, bundle_audio_options=None,
+                         bundle_storage="recorded", bundle_compact_limits=None,
                          _output_options=None, _expected_source_digest=None,
                          _working_directory=None, _configuration=None):
     """Render local Scene classes or named parameter variants in fresh processes.
@@ -234,7 +235,8 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
 
     format="fmtl" exports complete portable recordings through each worker's
     existing render_scenes/BundleExportSession. bundle_camera, bundle_limits,
-    bundle_audio and bundle_audio_options have the same meanings and defaults
+    bundle_audio, bundle_audio_options, bundle_storage and bundle_compact_limits
+    have the same meanings and defaults
     as sequential export. Explicit raster threads, ranges, subdivision, paired
     output and source certification are refused before launching a worker.
     Audio mixer workers are controlled separately by audio_threads. Parent-side
@@ -307,14 +309,23 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
                                save_last_frame=save_last_frame, reproducible=reproducible, format=format)
     from .source_jobs import prepare_source_jobs
 
+    # Snapshot compact admission before a caller-supplied scene iterator or
+    # observer can mutate budgets. Recorded defaults add no new plan fields.
+    if format == "fmtl":
+        from .bundle_export import _validated_batch_storage
+
+        bundle_limits, storage_options = _validated_batch_storage(
+            storage=bundle_storage, compact_limits=bundle_compact_limits, limits=bundle_limits)
+        bundle_compact_limits = storage_options.get("bundle_compact_limits")
     names, variants = prepare_source_jobs(scene_names, maximum)
     if variants is not None and reproducible:
         raise RuntimeError("CAPABILITY: parameterized source jobs do not certify constructor inputs")
     if type(bundle_camera) is not bool or type(bundle_audio) is not bool:
         raise TypeError("bundle_camera and bundle_audio must be bool")
     if format != "fmtl" and (bundle_camera or bundle_audio or bundle_limits is not None
-                             or bundle_audio_options is not None):
-        raise ValueError("bundle camera, audio and limits require format='fmtl'")
+                             or bundle_audio_options is not None
+                             or bundle_storage != "recorded" or bundle_compact_limits is not None):
+        raise ValueError("bundle camera, audio, storage and limits require format='fmtl'")
     if format == "fmtl" and (reproducible or subdivide or save_last_frame):
         native = importlib.import_module("manimlib")
         raise native._CapabilityError(
@@ -354,6 +365,7 @@ def render_source_scenes(source, directory, scene_names, *, workers=2,
         bundle_options = prepare_bundle_options(
             importlib.import_module("manimlib"), camera=bundle_camera, audio=bundle_audio,
             limits=bundle_limits, audio_options=bundle_audio_options, resolution=resolution,
+            storage=bundle_storage, compact_limits=bundle_compact_limits,
             fps=fps, threads=threads, animation_range=selection, subdivide=subdivide,
             save_last_frame=save_last_frame, reproducible=reproducible,
             output_options=_output_options,

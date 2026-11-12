@@ -54,6 +54,7 @@ class PointCloudLifecycleTests(unittest.TestCase):
                     def init_uniforms(self):
                         events.append('uniforms')
                         super().init_uniforms()
+                        self.uniforms['glow_factor'] = 3.
                     def init_colors(self):
                         events.append('colors')
                         super().init_colors()
@@ -62,6 +63,8 @@ class PointCloudLifecycleTests(unittest.TestCase):
                 cloud = Cloud()
                 self.assertEqual(events, ['data', 'points', 'uniforms', 'colors'])
                 np.testing.assert_array_equal(cloud.get_points(), [[0, 0, 0]])
+                self.assertEqual(cloud._get_uniform('glow_factor'), 3.)
+                self.assertEqual(cloud.data.dtype.itemsize, 32)
 
     def test_none_retains_authored_points_but_default_is_origin(self):
         for base in (m.DotCloud, m.GlowDots):
@@ -110,8 +113,10 @@ class PointCloudLifecycleTests(unittest.TestCase):
                 with self.subTest(points=points, glow=glow):
                     cloud = m.DotCloud(points, radius=.2, color=m.BLUE, opacity=.7, glow_factor=glow)
                     expected = kernel(points, glow=glow)
-                    for name in ('point', 'radius', 'rgba', 'glow_factor'):
+                    for name in ('point', 'radius', 'rgba'):
                         np.testing.assert_array_equal(cloud.data[name], expected.data[name])
+                    self.assertEqual(cloud.get_glow_factor(), expected.get_glow_factor())
+                    self.assertEqual(cloud.data.dtype.itemsize, 32)
                     self.assertEqual(cloud.uniforms['anti_alias_width'], 2.)
 
     def test_pgroup_retains_hook_children_and_argument_identity(self):
@@ -161,7 +166,7 @@ class PointCloudLifecycleTests(unittest.TestCase):
         self.assertEqual(cloud.get_num_points(), 0)
         cloud.add_points([[0, 0, 0], [1, 0, 0]])
         np.testing.assert_allclose(cloud.get_radii(), [[.3], [.3]])
-        np.testing.assert_array_equal(cloud.data['glow_factor'], [[2.], [2.]])
+        self.assertEqual(cloud._get_uniform('glow_factor'), 2.)
         with tempfile.TemporaryDirectory() as tmp:
             actual = render(Path(tmp) / 'actual.y4m', cloud)
             expected = render(Path(tmp) / 'expected.y4m', kernel([[0, 0, 0], [1, 0, 0]],
@@ -202,7 +207,10 @@ class PointCloudLifecycleTests(unittest.TestCase):
             def init_data(self):
                 events.append('data')
         for name in ('radius', 'glow_factor', 'anti_alias_width'):
-            for value in (-1., float('nan'), float('inf'), 1e40):
+            invalid = (-1., float('nan'), float('inf'))
+            if name != 'glow_factor':
+                invalid += (1e40,)
+            for value in invalid:
                 with self.subTest(name=name, value=value), self.assertRaises(ValueError):
                     Cloud(**{name: value})
         self.assertEqual(events, [])
@@ -233,11 +241,8 @@ class PointCloudLifecycleTests(unittest.TestCase):
         np.testing.assert_array_equal(cloud.data, before)
 
     def test_native_finalization_refuses_invalid_records_without_mutation(self):
-        class Raw(m.Mobject):
-            data_dtype = [('point', 3), ('radius', 1), ('rgba', 4), ('glow_factor', 1)]
-        for name, value in (('point', float('nan')), ('radius', -1.), ('glow_factor', -1.)):
-            raw = Raw()
-            raw.set_points([[0, 0, 0]])
+        for name, value in (('point', float('nan')), ('radius', -1.)):
+            raw = m.DotCloud()
             raw.data[name][:] = value
             before = raw.data.tobytes()
             with self.assertRaises(ValueError):

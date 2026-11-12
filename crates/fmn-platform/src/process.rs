@@ -11,8 +11,10 @@
 //!   application plus atomic Job Object assignment.
 //! - **Environment allowlist.** The child's environment is cleared and
 //!   rebuilt from [`ProcessSpec::env`] alone; nothing ambient leaks in.
-//! - **Timeout.** [`ProcessSpec::timeout`] bounds wall-clock runtime; on
-//!   expiry the child is killed and the outcome says so.
+//! - **Timeout.** [`ProcessSpec::timeout`] bounds startup and wall-clock
+//!   runtime together; on expiry a live child is killed. A transient
+//!   executable-busy loader refusal may be retried within that same bound,
+//!   without changing the selected image or ignoring cancellation.
 //! - **Output-size limits.** stdout and stderr are each capped at
 //!   [`ProcessSpec::max_output_bytes`]; exceeding a cap kills the child with
 //!   [`ProcessTermination::OutputLimitExceeded`] — a runaway encoder cannot
@@ -1849,7 +1851,8 @@ pub struct ProcessSpec {
     /// this field to be `None` and accepts ordered chunks through
     /// [`RunningProcess::write_stdin`].
     pub stdin: Option<Vec<u8>>,
-    /// Wall-clock bound; on expiry the child is killed.
+    /// Wall-clock bound including startup retries; on expiry the child is
+    /// killed, or startup fails with a typed timeout if no child was issued.
     pub timeout: Duration,
     /// Per-stream cap on captured stdout/stderr bytes; on overflow the child
     /// is killed with [`ProcessTermination::OutputLimitExceeded`].
@@ -2021,6 +2024,31 @@ pub enum ProcessError {
     },
 }
 
+impl ProcessError {
+    /// A deadline or cancellation that refused startup before a child existed.
+    ///
+    /// This classifies only the runner's own typed control refusal. An OS
+    /// loader error with the same I/O kind remains a mechanism failure, so
+    /// callers need not guess from diagnostic text or depend on the substrate.
+    #[must_use]
+    pub fn startup_termination(&self) -> Option<ProcessTermination> {
+        match self {
+            #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+            Self::Spawn {
+                err: asupersync::process::ProcessError::Io(error),
+                ..
+            } => error
+                .get_ref()
+                .and_then(|source| source.downcast_ref::<StartupRefusal>())
+                .map(|refusal| match refusal {
+                    StartupRefusal::Cancelled => ProcessTermination::Cancelled,
+                    StartupRefusal::TimedOut => ProcessTermination::TimedOut,
+                }),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for ProcessError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -2173,6 +2201,122 @@ pub trait ProcessRunner: Send + Sync {
 #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// Keep startup control refusals distinct from unrelated OS errors even when
+/// their public I/O kinds and diagnostic wording happen to match.
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+#[derive(Debug)]
+enum StartupRefusal {
+    Cancelled,
+    TimedOut,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+impl fmt::Display for StartupRefusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Cancelled => "process was cancelled before executable spawn",
+            Self::TimedOut => "process deadline expired before executable spawn",
+        })
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+impl std::error::Error for StartupRefusal {}
+
+/// One deadline covers loader retries, pipe setup, and child supervision.
+/// Keeping elapsed time rather than adding to `Instant` also accepts a
+/// caller's arbitrarily large `Duration` without overflowing the clock.
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+#[derive(Clone, Copy)]
+struct ProcessDeadline {
+    started: Instant,
+    timeout: Duration,
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+impl ProcessDeadline {
+    fn new(timeout: Duration) -> Self {
+        Self {
+            started: Instant::now(),
+            timeout,
+        }
+    }
+
+    fn remaining(self) -> Duration {
+        self.timeout.saturating_sub(self.started.elapsed())
+    }
+
+    fn expired(self) -> bool {
+        self.started.elapsed() >= self.timeout
+    }
+}
+
+/// A sibling fork can briefly inherit the write-capable descriptor used to
+/// create fmn-output's private executable, even after the owner closes it.
+/// Linux then refuses the exact image with ETXTBSY. Retry only that typed
+/// loader error: seven backoffs (1..64 ms, 127 ms total), never a different
+/// executable, an interpreter, or an error from a child that actually ran.
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+fn spawn_with_busy_retry<T>(
+    program: &Path,
+    deadline: ProcessDeadline,
+    cancellation: &ProcessCancellation,
+    mut spawn: impl FnMut() -> Result<T, asupersync::process::ProcessError>,
+) -> Result<T, ProcessError> {
+    const MAX_RETRIES: u32 = 7;
+
+    let check_start = || {
+        let refusal = if cancellation.is_cancelled() {
+            Some((io::ErrorKind::Interrupted, StartupRefusal::Cancelled))
+        } else if deadline.expired() {
+            Some((io::ErrorKind::TimedOut, StartupRefusal::TimedOut))
+        } else {
+            None
+        };
+        match refusal {
+            Some((kind, detail)) => Err(ProcessError::Spawn {
+                program: program.to_path_buf(),
+                err: asupersync::process::ProcessError::Io(io::Error::new(kind, detail)),
+            }),
+            None => Ok(()),
+        }
+    };
+
+    let mut retries = 0;
+    loop {
+        check_start()?;
+        match spawn() {
+            Ok(child) => return Ok(child),
+            Err(err) => {
+                if retries == MAX_RETRIES
+                    || !matches!(
+                        &err,
+                        asupersync::process::ProcessError::Io(error)
+                            if error.kind() == io::ErrorKind::ExecutableFileBusy
+                    )
+                {
+                    return Err(ProcessError::Spawn {
+                        program: program.to_path_buf(),
+                        err,
+                    });
+                }
+            }
+        }
+
+        let backoff = Duration::from_millis(1 << retries);
+        retries += 1;
+        let waiting_since = Instant::now();
+        loop {
+            check_start()?;
+            let remaining = backoff.saturating_sub(waiting_since.elapsed());
+            if remaining.is_zero() {
+                break;
+            }
+            std::thread::sleep(remaining.min(deadline.remaining()).min(POLL_INTERVAL));
+        }
+    }
+}
+
 /// Every runner (std and scripted alike) refuses relative program paths:
 /// the trait contract, not an implementation detail.
 fn require_absolute(spec: &ProcessSpec) -> Result<(), ProcessError> {
@@ -2262,14 +2406,13 @@ impl ProcessRunner for StdProcessRunner {
         // native-image-attested, and fingerprinted by the ffmpeg boundary
         // before it reaches this runner. ExactImageCommand never performs PATH
         // lookup, shell fallback, or environment inheritance.
+        let deadline = ProcessDeadline::new(spec.timeout);
         let mut command = asupersync::process::ExactImageCommand::new(&spec.program);
         command
             .args(&spec.argv)
             .envs(spec.env.iter().map(|(key, value)| (key, value)));
-        let mut child = command.spawn().map_err(|err| ProcessError::Spawn {
-            program: spec.program.clone(),
-            err,
-        })?;
+        let mut child =
+            spawn_with_busy_retry(&spec.program, deadline, &cancellation, || command.spawn())?;
         let actual_mechanism = exact_image_mechanism(child.mechanism());
         if actual_mechanism != self.mechanism() {
             let _ = kill_process_tree(&mut child);
@@ -2307,14 +2450,13 @@ impl ProcessRunner for StdProcessRunner {
         let stdout_thread = drain(stdout, spec.max_output_bytes, Arc::clone(&overflow));
         let stderr_thread = drain(stderr, spec.max_output_bytes, Arc::clone(&overflow));
         let program = spec.program.clone();
-        let timeout = spec.timeout;
         let supervisor_cancellation = cancellation.clone();
         let (outcome_tx, outcome_rx) = mpsc::sync_channel(1);
         let supervisor = std::thread::spawn(move || {
             let result = supervise_child(
                 child,
                 &program,
-                timeout,
+                deadline,
                 supervisor_cancellation,
                 overflow,
                 stdout_thread,
@@ -2339,13 +2481,12 @@ impl ProcessRunner for StdProcessRunner {
 fn supervise_child(
     mut child: asupersync::process::ExactImageChild,
     program: &std::path::Path,
-    timeout: Duration,
+    deadline: ProcessDeadline,
     cancellation: ProcessCancellation,
     overflow: Arc<AtomicBool>,
     stdout_thread: std::thread::JoinHandle<Vec<u8>>,
     stderr_thread: std::thread::JoinHandle<Vec<u8>>,
 ) -> Result<ProcessOutcome, ProcessError> {
-    let start = Instant::now();
     let termination = loop {
         // Reaping the group leader can disarm group-based tree cleanup. Once
         // both inherited pipes close, kill the isolated tree before reaping.
@@ -2376,7 +2517,7 @@ fn supervise_child(
             Some(ProcessTermination::OutputLimitExceeded)
         } else if cancellation.is_cancelled() {
             Some(ProcessTermination::Cancelled)
-        } else if start.elapsed() >= timeout {
+        } else if deadline.expired() {
             Some(ProcessTermination::TimedOut)
         } else {
             None
@@ -2702,5 +2843,194 @@ impl RunningProcess for ScriptedProcess {
 impl Drop for ScriptedProcess {
     fn drop(&mut self) {
         self.record();
+    }
+}
+
+#[cfg(all(test, feature = "exact-process", target_os = "linux"))]
+mod spawn_retry_tests {
+    use super::*;
+    use std::fs::{File, OpenOptions};
+    use std::os::unix::fs::OpenOptionsExt as _;
+    use std::sync::atomic::AtomicU64;
+
+    // A real native image held write-open produces Linux's actual ETXTBSY.
+    // Retain the fixture rather than unlinking a still-observed executable.
+    fn busy_executable() -> (PathBuf, File) {
+        static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+        let directory = std::env::temp_dir().canonicalize().expect("temporary root");
+        for _ in 0..128 {
+            let path = directory.join(format!(
+                "fmn-busy-spawn-{}-{}",
+                std::process::id(),
+                SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            match OpenOptions::new()
+                .create_new(true)
+                .read(true)
+                .write(true)
+                .mode(0o700)
+                .open(&path)
+            {
+                Ok(mut writer) => {
+                    let mut source = File::open("/usr/bin/true").expect("native true image");
+                    io::copy(&mut source, &mut writer).expect("copy native image");
+                    writer.sync_all().expect("sync native image");
+                    return (path, writer);
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => panic!("create busy-image fixture: {error}"),
+            }
+        }
+        panic!("could not claim a private busy-image fixture");
+    }
+
+    fn assert_spawn_io(error: ProcessError, kind: io::ErrorKind) {
+        let ProcessError::Spawn {
+            err: asupersync::process::ProcessError::Io(error),
+            ..
+        } = error
+        else {
+            panic!("expected typed spawn I/O error: {error}");
+        };
+        assert_eq!(error.kind(), kind);
+    }
+
+    #[test]
+    fn loader_busy_retry_recovers_after_the_last_writable_descriptor_closes() {
+        let (path, writer) = busy_executable();
+        let mut writer = Some(writer);
+        let command = asupersync::process::ExactImageCommand::new(&path);
+        let mut attempts = 0;
+        let mut child = spawn_with_busy_retry(
+            &path,
+            ProcessDeadline::new(Duration::from_secs(5)),
+            &ProcessCancellation::new(),
+            || {
+                attempts += 1;
+                let result = command.spawn();
+                if attempts == 1 {
+                    assert!(
+                        matches!(
+                            &result,
+                            Err(asupersync::process::ProcessError::Io(error))
+                                if error.kind() == io::ErrorKind::ExecutableFileBusy
+                        ),
+                        "the original one-attempt spawn must fail with a real busy-image error"
+                    );
+                    // A sibling's inherited descriptor can disappear at this
+                    // exact point. No sleep or scheduling race decides whether
+                    // the negative control actually exercised the refusal.
+                    drop(writer.take());
+                }
+                result
+            },
+        )
+        .expect("retry the same native image after the write handle closes");
+        assert_eq!(attempts, 2);
+        drop(child.take_stdin());
+        assert!(child.wait().expect("reap successful retry").success());
+    }
+
+    #[test]
+    fn loader_busy_retry_is_bounded_and_preserves_the_os_error() {
+        let (path, _writer) = busy_executable();
+        let command = asupersync::process::ExactImageCommand::new(&path);
+        let mut attempts = 0;
+        let error = spawn_with_busy_retry(
+            &path,
+            ProcessDeadline::new(Duration::from_secs(5)),
+            &ProcessCancellation::new(),
+            || {
+                attempts += 1;
+                command.spawn()
+            },
+        )
+        .err()
+        .expect("an image held write-open must never execute");
+        assert_eq!(
+            attempts, 8,
+            "persistent loader refusal must not retry forever"
+        );
+        let ProcessError::Spawn { ref program, .. } = error else {
+            panic!("expected original loader refusal: {error}");
+        };
+        assert_eq!(program, &path);
+        assert_spawn_io(error, io::ErrorKind::ExecutableFileBusy);
+    }
+
+    #[test]
+    fn loader_busy_retry_observes_cancellation_before_another_attempt() {
+        let (path, writer) = busy_executable();
+        let mut writer = Some(writer);
+        let command = asupersync::process::ExactImageCommand::new(&path);
+        let cancellation = ProcessCancellation::new();
+        let mut attempts = 0;
+        let error = spawn_with_busy_retry(
+            &path,
+            ProcessDeadline::new(Duration::from_secs(5)),
+            &cancellation,
+            || {
+                attempts += 1;
+                let result = command.spawn();
+                cancellation.cancel();
+                drop(writer.take());
+                result
+            },
+        )
+        .err()
+        .expect("cancellation must prevent an otherwise successful retry");
+        assert_eq!(attempts, 1);
+        assert_eq!(
+            error.startup_termination(),
+            Some(ProcessTermination::Cancelled)
+        );
+        assert_spawn_io(error, io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn startup_control_classification_does_not_relabel_os_loader_errors() {
+        for (kind, message) in [
+            (
+                io::ErrorKind::Interrupted,
+                "process was cancelled before executable spawn",
+            ),
+            (
+                io::ErrorKind::TimedOut,
+                "process deadline expired before executable spawn",
+            ),
+        ] {
+            let error = ProcessError::Spawn {
+                program: PathBuf::from("/native-image"),
+                err: asupersync::process::ProcessError::Io(io::Error::new(kind, message)),
+            };
+            assert_eq!(error.startup_termination(), None);
+            assert_spawn_io(error, kind);
+        }
+    }
+
+    #[test]
+    fn other_loader_errors_are_never_retried() {
+        let path = Path::new("/nonexistent/fmn-no-such-spawn-retry-image");
+        let command = asupersync::process::ExactImageCommand::new(path);
+        let mut attempts = 0;
+        let error = spawn_with_busy_retry(
+            path,
+            ProcessDeadline::new(Duration::from_secs(5)),
+            &ProcessCancellation::new(),
+            || {
+                attempts += 1;
+                command.spawn()
+            },
+        )
+        .err()
+        .expect("missing image must stay a typed loader refusal");
+        assert_eq!(attempts, 1);
+        assert!(matches!(
+            error,
+            ProcessError::Spawn {
+                err: asupersync::process::ProcessError::NotFound(_),
+                ..
+            }
+        ));
     }
 }

@@ -25,6 +25,7 @@ pub mod perf_harness;
 mod portal_assignment;
 mod portal_audio;
 mod portal_autotune;
+mod portal_bar_chart;
 #[cfg(any(test, feature = "gauntlet"))]
 mod portal_console;
 mod portal_network;
@@ -37,7 +38,11 @@ pub use portal_console::{
     run_portal_gauntlet_reference_flags, run_portal_gauntlet_worker_receipt_shutdown,
 };
 #[cfg(feature = "gauntlet")]
+pub use portal_network::run_portal_gauntlet_network_animations;
+#[cfg(feature = "gauntlet")]
 pub use portal_ode::run_portal_gauntlet_ode_solution;
+#[cfg(feature = "gauntlet")]
+pub use portal_point_cloud::run_portal_gauntlet_point_cloud_uniforms;
 #[cfg(feature = "gauntlet")]
 pub use portal_rates::run_portal_gauntlet_exact_rates;
 mod portal_playback;
@@ -51,11 +56,16 @@ mod portal_texture;
 pub use portal_raster::{run_portal_gauntlet_asset_root, run_portal_gauntlet_image_inputs};
 use portal_texture::raster as portal_raster;
 mod portal_typography;
+#[cfg(feature = "gauntlet")]
+pub use portal_typography::run_portal_gauntlet_text_configuration;
 mod portal_video;
 #[cfg(any(test, feature = "gauntlet"))]
 mod structural_parity;
 #[cfg(feature = "gauntlet")]
-pub use portal_texture::{run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures};
+pub use portal_texture::{
+    run_portal_gauntlet_surface_holes, run_portal_gauntlet_surface_lifecycle,
+    run_portal_gauntlet_textures,
+};
 #[cfg(feature = "gauntlet")]
 pub use structural_parity::{
     CorpusRegressionCase, EnvelopeDrillReport, StructuralParityReport, TexSelectionReport,
@@ -80,7 +90,8 @@ pub use tex_preamble::run_portal_gauntlet_tex_preamble;
 
 #[cfg(feature = "gauntlet")]
 pub use portal_readback::{
-    run_portal_gauntlet_camera_frame_points, run_portal_gauntlet_rectangle_recovery,
+    run_portal_gauntlet_camera_frame_points, run_portal_gauntlet_disc_recovery,
+    run_portal_gauntlet_rectangle_recovery, run_portal_gauntlet_rounded_rectangle_recovery,
 };
 #[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
@@ -192,6 +203,7 @@ struct PortalArtifactReport {
     digest: fmn_output::ArtifactDigest,
     invocations: Vec<fmn_output::InvocationReport>,
     audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    audio_dither_seed: Option<u64>,
     image_inputs: Vec<portal_raster::PortalImageInput>,
     /// Frames rasterized on Lumen's retained planar route and on the camera
     /// route (fm-sq8.11).
@@ -256,6 +268,7 @@ impl From<NativeArtifactReport> for PortalArtifactReport {
             digest: report.digest,
             invocations: Vec::new(),
             audio_inputs: Vec::new(),
+            audio_dither_seed: None,
             image_inputs: Vec::new(),
             routes: PortalRoutes::default(),
             tuning: None,
@@ -426,7 +439,7 @@ impl PortalRenderSession {
                     &fmn_output::WavPublicationConfig {
                         destination,
                         format: fmn_codec::SampleFormat::S16,
-                        dither: fmn_output::DitherPolicy::None,
+                        dither: audio.dither,
                         max_artifact_bytes,
                         profile: None,
                     },
@@ -440,6 +453,7 @@ impl PortalRenderSession {
                         bytes: report.bytes,
                         digest: report.digest,
                         invocations: audio.invocations(),
+                        audio_dither_seed: audio.dither_seed(),
                         audio_inputs: std::mem::take(&mut audio.inputs),
                         image_inputs: Vec::new(),
                         routes: PortalRoutes::default(),
@@ -473,10 +487,9 @@ struct PortalFrameSession {
     next_sequence: u64,
     single_frame: bool,
     timeline: OutputTimeline,
-    /// The default camera frame. While the scene's frame equals it and the
-    /// output aspect is the frame's, planar vector content takes the retained
-    /// 2D route (tile cache, adaptive AA) instead of the camera route.
-    planar_map_matches: bool,
+    /// Canonical camera admission for this output's aspect and frame height,
+    /// shared with readback and every native frame worker.
+    planar_policy: fmn_render::PlanarCapturePolicy,
     routes: PortalRoutes,
 }
 
@@ -628,14 +641,12 @@ impl PortalFrameSession {
             ..CameraConfig::default()
         })
         .map_err(|error| PyValueError::new_err(error.to_string()))?;
-        // The retained 2D route maps scene units by output height over the
-        // configured frame height with the origin at the centre. It draws what
-        // the camera route draws only while the scene frame is the default one
-        // and that frame has the output's aspect.
-        let planar_baseline = CameraConfig::default().frame;
-        let [frame_width, frame_height] = planar_baseline.shape();
-        let planar_map_matches = (frame_height - config.sizes.frame_height).abs() < 1e-12
-            && (frame_width - frame_height * f64::from(width) / f64::from(height)).abs() < 1e-9;
+        // The canonical frame follows the actual output aspect. Capture its
+        // admission independently of later live camera edits so workers and
+        // serial captures make the same decision for every frame.
+        let planar_policy =
+            fmn_render::PlanarCapturePolicy::for_output((width, height), config.sizes.frame_height)
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
         // ubs:ignore — compares a public output-format enum, not a secret.
         let pixel_format = wire.frame_format();
         let output_layout = FrameLayout::tight(pixel_format, width, height)
@@ -852,7 +863,7 @@ impl PortalFrameSession {
                 next_sequence: 0,
                 single_frame,
                 timeline: OutputTimeline::new(single_frame),
-                planar_map_matches,
+                planar_policy,
                 // Team zero retains the session renderer. Eligible pure plays
                 // use the other planned teams through NativeFramePipeline.
                 routes: PortalRoutes {
@@ -934,11 +945,10 @@ impl PortalFrameSession {
         // fm-sq8.11: planar vector content under the default camera frame
         // takes Lumen's retained 2D route, the one standalone fmn uses (tile
         // cache, adaptive AA, revisioned plan reuse); its +Y-up screen map
-        // renders upright since fm-sq8.9. Anything else (a moved or rotated
-        // frame, another output aspect, depth, lighting, clip planes, raster
-        // primitives, non-planar points) keeps the camera route.
-        let refusal =
-            fmn::rendering::planar_capture_refusal(stage, &self.camera, self.planar_map_matches);
+        // renders upright since fm-sq8.9. Moved, zoomed or rotated frames,
+        // depth, lighting, clip planes, raster primitives and nonplanar points
+        // keep the camera route.
+        let refusal = self.planar_policy.refusal(stage, &self.camera);
         self.routes.performance.capture_prepare_ns += portal_elapsed_ns(preparation_start);
         let render_start = Instant::now();
         if let Some(reason) = refusal {
@@ -1029,7 +1039,7 @@ impl PortalFrameSession {
         let config = self.renderer.config();
         let camera = fmn::rendering::NativeAdaptiveCamera::new(
             self.camera.clone(),
-            self.planar_map_matches,
+            self.planar_policy,
             self.light_mob,
         )
         .with_camera_tiling(self.camera_tiling);
@@ -1127,6 +1137,7 @@ impl PortalFrameSession {
                     digest: report.boundary.artifact_digest,
                     invocations: report.boundary.invocations,
                     audio_inputs: Vec::new(),
+                    audio_dither_seed: None,
                     image_inputs: Vec::new(),
                     routes: PortalRoutes::default(),
                     tuning: None,
@@ -1290,6 +1301,7 @@ struct PyScene {
     render_generation: Arc<()>,
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
+    render_audio_dither_seed: Option<u64>,
     render_image_inputs: Vec<portal_raster::PortalImageInput>,
     image_checkpoints: RefCell<portal_raster::ImageCheckpoints>,
     render_ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
@@ -1935,6 +1947,7 @@ pub(crate) fn install_pristine_arena(
         owner.render_generation = Arc::new(());
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
+        owner.render_audio_dither_seed = None;
         owner.render_image_inputs.clear();
         *owner.image_checkpoints.borrow_mut() = portal_raster::ImageCheckpoints::default();
         owner.render_ffmpeg_limits = None;
@@ -2445,6 +2458,7 @@ fn uniform_value<'py>(
             .into_pyobject(py)?
             .into_any()),
         "anti_alias_width" => Ok(uniforms.anti_alias_width.into_pyobject(py)?.into_any()),
+        "glow_factor" => Ok(uniforms.glow_factor.into_pyobject(py)?.into_any()),
         "joint_type" => Ok(uniforms.joint_type.to_code().into_pyobject(py)?.into_any()),
         "flat_stroke" => Ok(uniforms
             .flat_stroke
@@ -3036,9 +3050,22 @@ impl BridgeMobject {
         numpy_array(slf.py(), slf, writable)
     }
 
-    #[staticmethod]
-    fn _uniform_names() -> Vec<&'static str> {
-        UNIFORM_NAMES.to_vec()
+    fn _uniform_names(slf: &Bound<'_, Self>) -> PyResult<Vec<&'static str>> {
+        // The scalar glow is native material state only for a dot cloud.
+        // Other mobjects retain their open-ended Python extension map,
+        // including an authored key with this spelling. Read the primitive,
+        // not the Python class: become() may replace a different receiver's
+        // material without changing its class or proxy identity.
+        let dot_cloud = with_stage(slf, |stage, mob| {
+            stage
+                .get(mob)
+                .is_some_and(|entry| entry.render_primitive() == RenderPrimitive::DotCloud)
+        })?;
+        let mut names = UNIFORM_NAMES.to_vec();
+        if dot_cloud {
+            names.push("glow_factor");
+        }
+        Ok(names)
     }
 
     fn _get_uniform<'py>(slf: &Bound<'py, Self>, name: &str) -> PyResult<Bound<'py, PyAny>> {
@@ -3048,6 +3075,21 @@ impl BridgeMobject {
 
     fn _set_uniform(slf: &Bound<'_, Self>, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         crossing::record(CrossingClass::FieldWrite);
+        if name == "glow_factor" {
+            // __float__ may reenter the scene. Convert and validate before
+            // borrowing its arena; refusing must leave the live material
+            // unchanged and preserve the original Python exception.
+            let glow = value.extract::<f64>()?;
+            if !glow.is_finite() || glow < 0.0 {
+                return Err(PyValueError::new_err(
+                    "glow_factor must be finite and non-negative",
+                ));
+            }
+            return with_uniforms(slf, |uniforms| {
+                uniforms.glow_factor = glow;
+                Ok(())
+            });
+        }
         with_uniforms(slf, |uniforms| set_uniform(uniforms, name, value))
     }
 
@@ -5726,7 +5768,7 @@ impl BridgeMobject {
 
     /// `DotCloud(points, color, opacity, radius, glow_factor,
     /// anti_alias_width)` over the pointcloud shelf — the DotCloud record
-    /// schema (`point`/`radius`/`rgba`/`glow_factor`), not a VMobject.
+    /// schema (`point`/`radius`/`rgba`) and scalar glow uniform, not a VMobject.
     #[allow(clippy::too_many_arguments)]
     fn _build_dot_cloud<'py>(
         slf: &Bound<'py, Self>,
@@ -6264,9 +6306,9 @@ impl BridgeMobject {
     /// `ParametricSurface(uv_func, ...)`: the native sampler over a
     /// Python callable. The callable runs during construction only (no
     /// engine borrow is held); its first error aborts the build.
-    // The argument count mirrors the Reference ParametricSurface constructor
-    // surface one-to-one; collapsing it would change the Python-visible API.
+    // Sampling controls remain individually visible to the authored adapters.
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (factory, uv_func, u_range, v_range, resolution, epsilon, normal_nudge, allow_undefined=false))]
     fn _build_parametric_surface<'py>(
         slf: &Bound<'py, Self>,
         factory: &Bound<'py, PyAny>,
@@ -6276,6 +6318,7 @@ impl BridgeMobject {
         resolution: (usize, usize),
         epsilon: f64,
         normal_nudge: f64,
+        allow_undefined: bool,
     ) -> PyResult<Bound<'py, PyList>> {
         if slf.borrow().engine.is_some() {
             return Err(PyRuntimeError::new_err(
@@ -6293,12 +6336,16 @@ impl BridgeMobject {
         // No engine borrow spans user code. The fallible native loop returns
         // immediately, without sentinel probes or constructing a doomed grid.
         // Fixed-array extraction also prevents an unbounded result Vec allocation.
-        let surface = spec
-            .try_sample(|u, v| uv_func.call1((u, v))?.extract::<[f64; 3]>())
-            .map_err(|error| match error {
-                fmn_library::solids::SurfaceSampleError::Callback(error) => error,
-                other => PyValueError::new_err(other.to_string()),
-            })?;
+        let sample = |u, v| uv_func.call1((u, v))?.extract::<[f64; 3]>();
+        let surface = if allow_undefined {
+            spec.try_sample_with_holes(sample)
+        } else {
+            spec.try_sample(sample)
+        }
+        .map_err(|error| match error {
+            fmn_library::solids::SurfaceSampleError::Callback(error) => error,
+            other => PyValueError::new_err(other.to_string()),
+        })?;
         install_native_tree(slf, factory, surface)
     }
 
@@ -6795,6 +6842,29 @@ impl BridgeMobject {
             ));
         }
         let normals = normals.extract::<Vec<[f64; 3]>>()?;
+        // Accessors may execute authored code, so acquire the native snapshot
+        // only after both calls. Presence comes from its validated record lane,
+        // never from inert coordinates or an overridable Python mask accessor.
+        let validity = with_stage(source.cast::<BridgeMobject>()?, |stage, mob| {
+            let entry = stage
+                .get(mob)
+                .ok_or_else(|| StaleHandleError::new_err("SurfaceMesh source is stale"))?;
+            let topology_matches = match entry.render_primitive() {
+                fmn_mobject::RenderPrimitive::SurfaceGrid { resolution } => {
+                    resolution == source_resolution
+                }
+                // Empty constructors remain native containers; they yield no
+                // wires rather than acquiring a drawable triangle topology.
+                fmn_mobject::RenderPrimitive::Vector => count == 0,
+                _ => false,
+            };
+            if !topology_matches || entry.buffer.len() != count {
+                return Err(PyValueError::new_err(
+                    "SurfaceMesh source changed its native UV topology during sampling",
+                ));
+            }
+            fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)
+        })??;
         let mut mesh = fmn_library::SurfaceMesh::from_samples(points, normals, source_resolution)
             .map_err(|error| PyValueError::new_err(error.to_string()))?
             .resolution(resolution.0, resolution.1)
@@ -6802,6 +6872,11 @@ impl BridgeMobject {
             .stroke_width(stroke_width)
             .depth_test(depth_test)
             .joint_type(fmn_mobject::JointType::from_code(joint_code));
+        if let Some(validity) = validity {
+            mesh = mesh
+                .with_sample_validity(validity.into_iter().map(|value| value == 1.0).collect())
+                .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        }
         if let Some(color) = stroke_color {
             mesh = mesh.stroke_color(srgb_from_py(color)?);
         }
@@ -8861,6 +8936,7 @@ impl PyScene {
             render_generation: Arc::new(()),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
+            render_audio_dither_seed: None,
             render_image_inputs: Vec::new(),
             image_checkpoints: RefCell::new(portal_raster::ImageCheckpoints::default()),
             render_ffmpeg_limits: None,
@@ -9087,6 +9163,7 @@ impl PyScene {
             let mut scene = slf.borrow_mut();
             scene.render_invocations = report.invocations;
             scene.render_audio_inputs = report.audio_inputs;
+            scene.render_audio_dither_seed = report.audio_dither_seed;
             scene.render_image_inputs = report.image_inputs;
             scene.render_routes = report.routes;
             scene.render_tuning = report.tuning;
@@ -9178,6 +9255,12 @@ impl PyScene {
     #[getter]
     fn _render_audio_inputs(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
         portal_audio::input_facts(slf)
+    }
+
+    /// Frozen TPDF seed applied to the last native WAV publication, if any.
+    #[getter]
+    fn _render_audio_dither_seed(&self) -> Option<u64> {
+        self.render_audio_dither_seed
     }
 
     #[getter]
@@ -13686,6 +13769,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     )?;
     portal_typography::install(module)?;
     portal_network::install(module)?;
+    portal_bar_chart::install(module)?;
     portal_texture::install(module)?;
     execute_bootstrap(py, module)?;
     portal_recording::install(module)?;
@@ -14047,6 +14131,10 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
     })
 }
 
+/// Native Python soundtrack acceptance, available only to the Gauntlet.
+#[cfg(feature = "gauntlet")]
+pub use portal_studio::bundle::run_portal_gauntlet_bundle_audio;
+
 /// Production captured-preview seam, available only to the Gauntlet.
 #[cfg(feature = "gauntlet")]
 pub use portal_studio::{
@@ -14190,6 +14278,76 @@ pub fn run_portal_gauntlet_video_options() -> Result<(), String> {
     })
 }
 
+/// Exercise standalone SceneFileWriter inserts through the production native
+/// recording owner, checking decoded motion, ownership and no-clobber failure.
+/// Returns the number of completed acceptance cases; no ffmpeg is required.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_insert_recording() -> Result<u64, String> {
+    with_python_test_module("insert recording Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_insert_only", true)
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(include_str!("../tests/live_recording.py"))
+            .expect("insert recording suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_fmn_insert_checks")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "insert recording suite emitted no case count".to_owned())?
+            .extract::<u64>()
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Exercise authored StreamLines color maps through native flow geometry,
+/// live redraw, failure recovery and independent rendered color oracles.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_streamline_colors() -> Result<u64, String> {
+    with_python_test_module("streamline colors Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_streamline_colors_only", true)
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(include_str!("../tests/streamline_authoring.py"))
+            .expect("streamline color suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_fmn_streamline_color_checks")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "streamline color suite emitted no case count".to_owned())?
+            .extract::<u64>()
+            .map_err(|error| error.to_string())
+    })
+}
+
+/// Verify that copied time-varying fields evaluate their own clocks, using
+/// independent native vector-field geometry and actual captured pixels.
+#[cfg(feature = "gauntlet")]
+pub fn run_portal_gauntlet_time_varying_copies() -> Result<u64, String> {
+    with_python_test_module(
+        "time-varying field copies Gauntlet",
+        |py, _module, globals| {
+            globals
+                .set_item("_fmn_time_fields_only", true)
+                .map_err(|error| error.to_string())?;
+            let source = CString::new(include_str!("../tests/live_vector_fields.py"))
+                .expect("time-varying field suite contains no NUL");
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .map_err(|error| error.to_string())?;
+            globals
+                .get_item("_fmn_time_field_checks")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "time-varying field suite emitted no case count".to_owned())?
+                .extract::<u64>()
+                .map_err(|error| error.to_string())
+        },
+    )
+}
+
 /// What [`run_portal_gauntlet_planar_route`] observed (fm-sq8.11).
 #[cfg(feature = "gauntlet")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14212,6 +14370,140 @@ pub struct PortalPlanarRouteGauntletReport {
     pub converted_frames: u64,
     /// Planar frames copied from an identical preceding conversion.
     pub conversion_reuses: u64,
+}
+
+/// File, worker and readback agreement at one canonical output aspect.
+#[cfg(any(test, feature = "gauntlet"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalPlanarAspectReading {
+    /// The actual full-size file and readback output dimensions.
+    pub resolution: (u32, u32),
+    /// Completed frames in each serial and pure-worker sequence.
+    pub frame_count: u64,
+    /// `(planar frames, camera frames, first camera reason)` on the owner.
+    pub serial_routes: (u64, u64, Option<String>),
+    /// The same counters when the play uses native frame workers.
+    pub parallel_routes: (u64, u64, Option<String>),
+    /// Render teams actually used, rather than merely planned.
+    pub parallel_teams_used: u64,
+    /// Final-pose and moved/zoomed/rotated readbacks match decoded file pixels.
+    pub readback_matches_file: bool,
+    /// Every published serial frame matches its pure-worker counterpart.
+    pub serial_matches_parallel: bool,
+    /// `(mutation, planar frames, camera frames, first reason)` for stills
+    /// with each output dimension halved, preserving the exact aspect.
+    pub camera_mutation_routes: Vec<(String, u64, u64, Option<String>)>,
+}
+
+/// Exercise the real portal's retained route at 854×480 and 480×854, including
+/// pure plays, file/readback pixel agreement and live camera fallback.
+///
+/// # Errors
+/// A render, publication, PNG decode, admission or observer assertion failed.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_planar_aspects(
+    directory: &std::path::Path,
+) -> Result<Vec<PortalPlanarAspectReading>, String> {
+    let decode = |path: &std::path::Path, resolution: (u32, u32)| {
+        let bytes = std::fs::read(path)
+            .map_err(|error| format!("read aspect witness {}: {error}", path.display()))?;
+        let image = fmn_codec::png::decode(&bytes, &fmn_codec::png::PngLimits::default())
+            .map_err(|error| format!("decode aspect witness {}: {error}", path.display()))?;
+        if (image.width, image.height) != resolution {
+            return Err(format!(
+                "aspect witness {} has dimensions {:?}, expected {resolution:?}",
+                path.display(),
+                (image.width, image.height),
+            ));
+        }
+        Ok(image.rgba)
+    };
+    with_python_test_module("planar output aspects", |py, _module, globals| {
+        let source = CString::new(include_str!("../tests/planar_aspects.py"))
+            .expect("planar aspect suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let readings = globals
+            .get_item("run_planar_aspect_acceptance")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "planar aspect acceptance entry point is missing".to_owned())?
+            .call1((directory.to_string_lossy().as_ref(),))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        let mut output = Vec::new();
+        for reading in readings.try_iter().map_err(|error| error.to_string())? {
+            let reading = reading.map_err(|error| error.to_string())?;
+            let get = |name: &str| {
+                reading
+                    .get_item(name)
+                    .map_err(|error| format!("planar aspect report {name}: {error}"))
+            };
+            let resolution: (u32, u32) = get("resolution")?
+                .extract::<(u32, u32)>()
+                .map_err(|error| error.to_string())?;
+            let frame_count: u64 = get("frame_count")?
+                .extract::<u64>()
+                .map_err(|error| error.to_string())?;
+            let root = directory.join(format!("{}x{}", resolution.0, resolution.1));
+            let mut serial_matches_parallel = true;
+            let mut first_pixels = Vec::new();
+            let mut last_pixels = Vec::new();
+            for frame in 0..frame_count {
+                let name = format!("frame_{frame:06}.png");
+                let serial = decode(&root.join("serial").join(&name), resolution)?;
+                let parallel = decode(&root.join("parallel").join(&name), resolution)?;
+                serial_matches_parallel &= serial == parallel;
+                if frame == 0 {
+                    first_pixels.clone_from(&parallel);
+                }
+                last_pixels = parallel;
+            }
+            if first_pixels.is_empty() || first_pixels == last_pixels {
+                return Err(format!(
+                    "planar aspect {resolution:?} did not publish changing animation pixels"
+                ));
+            }
+            let readback: Vec<u8> = get("readback")?
+                .extract::<Vec<u8>>()
+                .map_err(|error| error.to_string())?;
+            let mut readback_matches_file = readback == last_pixels;
+            let camera_mutation_routes: Vec<(String, u64, u64, Option<String>)> =
+                get("camera_mutation_routes")?
+                    .extract::<Vec<(String, u64, u64, Option<String>)>>()
+                    .map_err(|error| error.to_string())?;
+            let mutation_readbacks: Vec<Vec<u8>> = get("camera_mutation_readbacks")?
+                .extract::<Vec<Vec<u8>>>()
+                .map_err(|error| error.to_string())?;
+            if camera_mutation_routes.len() != mutation_readbacks.len() {
+                return Err("planar aspect mutation report omitted a readback".to_owned());
+            }
+            for ((name, ..), pixels) in camera_mutation_routes.iter().zip(mutation_readbacks) {
+                let file = decode(
+                    &root.join(name).join("frame_000000.png"),
+                    (resolution.0 / 2, resolution.1 / 2),
+                )?;
+                readback_matches_file &= pixels == file;
+            }
+            output.push(PortalPlanarAspectReading {
+                resolution,
+                frame_count,
+                serial_routes: get("serial_routes")?
+                    .extract::<(u64, u64, Option<String>)>()
+                    .map_err(|error| error.to_string())?,
+                parallel_routes: get("parallel_routes")?
+                    .extract::<(u64, u64, Option<String>)>()
+                    .map_err(|error| error.to_string())?,
+                parallel_teams_used: get("parallel_teams_used")?
+                    .extract::<u64>()
+                    .map_err(|error| error.to_string())?,
+                readback_matches_file,
+                serial_matches_parallel,
+                camera_mutation_routes,
+            });
+        }
+        Ok(output)
+    })
 }
 
 /// One semantic-oracle reading from the portal suite (fm-5wq.46).
@@ -15183,6 +15475,50 @@ mod tests {
                 .inspect_err(|error| error.print(py))
                 .expect("decoded native GIF/y4m/WAV acceptance suite");
         });
+    }
+
+    #[test]
+    fn nonstandard_output_aspects_keep_planar_file_readback_and_worker_agreement() {
+        let directory = std::env::temp_dir().join(format!(
+            "fmn-planar-aspects-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the test host clock is after the Unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).expect("create a fresh planar aspect test directory");
+        let readings = run_portal_gauntlet_planar_aspects(&directory)
+            .expect("native planar aspect acceptance");
+        assert_eq!(
+            readings
+                .iter()
+                .map(|row| row.resolution)
+                .collect::<Vec<_>>(),
+            [(854, 480), (480, 854)]
+        );
+        for row in readings {
+            assert_eq!(row.frame_count, 6);
+            assert_eq!(row.serial_routes, (row.frame_count, 0, None));
+            assert_eq!(row.parallel_routes, row.serial_routes);
+            assert!(row.parallel_teams_used > 0);
+            assert!(row.serial_matches_parallel, "{:?}", row.resolution);
+            assert!(row.readback_matches_file, "{:?}", row.resolution);
+            assert_eq!(
+                row.camera_mutation_routes
+                    .iter()
+                    .map(|(name, ..)| name.as_str())
+                    .collect::<Vec<_>>(),
+                ["move", "zoom", "rotate"]
+            );
+            for (_, planar, camera, reason) in row.camera_mutation_routes {
+                assert_eq!((planar, camera), (0, 1));
+                assert_eq!(
+                    reason.as_deref(),
+                    Some("camera frame differs from the default frame")
+                );
+            }
+        }
     }
 
     #[test]

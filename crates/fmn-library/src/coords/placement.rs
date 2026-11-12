@@ -300,11 +300,15 @@ mod tests {
             .get_riemann_rectangles(&f, Some([-1.0, 2.0]), Some(0.4), "center")
             .unwrap();
         family_near(&bins, &old_bins.shifted(shift));
-        let area = after.get_area_under_graph(&graph, [-2.0, 4.0], Some([-1.0, 2.0]));
-        let old_area = before.get_area_under_graph(&old_graph, [-2.0, 4.0], Some([-1.0, 2.0]));
+        let area = after
+            .get_area_under_graph(&graph, Some([-1.0, 2.0]))
+            .unwrap();
+        let old_area = before
+            .get_area_under_graph(&old_graph, Some([-1.0, 2.0]))
+            .unwrap();
         family_near(&area, &old_area.shifted(shift));
         near(
-            after.get_tangent_line(1.0, &f, 2.0).center_point(),
+            after.get_tangent_line(1.0, &f, 2.0).unwrap().center_point(),
             after.i2gp(1.0, &f),
         );
     }

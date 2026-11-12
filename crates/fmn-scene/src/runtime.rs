@@ -24,9 +24,10 @@ use std::path::{Path, PathBuf};
 
 mod idle;
 mod parallel;
+pub use fmn_anim::OpenWaitCheckpoint;
 pub use idle::IdleFrame;
 
-use fmn_anim::pure_frame::PureSegment;
+use fmn_anim::pure_frame::{PureSegment, PureWaitAdvance};
 use fmn_anim::{
     AnimError, Animation, AnimationBoundary, BeginState, Duration, FrameMetadata, FramePacket,
     ImpureEffect, OpenSegment, OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime,
@@ -34,7 +35,7 @@ use fmn_anim::{
     complete_play_frame_with_capture, complete_wait_frame_with_capture, finish_open_play,
     finish_open_play_animations, finish_open_wait, open_play_with_mode, open_wait,
     open_wait_after_updaters, prepare_play_animation, prepare_play_frame, prepare_wait_frame,
-    validate_play, wait_segment_with_capture,
+    resume_open_wait, validate_play, wait_segment_with_capture,
 };
 use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
@@ -352,6 +353,16 @@ impl From<CameraError> for SceneError {
 impl From<PersistError> for SceneError {
     fn from(error: PersistError) -> Self {
         Self::Persist(error)
+    }
+}
+
+impl From<fmn_anim::continuation::Error> for SceneError {
+    fn from(error: fmn_anim::continuation::Error) -> Self {
+        match error {
+            fmn_anim::continuation::Error::Serial(error) => Self::Serialize(error),
+            fmn_anim::continuation::Error::Animation(error) => Self::Animation(error),
+            fmn_anim::continuation::Error::Invalid(reason) => Self::InvalidState(reason),
+        }
     }
 }
 
@@ -715,6 +726,7 @@ pub struct Scene {
     skipping: bool,
     original_skipping: bool,
     preflight_done: bool,
+    custom_preflight: bool,
     preflight: Box<dyn PreflightHook>,
     hold_controller: Box<dyn HoldController>,
     unbound_updaters: Option<UpdaterManifest>,
@@ -746,7 +758,7 @@ pub struct SteppedPlay {
 /// [`SteppedPlay`].
 pub struct SteppedWait {
     open: OpenWait,
-    pure_seek: Option<PureSegment>,
+    pure_seek: Option<PureWaitAdvance>,
     sink_error: Option<IntegrationError>,
 }
 
@@ -867,6 +879,7 @@ impl Scene {
             skipping,
             original_skipping,
             preflight_done: false,
+            custom_preflight: false,
             preflight: Box::new(NoPreflight),
             hold_controller: Box::new(ImmediateRelease),
             unbound_updaters: None,
@@ -941,6 +954,16 @@ impl Scene {
         &mut self.stage
     }
 
+    /// Original root seed used for named, frame-indexed RNG forks.
+    ///
+    /// Durable SceneState restores the serial stream separately. Checkpoint
+    /// owners must also bind this root identity so an equal serial stream
+    /// cannot silently select different randomness for later frame work.
+    #[must_use]
+    pub const fn rng_seed(&self) -> u64 {
+        self.rng_root.seed()
+    }
+
     /// The scene-serial named RNG substream. Frame work must use
     /// [`FramePacket::rng_fork`] instead.
     pub fn rng_mut(&mut self) -> &mut Pcg64Dxsm {
@@ -977,6 +1000,32 @@ impl Scene {
         !self.event_inbox.is_exclusive_empty()
             || !self.queued_events.is_empty()
             || self.event_error.is_some()
+    }
+
+    /// Whether scene-owned transient state permits a native wait continuation,
+    /// without losing input, presenter or sound history.
+    ///
+    /// Dormant listeners may be recreated by the deterministic factory. Their
+    /// callbacks have not run when no input sequence has ever been reserved.
+    /// This does not grant updater replay permission: the continuation owner
+    /// must separately admit its schedule and rebind every updater by identity.
+    /// That owner also binds the RNG root and preserves Stage configuration
+    /// such as its alignment frame, which durable SceneState omits.
+    #[must_use]
+    pub fn can_resume_wait_checkpoint(&self) -> bool {
+        !self.config.skip_animations
+            && self.config.start_at_play.is_none()
+            && self.config.end_at_play.is_none()
+            && !self.config.presenter_mode
+            && !self.original_skipping
+            && !self.skipping
+            && !self.custom_preflight
+            && self.unbound_updaters.is_none()
+            && self.stage.updater_error().is_none()
+            && !self.has_external_event_ingress()
+            && self.recorded_events.is_empty()
+            && self.next_event_sequence == Some(0)
+            && self.sound_requests.is_empty()
     }
 
     /// Queue one already-available live event for the next serial boundary.
@@ -1099,6 +1148,7 @@ impl Scene {
             ));
         }
         self.preflight = Box::new(hook);
+        self.custom_preflight = true;
         Ok(())
     }
 
@@ -1305,6 +1355,97 @@ impl Scene {
             pure_seek,
             sink_error: None,
         }))
+    }
+
+    /// Capture prepared native interpolation and its pending finish/cleanup.
+    /// The enclosing checkpoint also stores SceneState; no lifecycle work or
+    /// frame sampling runs here. Unsupported carriers/rates and current effects
+    /// return None so an owning front end can use its ordinary replay fallback.
+    ///
+    /// # Errors
+    /// An unfinished frame, invalid native state, failed scene, or byte budget.
+    pub fn checkpoint_stepped_play(
+        &self,
+        play: &SteppedPlay,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if !self.allows_unobserved_advance()
+            || play.sink_error.is_some()
+            || self.event_error.is_some()
+            || !self.stepped_play_purity(play).is_pure()
+        {
+            return Ok(None);
+        }
+        fmn_anim::continuation::capture(
+            &self.stage,
+            &self.clock,
+            &play.animations,
+            &play.open,
+            max_bytes,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Resume a closed play after its matching SceneState has been restored.
+    /// Exact clocks, prepared families, native kinds and generation references
+    /// are validated before this Scene changes. Begin, preparation, zero-dt
+    /// updates and already completed samples are never repeated. The ordinary
+    /// finish operation still consumes the pending epilogue exactly once.
+    ///
+    /// # Errors
+    /// Failed/unbound state, open external effects, or an invalid continuation.
+    pub fn resume_stepped_play(&mut self, bytes: &[u8]) -> Result<SteppedPlay, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if !self.allows_unobserved_advance()
+            || self.event_error.is_some()
+            || self.play_count == u64::MAX
+        {
+            return Err(SceneError::InvalidLifecycle(
+                "cannot resume a native play with failed or externally owned effects",
+            ));
+        }
+        let (animations, open) = fmn_anim::continuation::restore(&self.stage, &self.clock, bytes)?;
+        self.frame_duration_requested |= animations
+            .iter()
+            .any(|animation| animation.state().config.run_time_frames.is_some());
+        self.preflight_done = true;
+        Ok(SteppedPlay {
+            animations,
+            open,
+            // A later restored state is not the historical begin snapshot.
+            // Ordinary exact stepping remains available without inventing one.
+            pure_seek: None,
+            sink_error: None,
+        })
+    }
+
+    /// Read a supported factory play's complete native declaration as data.
+    /// Timing overrides are applied to known native clones; no rate callback,
+    /// begin hook, target preparation or stage mutation is executed.
+    ///
+    /// # Errors
+    /// Invalid declared handles or bounded encoding failure.
+    pub fn play_declaration_bytes(
+        &self,
+        animations: &[Box<dyn Animation>],
+        overrides: &PlayOverrides,
+        max_bytes: usize,
+    ) -> Result<Option<Vec<u8>>, SceneError> {
+        fmn_anim::continuation::declaration_bytes(
+            &self.stage,
+            animations,
+            fmn_anim::continuation::DeclarationOverrides {
+                run_time: overrides.run_time,
+                run_time_frames: overrides.run_time_frames,
+                rate_func: overrides.rate_func.as_ref(),
+                lag_ratio: overrides.lag_ratio,
+            },
+            max_bytes,
+        )
+        .map_err(Into::into)
     }
 
     /// Advance at most `max_frames` within a seekable pure play, returning the
@@ -1716,7 +1857,7 @@ impl Scene {
             )?
         };
         let pure_seek = (allow_seek && self.allows_unobserved_advance())
-            .then(|| PureSegment::freeze_wait(&self.stage, &self.clock, &self.rng_root, &open).ok())
+            .then(|| PureWaitAdvance::admit(&self.stage, &self.clock, &self.rng_root, &open).ok())
             .flatten();
         Ok(SteppedWait {
             open,
@@ -1744,7 +1885,7 @@ impl Scene {
             return Ok(None);
         };
         program
-            .try_advance_wait_on_owner(
+            .try_advance(
                 &mut self.stage,
                 &mut self.clock,
                 &self.rng_root,
@@ -1752,6 +1893,66 @@ impl Scene {
                 max_frames,
             )
             .map_err(Into::into)
+    }
+
+    /// Capture an opened wait's cursor at a completed frame boundary.
+    /// SceneState bytes and executable updater registration remain separate.
+    ///
+    /// # Errors
+    /// Unbound/failed updaters, a failed capture, an unfinished frame, or a
+    /// cursor which no longer matches this Scene's clock.
+    pub fn checkpoint_stepped_wait(
+        &self,
+        wait: &SteppedWait,
+    ) -> Result<OpenWaitCheckpoint, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if wait.sink_error.is_some() || self.event_error.is_some() {
+            return Err(SceneError::InvalidLifecycle(
+                "cannot checkpoint a wait after a failed capture",
+            ));
+        }
+        let checkpoint = wait.open.checkpoint()?;
+        checkpoint.validate_clock(&self.clock)?;
+        Ok(checkpoint)
+    }
+
+    /// Resume a wait after restoring its SceneState and rebinding its updaters.
+    ///
+    /// This runs no preflight, pre-play, zero-dt updater or capture. The saved
+    /// clock and completed play count remain unchanged; the next frame uses
+    /// the original segment alpha and global frame-indexed RNG. Finishing the
+    /// returned handle performs the original pending epilogue exactly once.
+    /// A static continuation may also use [`Self::try_advance_pure_wait`] after
+    /// the ordinary observer/purity checks; no historical begin is fabricated.
+    ///
+    /// # Errors
+    /// Unbound/failed updaters, failed event state, exhausted play count or an
+    /// invalid cursor/clock pair. Refusal leaves the Scene unchanged.
+    pub fn resume_stepped_wait(
+        &mut self,
+        checkpoint: OpenWaitCheckpoint,
+    ) -> Result<SteppedWait, SceneError> {
+        self.ensure_ready()?;
+        self.ensure_updaters_ready()?;
+        if self.event_error.is_some() || self.play_count == u64::MAX {
+            return Err(SceneError::InvalidLifecycle(
+                "cannot resume a wait with failed events or an exhausted play count",
+            ));
+        }
+        let open = resume_open_wait(&self.stage, &self.clock, checkpoint)?;
+        let pure_seek = self
+            .allows_unobserved_advance()
+            .then(|| PureWaitAdvance::admit(&self.stage, &self.clock, &self.rng_root, &open).ok())
+            .flatten();
+        // An open wait has already passed preflight. Restoring its continuation
+        // must not make the next segment run that old phase a second time.
+        self.preflight_done = true;
+        Ok(SteppedWait {
+            open,
+            pure_seek,
+            sink_error: None,
+        })
     }
 
     /// Advance a stepped wait's rational clock, yielding before scene

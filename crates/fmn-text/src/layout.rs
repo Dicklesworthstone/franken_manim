@@ -225,9 +225,9 @@ pub fn layout_text_with_style(
     base: &crate::markup::CharStyle,
 ) -> Result<TextLayout, TextError> {
     let mut chars = if req.markup {
-        crate::markup::parse_markup_with_style(req.text, base)?
+        crate::markup::parse_markup_with_scoped_styles(req.text, base, req.maps.scoped_styles)?
     } else {
-        crate::markup::plain_chars_with_style(req.text, base)
+        crate::markup::plain_chars_with_scoped_styles(req.text, base, req.maps.scoped_styles)?
     };
     crate::maps::apply_maps(&mut chars, req.text, &req.maps);
     crate::maps::apply_overrides(&mut chars, req.overrides);
@@ -429,8 +429,14 @@ fn least_badness_breaks(
     breaks
 }
 
-/// A pending underline/strike run: (strike?, start x, span, fill).
-type DecoRun = (bool, f64, (usize, usize), Option<Srgb>);
+/// One pending decoration run with its resolved paint and font metrics.
+struct DecoRun {
+    x: f64,
+    baseline: f64,
+    size: f64,
+    span: (usize, usize),
+    fill: Option<Srgb>,
+}
 
 /// Decoration metrics, ems.
 const UNDERLINE_Y: f64 = -0.12;
@@ -472,12 +478,14 @@ fn place(
             x += req.indent;
         }
         let glyph_start = layout.glyphs.len();
-        let mut deco_run: Option<DecoRun> = None;
+        let mut underline: Option<DecoRun> = None;
+        let mut strike: Option<DecoRun> = None;
         for item in &items[spec.items.0..spec.items.1] {
             match item {
                 ShapedItem::Newline { .. } => {}
                 ShapedItem::Space { width, .. } => {
-                    flush_deco(&mut layout, &mut deco_run, x, baseline);
+                    flush_deco(&mut layout, &mut underline, x, false);
+                    flush_deco(&mut layout, &mut strike, x, true);
                     x += width + space_stretch;
                 }
                 ShapedItem::Glyph(g) => {
@@ -501,25 +509,15 @@ fn place(
                     let m = glyph_metrics(face, g.gid);
                     layout.height = layout.height.max(y + m.height * g.size);
                     layout.depth = layout.depth.max(-(y - m.depth * g.size));
-                    if g.underline || g.strike {
-                        match &mut deco_run {
-                            Some((strike, _, span, _)) if *strike == g.strike => {
-                                span.1 = g.span.1;
-                            }
-                            _ => {
-                                flush_deco(&mut layout, &mut deco_run, x, baseline);
-                                deco_run = Some((g.strike, x, g.span, g.fill));
-                            }
-                        }
-                    } else {
-                        flush_deco(&mut layout, &mut deco_run, x, baseline);
-                    }
+                    append_deco(&mut layout, &mut underline, g, x, y, false);
+                    append_deco(&mut layout, &mut strike, g, x, y, true);
                     x += g.advance;
                     layout.width = layout.width.max(x);
                 }
             }
         }
-        flush_deco(&mut layout, &mut deco_run, x, baseline);
+        flush_deco(&mut layout, &mut underline, x, false);
+        flush_deco(&mut layout, &mut strike, x, true);
         layout.lines.push(Line {
             baseline,
             width: x,
@@ -530,16 +528,50 @@ fn place(
     Ok(layout)
 }
 
-fn flush_deco(layout: &mut TextLayout, run: &mut Option<DecoRun>, x_end: f64, baseline: f64) {
-    if let Some((strike, x0, span, fill)) = run.take() {
-        let y = baseline + if strike { STRIKE_Y } else { UNDERLINE_Y };
+fn append_deco(
+    layout: &mut TextLayout,
+    run: &mut Option<DecoRun>,
+    glyph: &crate::shape::ShapedGlyph,
+    x: f64,
+    baseline: f64,
+    strike: bool,
+) {
+    if !(if strike {
+        glyph.strike
+    } else {
+        glyph.underline
+    }) {
+        flush_deco(layout, run, x, strike);
+        return;
+    }
+    if let Some(active) = run
+        && active.fill == glyph.fill
+        && active.size.to_bits() == glyph.size.to_bits()
+        && active.baseline.to_bits() == baseline.to_bits()
+    {
+        active.span.1 = glyph.span.1;
+        return;
+    }
+    flush_deco(layout, run, x, strike);
+    *run = Some(DecoRun {
+        x,
+        baseline,
+        size: glyph.size,
+        span: glyph.span,
+        fill: glyph.fill,
+    });
+}
+
+fn flush_deco(layout: &mut TextLayout, run: &mut Option<DecoRun>, x_end: f64, strike: bool) {
+    if let Some(run) = run.take() {
+        let offset = if strike { STRIKE_Y } else { UNDERLINE_Y };
         layout.decorations.push(Decoration {
-            x: x0,
-            y,
-            width: (x_end - x0).max(0.0),
-            height: DECO_THICKNESS,
-            span,
-            fill,
+            x: run.x,
+            y: run.baseline + offset * run.size,
+            width: (x_end - run.x).max(0.0),
+            height: DECO_THICKNESS * run.size,
+            span: run.span,
+            fill: run.fill,
         });
     }
 }

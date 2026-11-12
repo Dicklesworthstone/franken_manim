@@ -36,6 +36,7 @@ fn grid(entry: &fmn_mobject::Entry) -> PyResult<Option<(usize, usize)>> {
             ));
         }
     }
+    fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)?;
     Ok(Some(resolution))
 }
 
@@ -50,10 +51,86 @@ fn _surface_grid_resolution(target: &Bound<'_, BridgeMobject>) -> PyResult<Optio
     })?
 }
 
+/// Presence is owned by the native records, including intermediate morph
+/// values. Python must not infer it from the finite inert geometry in holes.
+#[pyfunction]
+fn _surface_sample_validity(target: &Bound<'_, BridgeMobject>) -> PyResult<Vec<bool>> {
+    with_stage(target, |stage, mob| -> PyResult<Vec<bool>> {
+        let entry = stage
+            .get(mob)
+            .ok_or_else(|| StaleHandleError::new_err("surface is stale"))?;
+        let count = entry.buffer.len();
+        let limit = fmn_library::SURFACE_SAMPLING_BUDGET.max_samples();
+        match entry.render_primitive() {
+            RenderPrimitive::SurfaceGrid {
+                resolution: (nu, nv),
+            } if nu <= limit && nv <= limit && nu.checked_mul(nv) == Some(count) => {}
+            // Empty Surface and SGroup roots deliberately have no drawable
+            // topology; constructor-admitted strips still use SurfaceGrid.
+            RenderPrimitive::Vector if count == 0 => {}
+            _ => {
+                return Err(PyTypeError::new_err(
+                    "sample validity requires native UV surface topology",
+                ));
+            }
+        }
+        if count > limit {
+            return Err(PyValueError::new_err(
+                "surface exceeds the native sample budget",
+            ));
+        }
+        let validity = fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)?;
+        Ok((0..count)
+            .map(|index| fmn_mobject::stage::surface_sample_is_present(validity.as_deref(), index))
+            .collect())
+    })?
+}
+
+/// Detached families publish through separate nursery roots. Preflight every
+/// pair using Marionette's schema rule before Python changes the first root.
+#[pyfunction]
+fn _become_schema_compatible(
+    left: &Bound<'_, BridgeMobject>,
+    right: &Bound<'_, BridgeMobject>,
+) -> PyResult<bool> {
+    let describe = |target| {
+        with_stage(target, |stage, mob| {
+            let entry = stage
+                .get(mob)
+                .ok_or_else(|| StaleHandleError::new_err("become endpoint is stale"))?;
+            Ok::<_, PyErr>((
+                entry.buffer.schema().clone(),
+                matches!(
+                    entry.render_primitive(),
+                    RenderPrimitive::SurfaceGrid { .. }
+                ),
+            ))
+        })?
+    };
+    let (left_schema, left_surface) = describe(left)?;
+    let (right_schema, right_surface) = describe(right)?;
+    let surface_pair = left_surface || right_surface;
+    if surface_pair {
+        for target in [left, right] {
+            with_stage(target, |stage, mob| {
+                let entry = stage
+                    .get(mob)
+                    .ok_or_else(|| StaleHandleError::new_err("become endpoint is stale"))?;
+                fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)?;
+                Ok::<_, PyErr>(())
+            })??;
+        }
+    }
+    Ok(left_schema == right_schema
+        || (surface_pair
+            && fmn_mobject::stage::compatible_surface_schemas(&left_schema, &right_schema)))
+}
+
 struct Geometry {
     resolution: (usize, usize),
     points: Vec<f32>,
     normal_points: Vec<f32>,
+    validity: Option<Vec<f32>>,
 }
 
 fn world_column(entry: &fmn_mobject::Entry, key: &str) -> PyResult<Vec<f32>> {
@@ -104,6 +181,7 @@ fn _copy_surface_geometry(
                 .ok_or_else(|| PyTypeError::new_err("source must be a native UV surface"))?,
             points: world_column(entry, "point")?,
             normal_points: world_column(entry, "d_normal_point")?,
+            validity: fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)?,
         })
     })??;
     with_stage(target, |stage, mob| -> PyResult<()> {
@@ -115,8 +193,29 @@ fn _copy_surface_geometry(
                 "live surface regeneration requires matching native UV topology",
             ));
         }
-        // This also preserves any additional schema-declared pointlike fields
-        // in world space. Neither bake nor the writes below invoke host code.
+        let has_validity = entry
+            .buffer
+            .schema()
+            .field_width(fmn_mobject::stage::SURFACE_VALIDITY_FIELD)
+            .is_some();
+        if geometry.validity.is_some() && !has_validity {
+            // Promoting the optional mask changes storage schema. Prepare the
+            // complete native update before publishing that new generation.
+            let update = fmn_mobject::stage::SurfaceGridUpdate::for_geometry_with_validity(
+                entry,
+                geometry.resolution,
+                &geometry.points,
+                &geometry.normal_points,
+                geometry.validity.as_deref(),
+            )
+            .map_err(native_error)?;
+            return stage
+                .apply_surface_grid_update(mob, update)
+                .map_err(native_error);
+        }
+        // Existing schemas keep the precise geometry writes and attached
+        // views of ordinary live regeneration. All source values and target
+        // fields have been validated; no host code runs during publication.
         stage.bake_placement(mob).map_err(stage_error)?;
         let entry = stage
             .get_mut(mob)
@@ -125,6 +224,14 @@ fn _copy_surface_geometry(
         entry
             .buffer
             .write_range("d_normal_point", 0, &geometry.normal_points);
+        if has_validity {
+            let validity = geometry
+                .validity
+                .unwrap_or_else(|| vec![1.0; entry.buffer.len()]);
+            entry
+                .buffer
+                .write_range(fmn_mobject::stage::SURFACE_VALIDITY_FIELD, 0, &validity);
+        }
         Ok(())
     })?
 }
@@ -146,17 +253,19 @@ fn _regrid_surface_geometry(
                 .ok_or_else(|| PyTypeError::new_err("source must be a native UV surface"))?,
             points: world_column(entry, "point")?,
             normal_points: world_column(entry, "d_normal_point")?,
+            validity: fmn_mobject::stage::surface_validity(&entry.buffer).map_err(native_error)?,
         })
     })??;
     with_stage(target, |stage, mob| -> PyResult<()> {
         let entry = stage
             .get(mob)
             .ok_or_else(|| StaleHandleError::new_err("target surface is stale"))?;
-        let update = fmn_mobject::stage::SurfaceGridUpdate::for_geometry(
+        let update = fmn_mobject::stage::SurfaceGridUpdate::for_geometry_with_validity(
             entry,
             geometry.resolution,
             &geometry.points,
             &geometry.normal_points,
+            geometry.validity.as_deref(),
         )
         .map_err(native_error)?;
         stage
@@ -207,15 +316,46 @@ fn _align_surface_grids(
 pub(super) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     initialization::install(module)?;
     module.add_function(wrap_pyfunction!(_surface_grid_resolution, module)?)?;
+    module.add_function(wrap_pyfunction!(_surface_sample_validity, module)?)?;
+    module.add_function(wrap_pyfunction!(_become_schema_compatible, module)?)?;
     module.add_function(wrap_pyfunction!(_copy_surface_geometry, module)?)?;
     module.add_function(wrap_pyfunction!(_regrid_surface_geometry, module)?)?;
     module.add_function(wrap_pyfunction!(_align_surface_grids, module)?)?;
     Ok(())
 }
 
+/// Explicit undefined samples through Python construction, live geometry,
+/// derived meshes/textures and native rendering.
+///
+/// # Errors
+/// Returns the actual authored or native acceptance failure.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_surface_holes() -> Result<u64, String> {
+    crate::with_python_test_module("explicit surface holes", |py, _module, globals| {
+        let code = std::ffi::CString::new(include_str!("../tests/surface_holes.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("run_surface_holes")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "surface holes entry point is absent".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<u64>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_surface_holes_and_native_rendering() {
+        assert_eq!(run_portal_gauntlet_surface_holes().unwrap(), 17);
+    }
 
     #[test]
     fn live_surface_regridding_and_native_output() {

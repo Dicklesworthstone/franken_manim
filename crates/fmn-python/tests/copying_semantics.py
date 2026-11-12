@@ -103,6 +103,19 @@ class NativeCopyingTests(unittest.TestCase):
         other.lookup[1] = outsider
         self.assertIs(root.lookup[1], root[0])
 
+    def test_stored_family_methods_edit_only_the_copied_members(self):
+        for bound in (False, True):
+            _, root = self.root(bound)
+            root.edit_first = root[0].set_control
+            root[0].edit_sibling = root[1].set_control
+            other = root.copy()
+            other.edit_first(2.)
+            other[0].edit_sibling(-3.)
+            self.assertIs(other.edit_first.__self__, other[0])
+            self.assertIs(other[0].edit_sibling.__self__, other[1])
+            self.assertEqual((other[0].controls[0], other[1].controls[0]), (2., -3.))
+            self.assertEqual((root[0].controls[0], root[1].controls[0]), (0., 0.))
+
     def test_structured_object_subarrays_use_the_same_family_map(self):
         _, root = self.root(False)
         root.lookup = np.zeros(2, dtype=[("points", "f8", 3), ("objects", "O", 2)])
@@ -336,7 +349,7 @@ class NativeCopyingTests(unittest.TestCase):
 
 
 suite = unittest.defaultTestLoader.loadTestsFromTestCase(NativeCopyingTests)
-assert suite.countTestCases() == 21
+assert suite.countTestCases() == 22
 result = unittest.TextTestRunner(verbosity=2).run(suite)
 if not result.wasSuccessful():
     raise AssertionError("native mobject array-copy acceptance failed")

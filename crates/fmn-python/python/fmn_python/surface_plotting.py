@@ -29,20 +29,29 @@ class _ChartRecipe:
         self.axes, self.function, self.c2p, self.coords_to_point = state
         self.np = np
 
-    def point(self, value, *, world=False):
+    def point(self, value, *, world=False, allow_undefined=False):
         np = self.np
         point = np.asarray(value)
         if point.shape != (3,) or point.dtype.kind not in "biuf":
             raise ValueError("surface plotting requires three real coordinates")
+        if point.dtype.kind == "f" and point.dtype.itemsize > 8:
+            # A finite extended-precision input must not narrow to inf and
+            # acquire the semantics of an authored undefined sample. World
+            # coordinates also retain their f32 bound before that rounding.
+            limit = np.finfo(np.float32 if world else np.float64).max
+            if np.any(np.isfinite(point) & (np.abs(point) > limit)):
+                raise ValueError("surface plotting coordinates exceed their finite representation")
         point = point.astype(float, copy=True)
-        if not np.isfinite(point).all() or (world and np.any(np.abs(point) > np.finfo(np.float32).max)):
+        finite = np.isfinite(point)
+        if ((not allow_undefined and not finite.all())
+                or (world and np.any(finite & (np.abs(point) > np.finfo(np.float32).max)))):
             raise ValueError("surface plotting requires finite, float32-representable world coordinates")
         return point
 
     def __call__(self, u, v):
         return self.point(self.axes.c2p(*self.point(self.function(u, v))), world=True)
 
-    def prepare(self):
+    def prepare(self, *, allow_undefined=False):
         """One immutable affine chart, or explicit authored mapping dispatch."""
         np, axes = self.np, self.axes
         methods = axes.c2p, axes.coords_to_point
@@ -59,13 +68,24 @@ class _ChartRecipe:
             basis = before[1:] - origin
 
             def sample(u, v):
-                x, y, z = self.point(self.function(u, v))
+                point = self.point(self.function(u, v), allow_undefined=allow_undefined)
+                if not np.isfinite(point).all():
+                    # An undefined coordinate has no image under this chart.
+                    # Preserve it for Atlas's mask instead of evaluating 0*inf
+                    # and fabricating finite geometry or emitting warnings.
+                    return self.point(point, world=True, allow_undefined=True)
+                x, y, z = point
                 # Fixed-order arithmetic; no BLAS or second geometry sampler.
-                return self.point(origin + x * basis[0] + y * basis[1] + z * basis[2], world=True)
+                return self.point(origin + x * basis[0] + y * basis[1] + z * basis[2],
+                                  world=True)
         else:
             # A custom chart may be nonlinear. Do not replace it by a basis
             # inferred at four points; keep its actual public c2p dispatch.
-            sample = self
+            def sample(u, v):
+                point = self.point(self.function(u, v), allow_undefined=allow_undefined)
+                if not np.isfinite(point).all():
+                    return self.point(point, world=True, allow_undefined=True)
+                return self.point(axes.c2p(*point), world=True, allow_undefined=allow_undefined)
 
         def verify():
             if (axes.c2p, axes.coords_to_point) != methods or (affine and not np.array_equal(chart(), before)):
@@ -99,7 +119,7 @@ def install_surface_plotting(native):
             raise TypeError("surface function must be callable")
         kwargs = _sampling_options(kwargs)
         recipe = _ChartRecipe(self, func, np, default_c2p, default_coords)
-        sample, verify = recipe.prepare()
+        sample, verify = recipe.prepare(allow_undefined=kwargs["allow_undefined"])
         surface = ParametricSurface(sample, color=color, opacity=opacity, **kwargs)
         verify()
         # Keep the recipe, not this construction's frozen basis: a later
@@ -113,16 +133,19 @@ def install_surface_plotting(native):
 
         def coordinates(u, v):
             value = np.asarray(func(u, v))
-            if value.ndim != 0 or value.dtype.kind not in "biuf" or not np.isfinite(value):
-                raise ValueError("surface graph function must return a finite real scalar")
-            return u, v, float(value)
+            if value.ndim != 0 or value.dtype.kind not in "biuf":
+                raise ValueError("surface graph function must return a real scalar")
+            # Preserve extended floating-point values until chart admission
+            # can distinguish authored infinities from finite overflow.
+            return u, v, value[()]
 
         return get_parametric_surface(self, coordinates, color=color, opacity=opacity,
                                       u_range=self.x_range[:2] if u_range is None else u_range,
                                       v_range=self.y_range[:2] if v_range is None else v_range, **kwargs)
 
-    def prepare(function):
-        return function.prepare() if isinstance(function, _ChartRecipe) else (function, None)
+    def prepare(function, *, allow_undefined=False):
+        return (function.prepare(allow_undefined=allow_undefined)
+                if isinstance(function, _ChartRecipe) else (function, None))
 
     _bind_method(ThreeDAxes, "get_parametric_surface", get_parametric_surface)
     _bind_method(ThreeDAxes, "get_graph", get_graph)

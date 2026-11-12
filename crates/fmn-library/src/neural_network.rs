@@ -1,30 +1,23 @@
-//! The enhanced-tier NeuralNetworkMobject (§2.6 leapfrog #9, fm-74z):
-//! [`NeuralNetworkMobject`] renders real `ft-nn` module structures —
-//! introspected layers (MLP, Conv stacks), live weight/activation
-//! visualization mid-training (values flowing into mobject styles via updaters),
-//! and animation of forward/backward passes (activation wavefronts, gradient-flow
-//! highlights) over the standard animation and mobject machinery.
+//! Native neural-network visualization (§2.6, fm-74z).
 //!
-//! ## Architecture & Purity
+//! [`NeuralNetworkMobject`] consumes explicit layer, activation and weight
+//! values. [`NeuralNetworkBinding`] connects those values to an installed
+//! scene family: training-loop updaters can refresh its colors and widths
+//! without replacing geometry, handles, placements or other updaters. The
+//! caller supplies model values from its training backend. The optional
+//! [`NeuralNetworkMobject::feed_forward`] provides an illustrative sigmoid pass.
 //!
-//! * **Layer & Graph Introspection:** Introspects real layer specifications
-//!   (Dense / Linear, Conv2d, activations, inputs/outputs) with exact neuron counts,
-//!   weight matrices, and bias vectors.
-//! * **Large-Layer Instancing:** For large layers (e.g. 4096 units), the mobject
-//!   uses elision markers (ellipsis dots) and compact representations so layout
-//!   stays clean and render IR instancing remains fast.
-//! * **Live-Value Updaters & Purity:** Updaters reading training loop tensors
-//!   update neuron and synapse activations; registering a scene updater
-//!   conservatively classifies the animation segment as stateful under
-//!   `fmn_anim::purity`.
-//! * **Determinism:** Seeded weight initializations and forward activations
-//!   replay bit-identically across platforms.
+//! Large layers show their first and last neurons, separated by an elision
+//! slot. Their synapses retain the original neuron indices. Ordinary Choreo
+//! animations can target the returned neuron and synapse handles; an updater
+//! which reads live model values conservatively makes its segment stateful.
 
 use std::fmt;
 
 use fmn_core::color::{Srgb, interpolate_color};
 use fmn_core::constants::{BLUE_D, GREY_B, RED, WHITE, YELLOW};
 use fmn_core::types::Vec3;
+use fmn_mobject::{Mob, RecordBuffer, Stage};
 
 use crate::arc::Dot;
 use crate::line::Line;
@@ -41,6 +34,11 @@ pub const DEFAULT_NEURON_RADIUS: f64 = 0.14;
 pub const DEFAULT_SYNAPSE_STROKE_WIDTH: f64 = 1.6;
 /// Default threshold for compressing a layer with ellipsis dots.
 pub const DEFAULT_MAX_DISPLAYED_NEURONS: usize = 12;
+/// Maximum visible neurons, synapses and elision markers in one family.
+pub const MAX_NEURAL_NETWORK_PARTS: usize = 65_536;
+/// Maximum activation, bias and default-weight values allocated by a recipe.
+/// Explicit sparse layer specifications can omit default weight matrices.
+pub const MAX_NEURAL_NETWORK_VALUES: usize = 16_777_216;
 
 /// Why a [`NeuralNetworkMobject`] could not be constructed, updated, or built.
 #[derive(Debug, Clone, PartialEq)]
@@ -74,6 +72,16 @@ pub enum NeuralNetworkError {
     },
     /// A geometry construction failed.
     Geometry(String),
+    /// A layout control or visible model value is non-finite or invalid.
+    InvalidValue(&'static str),
+    /// The visible family exceeds its declared allocation budget.
+    TooManyParts { requested: usize, max: usize },
+    /// A constructor's model-value storage exceeds its declared budget.
+    TooManyValues { requested: usize, max: usize },
+    /// A live binding's root or one of its original children was deleted.
+    StaleBinding(Mob),
+    /// Family topology, record schema, layer sizes or configuration changed.
+    BindingMismatch(&'static str),
 }
 
 impl fmt::Display for NeuralNetworkError {
@@ -110,6 +118,21 @@ impl fmt::Display for NeuralNetworkError {
                 )
             }
             Self::Geometry(detail) => write!(f, "geometry construction failed: {detail}"),
+            Self::InvalidValue(detail) => write!(f, "invalid neural network value: {detail}"),
+            Self::TooManyParts { requested, max } => {
+                write!(
+                    f,
+                    "neural network needs {requested} visible parts, above the {max} cap"
+                )
+            }
+            Self::TooManyValues { requested, max } => {
+                write!(
+                    f,
+                    "neural network needs {requested} stored values, above the {max} cap"
+                )
+            }
+            Self::StaleBinding(mob) => write!(f, "neural network binding has stale handle {mob:?}"),
+            Self::BindingMismatch(detail) => write!(f, "neural network binding changed: {detail}"),
         }
     }
 }
@@ -252,7 +275,7 @@ impl Default for NeuralNetworkConfig {
     }
 }
 
-/// An introspected, animatable neural network mobject.
+/// A neural-network visualization recipe with explicit model values.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NeuralNetworkMobject {
     layers: Vec<LayerSpec>,
@@ -265,6 +288,14 @@ impl NeuralNetworkMobject {
         if sizes.is_empty() {
             return Err(NeuralNetworkError::EmptyNetwork);
         }
+        let mut values = 0_usize;
+        for (index, &size) in sizes.iter().enumerate() {
+            values = values.saturating_add(size.saturating_mul(2));
+            if let Some(&next) = sizes.get(index + 1) {
+                values = values.saturating_add(size.saturating_mul(next));
+            }
+        }
+        admit_values(values)?;
         let mut layers = Vec::with_capacity(sizes.len());
         for (i, &size) in sizes.iter().enumerate() {
             let kind = if i == 0 {
@@ -326,6 +357,14 @@ impl NeuralNetworkMobject {
                 context: "biases layer count".into(),
             });
         }
+        let values = layer_sizes.iter().fold(0_usize, |sum, &size| {
+            sum.saturating_add(size.saturating_mul(2))
+        });
+        let values = weights
+            .iter()
+            .flat_map(|matrix| matrix.iter())
+            .fold(values, |sum, row| sum.saturating_add(row.len()));
+        admit_values(values)?;
 
         let mut layers = Vec::with_capacity(n_layers);
         for i in 0..n_layers {
@@ -390,6 +429,14 @@ impl NeuralNetworkMobject {
         if conv_layers.is_empty() && dense_sizes.is_empty() {
             return Err(NeuralNetworkError::EmptyNetwork);
         }
+        let values = conv_layers
+            .iter()
+            .map(|&(size, _)| size)
+            .chain(dense_sizes.iter().copied())
+            .fold(in_channels.saturating_mul(2), |sum, size| {
+                sum.saturating_add(size.saturating_mul(2))
+            });
+        admit_values(values)?;
         let mut layers = Vec::new();
         let mut current_channels = in_channels;
 
@@ -479,6 +526,11 @@ impl NeuralNetworkMobject {
                 context: format!("activations for layer {layer_idx}"),
             });
         }
+        if activations.iter().any(|value| !value.is_finite()) {
+            return Err(NeuralNetworkError::InvalidValue(
+                "activations must be finite",
+            ));
+        }
         layer.activations = activations.to_vec();
         Ok(())
     }
@@ -490,6 +542,11 @@ impl NeuralNetworkMobject {
         neuron_idx: usize,
         value: f64,
     ) -> Result<(), NeuralNetworkError> {
+        if !value.is_finite() {
+            return Err(NeuralNetworkError::InvalidValue(
+                "activation must be finite",
+            ));
+        }
         let layer = self.layer_mut(layer_idx)?;
         let total = layer.unit_count();
         let act = layer.activations.get_mut(neuron_idx).ok_or(
@@ -511,6 +568,9 @@ impl NeuralNetworkMobject {
         to_neuron: usize,
         weight: f64,
     ) -> Result<(), NeuralNetworkError> {
+        if !weight.is_finite() {
+            return Err(NeuralNetworkError::InvalidValue("weight must be finite"));
+        }
         let layer = self.layer_mut(layer_idx)?;
         let unit_count = layer.unit_count();
         let row = layer.next_weights.get_mut(from_neuron).ok_or(
@@ -565,7 +625,8 @@ impl NeuralNetworkMobject {
         Ok(current)
     }
 
-    /// Calculate the 3D position of a neuron in the layout.
+    /// Calculate a displayed neuron's position in the detached layout.
+    /// Elided neurons and invalid indices have no individual position.
     #[must_use]
     pub fn neuron_position(&self, layer_idx: usize, neuron_idx: usize) -> Option<Vec3> {
         if layer_idx >= self.layers.len() {
@@ -580,82 +641,223 @@ impl NeuralNetworkMobject {
         // Center layers horizontally about the origin
         let x = (layer_idx as f64 - (total_layers as f64 - 1.0) / 2.0) * self.config.layer_spacing;
 
-        // Center neurons vertically within the layer
+        // One empty slot separates the visible first/last neurons. It is also
+        // the ellipsis center, including for odd display caps.
         let displayed_count = layer_unit_count.min(self.config.max_displayed_neurons);
-        let effective_idx = if layer_unit_count > self.config.max_displayed_neurons {
-            if neuron_idx < self.config.max_displayed_neurons / 2 {
-                neuron_idx
-            } else if neuron_idx >= layer_unit_count - self.config.max_displayed_neurons / 2 {
-                neuron_idx - (layer_unit_count - self.config.max_displayed_neurons)
+        let (effective_idx, slots) = if layer_unit_count > displayed_count {
+            let leading = displayed_count.div_ceil(2);
+            let trailing = displayed_count / 2;
+            if neuron_idx < leading {
+                (neuron_idx, displayed_count + 1)
+            } else if neuron_idx >= layer_unit_count - trailing {
+                (
+                    leading + 1 + (neuron_idx - (layer_unit_count - trailing)),
+                    displayed_count + 1,
+                )
             } else {
-                // Interior elided neuron
-                self.config.max_displayed_neurons / 2
+                return None;
             }
         } else {
-            neuron_idx
+            (neuron_idx, displayed_count)
         };
 
-        let y = ((displayed_count as f64 - 1.0) / 2.0 - effective_idx as f64)
-            * self.config.neuron_spacing;
+        let y = ((slots as f64 - 1.0) / 2.0 - effective_idx as f64) * self.config.neuron_spacing;
         Some([x, y, 0.0])
+    }
+
+    fn visible_neurons(&self, layer: usize) -> impl Iterator<Item = usize> {
+        let count = self.layers[layer].unit_count();
+        let displayed = count.min(self.config.max_displayed_neurons);
+        let leading = if count == displayed {
+            count
+        } else {
+            displayed.div_ceil(2)
+        };
+        let trailing = if count == displayed { 0 } else { displayed / 2 };
+        (0..leading).chain(count - trailing..count)
+    }
+
+    fn validate(&self) -> Result<(), NeuralNetworkError> {
+        if self.layers.is_empty() {
+            return Err(NeuralNetworkError::EmptyNetwork);
+        }
+        for value in [
+            self.config.layer_spacing,
+            self.config.neuron_spacing,
+            self.config.neuron_radius,
+            self.config.synapse_stroke_width,
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(NeuralNetworkError::InvalidValue(
+                    "spacing, radius and stroke width must be positive and finite",
+                ));
+            }
+        }
+        if self.config.max_displayed_neurons < 2 {
+            return Err(NeuralNetworkError::InvalidValue(
+                "max_displayed_neurons must be at least two",
+            ));
+        }
+        if !self.config.synapse_opacity.is_finite()
+            || !(0.0..=1.0).contains(&self.config.synapse_opacity)
+        {
+            return Err(NeuralNetworkError::InvalidValue(
+                "synapse opacity must be in [0, 1]",
+            ));
+        }
+        for color in [
+            self.config.neuron_base_color,
+            self.config.neuron_active_color,
+            self.config.positive_weight_color,
+            self.config.negative_weight_color,
+        ] {
+            if [color.r, color.g, color.b]
+                .iter()
+                .any(|value| !value.is_finite() || !(0.0..=1.0).contains(value))
+            {
+                return Err(NeuralNetworkError::InvalidValue(
+                    "colors must have finite components in [0, 1]",
+                ));
+            }
+        }
+        let mut parts = 0_usize;
+        for (index, layer) in self.layers.iter().enumerate() {
+            let count = layer.unit_count();
+            if count == 0 || layer.activations.len() != count || layer.biases.len() != count {
+                return Err(NeuralNetworkError::InvalidValue(
+                    "layers must have nonzero size and matching activation/bias vectors",
+                ));
+            }
+            if !layer.next_weights.is_empty() {
+                let next = self.layers.get(index + 1).map_or(0, LayerSpec::unit_count);
+                if layer.next_weights.len() != count
+                    || layer.next_weights.iter().any(|row| row.len() != next)
+                {
+                    return Err(NeuralNetworkError::InvalidValue(
+                        "weight matrix dimensions must match adjacent layers",
+                    ));
+                }
+            }
+            let visible = count.min(self.config.max_displayed_neurons);
+            let next_visible = self.layers.get(index + 1).map_or(0, |next| {
+                next.unit_count().min(self.config.max_displayed_neurons)
+            });
+            parts = parts
+                .saturating_add(visible)
+                .saturating_add(visible.saturating_mul(next_visible));
+            if count > visible {
+                parts = parts.saturating_add(3);
+            }
+            if parts > MAX_NEURAL_NETWORK_PARTS {
+                return Err(NeuralNetworkError::TooManyParts {
+                    requested: parts,
+                    max: MAX_NEURAL_NETWORK_PARTS,
+                });
+            }
+            for neuron in self.visible_neurons(index) {
+                self.neuron_color(index, neuron)?;
+                let point =
+                    self.neuron_position(index, neuron)
+                        .ok_or(NeuralNetworkError::InvalidValue(
+                            "displayed neuron has no position",
+                        ))?;
+                if point.iter().any(|value| {
+                    !value.is_finite()
+                        || value.abs() + 2.0 * self.config.neuron_radius > f64::from(f32::MAX)
+                }) {
+                    return Err(NeuralNetworkError::InvalidValue(
+                        "neuron geometry must fit finite f32 records",
+                    ));
+                }
+                if index + 1 < self.layers.len() {
+                    for next in self.visible_neurons(index + 1) {
+                        self.synapse_style(index, neuron, next)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn neuron_color(&self, layer: usize, neuron: usize) -> Result<Srgb, NeuralNetworkError> {
+        let value =
+            *self.layers[layer]
+                .activations
+                .get(neuron)
+                .ok_or(NeuralNetworkError::InvalidValue(
+                    "missing displayed neuron activation",
+                ))?;
+        if !value.is_finite() {
+            return Err(NeuralNetworkError::InvalidValue(
+                "displayed activations must be finite",
+            ));
+        }
+        Ok(interpolate_color(
+            self.config.neuron_base_color,
+            self.config.neuron_active_color,
+            value.clamp(0.0, 1.0),
+        ))
+    }
+
+    fn synapse_style(
+        &self,
+        layer: usize,
+        from: usize,
+        to: usize,
+    ) -> Result<Style, NeuralNetworkError> {
+        let weights = &self.layers[layer].next_weights;
+        let weight = if weights.is_empty() {
+            0.5
+        } else {
+            *weights.get(from).and_then(|row| row.get(to)).ok_or(
+                NeuralNetworkError::InvalidValue("missing displayed synapse weight"),
+            )?
+        };
+        if !weight.is_finite() {
+            return Err(NeuralNetworkError::InvalidValue(
+                "displayed weights must be finite",
+            ));
+        }
+        let color = if weight >= 0.0 {
+            self.config.positive_weight_color
+        } else {
+            self.config.negative_weight_color
+        };
+        let magnitude = weight.abs().min(1.0);
+        let width = (self.config.synapse_stroke_width * (0.4 + 0.6 * magnitude)).clamp(0.5, 6.0);
+        let opacity = (self.config.synapse_opacity * (0.3 + 0.7 * magnitude)).clamp(0.1, 1.0);
+        Ok(Style::default().stroke(color, width, opacity))
     }
 
     /// Build the full visual representation into a [`VMobject`] family.
     ///
-    /// The family structure is painter-ordered:
-    /// `[synapse_group, neuron_group, optional_elision_group]`.
+    /// Direct children are painter-ordered: synapses first, followed by
+    /// each layer's displayed neurons and optional elision markers.
     pub fn build(&self) -> Result<VMobject, NeuralNetworkError> {
-        if self.layers.is_empty() {
-            return Err(NeuralNetworkError::EmptyNetwork);
-        }
+        self.validate()?;
 
         let mut synapse_mobjects = Vec::new();
         let mut neuron_mobjects = Vec::new();
 
         // 1. Build Synapses (drawn underneath neurons)
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
+        for layer_idx in 0..self.layers.len() {
             if layer_idx + 1 >= self.layers.len() {
                 continue;
             }
-            let next_layer = &self.layers[layer_idx + 1];
-            let from_count = layer.unit_count();
-            let to_count = next_layer.unit_count();
-
-            let max_from = from_count.min(self.config.max_displayed_neurons);
-            let max_to = to_count.min(self.config.max_displayed_neurons);
-
-            for from_idx in 0..max_from {
+            for from_idx in self.visible_neurons(layer_idx) {
                 let from_pos = self
                     .neuron_position(layer_idx, from_idx)
                     .ok_or_else(|| NeuralNetworkError::Geometry("missing from_pos".into()))?;
 
-                for to_idx in 0..max_to {
+                for to_idx in self.visible_neurons(layer_idx + 1) {
                     let to_pos = self
                         .neuron_position(layer_idx + 1, to_idx)
                         .ok_or_else(|| NeuralNetworkError::Geometry("missing to_pos".into()))?;
 
-                    let weight = layer
-                        .next_weights
-                        .get(from_idx)
-                        .and_then(|row| row.get(to_idx))
-                        .copied()
-                        .unwrap_or(0.5);
-
-                    let (color, weight_magnitude) = if weight >= 0.0 {
-                        (self.config.positive_weight_color, weight.min(1.0))
-                    } else {
-                        (self.config.negative_weight_color, (-weight).min(1.0))
-                    };
-
-                    let stroke_w = (self.config.synapse_stroke_width
-                        * (0.4 + 0.6 * weight_magnitude))
-                        .clamp(0.5, 6.0);
-                    let opacity = (self.config.synapse_opacity * (0.3 + 0.7 * weight_magnitude))
-                        .clamp(0.1, 1.0);
-
+                    let style = self.synapse_style(layer_idx, from_idx, to_idx)?;
                     let line = Line::new(from_pos, to_pos)
-                        .color(color)
-                        .style(Style::default().stroke(color, stroke_w, opacity));
+                        .color(style.stroke_color)
+                        .style(style);
                     let built_line = line
                         .build()
                         .map_err(|e| NeuralNetworkError::Geometry(format!("{e}")))?;
@@ -668,19 +870,12 @@ impl NeuralNetworkMobject {
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let unit_count = layer.unit_count();
             let is_compressed = unit_count > self.config.max_displayed_neurons;
-            let display_count = unit_count.min(self.config.max_displayed_neurons);
-
-            for neuron_idx in 0..display_count {
+            for neuron_idx in self.visible_neurons(layer_idx) {
                 let pos = self
                     .neuron_position(layer_idx, neuron_idx)
                     .ok_or_else(|| NeuralNetworkError::Geometry("missing neuron_pos".into()))?;
 
-                let activation = layer.activations.get(neuron_idx).copied().unwrap_or(0.0);
-                let color = interpolate_color(
-                    self.config.neuron_base_color,
-                    self.config.neuron_active_color,
-                    activation.clamp(0.0, 1.0),
-                );
+                let color = self.neuron_color(layer_idx, neuron_idx)?;
 
                 let dot = Dot::new()
                     .point(pos)
@@ -694,9 +889,12 @@ impl NeuralNetworkMobject {
             if is_compressed {
                 let mid_x = (layer_idx as f64 - (self.layers.len() as f64 - 1.0) / 2.0)
                     * self.config.layer_spacing;
-                for offset_y in [-0.15, 0.0, 0.15] {
+                let gap_y = (self.config.max_displayed_neurons as f64 / 2.0
+                    - self.config.max_displayed_neurons.div_ceil(2) as f64)
+                    * self.config.neuron_spacing;
+                for offset_y in [-0.25, 0.0, 0.25] {
                     let el_dot = Dot::new()
-                        .point([mid_x, offset_y, 0.0])
+                        .point([mid_x, gap_y + offset_y * self.config.neuron_spacing, 0.0])
                         .radius(self.config.neuron_radius * 0.35)
                         .color(self.config.neuron_base_color)
                         .style(Style::default().fill(self.config.neuron_base_color, 0.8));
@@ -708,5 +906,269 @@ impl NeuralNetworkMobject {
         let mut all_children = synapse_mobjects;
         all_children.extend(neuron_mobjects);
         Ok(v_group(all_children))
+    }
+
+    /// Install this visual family and retain stable displayed-neuron and
+    /// synapse identities. Add the returned root to the scene separately.
+    ///
+    /// # Errors
+    /// Invalid layout/model values and the visible-family resource budget are
+    /// checked before adding any records to the arena.
+    pub fn add_to(&self, stage: &mut Stage) -> Result<NeuralNetworkBinding, NeuralNetworkError> {
+        let root = stage.add(self.build()?);
+        let members = stage
+            .get(root)
+            .expect("new neural family is live")
+            .submobjects()
+            .to_vec();
+        let mut synapses = Vec::new();
+        let mut neurons = Vec::new();
+        let mut child = 0;
+        for layer in 0..self.layers.len().saturating_sub(1) {
+            for from in self.visible_neurons(layer) {
+                for to in self.visible_neurons(layer + 1) {
+                    synapses.push((layer, from, to, members[child]));
+                    child += 1;
+                }
+            }
+        }
+        for layer in 0..self.layers.len() {
+            for neuron in self.visible_neurons(layer) {
+                neurons.push((layer, neuron, members[child]));
+                child += 1;
+            }
+            if self.layers[layer].unit_count() > self.config.max_displayed_neurons {
+                child += 3;
+            }
+        }
+        debug_assert_eq!(child, members.len());
+        let children: Vec<_> = members
+            .into_iter()
+            .map(|mob| {
+                (
+                    mob,
+                    stage
+                        .get(mob)
+                        .expect("new neural child is live")
+                        .buffer
+                        .len(),
+                )
+            })
+            .collect();
+        let scratch_capacity = children.iter().map(|(_, rows)| rows * 4).max().unwrap_or(0);
+        Ok(NeuralNetworkBinding {
+            root,
+            children,
+            neurons,
+            synapses,
+            sizes: self.layers.iter().map(LayerSpec::unit_count).collect(),
+            config: self.config.clone(),
+            scratch: Vec::with_capacity(scratch_capacity),
+        })
+    }
+}
+
+fn admit_values(requested: usize) -> Result<(), NeuralNetworkError> {
+    if requested > MAX_NEURAL_NETWORK_VALUES {
+        Err(NeuralNetworkError::TooManyValues {
+            requested,
+            max: MAX_NEURAL_NETWORK_VALUES,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+/// An installed neural family whose displayed objects retain their identities.
+///
+/// [`Self::sync_values`] updates neuron fill RGB and synapse stroke RGB, alpha
+/// and width. It preserves placements, geometry, neuron opacity, other styles,
+/// updaters and scene membership. Values in elided neurons do not require any
+/// render work. Refresh costs are proportional to the displayed family, not
+/// the full model's dense weight matrix.
+///
+/// Layout/configuration changes require a new binding. Deleting, regrouping,
+/// reordering or changing the record shape of a bound child invalidates the
+/// binding, and refresh refuses before writing any style. Removing the root
+/// from the scene and later readding it is supported. Clones refer to the same
+/// arena handles; they do not bind copies of the visual family.
+///
+/// ```
+/// use fmn_library::NeuralNetworkMobject;
+/// use fmn_mobject::Stage;
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let mut stage = Stage::new();
+/// let mut model = NeuralNetworkMobject::from_layer_sizes(&[2, 4, 1])?;
+/// let mut live = model.add_to(&mut stage)?;
+/// stage.add_to_scene(live.mobject())?;
+/// model.set_layer_activations(1, &[0.2, 0.5, 0.8, 1.0])?;
+/// model.set_synapse_weight(0, 0, 3, -0.9)?;
+/// live.sync_values(&mut stage, &model)?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Debug, Clone)]
+pub struct NeuralNetworkBinding {
+    root: Mob,
+    children: Vec<(Mob, usize)>,
+    neurons: Vec<(usize, usize, Mob)>,
+    synapses: Vec<(usize, usize, usize, Mob)>,
+    sizes: Vec<usize>,
+    config: NeuralNetworkConfig,
+    scratch: Vec<f32>,
+}
+
+impl NeuralNetworkBinding {
+    /// The installed family root for scene membership or whole-family motion.
+    #[must_use]
+    pub fn mobject(&self) -> Mob {
+        self.root
+    }
+
+    /// A displayed neuron, addressed by its original model index.
+    /// Elided and out-of-range neurons return `None`.
+    #[must_use]
+    pub fn neuron(&self, layer: usize, index: usize) -> Option<Mob> {
+        self.neurons
+            .iter()
+            .find_map(|&(l, n, mob)| (l == layer && n == index).then_some(mob))
+    }
+
+    /// A displayed connection from `layer` to `layer + 1`, using model indices.
+    #[must_use]
+    pub fn synapse(&self, layer: usize, from: usize, to: usize) -> Option<Mob> {
+        self.synapses
+            .iter()
+            .find_map(|&(l, a, b, mob)| (l == layer && a == from && b == to).then_some(mob))
+    }
+
+    fn validate(
+        &self,
+        stage: &Stage,
+        model: &NeuralNetworkMobject,
+    ) -> Result<(), NeuralNetworkError> {
+        if model.config != self.config || model.layers.len() != self.sizes.len() {
+            return Err(NeuralNetworkError::BindingMismatch(
+                "layout configuration or layer count",
+            ));
+        }
+        for (layer, &size) in model.layers.iter().zip(&self.sizes) {
+            if layer.unit_count() != size
+                || layer.activations.len() != size
+                || layer.biases.len() != size
+                || (!layer.next_weights.is_empty() && layer.next_weights.len() != size)
+            {
+                return Err(NeuralNetworkError::BindingMismatch("layer dimensions"));
+            }
+        }
+        let root = stage
+            .get(self.root)
+            .ok_or(NeuralNetworkError::StaleBinding(self.root))?;
+        if !root.buffer.is_empty()
+            || root.submobjects().len() != self.children.len()
+            || root
+                .submobjects()
+                .iter()
+                .zip(&self.children)
+                .any(|(&actual, &(expected, _))| actual != expected)
+        {
+            return Err(NeuralNetworkError::BindingMismatch(
+                "family membership or order",
+            ));
+        }
+        for &(mob, rows) in &self.children {
+            let entry = stage
+                .get(mob)
+                .ok_or(NeuralNetworkError::StaleBinding(mob))?;
+            if !entry.submobjects().is_empty()
+                || entry.buffer.len() != rows
+                || entry.buffer.schema().field_width("point") != Some(3)
+                || entry.buffer.schema().field_width("fill_rgba") != Some(4)
+                || entry.buffer.schema().field_width("stroke_rgba") != Some(4)
+                || entry.buffer.schema().field_width("stroke_width") != Some(1)
+            {
+                return Err(NeuralNetworkError::BindingMismatch(
+                    "child geometry or record schema",
+                ));
+            }
+        }
+        // Validate every value before the first write, including the last
+        // displayed synapse. No model callbacks or arena mutation occur here.
+        for &(layer, neuron, _) in &self.neurons {
+            model.neuron_color(layer, neuron)?;
+        }
+        for &(layer, from, to, _) in &self.synapses {
+            let weights = &model.layers[layer].next_weights;
+            if !weights.is_empty() && weights[from].len() != self.sizes[layer + 1] {
+                return Err(NeuralNetworkError::BindingMismatch("weight row dimensions"));
+            }
+            model.synapse_style(layer, from, to)?;
+        }
+        Ok(())
+    }
+
+    /// Refresh the installed visual values without rebuilding any geometry.
+    ///
+    /// Reuses column scratch and leaves unchanged columns' revisions intact.
+    /// This method reads live records, so external styling and writable views
+    /// cannot make a cached model value suppress a necessary update.
+    ///
+    /// # Errors
+    /// Stale/restructured families, changed model layout, malformed dimensions
+    /// and non-finite displayed values. Every such refusal precedes all writes.
+    pub fn sync_values(
+        &mut self,
+        stage: &mut Stage,
+        model: &NeuralNetworkMobject,
+    ) -> Result<(), NeuralNetworkError> {
+        self.validate(stage, model)?;
+        for &(layer, neuron, mob) in &self.neurons {
+            let color = model.neuron_color(layer, neuron)?;
+            let buffer = &mut stage.get_mut(mob).expect("binding was validated").buffer;
+            sync_rgb(buffer, "fill_rgba", color, None, &mut self.scratch);
+        }
+        for &(layer, from, to, mob) in &self.synapses {
+            let style = model.synapse_style(layer, from, to)?;
+            let buffer = &mut stage.get_mut(mob).expect("binding was validated").buffer;
+            sync_rgb(
+                buffer,
+                "stroke_rgba",
+                style.stroke_color,
+                Some(style.stroke_opacity),
+                &mut self.scratch,
+            );
+            buffer.read_column_into("stroke_width", &mut self.scratch);
+            let width = style.stroke_width as f32;
+            if self.scratch.iter().any(|&value| value != width) {
+                self.scratch.fill(width);
+                buffer.write_range("stroke_width", 0, &self.scratch);
+            }
+        }
+        Ok(())
+    }
+}
+
+fn sync_rgb(
+    buffer: &mut RecordBuffer,
+    field: &str,
+    color: Srgb,
+    opacity: Option<f64>,
+    scratch: &mut Vec<f32>,
+) {
+    buffer.read_column_into(field, scratch);
+    let rgb = [color.r as f32, color.g as f32, color.b as f32];
+    let alpha = opacity.map(|value| value as f32);
+    let mut changed = false;
+    for rgba in scratch.as_chunks_mut::<4>().0 {
+        if rgba[..3] != rgb || alpha.is_some_and(|value| rgba[3] != value) {
+            rgba[..3].copy_from_slice(&rgb);
+            if let Some(alpha) = alpha {
+                rgba[3] = alpha;
+            }
+            changed = true;
+        }
+    }
+    if changed {
+        buffer.write_range(field, 0, scratch);
     }
 }

@@ -9119,7 +9119,9 @@ dot_cloud.add_point([3.0, 4.0, 0.0], opacity=0.25, color=manimlib.BLUE)
 assert np.allclose(dot_cloud.get_points(), [[1, 2, 0], [3, 4, 0]])
 assert np.allclose(dot_cloud.get_opacities(), [0.75, 0.25])
 assert np.allclose(dot_cloud.data["radius"], [0.2, 0.2])
-assert np.allclose(dot_cloud.data["glow_factor"], [2.0, 2.0])
+assert dot_cloud.data.dtype == np.dtype(manimlib.DotCloud.data_dtype)
+assert dot_cloud.data.dtype.itemsize == 32
+assert dot_cloud.uniforms["glow_factor"] == 2.0
 dot_cloud.set_opacity([0.5, 0.125])
 assert np.allclose(dot_cloud.get_opacities(), [0.5, 0.125])
 
@@ -14894,7 +14896,7 @@ writer_root = pathlib.Path("/tmp/out") / "demo"
 assert writer.get_output_file_rootname() == str(writer_root)
 assert writer.get_image_file_path() == str(writer_root) + ".png"
 assert writer.get_movie_file_path() == str(writer_root) + ".mp4"
-assert writer.get_insert_file_path(2) == str(writer_root) + "_2.mp4"
+assert writer.get_insert_file_path(2) == str(writer_root.parent / "inserts" / "demo_2.mp4")
 # Subdivided clips are DIRECTORY/SCENE/clips/segment-NNNNNN (BN-15); the
 # partial-movie helpers name that layout (fm-fxov).
 assert writer.init_partial_movie_directory() == str(writer_root / "clips")
@@ -22434,8 +22436,8 @@ assert np.allclose(cloud.get_radii().reshape(-1), [1.2, 1.2, 1.2])
 assert cloud.set_glow_factor(1.5) is cloud
 assert np.isclose(cloud.get_glow_factor(), 1.5)
 assert np.isclose(cloud.uniforms["glow_factor"], 1.5)
-if "glow_factor" in cloud.data.dtype.names:
-    assert np.allclose(cloud.data["glow_factor"].reshape(-1), [1.5, 1.5, 1.5])
+assert cloud.data.dtype == np.dtype(dot_cloud_mod.DotCloud.data_dtype)
+assert cloud.data.dtype.itemsize == 32
 assert cloud.make_3d() is cloud
 assert np.allclose(cloud.get_shading(), [0.5, 0.1, 0.2])
 assert bool(cloud.uniforms["depth_test"]) is True
@@ -23580,8 +23582,8 @@ _check("image path appends png suffix",
        _named.get_image_file_path() == str(_named_root) + ".png")
 _check("movie path normalizes extension dot",
        _named.get_movie_file_path() == str(_named_root) + ".mov")
-_check("insert path indexes per play",
-       _named.get_insert_file_path(3) == str(_named_root) + "_3.mov")
+_check("insert path numbers standalone clips under inserts",
+       _named.get_insert_file_path(3) == str(_named_root.parent / "inserts" / "custom_name_3.mov"))
 _check("partial movie path names the next subdivided clip (BN-15)",
        _named.get_next_partial_movie_path() == str(
            _named_root / "clips" / "segment-000000.mov"
@@ -23642,18 +23644,8 @@ except Exception as error:
     _finish_refused = "Reel" in str(error)
 _check("finish surfaces pipe refusal when writing movies",
        _finish_refused)
-_ins_refused = False
-try:
-    _fw.begin_insert()
-except NotImplementedError:
-    _ins_refused = True
-_end_ins_refused = False
-try:
-    _fw.end_insert()
-except NotImplementedError:
-    _end_ins_refused = True
-_check("insert family refuses toward native segmentation",
-       _ins_refused and _end_ins_refused)
+_check("inserts require the Scene's attached writer and an active owner to end",
+       _raises(_fw.begin_insert, RuntimeError) and _raises(_fw.end_insert, RuntimeError))
 _pd_scene = manimlib.Scene()
 _pd_writer = manimlib.SceneFileWriter(_pd_scene)
 _check("progress description is a silent host stub",

@@ -416,8 +416,9 @@ impl FmnPlayer {
         self.core.bundle.frame_of_label(name)
     }
 
-    /// The segment kind at `index` (0 = pure-reconstructible, 1 =
-    /// stateful/recorded) — diagnostic surface for scrub UIs.
+    /// The segment storage kind at `index`: 0 = pure-reconstructible,
+    /// 1 = recorded snapshots, 2 = lossless compact recorded snapshots.
+    /// Compact storage does not imply pure source animation.
     ///
     /// # Errors
     /// `JsError` for an out-of-range segment index.
@@ -540,6 +541,63 @@ mod tests {
                 a.render_index(index).expect("render a"),
                 b.render_index(index).expect("render b"),
                 "frame {index} differs across identical loads"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_recordings_render_identically_across_block_boundaries() {
+        use fmn_scene::recording::SceneBundleRecorder;
+        use fmn_scene::{RuntimeConfig, Scene};
+
+        fn record(compact: bool) -> Vec<u8> {
+            let mut scene = Scene::new(
+                RuntimeConfig {
+                    fps: 8,
+                    ..RuntimeConfig::default()
+                },
+                13,
+            )
+            .unwrap();
+            let mob = scene
+                .add_mobject(crate::circle_mobject([-1.0, 0.0, 0.0], 0.75))
+                .unwrap();
+            scene
+                .stage_mut()
+                .add_dt_updater(
+                    mob,
+                    |stage, mob, dt| {
+                        stage.shift(mob, [dt / 4.0, 0.0, 0.0]);
+                    },
+                    false,
+                )
+                .unwrap();
+            let mut recorder = if compact {
+                SceneBundleRecorder::new_compact(8, Default::default()).unwrap()
+            } else {
+                SceneBundleRecorder::new_render_only(8, Default::default()).unwrap()
+            };
+            scene.wait_frames(70, &mut recorder).unwrap();
+            recorder.finish().unwrap().bytes
+        }
+
+        let legacy_bytes = record(false);
+        let compact_bytes = record(true);
+        assert!(compact_bytes.len() < legacy_bytes.len());
+        let mut legacy = PlayerCore::load(&legacy_bytes).unwrap();
+        let mut compact = PlayerCore::load(&compact_bytes).unwrap();
+        legacy.set_viewport(48, 27).unwrap();
+        compact.set_viewport(48, 27).unwrap();
+        assert_eq!(compact.frame_count(), 70);
+        assert_ne!(
+            legacy.render_index(0).unwrap(),
+            legacy.render_index(69).unwrap()
+        );
+        for index in [69, 0, 63, 64, 32, 1, 0] {
+            assert_eq!(
+                compact.render_index(index).unwrap(),
+                legacy.render_index(index).unwrap(),
+                "rendered frame {index}",
             );
         }
     }

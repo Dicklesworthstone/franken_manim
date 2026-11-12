@@ -390,6 +390,18 @@ Transform's families (`invisible_copy`, fm-b97z) remap every reference into
 the copied family, as `deepcopy()` does. A reference outside the copied
 family stays shared, as in the Reference.
 
+Stored Python bound-method attributes follow the same family remap: a copied
+parent's method reference to a child is rebound to the copied child. Methods
+whose receiver is outside the copied family remain shared by shallow copies.
+Ordinary function objects and updater-list callables retain their existing
+sharing rules.
+
+`TimeVaryingVectorField` uses this receiver-bound dispatch for its field
+function. Copies and animation targets therefore sample their own `time`
+and `time_func`, instead of retaining a closure over the original field's
+clock. Advancing a copy leaves the original field unchanged, and later updates
+to the original cannot change the copy's sampled field.
+
 Locked by `test_copy_remaps_every_family_internal_reference` in
 `crates/fmn-python/tests/copying_semantics.py` and
 `test_pads_remap_references_only_within_their_own_family` in

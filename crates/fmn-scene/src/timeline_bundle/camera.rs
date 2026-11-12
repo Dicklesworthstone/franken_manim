@@ -15,8 +15,11 @@ pub const CAMERA_TIMELINE_BUNDLE_SCHEMA: Schema = Schema::new(*b"FMTL", 1, 0, 1)
 pub(super) fn read_track(
     reader: &mut Reader<'_>,
     frame_count: u32,
+    remaining_retained: Option<&mut usize>,
 ) -> Result<Option<Vec<CameraSample>>, BundleReadError> {
-    if reader.version().1 == 0 {
+    if reader.version().1 == 0
+        || (reader.version().1 == 3 && !reader.get_bool().map_err(BundleReadError::Malformed)?)
+    {
         return Ok(None);
     }
     let count = reader.get_u32().map_err(BundleReadError::Malformed)?;
@@ -33,6 +36,17 @@ pub(super) fn read_track(
         return Err(BundleReadError::PlanInconsistent(
             "camera track payload size",
         ));
+    }
+    if let Some(remaining) = remaining_retained {
+        let needed = count.saturating_mul(std::mem::size_of::<CameraSample>());
+        *remaining = remaining
+            .checked_sub(needed)
+            .ok_or(BundleReadError::Malformed(
+                fmn_hash::SerialError::SizeLimit {
+                    needed,
+                    limit: *remaining,
+                },
+            ))?;
     }
     let mut cameras = Vec::new();
     cameras
@@ -111,5 +125,51 @@ impl TimelineBundle {
     ) -> Result<(Stage, Option<Camera>), BundleReadError> {
         let camera = self.camera_at(index, resolution)?;
         Ok((self.stage_at_inner(index)?, camera))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fmn_hash::serial::{Limits, UnknownPolicy, Writer};
+
+    #[test]
+    fn compact_camera_storage_uses_the_remaining_recording_budget() {
+        let camera = Camera::new(fmn_render::CameraConfig::default()).unwrap();
+        let mut writer = Writer::new(super::super::COMPACT_TIMELINE_BUNDLE_SCHEMA);
+        writer.put_bool(true).put_u32(1);
+        CameraSample::capture(&camera)
+            .unwrap()
+            .write_to(&mut writer);
+        let bytes = writer.finish().unwrap();
+        let open = || {
+            Reader::open(
+                &bytes,
+                super::super::COMPACT_TIMELINE_BUNDLE_SCHEMA,
+                Limits::DEFAULT,
+                UnknownPolicy::Strict,
+            )
+            .unwrap()
+        };
+        let required = std::mem::size_of::<CameraSample>();
+        let mut short = required - 1;
+        assert!(matches!(
+            read_track(&mut open(), 1, Some(&mut short)),
+            Err(BundleReadError::Malformed(
+                fmn_hash::SerialError::SizeLimit { .. }
+            )),
+        ));
+        assert_eq!(short, required - 1);
+        let mut exact = required;
+        let mut reader = open();
+        assert_eq!(
+            read_track(&mut reader, 1, Some(&mut exact))
+                .unwrap()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(exact, 0);
+        reader.finish().unwrap();
     }
 }

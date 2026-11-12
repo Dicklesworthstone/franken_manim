@@ -2,8 +2,8 @@
 //! update those records; generic point maps and Group scaling do not.
 
 use fmn_anim::{
-    Animation, RateFunc, fade_in, fade_out, grow_from_center, indicate, prepare_animation,
-    scale_in_place,
+    AnimConfig, Animation, RateFunc, Transform, fade_in, fade_out, grow_from_center, indicate,
+    prepare_animation, scale_in_place,
 };
 use fmn_core::rate;
 use fmn_mobject::animate::AnimateArgs;
@@ -31,6 +31,31 @@ fn radii(stage: &Stage, mob: Mob) -> Vec<f32> {
         .buffer
         .read_column("radius")
         .unwrap()
+}
+
+#[test]
+fn dot_glow_interpolates_as_a_uniform_without_adding_or_mutating_records() {
+    let mut stage = Stage::new();
+    let source = dots(&mut stage);
+    let target = stage.copy_family(source).unwrap();
+    stage.get_mut(target).unwrap().uniforms_mut().glow_factor = 4.0;
+    let original_points = stage.get_points(source).unwrap();
+    let mut animation = Transform::new(source, target).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    animation.begin(&mut stage).unwrap();
+    for alpha in [0.25, 0.75, 0.5, 0.0, 1.0] {
+        animation.interpolate(&mut stage, alpha);
+        let entry = stage.get(source).unwrap();
+        assert_eq!(entry.uniforms().glow_factor, alpha * 4.0);
+        assert_eq!(entry.buffer.schema().stride(), 8);
+        assert!(entry.buffer.schema().field_width("glow_factor").is_none());
+        assert_eq!(stage.get_points(source).unwrap(), original_points);
+        assert_eq!(radii(&stage, source), [0.25, 0.5]);
+    }
+    animation.finish(&mut stage);
+    assert_eq!(stage.get(source).unwrap().uniforms().glow_factor, 4.0);
 }
 
 #[test]

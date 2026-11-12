@@ -1519,6 +1519,16 @@ mod ffmpeg_boundary {
             cancellation: ProcessCancellation,
             mut stdin_limits: ProcessStdinLimits,
         ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+            #[cfg(feature = "exact-process")]
+            if cancellation.is_cancelled() {
+                // Mirror the real substrate's no-child startup refusal, not
+                // a scripted child that reaches cancellation only at finish.
+                return fmn_platform::process::StdProcessRunner.start(
+                    spec,
+                    cancellation,
+                    stdin_limits,
+                );
+            }
             let cap = self.stdin_total_cap.load(Ordering::Relaxed);
             if cap > 0 {
                 stdin_limits.max_total_bytes = stdin_limits.max_total_bytes.min(cap);
@@ -2373,6 +2383,36 @@ mod ffmpeg_boundary {
             .expect_err("cancelled externally");
         assert_eq!(error.code(), "sink.cancelled");
         assert!(matches!(receipt.take(), Err(ReceiptError::Aborted)));
+        assert_eq!(std::fs::read(destination).unwrap(), b"prior video");
+    }
+
+    #[cfg(feature = "exact-process")]
+    #[test]
+    fn ffmpeg_startup_cancellation_aborts_the_receipt_without_feeding_a_child() {
+        let (root, tool, runner) = fake_tool("startup-cancellation");
+        let destination = root.join("existing.mp4");
+        std::fs::write(&destination, b"prior video").unwrap();
+        let mut config = ffmpeg_config(
+            tool,
+            &root,
+            WireFormat::Rgba8,
+            destination.clone(),
+            None,
+            None,
+        );
+        config.limits = exact_limits(1);
+        let mut sink = FfmpegSink::new(runner.clone(), config).unwrap();
+        let cancellation = ProcessCancellation::new();
+        sink.set_cancellation(cancellation.clone());
+        cancellation.cancel();
+        let receipt = sink.receipt();
+        let (frame, _) = padded_frame(PixelFormat::Rgba8, 8);
+        let error = sink
+            .write_frame(7, &frame)
+            .expect_err("startup cancellation must refuse the first frame");
+        assert_eq!(error.code(), "sink.cancelled");
+        assert!(matches!(receipt.take(), Err(ReceiptError::Aborted)));
+        assert!(runner.stdin_chunks().is_empty());
         assert_eq!(std::fs::read(destination).unwrap(), b"prior video");
     }
 

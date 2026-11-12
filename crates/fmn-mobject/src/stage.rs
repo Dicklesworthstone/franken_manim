@@ -32,7 +32,7 @@ use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
 use crate::StageError;
 use crate::bbox::BboxCache;
 use crate::mobject::{ImageResource, Mobject, RenderPrimitive};
-use crate::persist::{UpdaterIdentity, UpdaterKindTag};
+use crate::persist::{UpdaterIdentity, UpdaterKindTag, UpdaterManifest};
 use crate::placement::Placement;
 use crate::record::RecordBuffer;
 use crate::shape::ShapeSlot;
@@ -684,6 +684,11 @@ pub struct Entry {
     /// point write or structural change invalidates it automatically, through
     /// any channel (fm-jru).
     bbox: RefCell<BboxCache>,
+    /// The immutable metadata payload shared by successive captures until
+    /// this entry is edited. Never retained while a record view is attached.
+    /// Mutable entry access drops this before exposing record storage, so a
+    /// cache with no outside snapshot owners cannot force a record CoW copy.
+    snapshot_cache: RefCell<Option<SnapshotEntry>>,
 }
 
 impl Entry {
@@ -713,6 +718,7 @@ impl Entry {
             image_revision: 0,
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
+            snapshot_cache: RefCell::new(None),
         }
     }
 
@@ -759,7 +765,53 @@ impl Entry {
             image_revision: 0,
             family_cache: RefCell::new(None),
             bbox: RefCell::new(BboxCache::default()),
+            snapshot_cache: RefCell::new(None),
         }
+    }
+
+    fn snapshot(&self) -> SnapshotEntry {
+        // Even read-only exports retain V5's eager-isolation semantics. A
+        // foreign writable view can change cells without bumping revisions,
+        // so no revision key can make a viewed entry reusable here.
+        let cacheable = self.buffer.live_view_count() == 0;
+        if cacheable && let Some(cached) = self.snapshot_cache.borrow().as_ref() {
+            return cached.clone();
+        }
+        let buffer = self.buffer.snapshot_clone();
+        let hint_was_live = self.shape.point_revision.is_some()
+            && self.shape.point_revision == self.buffer.field_revision("point")
+            && !self.buffer.writable_view_affects("point");
+        let captured = SnapshotEntry::new(SnapshotEntryData {
+            shape: ShapeSlot {
+                tag: self.shape.tag,
+                point_revision: hint_was_live
+                    .then(|| buffer.field_revision("point"))
+                    .flatten(),
+            },
+            buffer,
+            placement: self.placement,
+            placement_revision: self.placement_revision,
+            submobjects: self.submobjects.clone(),
+            parents: self.parents.clone(),
+            updaters: self.updaters.clone(),
+            updater_states: self.updater_states.clone(),
+            updating_suspended: self.updating_suspended,
+            is_animating: self.is_animating,
+            tracker: self.tracker,
+            target: self.target,
+            saved_state: self.saved_state,
+            padding_source: self.padding_source,
+            pins: self.pins,
+            pending_delete: self.pending_delete,
+            uniforms: self.uniforms,
+            z_index: self.z_index,
+            render_primitive: self.render_primitive,
+            image: self.image.clone(),
+            image_revision: self.image_revision,
+            family_cache: self.family_cache.borrow().clone(),
+        });
+        *self.snapshot_cache.borrow_mut() = cacheable.then(|| captured.clone());
+        captured
     }
 
     /// The per-object uniform inventory (read access — §8.4 API surface).
@@ -919,6 +971,27 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Whether two captures share the complete immutable metadata of `mob`.
+    ///
+    /// This is an allocation observation, not a content-equivalence test:
+    /// mutable access and live record views can require distinct payloads
+    /// even when their values happen to agree. Stale or foreign handles
+    /// return false. The slot tables are still visited on capture; only the
+    /// payloads of untouched entries are retained without copying.
+    #[must_use]
+    pub fn shares_entry_with(&self, other: &Self, mob: Mob) -> bool {
+        if self.stage_id != other.stage_id || self.stage_id != mob.stage_id {
+            return false;
+        }
+        matches!(
+            (self.slots.get(mob.index as usize), other.slots.get(mob.index as usize)),
+            (Some((left_generation, Some(left))), Some((right_generation, Some(right))))
+                if *left_generation == mob.generation
+                    && *right_generation == mob.generation
+                    && Rc::ptr_eq(&left.0, &right.0)
+        )
+    }
+
     /// Materialize an independent arena in the same logical handle domain.
     ///
     /// A [`Snapshot`] is the immutable serial-front-end boundary carried by a
@@ -951,7 +1024,41 @@ impl Snapshot {
     }
 }
 
-pub(crate) struct SnapshotEntry {
+/// One immutable metadata payload. Internal mutation (decode, projection and
+/// adversarial fixtures) detaches first, just like the record data it holds.
+#[derive(Clone)]
+pub(crate) struct SnapshotEntry(Rc<SnapshotEntryData>);
+
+impl SnapshotEntry {
+    // Include the pointee and Rc's strong/weak counters in every untrusted
+    // decode/projection budget; charging only this wrapper would undercount.
+    pub(crate) const ALLOCATION_BYTES: usize =
+        std::mem::size_of::<SnapshotEntryData>() + 2 * std::mem::size_of::<usize>();
+
+    pub(crate) fn new(data: SnapshotEntryData) -> Self {
+        Self(Rc::new(data))
+    }
+
+    pub(crate) fn into_data(self) -> SnapshotEntryData {
+        Rc::unwrap_or_clone(self.0)
+    }
+}
+
+impl std::ops::Deref for SnapshotEntry {
+    type Target = SnapshotEntryData;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for SnapshotEntry {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Rc::make_mut(&mut self.0)
+    }
+}
+
+pub(crate) struct SnapshotEntryData {
     pub(crate) buffer: RecordBuffer,
     pub(crate) placement: Placement,
     pub(crate) placement_revision: u64,
@@ -974,6 +1081,35 @@ pub(crate) struct SnapshotEntry {
     pub(crate) image: Option<ImageResource>,
     pub(crate) image_revision: u64,
     pub(crate) family_cache: Option<Arc<Vec<Mob>>>,
+}
+
+impl Clone for SnapshotEntryData {
+    fn clone(&self) -> Self {
+        Self {
+            buffer: self.buffer.snapshot_clone(),
+            placement: self.placement,
+            placement_revision: self.placement_revision,
+            submobjects: self.submobjects.clone(),
+            parents: self.parents.clone(),
+            updaters: self.updaters.clone(),
+            updater_states: self.updater_states.clone(),
+            updating_suspended: self.updating_suspended,
+            is_animating: self.is_animating,
+            tracker: self.tracker,
+            target: self.target,
+            saved_state: self.saved_state,
+            padding_source: self.padding_source,
+            pins: self.pins,
+            pending_delete: self.pending_delete,
+            uniforms: self.uniforms,
+            z_index: self.z_index,
+            shape: self.shape,
+            render_primitive: self.render_primitive,
+            image: self.image.clone(),
+            image_revision: self.image_revision,
+            family_cache: self.family_cache.clone(),
+        }
+    }
 }
 
 /// The stable old-handle → new-handle map a family copy produces — the
@@ -1171,6 +1307,29 @@ impl Stage {
         self.id == snapshot.stage_id
     }
 
+    /// Whether rollback retained allocation identities beyond durable state.
+    ///
+    /// In-memory rollback never reissues a discarded handle or updater token.
+    /// Those physical high-water marks are intentionally absent from durable
+    /// snapshots. A data-only continuation cannot reproduce subsequent
+    /// allocations while this probe is true without restoring that history too.
+    /// Ordinary allocation and deletion keep their cursors in the snapshot.
+    #[must_use]
+    pub fn has_rollback_identity_history(&self) -> bool {
+        self.updater_id_high_water > self.next_updater_id
+            || self
+                .generation_high_water
+                .iter()
+                .enumerate()
+                .any(|(index, &issued)| {
+                    let durable = self.slots.get(index).map_or(0, |slot| {
+                        slot.generation
+                            .saturating_add(u32::from(slot.entry.is_some()))
+                    });
+                    issued > durable
+                })
+    }
+
     // ------------------------------------------------------------ handles
 
     fn available_generation(&self, index: usize, recorded: u32) -> Option<u32> {
@@ -1187,7 +1346,10 @@ impl Stage {
         self.generation_high_water[index] = generation + 1;
     }
 
-    fn alloc(&mut self, entry: Entry) -> Mob {
+    fn alloc(&mut self, mut entry: Entry) -> Mob {
+        // Cross-stage moves remap edges after taking an existing entry. A
+        // captured payload always belongs to its original logical arena.
+        *entry.snapshot_cache.get_mut() = None;
         if let Some(position) = self.free.iter().rposition(|&index| {
             self.available_generation(index as usize, self.slots[index as usize].generation)
                 .is_some()
@@ -1259,7 +1421,9 @@ impl Stage {
         if slot.generation != mob.generation {
             return None;
         }
-        slot.entry.as_mut()
+        let entry = slot.entry.as_mut()?;
+        *entry.snapshot_cache.get_mut() = None;
+        Some(entry)
     }
 
     /// [`Stage::get`] with a typed error for contexts that must report.
@@ -1270,6 +1434,23 @@ impl Stage {
     #[must_use]
     pub fn contains(&self, mob: Mob) -> bool {
         self.get(mob).is_some()
+    }
+
+    /// Durable coordinates of a live handle in this arena's snapshot.
+    /// Process-local stage identity is excluded. Foreign and stale handles
+    /// cannot be exported as references into this snapshot.
+    #[must_use]
+    pub fn snapshot_handle(&self, mob: Mob) -> Option<(u32, u32)> {
+        self.get(mob).map(|_| mob.parts())
+    }
+
+    /// Resolve coordinates against an already restored matching snapshot.
+    /// The generation is checked before a handle in this arena is returned.
+    /// The enclosing durable document must bind the matching snapshot identity.
+    #[must_use]
+    pub fn resolve_snapshot_handle(&self, index: u32, generation: u32) -> Option<Mob> {
+        let mob = Mob::from_parts(self.id, index, generation);
+        self.contains(mob).then_some(mob)
     }
 
     // ---------------------------------------------------- add and compose
@@ -1720,6 +1901,7 @@ impl Stage {
             visited.push(current);
             if let Some(entry) = self.get(current) {
                 *entry.family_cache.borrow_mut() = None;
+                *entry.snapshot_cache.borrow_mut() = None;
                 stack.extend(entry.parents.iter().copied());
             }
         }
@@ -1936,6 +2118,20 @@ impl Stage {
     #[must_use]
     pub fn padding_source(&self, mob: Mob) -> Option<Mob> {
         self.get(mob).and_then(|e| e.padding_source)
+    }
+
+    /// Whether a live entry retains an invisible padding copy's source link.
+    ///
+    /// These observable links are transient and absent from durable snapshots.
+    /// Data-only checkpoint owners must reconstruct them or refuse continuation.
+    /// Detached padding members count even when their source was deleted.
+    #[must_use]
+    pub fn has_padding_sources(&self) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.entry
+                .as_ref()
+                .is_some_and(|entry| entry.padding_source.is_some())
+        })
     }
 
     /// Record each member of a padding copy as a copy of its source member.
@@ -2809,6 +3005,68 @@ impl Stage {
             .unwrap_or_default()
     }
 
+    /// The original callable under an updater removal identity.
+    ///
+    /// This shares the same callable as ordinary mobject copies. Reading a
+    /// binding never invokes it or changes its registration. Replay admission
+    /// can compare the `Rc` identity with an explicitly registered callback.
+    #[must_use]
+    pub fn updater_binding(&self, mob: Mob, id: UpdaterId) -> Option<UpdaterFn> {
+        self.get(mob)?
+            .updaters
+            .iter()
+            .find(|slot| slot.id == id)
+            .map(|slot| slot.func.clone())
+    }
+
+    /// Every live slot's durable updater identities, in arena and execution
+    /// order. Detached objects are included, just as in an arena snapshot.
+    /// This copies only the manifest; it neither snapshots records nor calls
+    /// an updater.
+    #[must_use]
+    pub fn updater_manifest(&self) -> UpdaterManifest {
+        UpdaterManifest {
+            entries: self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(index, slot)| {
+                    let entry = slot.entry.as_ref()?;
+                    (!entry.updaters.is_empty()).then(|| {
+                        (
+                            index as u32,
+                            entry
+                                .updaters
+                                .iter()
+                                .map(|slot| {
+                                    let kind = match &slot.func {
+                                        UpdaterFn::NonDt(_) => UpdaterKindTag::NonDt,
+                                        UpdaterFn::Dt(_) => UpdaterKindTag::Dt,
+                                    };
+                                    (slot.id.raw(), kind)
+                                })
+                                .collect(),
+                        )
+                    })
+                })
+                .collect(),
+        }
+    }
+
+    /// Whether any live arena entry retains native updater attributes.
+    ///
+    /// These typed values are absent from durable snapshots. Checkpoint owners
+    /// must refuse a data-only resume unless they separately reconstruct them.
+    /// Attributes on detached objects and removed updater slots still count.
+    #[must_use]
+    pub fn has_native_updater_state(&self) -> bool {
+        self.slots.iter().any(|slot| {
+            slot.entry
+                .as_ref()
+                .is_some_and(|entry| !entry.updater_states.is_empty())
+        })
+    }
+
     /// Atomically reinstall updater callables under identities recovered from
     /// a durable manifest.
     ///
@@ -3143,9 +3401,10 @@ impl Stage {
 
     // ---------------------------------------------------------- snapshots
 
-    /// CoW snapshot of the whole stage: record storages share until someone
-    /// writes; entries with live views copy eagerly (view-protocol rule
-    /// V5). Cost is O(touched + live-viewed), verified by test.
+    /// CoW snapshot of the whole stage. Untouched entries share their complete
+    /// immutable metadata and record storages; entries with live views copy
+    /// eagerly (V5). Capture visits the slot table, but copies payloads only
+    /// for entries touched or viewed since the previous capture.
     #[must_use]
     pub fn snapshot(&self) -> Snapshot {
         Snapshot {
@@ -3155,47 +3414,7 @@ impl Stage {
             slots: self
                 .slots
                 .iter()
-                .map(|slot| {
-                    (
-                        slot.generation,
-                        slot.entry.as_ref().map(|entry| {
-                            let buffer = entry.buffer.snapshot_clone();
-                            let hint_was_live = entry.shape.point_revision.is_some()
-                                && entry.shape.point_revision
-                                    == entry.buffer.field_revision("point")
-                                && !entry.buffer.writable_view_affects("point");
-                            SnapshotEntry {
-                                shape: ShapeSlot {
-                                    tag: entry.shape.tag,
-                                    point_revision: hint_was_live
-                                        .then(|| buffer.field_revision("point"))
-                                        .flatten(),
-                                },
-                                buffer,
-                                placement: entry.placement,
-                                placement_revision: entry.placement_revision,
-                                submobjects: entry.submobjects.clone(),
-                                parents: entry.parents.clone(),
-                                updaters: entry.updaters.clone(),
-                                updater_states: entry.updater_states.clone(),
-                                updating_suspended: entry.updating_suspended,
-                                is_animating: entry.is_animating,
-                                tracker: entry.tracker,
-                                target: entry.target,
-                                saved_state: entry.saved_state,
-                                padding_source: entry.padding_source,
-                                pins: entry.pins,
-                                pending_delete: entry.pending_delete,
-                                uniforms: entry.uniforms,
-                                z_index: entry.z_index,
-                                render_primitive: entry.render_primitive,
-                                image: entry.image.clone(),
-                                image_revision: entry.image_revision,
-                                family_cache: entry.family_cache.borrow().clone(),
-                            }
-                        }),
-                    )
-                })
+                .map(|slot| (slot.generation, slot.entry.as_ref().map(Entry::snapshot)))
                 .collect(),
             free: self.free.clone(),
             roots: self.roots.clone(),
@@ -3258,6 +3477,7 @@ impl Stage {
                     image_revision: e.image_revision,
                     family_cache: RefCell::new(e.family_cache.clone()),
                     bbox: RefCell::new(BboxCache::default()),
+                    snapshot_cache: RefCell::new(None),
                 }),
             })
             .collect();

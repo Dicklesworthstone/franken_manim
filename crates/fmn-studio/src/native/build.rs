@@ -29,6 +29,7 @@ pub type NativeBuild =
 pub struct NativeBuildContext<'a> {
     pub(super) scene: &'a mut Scene,
     pub(super) spans: &'a mut SpanRegistry,
+    pub(super) changed_bindings: &'a mut bool,
 }
 
 impl NativeBuildContext<'_> {
@@ -61,11 +62,15 @@ impl NativeBuildContext<'_> {
     /// Input still runs through the Scene's single dispatcher and capture seam;
     /// obtaining this handle neither queues nor dispatches an event.
     pub fn event_dispatcher_mut(&mut self) -> &mut EventDispatcher {
+        // A fresh factory cannot recreate a listener installed by an already
+        // completed deferred step. Keep this prefix on verified cold replay.
+        *self.changed_bindings = true;
         self.scene.event_dispatcher_mut()
     }
 
     /// Attach native source/type-setting spans to newly constructed handles.
     pub fn spans_mut(&mut self) -> &mut SpanRegistry {
+        *self.changed_bindings = true;
         self.spans
     }
 

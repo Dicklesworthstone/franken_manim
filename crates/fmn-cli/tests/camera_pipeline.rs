@@ -401,11 +401,11 @@ fn camera_native_streams_subdivisions_and_no_clobber_share_the_output_contract()
     assert_eq!(std::fs::read_dir(output).unwrap().count(), 0);
 }
 
-#[test]
-fn svg_bundle_uses_recorded_final_camera_background_and_fixed_overlay() {
+fn camera_vector_bundle(with_tail: bool) -> Vec<u8> {
     struct CameraVectors {
         rig: fmn_scene::CameraRig,
         base: CameraConfig,
+        with_tail: bool,
     }
     impl fmn::SceneConstruct for CameraVectors {
         fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
@@ -431,6 +431,19 @@ fn svg_bundle_uses_recorded_final_camera_background_and_fixed_overlay() {
                 },
             )?;
             stage.wait(0.125)?;
+            if self.with_tail {
+                target.frame.set_center([-2.0, 0.0, 0.0])?;
+                target.frame.set_width(10.0)?;
+                let animation = self.rig.animate_to(stage.scene_mut(), &target)?;
+                stage.play_prepared_with(
+                    vec![Box::new(animation)],
+                    fmn_scene::PlayOverrides {
+                        run_time: Some(0.25),
+                        rate_func: Some(fmn::animation::RateFunc::linear()),
+                        ..Default::default()
+                    },
+                )?;
+            }
             Ok(())
         }
     }
@@ -444,13 +457,14 @@ fn svg_bundle_uses_recorded_final_camera_background_and_fixed_overlay() {
         ..CameraConfig::default()
     };
     base.frame.set_width(8.0).unwrap();
-    let bytes = fmn::export_camera_bundle_bytes(
+    fmn::export_camera_bundle_bytes(
         |scene, base| {
             let rig = fmn_scene::CameraRig::new(scene, base)?;
             Ok((
                 CameraVectors {
                     rig,
                     base: base.clone(),
+                    with_tail,
                 },
                 rig,
             ))
@@ -460,7 +474,12 @@ fn svg_bundle_uses_recorded_final_camera_background_and_fixed_overlay() {
     )
     .unwrap()
     .bundle
-    .bytes;
+    .bytes
+}
+
+#[test]
+fn svg_bundle_uses_recorded_final_camera_background_and_fixed_overlay() {
+    let bytes = camera_vector_bundle(false);
     let bundle = TimelineBundle::from_bytes(&bytes).unwrap();
     assert!(bundle.has_camera_track());
     let (stage, camera) = bundle
@@ -500,6 +519,115 @@ fn svg_bundle_uses_recorded_final_camera_background_and_fixed_overlay() {
             String::from_utf8_lossy(&result.stderr)
         );
         let bytes = std::fs::read(output.join("CameraSvg.svg")).unwrap();
+        let svg = fmn::geometry::SvgDocument::parse(&bytes).unwrap();
+        assert_eq!(svg.shapes.len(), expected.len() + 1);
+        assert_eq!(
+            svg.shapes[0].style.fill,
+            Some(fmn::geometry::Paint::Color(RED))
+        );
+        assert_eq!(svg.shapes[0].style.fill_opacity, 0.25);
+        for (shape, expected) in svg.shapes[1..].iter().zip(&expected) {
+            assert_eq!(shape.path.points().len(), expected.len());
+            for (actual, expected) in shape.path.points().iter().zip(expected) {
+                assert!((actual[0] - expected[0]).abs() < 1e-4);
+                assert!((actual[1] - expected[1]).abs() < 1e-4);
+            }
+        }
+        if let Some(baseline) = &baseline {
+            assert_eq!(&bytes, baseline);
+        } else {
+            baseline = Some(bytes);
+        }
+    }
+}
+
+#[test]
+fn compiled_camera_ranges_preserve_source_camera_and_svg_stop_state() {
+    let bytes = camera_vector_bundle(true);
+    let bundle = TimelineBundle::from_bytes(&bytes).unwrap();
+    assert_eq!(bundle.frame_count(), 5);
+    assert_eq!(bundle.segment_frame_range(1), Some(2..3));
+    let (stage, camera) = bundle.stage_at_with_camera(2, (64, 48)).unwrap();
+    let camera = camera.unwrap();
+    let expected: Vec<Vec<[f64; 3]>> = stage
+        .draw_plan()
+        .items()
+        .iter()
+        .map(|item| {
+            stage
+                .get_points(item.mob)
+                .unwrap()
+                .into_iter()
+                .map(|point| {
+                    camera
+                        .project(point, item.key.uniforms.is_fixed_in_frame)
+                        .pixel((64, 48))
+                        .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    let root = root();
+    let source = root.join("camera-range.fmtl");
+    std::fs::write(&source, bytes).unwrap();
+    let full = root.join("full");
+    ok(
+        run(&source, &full, "CameraRange", "1", "png_sequence", &[]),
+        "compiled-camera-cpu",
+    );
+    let full = pngs(&full.join("CameraRange"));
+    assert_eq!(full.len(), 5);
+    assert_ne!(full[0], full[2]);
+    assert_ne!(full[2], full[4]);
+    for threads in ["1", "4", "16"] {
+        let output = root.join(format!("range-{threads}"));
+        let stdout = ok(
+            run(
+                &source,
+                &output,
+                "CameraRange",
+                threads,
+                "png_sequence",
+                &["-n", "1,2", "--prerun"],
+            ),
+            "compiled-camera-cpu",
+        );
+        assert!(stdout.contains("\"frames\":1,\"segments\":1"), "{stdout}");
+        assert!(stdout.contains("\"source_frames\":[2,3]"), "{stdout}");
+        assert!(stdout.contains("\"source_segments\":[1,2]"), "{stdout}");
+        let naming = fmn_scene::OutputNaming {
+            output_directory: output,
+            start_at_play: Some(1),
+            end_at_play: Some(2),
+            ..Default::default()
+        };
+        assert_eq!(pngs(&naming.root("CameraRange")), [full[2].clone()]);
+    }
+    let mut baseline = None;
+    for threads in ["1", "4"] {
+        let output = root.join(format!("svg-{threads}"));
+        let result = run(
+            &source,
+            &output,
+            "CameraRange",
+            threads,
+            "svg",
+            &["-n", "1,2", "--prerun"],
+        );
+        let stdout = String::from_utf8(result.stdout).unwrap();
+        assert!(
+            result.status.success(),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert!(stdout.contains("\"source_frames\":[2,3]"), "{stdout}");
+        let naming = fmn_scene::OutputNaming {
+            output_directory: output,
+            start_at_play: Some(1),
+            end_at_play: Some(2),
+            ..Default::default()
+        };
+        let bytes = std::fs::read(naming.artifact("CameraRange", "svg")).unwrap();
         let svg = fmn::geometry::SvgDocument::parse(&bytes).unwrap();
         assert_eq!(svg.shapes.len(), expected.len() + 1);
         assert_eq!(

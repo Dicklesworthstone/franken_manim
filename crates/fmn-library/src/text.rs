@@ -33,8 +33,9 @@ use fmn_text::{
 };
 
 pub use fmn_text::Align;
-pub use fmn_text::maps::{SourceSelector, SourceStyle};
-use fmn_text::markup::CharStyle;
+pub use fmn_text::layout::BASELINE_SKIP;
+pub use fmn_text::maps::{ScopedStyle, SizeChange, SourceSelector, SourceStyle, StyleFields};
+pub use fmn_text::markup::CharStyle;
 
 use crate::spans::{SpanKindU8, SpanMapData, SpanMapEntry};
 use crate::style::Style;
@@ -311,6 +312,15 @@ impl<'a> Text<'a> {
         self
     }
 
+    /// Replace the inherited character style before markup is interpreted.
+    /// Inner markup and configured source scopes may override these fields;
+    /// the original source bytes and their glyph provenance remain intact.
+    #[must_use]
+    pub fn inherited_style(mut self, style: CharStyle) -> Self {
+        self.base_style = style;
+        self
+    }
+
     /// The `font_size=` surface.
     #[must_use]
     pub fn font_size(mut self, font_size: f64) -> Self {
@@ -389,6 +399,15 @@ impl<'a> Text<'a> {
     #[must_use]
     pub fn source_styles(mut self, styles: &'a [SourceStyle<'a>]) -> Self {
         self.maps.source_styles = styles;
+        self
+    }
+
+    /// Character styles nested with markup over original UTF-8 source ranges.
+    /// Contained scopes override enclosing scopes; identical ranges retain
+    /// authored order. See [`ScopedStyle`] for partial-overlap semantics.
+    #[must_use]
+    pub fn scoped_styles(mut self, styles: &'a [ScopedStyle<'a>]) -> Self {
+        self.maps.scoped_styles = styles;
         self
     }
 
@@ -539,6 +558,13 @@ impl<'a> MarkupText<'a> {
         self
     }
 
+    /// Inherited character style, applied before inline markup and scopes.
+    #[must_use]
+    pub fn inherited_style(mut self, style: CharStyle) -> Self {
+        self.inner = self.inner.inherited_style(style);
+        self
+    }
+
     /// The config's `text.font_size_for_unit_height`.
     #[must_use]
     pub fn font_size_for_unit_height(mut self, fsuh: f64) -> Self {
@@ -606,6 +632,13 @@ impl<'a> MarkupText<'a> {
     #[must_use]
     pub fn source_styles(mut self, styles: &'a [SourceStyle<'a>]) -> Self {
         self.inner = self.inner.source_styles(styles);
+        self
+    }
+
+    /// Nested character styles over the original markup's UTF-8 bytes.
+    #[must_use]
+    pub fn scoped_styles(mut self, styles: &'a [ScopedStyle<'a>]) -> Self {
+        self.inner = self.inner.scoped_styles(styles);
         self
     }
 

@@ -7,6 +7,7 @@ import inspect
 import itertools
 import math
 import operator
+import re
 
 _MAX_BYTES = 262_144
 _MAX_ITEMS = 4096
@@ -54,12 +55,14 @@ def _stops(g, values, name):
     return result
 
 
-def _resolved_selector(obj, selector, offsets, budget, multiplier):
+def _resolved_selector(obj, selector, offsets, budget, multiplier, *, scope_limit=None):
     """Use the public selector protocol, then retain exact original bytes."""
     result = []
     for span in itertools.islice(iter(obj.find_spans_by_selector(selector)), budget[0] + 1):
         if budget[0] == 0:
             raise ValueError("Text selectors exceed the 262145-range budget")
+        if scope_limit is not None and len(result) == scope_limit:
+            raise ValueError("Text scoped styles exceed the 4096-entry budget")
         start, end = (operator.index(index) for index in span)
         if not 0 <= start <= end < len(offsets):
             raise ValueError("Text style selectors must identify valid source character ranges")
@@ -72,14 +75,111 @@ def _resolved_selector(obj, selector, offsets, budget, multiplier):
     return result
 
 
+def _config_bool(value, name):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str) and value.lower() in ("true", "false"):
+        return value.lower() == "true"
+    raise ValueError(name + " must be true or false")
+
+
+def _config_size(value, name, font_size):
+    """Pango's numeric units and explicit point/relative sizes, without a font host."""
+    if isinstance(value, bool):
+        raise TypeError(name + " must be a Pango size or a point/percentage string")
+    text = str(value).strip().lower()
+    if text in ("larger", "smaller"):
+        return ("relative", 1.2 if text == "larger" else 1 / 1.2)
+    if text.endswith("%"):
+        return ("relative", _number(text[:-1], name, positive=True) / 100)
+    if text.endswith("pt"):
+        return ("absolute", _number(text[:-2], name, positive=True) / font_size)
+    if text in ("xx-small", "x-small", "small", "medium", "large", "x-large", "xx-large"):
+        raise NotImplementedError(name + " uses a host-dependent named size; use points, Pango units or a percentage")
+    units = _number(value, name, positive=True)
+    if not units.is_integer():
+        raise ValueError(name + " without pt or % must be an integer in 1024ths of a point")
+    return ("absolute", units / 1024 / font_size)
+
+
+def _config_features(value, name):
+    # Scribe exposes one bundled-ligature switch, not arbitrary OpenType
+    # feature selection. Admit the Reference's complete suppression recipe
+    # and its all-enabled inverse; never silently ignore a partial setting.
+    if not isinstance(value, str):
+        raise TypeError(name + " must be an OpenType feature string")
+    settings = {}
+    for item in value.split(","):
+        match = re.fullmatch(r"\s*(liga|dlig|clig|hlig)\s*=\s*([01])\s*", item)
+        if match is None or match[1] in settings:
+            raise NotImplementedError(name + " supports only a complete, uniform liga/dlig/clig/hlig setting")
+        settings[match[1]] = match[2] == "1"
+    if len(settings) != 4 or len(set(settings.values())) != 1:
+        raise NotImplementedError(name + " supports only a complete, uniform liga/dlig/clig/hlig setting")
+    return not settings["liga"]
+
+
+def _config_attributes(g, config, name, font_size, *, global_scope=False):
+    """Normalize only attributes represented by Scribe's native typed styles."""
+    fields, layout = {}, {}
+    for key, value in _map({}, config, name).items():
+        if not isinstance(key, str):
+            raise TypeError(name + " attribute names must be strings")
+        key = key.lower()
+        label = name + " attribute " + repr(key)
+        if isinstance(value, str) and len(value.encode("utf-8")) > 1024:
+            raise ValueError(label + " exceeds 1024 UTF-8 bytes")
+        if key in ("foreground", "fgcolor", "color"):
+            if isinstance(value, str) and value.startswith("#") and len(value) == 9:
+                raise NotImplementedError(label + " does not support a foreground alpha channel; use RGB")
+            color = tuple(float(v) for v in g["color_to_rgb"](value))
+            if len(color) != 3 or any(not math.isfinite(v) or not 0 <= v <= 1 for v in color):
+                raise ValueError(label + " must contain finite RGB channels in [0, 1]")
+            fields["color"] = color
+        elif key in ("font_family", "face"):
+            if not isinstance(value, str):
+                raise TypeError(label + " must be a font family name")
+            fields["family"] = value
+        elif key in ("font_style", "style"):
+            normalized = str(value).lower()
+            if normalized not in ("normal", "italic", "oblique"):
+                raise ValueError(label + " must be normal, italic or oblique")
+            fields["italic"] = normalized != "normal"
+        elif key in ("font_weight", "weight"):
+            normalized = str(value).lower()
+            if normalized not in ("normal", "bold", "400", "700"):
+                raise NotImplementedError(label + " supports the bundled normal (400) and bold (700) faces")
+            fields["bold"] = normalized in ("bold", "700")
+        elif key == "underline":
+            normalized = str(value).lower()
+            if normalized not in ("none", "single"):
+                raise NotImplementedError(label + " supports none or single")
+            fields["underline"] = normalized == "single"
+        elif key == "strikethrough":
+            fields["strike"] = _config_bool(value, label)
+        elif key in ("font_size", "size"):
+            fields["size"] = _config_size(value, label, font_size)
+        elif key == "line_height" and global_scope:
+            height = _number(value, label, positive=True)
+            if height < 1024:
+                layout["line_height"] = ("relative", height)
+            elif height.is_integer():
+                layout["line_height"] = ("absolute", height / 1024 / font_size)
+            else:
+                raise ValueError(label + " absolute lengths must be integer Pango units")
+        elif key == "font_features" and global_scope:
+            layout["disable_ligatures"] = _config_features(value, label)
+        else:
+            raise NotImplementedError(label + " is not supported by native text attributes")
+    return fields, layout
+
+
 def text_recipe(g, obj, source):
     """Compile the current public fields before publishing a new glyph family."""
     from .string_lifecycle import typesetting_value
     size = len(source.encode("utf-8"))
     if size > _MAX_BYTES:
         raise ValueError("Text source exceeds 262144 bytes")
-    if obj.global_config or obj.local_configs:
-        raise NotImplementedError("Text global_config/local_configs require unsupported Pango attributes; use native font/style maps")
     # Code's empty/Consolas names select its bundled typewriter fallback.
     font = obj.font if isinstance(obj, g["Code"]) else typesetting_value(g, obj, "text", "font")
     if not isinstance(font, str):
@@ -107,6 +207,15 @@ def text_recipe(g, obj, source):
                    line_spacing=1. if obj.lsh is None else _number(obj.lsh, "Text line spacing", positive=True),
                    justify=bool(obj.justify), indent=_number(obj.indent, "Text indent"),
                    disable_ligatures=bool(obj.disable_ligatures))
+    global_style, layout = _config_attributes(
+        g, obj.global_config, "Text global_config", options["font_size"], global_scope=True)
+    local_configs = _map({}, obj.local_configs, "Text local_configs")
+    local_styles = [(selector, _config_attributes(g, config, "Text local_configs", options["font_size"])[0])
+                    for selector, config in local_configs.items()]
+    if size * sum(max(len(fields), 1) for _, fields in local_styles) > _MAX_STYLE_WORK:
+        raise ValueError("Text style matching exceeds the 16777216-byte-work budget")
+    options["global_style"] = global_style
+    options.update(layout)
     if obj.line_width is not None:
         options["line_width"] = _number(obj.line_width, "Text line_width", positive=True)
     if isinstance(obj, g["Code"]):
@@ -124,6 +233,7 @@ def text_recipe(g, obj, source):
     # rebuild. Restore the old published source if validation/layout fails.
     obj.string = source
     try:
+        scoped = []
         for name in ("t2f", "t2s", "t2w", "t2g"):
             entries = []
             for selector, value in maps[name].items():
@@ -132,8 +242,25 @@ def text_recipe(g, obj, source):
                 elif name == "t2w":
                     value = _style_flag(value, name, "BOLD")
                 multiplier = 1 + len(value) if name == "t2g" else 1
-                entries.append((_resolved_selector(obj, selector, offsets, budget, multiplier), value))
+                scoped_entry = bool(local_styles) and name != "t2g"
+                ranges = _resolved_selector(
+                    obj, selector, offsets, budget, multiplier,
+                    scope_limit=_MAX_ITEMS - len(scoped) if scoped_entry else None)
+                if scoped_entry:
+                    # In the Reference these are configured spans preceding
+                    # local_configs. Native scope nesting lets a local equal
+                    # range override them without erasing inline markup.
+                    field = {"t2f": "family", "t2s": "italic", "t2w": "bold"}[name]
+                    scoped.extend((start, end, {field: value}) for start, end in ranges)
+                else:
+                    entries.append((ranges, value))
             options[name] = entries
+        for selector, fields in local_styles:
+            ranges = _resolved_selector(
+                obj, selector, offsets, budget, max(len(fields), 1),
+                scope_limit=_MAX_ITEMS - len(scoped))
+            scoped.extend((start, end, fields.copy()) for start, end in ranges)
+        options["scoped_styles"] = scoped
     finally:
         obj.string = previous_source
     return options, maps, gradient
@@ -172,8 +299,9 @@ def install_text_authoring(native):
         source = str(p["text"])
         if len(source.encode("utf-8")) > _MAX_BYTES:
             raise ValueError("Text source exceeds 262144 bytes")
-        if p["global_config"] or p["local_configs"]:
-            raise NotImplementedError("Text global_config/local_configs require unsupported Pango attributes; use native font/style maps")
+        global_config = _map({}, p["global_config"], "Text global_config")
+        local_configs = {selector: _map({}, config, "Text local_configs attributes")
+                         for selector, config in _map({}, p["local_configs"], "Text local_configs").items()}
         maps = {name: _map(p[long], p[name], name) for name, long in (
             ("t2c", "text2color"), ("t2f", "text2font"), ("t2s", "text2slant"),
             ("t2w", "text2weight"), ("t2g", "text2gradient"),
@@ -192,7 +320,7 @@ def install_text_authoring(native):
         self.weight, self.slant = p["weight"], p["slant"]
         self.alignment, self.line_width = p["alignment"], p["line_width"]
         self.justify, self.indent, self.lsh = p["justify"], p["indent"], spacing
-        self.global_config, self.local_configs = {}, {}
+        self.global_config, self.local_configs = global_config, local_configs
         self.disable_ligatures, self.isolate = p["disable_ligatures"], p["isolate"]
         self.gradient = None if p["gradient"] is None else _stops(g, p["gradient"], "gradient")
         self.use_labelled_svg, self.base_color, self.protect = labelled, base_color, protect

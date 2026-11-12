@@ -130,6 +130,7 @@ impl PartialEq for BatchKey {
                 .zip(b.clip_planes.iter().flatten())
                 .all(|(x, y)| x.to_bits() == y.to_bits())
             && a.anti_alias_width.to_bits() == b.anti_alias_width.to_bits()
+            && a.glow_factor.to_bits() == b.glow_factor.to_bits()
             && a.joint_type == b.joint_type
             && a.flat_stroke == b.flat_stroke
             && a.scale_stroke_with_zoom == b.scale_stroke_with_zoom

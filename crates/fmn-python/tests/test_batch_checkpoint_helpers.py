@@ -78,6 +78,28 @@ class CheckpointTests(unittest.TestCase):
     def document(self):
         return json.loads(self.journal.read_text())
 
+    def test_wav_dither_receipts_round_trip_and_reject_invalid_policy(self):
+        destination = self.output / "tone.wav"
+        for seed in (None, 0, (1 << 64) - 1):
+            receipt = batch.RenderResult(
+                destination=destination, format="wav", resolution=(96, 54), fps=8,
+                threads=1, engine="test-protocol-not-native", bytes=44,
+                digest="0" * 64, frame_count=None, sample_frames=0, seed=7,
+                audio_dither_seed=seed,
+            )
+            row = {"name": "tone", "destination": str(destination), "result": receipt.as_dict()}
+            restored = batch._restored_outcome(row).result
+            self.assertEqual(restored.audio_dither_seed, seed)
+            self.assertEqual(restored.as_dict(), receipt.as_dict())
+            self.assertEqual("audio_dither_seed" in restored.as_dict(), seed is not None)
+        for invalid in (True, -1, 1 << 64, 1.0, "17"):
+            row["result"]["audio_dither_seed"] = invalid
+            with self.assertRaisesRegex(ValueError, "audio_dither_seed"):
+                batch._restored_outcome(row)
+        row["result"].update(audio_dither_seed=0, format="png")
+        with self.assertRaisesRegex(ValueError, "audio_dither_seed"):
+            batch._restored_outcome(row)
+
     def test_fail_fast_resume_only_unfinished_jobs(self):
         self.failures[Second] = RuntimeError("authored failure")
         with self.assertRaises(batch.BatchRenderError) as caught:

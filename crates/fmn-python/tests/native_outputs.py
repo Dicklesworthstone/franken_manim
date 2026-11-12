@@ -455,6 +455,31 @@ assert wav_replay.read_bytes() == wav_bytes
 reports["wav"] = wav_report
 thread_replays += 1
 
+# The optional WAV quantizer reaches the real CLI, native mixer, publication,
+# and receipt. Its counters belong to samples, never to workers or channels.
+assert "audio_dither_seed" not in wav_report, "default receipt shape changed"
+dithered_outputs = {}
+for dither_seed in (0, (1 << 64) - 1):
+    for workers in (1, 4, 16):
+        destination = output_root / f"dither-{dither_seed}-{workers}.wav"
+        code, report = console(
+            *wav_arguments, "--threads", str(workers),
+            "--audio-dither-seed", str(dither_seed), "--output", str(destination),
+        )
+        assert code == 0, report
+        assert report["audio_dither_seed"] == dither_seed
+        assert report["sample_frames"] == wav_report["sample_frames"]
+        encoded = destination.read_bytes()
+        assert len(encoded) == len(wav_bytes) and encoded != wav_bytes
+        with wave.open(str(destination), "rb") as decoded:
+            dithered_pcm = np.frombuffer(decoded.readframes(3000), dtype="<i2").reshape(3000, 2)
+        assert np.max(np.abs(dithered_pcm.astype(np.int32) - samples.astype(np.int32))) <= 2
+        assert np.any(dithered_pcm[:1500]), "silence reduction did not use TPDF"
+        assert not np.array_equal(dithered_pcm[:, 0], dithered_pcm[:, 1]), "channel counters aliased"
+        assert encoded == dithered_outputs.setdefault(dither_seed, encoded), "thread-dependent PCM"
+        thread_replays += 1
+assert dithered_outputs[0] != dithered_outputs[(1 << 64) - 1], "dither seed was ignored"
+
 for scene_name, failure_code, message in (
     ("MissingSound", 6, "missing.wav"),
     ("MalformedSound", 6, "unrecognized audio container"),
@@ -721,6 +746,26 @@ if ffmpeg:
             assert code2 == 0, cert_report2
             assert cert_dest.read_bytes() == cert_dest2.read_bytes(), f"certified {cert_format} output drifted across runs"
             assert cert_report["closure_digest"] == cert_report2["closure_digest"], "closure digest drifted"
+
+            if cert_format == "wav":
+                # The same authored scene with another reduction seed is a
+                # different certified input closure. Replays retain both bytes
+                # and closure even when the mixer worker count changes.
+                seeded = {}
+                for dither_seed, workers in ((0, 1), (0, 4), ((1 << 64) - 1, 1)):
+                    destination = output_root / f"certified-dither-{dither_seed}-{workers}.wav"
+                    code, report = console(
+                        str(source), scene_name, "--format", "wav", "--reproducible",
+                        "--audio-dither-seed", str(dither_seed), "--threads", str(workers),
+                        "--output", str(destination),
+                    )
+                    assert code == 0 and report["audio_dither_seed"] == dither_seed, report
+                    assert report["closure_digest"] != cert_report["closure_digest"]
+                    sidecar = destination.parent / (destination.name + ".manifest") / "manifest.txt"
+                    assert "audio/pcm-reduction" in sidecar.read_text()
+                    identity = (destination.read_bytes(), report["closure_digest"])
+                    assert identity == seeded.setdefault(dither_seed, identity)
+                assert seeded[0][1] != seeded[(1 << 64) - 1][1]
 
             # Preflight no-clobber refusal if manifest destination exists
             code3, err_report3 = console(*cert_args)

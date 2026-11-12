@@ -129,11 +129,27 @@ these admission checks alone.
 
 ## Checkpoints and deterministic recovery
 
-Deferred closures and the pending executable continuation are not serialized.
-The source factory reconstructs them, then ordinary native execution reaches
-the requested checkpoint. The worker verifies actual SceneState bytes and
-journal hashes before installing that rebuilt owner. This works both before
-and after late object construction and native updater registration.
+Deferred closures and pending executable work are not serialized. With
+`ColdVerified`, the source factory reconstructs them, then ordinary native
+execution reaches the requested checkpoint. The worker verifies actual
+SceneState bytes and journal hashes before installing that rebuilt owner. This
+works both before and after late construction and native updater registration.
+
+With `Checkpointed`, an original trailing suffix of `Wait`/`WaitFrames` can
+resume directly once all preceding construction and animation lifecycles have
+finished. The snapshot supplies the completed prefix's geometry, allocated
+objects, rational clock, play count and RNG state. The fresh factory supplies
+registered updater functions and the unchanged trailing wait declarations;
+the finished build/play callbacks are not executed again. The exact open-wait
+cursor preserves its original alpha law and pending epilogue. Checkpoints
+inside an animation or an earlier wait with pending executable steps still use
+verified cold reconstruction.
+
+Direct restore requires the same registered-function contract as all-wait
+programs. Author event listeners, deferred span changes, sound cues, opaque updater captures,
+input history and other transient state retain cold reconstruction. See
+[Native Studio worker recovery](NATIVE_STUDIO_WORKER.md#restore-registered-wait-programs)
+for registration, identity checks and the runnable `native_checkpoint` example.
 
 `NativeReplayPolicy::Disabled` remains the default for unclassified callbacks.
 `ColdVerified` still requires independently constructed captures and a complete

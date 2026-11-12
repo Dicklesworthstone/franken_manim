@@ -6,7 +6,7 @@ use fmn_anim::{FramePacket, RationalFrameClock, prepare_animation};
 use fmn_core::rng::RngRoot;
 use fmn_hash::sha256;
 use fmn_mobject::{AnimateArgs, Mobject, Snapshot, Stage};
-use fmn_scene::recording::{RecordingError, SceneBundleRecorder};
+use fmn_scene::recording::{CompactRecordingLimits, RecordingError, SceneBundleRecorder};
 use fmn_scene::{
     BundleError, BundleExportLimits, BundleSegmentKind, CaptureReason, IntegrationError,
     LifecycleEvent, PlayOverrides, RuntimeConfig, Scene, SceneSink, TimelineBundle,
@@ -188,6 +188,62 @@ fn static_terminal_capture_is_explicit_and_deterministic() {
     assert_eq!(
         restored.snapshot().to_bytes().unwrap(),
         stage.snapshot().to_bytes().unwrap()
+    );
+}
+
+#[test]
+fn compact_full_state_retains_detached_objects_and_bounds_canonical_encoding() {
+    let mut stage = Stage::new();
+    let visible = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    stage.add_to_scene(visible).unwrap();
+    stage.add(Mobject::from_points(&[[7.0, 8.0, 0.0], [9.0, 10.0, 0.0]]));
+    let full = stage.snapshot().to_bytes().unwrap();
+    let picture = stage.snapshot().to_render_bytes().unwrap();
+    assert_ne!(full, picture, "detached state distinguishes the contracts");
+    let limits = CompactRecordingLimits {
+        max_snapshot_bytes: full.len(),
+        max_snapshot_work_bytes: full.len() as u64,
+        ..CompactRecordingLimits::default()
+    };
+    let mut recorder = SceneBundleRecorder::new_compact(30, limits).unwrap();
+    recorder.capture_terminal_still(&stage).unwrap();
+    let artifact = recorder.finish().unwrap();
+    let bundle = TimelineBundle::from_bytes(&artifact.bytes).unwrap();
+    assert_eq!(
+        bundle.segment_kind(0),
+        Some(BundleSegmentKind::CompactRecorded)
+    );
+    assert_eq!(
+        bundle.stage_at(0).unwrap().snapshot().to_bytes().unwrap(),
+        full
+    );
+
+    let mut short = SceneBundleRecorder::new_compact(
+        30,
+        CompactRecordingLimits {
+            max_snapshot_bytes: full.len() - 1,
+            ..limits
+        },
+    )
+    .unwrap();
+    assert!(short.capture_terminal_still(&stage).is_err());
+    assert!(matches!(
+        short.finish(),
+        Err(RecordingError::SnapshotLimit { .. })
+    ));
+
+    let mut render_only = SceneBundleRecorder::new_compact_render_only(30, limits).unwrap();
+    render_only.capture_terminal_still(&stage).unwrap();
+    let artifact = render_only.finish().unwrap();
+    assert_eq!(
+        TimelineBundle::from_bytes(&artifact.bytes)
+            .unwrap()
+            .stage_at(0)
+            .unwrap()
+            .snapshot()
+            .to_bytes()
+            .unwrap(),
+        picture
     );
 }
 

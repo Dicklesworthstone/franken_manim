@@ -274,6 +274,12 @@ def install_scene_execution(native: Any) -> None:
                 if primary is not error:
                     _note(primary, "outer animation cleanup also failed: " + type(error).__name__)
                 owner.unwind(primary)
+                # Manual begin_insert/end_insert has no context-manager exit
+                # to cancel failed execution. The admitted recording owner
+                # must discard its partial output and release writer flags.
+                insert = vars(scene).get("_fmn_file_writer_insert")
+                if insert is not None and not isinstance(primary, g.get("EndScene", ())):
+                    insert._cancel_preserving(primary)
                 if primary is error:
                     raise
                 raise primary from None

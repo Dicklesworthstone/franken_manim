@@ -166,6 +166,72 @@ class BundleCliProtocol(unittest.TestCase):
         self.assertIn("code-free", receipt["help"])
         self.assertEqual(self.native.instances, [])
 
+    def enable_compact(self):
+        begin = self.native._portal_begin_bundle
+        def compact_begin(scene, *arguments):
+            begin(scene, *arguments)
+            self.native.bundle_calls[-1] = ("compact", *arguments)
+        self.native._portal_begin_compact_bundle = compact_begin
+
+    def test_compact_storage_and_independent_budgets_reach_native(self):
+        self.enable_compact()
+        code, receipt, _ = self.export(
+            "Example", "--bundle-storage=compact", "--resolution=128x72", "--fps=24",
+            "--bundle-max-retained-bytes", "123456", "--bundle-max-snapshot-bytes=3456",
+            "--bundle-max-snapshot-work-bytes", "9000000000", "--bundle-camera")
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt["bundle"]["storage"], "compact")
+        self.assertEqual(receipt["bundle"]["fmtl_minor"], 3)
+        self.assertTrue(receipt["bundle"]["camera_track"])
+        begin = self.native.bundle_calls[0]
+        self.assertEqual(begin[:5], ("compact", str(self.output), 128, 72, 24))
+        self.assertEqual(begin[6:13],
+                         (1_000_000, 256 * 1024 * 1024, True, False, 123456, 3456, 9_000_000_000))
+        self.assertEqual(self.native.bundle_calls[-1], ("finish",))
+        self.assertEqual(len(self.native.instances), 1)
+
+    def test_compact_invalid_options_refuse_before_source_and_keep_robot(self):
+        self.enable_compact()
+        self.source.write_text("raise AssertionError('source executed')\n")
+        invalid = (
+            ("--bundle-storage",),
+            ("--bundle-storage", "unknown"),
+            ("--bundle-storage=compact", "--bundle-storage=compact"),
+            ("--bundle-max-retained-bytes", "1000"),
+            ("--bundle-storage=compact", "--bundle-max-retained-bytes", "0"),
+            ("--bundle-storage=compact", "--bundle-max-snapshot-bytes", "67108865"),
+            ("--bundle-storage=compact", "--bundle-max-snapshot-work-bytes", "17179869185"),
+            ("--bundle-storage=compact", "--bundle-max-snapshot-work-bytes", "-1"),
+            ("--bundle-storage=compact", "--bundle-max-snapshot-work-bytes", "1.0"),
+            ("--bundle-storage=compact", "--bundle-max-snapshot-bytes", "1",
+             "--bundle-max-snapshot-bytes", "2"),
+        )
+        for args in invalid:
+            with self.subTest(args=args):
+                code, receipt, _ = self.invoke(str(self.source), "--format=fmtl", *args, "--robot")
+                self.assertEqual(code, 2)
+                self.assertEqual(receipt["phase"], "options")
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(self.native.bundle_calls, [])
+
+    def test_compact_missing_capability_is_an_explicit_early_refusal(self):
+        self.source.write_text("raise AssertionError('source executed')\n")
+        code, receipt, _ = self.export("--bundle-storage=compact")
+        self.assertEqual(code, 4)
+        self.assertIn("matching native wheel", receipt["message"])
+        self.assertEqual(self.native.instances, [])
+        self.assertEqual(self.native.bundle_calls, [])
+
+    def test_compact_requires_fmtl_and_option_values_do_not_activate_it(self):
+        self.assertIsNone(self.invoke("--video_dir", "--bundle-storage", "compact")[0])
+        self.source.write_text("raise AssertionError('source executed')\n")
+        for args in (("--bundle-storage=compact",),
+                     ("--bundle-storage=compact", "--format=png")):
+            with self.subTest(args=args):
+                code, receipt, _ = self.invoke("--robot", str(self.source), *args)
+                self.assertEqual(code, 2)
+                self.assertEqual(receipt["phase"], "options")
+
 
     def enable_camera(self):
         begin = self.native._portal_begin_bundle

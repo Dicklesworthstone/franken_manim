@@ -1,5 +1,6 @@
 //! cargo run -p fmn --example export_scene -- scene.fmtl
 //! Then pass scene.fmtl to the standalone fmn CLI or an FMTL player.
+//! Lossless compact storage preserves the real captured frames and callbacks.
 use fmn::prelude::*;
 
 struct MovingCircle;
@@ -18,7 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let output = std::env::args_os()
         .nth(1)
         .unwrap_or_else(|| "scene.fmtl".into());
-    let report = export_bundle(&mut MovingCircle, output, BundleExportOptions::new()?)?;
+    let report = export_bundle(&mut MovingCircle, output, BundleExportOptions::compact()?)?;
     println!(
         "{}: {} frames, {} bytes, sha256 {}",
         report.output.display(),

@@ -1069,10 +1069,13 @@ pub(crate) struct Draw {
     pub(crate) style: Style,
     /// The hinted fill route, or [`FillKernel::General`].
     pub(crate) kernel: FillKernel,
-    /// Recovering a rectangle from current geometry keeps the previous general
+    /// A proved decomposition over this draw's actual monotone pieces. Only
+    /// admitted draws allocate a descriptor in the frame arena.
+    pub(crate) rounded_rect: Option<u32>,
+    /// Recovering a primitive from current geometry keeps the previous general
     /// native row and edge classifier. Only subcell integration uses the
     /// recovered closed form: hinted edge probes count corners differently.
-    pub(crate) recovered_rectangle: bool,
+    pub(crate) recovered_geometry: bool,
     /// The joint overrides, as a range into the frame arena's wedge pool;
     /// empty for the round settings (ADR-0012).
     pub(crate) joins: PoolRange,
@@ -1105,6 +1108,8 @@ pub(crate) struct StrokeRef {
     pub(crate) slab: [f64; 4],
     /// Optional fine-tile CSR ranges (starts, segment indices), in outline order.
     pub(crate) bins: Option<(PoolRange, PoolRange)>,
+    /// Optional proved circular-distance bound in the frame arena.
+    pub(crate) circular: Option<u32>,
 }
 
 /// The arena coordinates of a draw's [`GradientField`] stations.
@@ -1768,19 +1773,49 @@ impl<'a> FrameJob<'a> {
             } else {
                 FillKernel::select(shape, segs, map, translate)
             };
-            let mut recovered_rectangle = false;
-            if kernel == FillKernel::General
-                && identity.engine == EngineKind::FastCpu
-                && inst.placement.is_translation()
-            {
+            let mut recovered_geometry = false;
+            if kernel == FillKernel::General && identity.engine == EngineKind::FastCpu {
                 // A stale constructor tag is not evidence, but the current
-                // owned outline can prove an exact rectangle. Live views still
+                // owned outline can prove an exact rectangle or a disc within
+                // the existing screen-space bound. Nontranslation placements
+                // already have world-space segments and a zero translation;
+                // prove those same curves used by fill, strokes and gradients.
+                // Live views still
                 // force a fresh plan observation and poison tile-cache reuse;
                 // no mutable records or hint payloads enter this proof. Keep
                 // certified's ordered coverage arithmetic unchanged.
-                kernel = FillKernel::from_exact_rectangle(shape, segs, map, translate);
-                recovered_rectangle = matches!(kernel, FillKernel::Rect { .. });
+                kernel =
+                    FillKernel::from_exact_rectangle(shape, effective_segments, map, translate);
+                if kernel == FillKernel::General && draws_fill {
+                    kernel =
+                        FillKernel::from_bounded_disc(shape, effective_segments, map, translate);
+                }
+                recovered_geometry = kernel != FillKernel::General;
             }
+            let rounded_rect = if kernel == FillKernel::General
+                && draws_fill
+                && identity.engine == EngineKind::FastCpu
+            {
+                let pieces = match transformed_pieces {
+                    Some(range) => arena.pieces.slice(range),
+                    None => mono.pieces_of(inst.shape),
+                };
+                if let Some(proof) = fill::QuadraticRoundedRect::from_shape(shape, pieces) {
+                    let start = arena.rounded_rects.len();
+                    arena.rounded_rects.put(proof.data());
+                    recovered_geometry = true;
+                    Some(
+                        arena
+                            .rounded_rects
+                            .range_from("rounded rectangle descriptors", start)?
+                            .start,
+                    )
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let joins = {
                 let start = arena.joins.len();
                 stroke::join_wedges_into(
@@ -1807,6 +1842,28 @@ impl<'a> FrameJob<'a> {
                 let segments = arena
                     .stroke_segments
                     .range_from("prepared stroke rows", start)?;
+                let circular = if identity.engine == EngineKind::FastCpu {
+                    if let Some(proof) = stroke::CircularStroke::from_shape(
+                        shape,
+                        effective_segments,
+                        &style,
+                        map,
+                        translate,
+                    ) {
+                        let start = arena.circular_strokes.len();
+                        arena.circular_strokes.put(proof);
+                        Some(
+                            arena
+                                .circular_strokes
+                                .range_from("circular stroke bounds", start)?
+                                .start,
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 let bins = if matches!(
                     identity.engine,
                     EngineKind::CertifiedCpu | EngineKind::FastCpu
@@ -1827,6 +1884,7 @@ impl<'a> FrameJob<'a> {
                     segments,
                     slab,
                     bins,
+                    circular,
                 })
             } else {
                 None
@@ -1887,7 +1945,8 @@ impl<'a> FrameJob<'a> {
                 straight_segments,
                 style: style.clone(),
                 kernel,
-                recovered_rectangle,
+                rounded_rect,
+                recovered_geometry,
                 joins,
                 stroke,
                 field,
@@ -1950,6 +2009,20 @@ impl<'a> FrameJob<'a> {
         self.draws().iter().flatten().count()
     }
 
+    /// How many styled occurrences carry a proved circular-stroke bound.
+    ///
+    /// This counts admission, not shaded pixels: only points whose complete
+    /// distance interval saturates the AA profile bypass the general solver.
+    /// The certified engine does not select this acceleration.
+    #[must_use]
+    pub fn circular_stroke_count(&self) -> usize {
+        self.draws()
+            .iter()
+            .flatten()
+            .filter(|draw| draw.stroke.is_some_and(|stroke| stroke.circular.is_some()))
+            .count()
+    }
+
     /// The draw list, index-aligned with the instance list.
     ///
     /// The list lives in the arena; this resolves its range. Every engine
@@ -1976,6 +2049,11 @@ impl<'a> FrameJob<'a> {
                         self.arena().stroke_bin_entries.slice(entries),
                     )
                 }),
+            )
+            .with_circular(
+                stroke
+                    .circular
+                    .map(|index| &self.arena().circular_strokes[index as usize]),
             )
         })
     }
@@ -2604,7 +2682,7 @@ impl<'a> FrameJob<'a> {
         }
 
         // Exactly one of three sources fills the row: a classified interior,
-        // a trusted primitive hint, or the general machinery. A rectangle
+        // a trusted primitive hint, or the general machinery. A primitive
         // recovered from current geometry deliberately keeps the general row's
         // coverage and corner counts; its closed form accelerates the expensive
         // subcell integrations without changing which pixels are supersampled.
@@ -2612,7 +2690,7 @@ impl<'a> FrameJob<'a> {
         let mut general_classified = false;
         if interior {
             worker.cov[..w].copy_from_slice(worker.scratch.interior_row(x_lo, x_hi));
-        } else if rec.recovered_rectangle || !rec.kernel.row(py, x_lo, x_hi, &mut worker.cov[..w]) {
+        } else if rec.recovered_geometry || !rec.kernel.row(py, x_lo, x_hi, &mut worker.cov[..w]) {
             if classify {
                 let (coverage, crossings) =
                     worker
@@ -2893,6 +2971,20 @@ impl<'a> FrameJob<'a> {
                     // tile, and in dense scenes most of them cannot reach it.
                     if pixel_misses_hull(rec.fill_slab, subcell.px, subcell.py) {
                         return 0.0;
+                    }
+                    if let Some(index) = rec.rounded_rect
+                        && let Some(coverage) = self.arena().rounded_rects[index as usize]
+                            .coverage_subcell(
+                                self.pieces_of(rec),
+                                rec.translate,
+                                subcell.py,
+                                subcell.px,
+                                subcell.samples,
+                                subcell.x,
+                                subcell.y,
+                            )
+                    {
+                        return coverage;
                     }
                     fill::coverage_at_subcell(
                         self.pieces_of(rec),
@@ -3681,6 +3773,10 @@ fn hull_slab(segments: &[Segment], map: ScreenMap, translate: [f64; 2]) -> [f64;
 }
 
 #[cfg(test)]
+#[path = "engine/circular_stroke_tests.rs"]
+mod circular_stroke_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::bin::covers_tile;
@@ -3742,6 +3838,71 @@ mod tests {
             out.push([b[0], b[1], 0.0]);
         }
         out
+    }
+
+    /// Actual native rounded-rectangle curves, including elliptical corners,
+    /// before the ordinary record-buffer conversion to f32.
+    fn rounded_rect_points() -> Vec<[f64; 3]> {
+        let document = fmn_geom::svg::SvgDocument::parse(
+            br#"<svg xmlns="http://www.w3.org/2000/svg" width="112" height="112">
+                <rect x="-12" y="-8" width="24" height="16" rx="4" ry="3"/>
+            </svg>"#,
+        )
+        .expect("native rounded SVG fixture");
+        assert_eq!(document.shapes.len(), 1);
+        document.shapes[0].path.points().to_vec()
+    }
+
+    fn rounded_rect_field(rows: u32, columns: u32, styled: bool) -> Stage {
+        let points = rounded_rect_points();
+        let mut stage = Stage::new();
+        for row in 0..rows {
+            for column in 0..columns {
+                let mob = stage.add(vmob(
+                    &points,
+                    [0.2, 0.7, 0.9, 0.72],
+                    if styled {
+                        [0.95, 0.3, 0.2, 0.65]
+                    } else {
+                        [0.0; 4]
+                    },
+                    if styled { 80.0 } else { 0.0 },
+                ));
+                if styled {
+                    let last = points.len() - 1;
+                    let entry = stage.get_mut(mob).expect("rounded field member");
+                    assert!(
+                        entry
+                            .buffer
+                            .write(last, "fill_rgba", &[0.9, 0.2, 0.4, 0.72])
+                    );
+                    assert!(
+                        entry
+                            .buffer
+                            .write(last, "stroke_rgba", &[0.2, 0.8, 0.4, 0.9])
+                    );
+                    assert!(entry.buffer.write(last, "stroke_width", &[160.0]));
+                }
+                let linear = match (row * columns + column) % 3 {
+                    0 => Placement::IDENTITY.linear(),
+                    1 => [[1.125, 0.0, 0.0], [0.0, 0.75, 0.0], [0.0, 0.0, 1.0]],
+                    _ => [[0.0, -0.875, 0.0], [-1.125, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                };
+                stage.add_to_scene(mob).expect("rounded field root");
+                stage.apply_affine(
+                    mob,
+                    Placement::new(
+                        linear,
+                        [
+                            17.0 + 28.0 * f64::from(column),
+                            16.0 + 24.0 * f64::from(row),
+                            0.0,
+                        ],
+                    ),
+                );
+            }
+        }
+        stage
     }
 
     /// The engine's corpus scene: overlapping translucent fills, a winding hole,
@@ -6541,17 +6702,575 @@ mod tests {
 
     /// Exercise the former general route in the same renderer, without a
     /// product switch or a second implementation of the reference pixels.
-    fn without_rectangle_recovery(mut job: FrameJob<'_>) -> FrameJob<'_> {
+    fn without_geometry_recovery(mut job: FrameJob<'_>) -> FrameJob<'_> {
         let ArenaStorage::Owned(arena) = &mut job.arena else {
             panic!("the general reference must own its preparation");
         };
         for draw in arena.draws.slice_mut(job.draws).iter_mut().flatten() {
-            if matches!(draw.kernel, FillKernel::Rect { .. }) {
+            if draw.recovered_geometry {
                 draw.kernel = FillKernel::General;
-                draw.recovered_rectangle = false;
+                draw.rounded_rect = None;
+                draw.recovered_geometry = false;
             }
         }
         job
+    }
+
+    #[test]
+    fn affine_geometry_recovery_proves_current_outlines_at_screen_scale() {
+        let mut cfg = config();
+        cfg.map = ScreenMap {
+            scale: 1.25,
+            origin: [5.25, 91.5],
+            y_up: true,
+        };
+        let translation = [29.25, 33.5, 0.0];
+        let expected_center = [41.8125, 49.625];
+        let check = |name: &str, points: Vec<[f64; 3]>, linear, expected: FillKernel| {
+            let mut stage = Stage::new();
+            let mob = stage.add(vmob(&points, [0.3, 0.7, 0.9, 0.8], [0.0; 4], 0.0));
+            stage.add_to_scene(mob).expect("affine primitive root");
+            stage.apply_affine(mob, Placement::new(linear, translation));
+            let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
+                    .expect("affine primitive job");
+                let draw = job.draws()[0].as_ref().expect("visible primitive");
+                assert!(draw.transformed_segments.is_some(), "{name}");
+                assert_eq!(draw.translate, [0.0; 2], "placement applied twice: {name}");
+                let expected = if identity.engine == EngineKind::FastCpu {
+                    expected
+                } else {
+                    FillKernel::General
+                };
+                match (draw.kernel, expected) {
+                    (
+                        FillKernel::Disc { center, radius },
+                        FillKernel::Disc {
+                            center: wanted_center,
+                            radius: wanted_radius,
+                        },
+                    ) => {
+                        for (actual, wanted) in center.into_iter().zip(wanted_center) {
+                            assert!((actual - wanted).abs() < fill::HINT_BUDGET_PX, "{name}");
+                        }
+                        assert!(
+                            (radius - wanted_radius).abs() < fill::HINT_BUDGET_PX,
+                            "{name}"
+                        );
+                    }
+                    (actual, wanted) => assert_eq!(actual, wanted, "{name}, {identity:?}"),
+                }
+            }
+        };
+        for (name, linear, admitted) in [
+            (
+                "scaled disc",
+                [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]],
+                true,
+            ),
+            (
+                "rotated disc",
+                [[1.2, -1.6, 0.0], [1.6, 1.2, 0.0], [0.0, 0.0, 1.0]],
+                true,
+            ),
+            (
+                "reflected disc",
+                [[-2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]],
+                true,
+            ),
+            (
+                "ellipse",
+                [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+            (
+                "sheared disc",
+                [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+            (
+                "over-budget disc",
+                [[32.0, 0.0, 0.0], [0.0, 32.0, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+            (
+                "collapsed disc",
+                [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+        ] {
+            check(
+                name,
+                ring(0.0, 0.0, 4.0, 16, true),
+                linear,
+                if admitted {
+                    FillKernel::Disc {
+                        center: expected_center,
+                        radius: 10.0,
+                    }
+                } else {
+                    FillKernel::General
+                },
+            );
+        }
+        for (name, linear, bounds) in [
+            (
+                "stretched rectangle",
+                [[2.0, 0.0, 0.0], [0.0, 1.5, 0.0], [0.0, 0.0, 1.0]],
+                Some([31.8125, 45.875, 51.8125, 53.375]),
+            ),
+            (
+                "quarter-turn rectangle",
+                [[0.0, -1.5, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                Some([38.0625, 39.625, 45.5625, 59.625]),
+            ),
+            (
+                "reflected rectangle",
+                [[-2.0, 0.0, 0.0], [0.0, 1.5, 0.0], [0.0, 0.0, 1.0]],
+                Some([31.8125, 45.875, 51.8125, 53.375]),
+            ),
+            (
+                "rotated rectangle",
+                [[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]],
+                None,
+            ),
+            (
+                "sheared rectangle",
+                [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                None,
+            ),
+            (
+                "collapsed rectangle",
+                [[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                None,
+            ),
+        ] {
+            check(
+                name,
+                rect_points(-4.0, -2.0, 4.0, 2.0),
+                linear,
+                bounds.map_or(FillKernel::General, |rect| FillKernel::Rect { rect }),
+            );
+        }
+        let mut stage = Stage::new();
+        let mob = stage.add(vmob(
+            &ring(0.0, 0.0, 4.0, 16, true),
+            [1.0; 4],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.add_to_scene(mob).expect("nonplanar primitive root");
+        stage.apply_affine(
+            mob,
+            Placement::new(
+                [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.5, 0.0, 1.0]],
+                translation,
+            ),
+        );
+        let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            assert!(matches!(
+                FrameJob::with_identity(&plan, &mono, &bins, cfg, identity),
+                Err(FrameJobError::CameraProjectionRequired { instance: 0 })
+            ));
+        }
+    }
+
+    #[test]
+    fn affine_geometry_recovery_preserves_gradients_strokes_sampling_and_threads() {
+        for discs in [false, true] {
+            let mut stage = Stage::new();
+            let matrices = if discs {
+                [
+                    [[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 1.0]],
+                    [[1.2, -1.6, 0.0], [1.6, 1.2, 0.0], [0.0, 0.0, 1.0]],
+                    [[-1.75, 0.0, 0.0], [0.0, 1.75, 0.0], [0.0, 0.0, 1.0]],
+                ]
+            } else {
+                [
+                    [[1.5, 0.0, 0.0], [0.0, 0.75, 0.0], [0.0, 0.0, 1.0]],
+                    [[0.0, -1.25, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                    [[-1.75, 0.0, 0.0], [0.0, 1.5, 0.0], [0.0, 0.0, 1.0]],
+                ]
+            };
+            for (index, linear) in matrices.into_iter().enumerate() {
+                let points = if discs {
+                    ring(0.0, 0.0, 4.0, 16, index % 2 == 0)
+                } else {
+                    rect_points(-4.0, -2.0, 4.0, 2.0)
+                };
+                let mob = stage.add(vmob(
+                    &points,
+                    [0.2, 0.7, 0.9, 0.8],
+                    [1.0, 0.3, 0.1, 0.7],
+                    100.0,
+                ));
+                let last = points.len() - 1;
+                let entry = stage.get_mut(mob).expect("live primitive");
+                assert!(entry.buffer.write(last, "fill_rgba", &[0.9, 0.2, 0.4, 0.8]));
+                assert!(
+                    entry
+                        .buffer
+                        .write(last, "stroke_rgba", &[0.1, 0.8, 0.3, 0.9])
+                );
+                assert!(entry.buffer.write(last, "stroke_width", &[200.0]));
+                stage.add_to_scene(mob).expect("styled affine root");
+                stage.apply_affine(
+                    mob,
+                    Placement::new(
+                        linear,
+                        [28.25 + 14.0 * index as f64, 37.5 + 2.75 * index as f64, 0.0],
+                    ),
+                );
+            }
+            let mut cfg = config();
+            cfg.map = ScreenMap {
+                scale: 1.25,
+                origin: [5.25, 91.5],
+                y_up: true,
+            };
+            let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+                    let cfg = cfg.with_aa_policy(aa);
+                    let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
+                        .expect("styled affine job");
+                    for draw in job.draws().iter().flatten() {
+                        assert!(draw.transformed_segments.is_some());
+                        assert!(draw.field.is_some(), "gradient fixture became a flat fill");
+                        assert!(draw.stroke.is_some(), "stroke fixture stopped drawing");
+                        assert_eq!(
+                            matches!(draw.kernel, FillKernel::Disc { .. }),
+                            discs && identity.engine == EngineKind::FastCpu,
+                        );
+                        assert_eq!(
+                            matches!(draw.kernel, FillKernel::Rect { .. }),
+                            !discs && identity.engine == EngineKind::FastCpu,
+                        );
+                    }
+                    let reference = without_geometry_recovery(
+                        FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
+                            .expect("general affine job"),
+                    );
+                    let (expected, expected_stats) = reference.render_with_stats(1).unwrap();
+                    let (first, stats) = job.render_with_stats(1).unwrap();
+                    assert_eq!(stats, expected_stats, "affine recovery changed AA sampling");
+                    if !discs || identity.engine == EngineKind::CertifiedCpu {
+                        assert_frames_equal(&first, &expected, "affine exact coverage changed");
+                    } else {
+                        let (maximum, _) = visual_error(&first, &expected);
+                        assert!(
+                            maximum <= 3.0 * fill::HINT_BUDGET_PX,
+                            "affine disc exceeded existing coverage bound: {maximum}"
+                        );
+                    }
+                    for threads in [4, 16] {
+                        let (frame, parallel_stats) = job.render_with_stats(threads).unwrap();
+                        assert_frames_equal(
+                            &frame,
+                            &first,
+                            "affine recovery changed with worker count",
+                        );
+                        assert_eq!(parallel_stats, stats);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn affine_geometry_recovery_observes_foreign_edits_and_frozen_snapshots() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vmob(
+            &ring(0.0, 0.0, 4.0, 16, true),
+            [0.8, 0.2, 0.7, 0.75],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.add_to_scene(mob).expect("affine live-view root");
+        stage.apply_affine(
+            mob,
+            Placement::new(
+                [[1.2, -1.6, 0.0], [1.6, 1.2, 0.0], [0.0, 0.0, 1.0]],
+                [40.25, 43.5, 0.0],
+            ),
+        );
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("foreign point view");
+        let first_snapshot = stage.snapshot();
+        let cfg = config();
+        let mut plan = RenderPlan::new();
+        let mut first_pixels = None;
+        for changed in [false, true] {
+            if changed {
+                let revision = stage.get(mob).unwrap().buffer.field_revision("point");
+                assert!(view.write_foreign(1, "point", &[5.0, 4.0, 0.0]));
+                assert_eq!(
+                    stage.get(mob).unwrap().buffer.field_revision("point"),
+                    revision,
+                    "the foreign edit must bypass revision callbacks"
+                );
+            }
+            let frozen = stage.snapshot().materialize();
+            let sync = plan
+                .sync(&frozen, 0)
+                .expect("observe transformed live points");
+            assert_eq!(sync.shapes_reused, 0);
+            let instance = &plan.shapes().instances()[0];
+            assert!(instance.volatile && instance.hint_unsafe);
+            assert!(!instance.placement.is_translation());
+            let mono = MonoTable::build(&plan, cfg.map).unwrap();
+            let bins = Binning::build(&plan, cfg.viewport, default_tiling(), cfg.map).unwrap();
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap();
+                assert_eq!(
+                    matches!(
+                        job.draws()[0].as_ref().unwrap().kernel,
+                        FillKernel::Disc { .. }
+                    ),
+                    !changed && identity.engine == EngineKind::FastCpu,
+                );
+                let frame = job.render(1).unwrap();
+                if identity.engine == EngineKind::FastCpu {
+                    if changed {
+                        assert_ne!(
+                            frame.as_bytes(),
+                            first_pixels.as_ref().expect("initial frame")
+                        );
+                    } else {
+                        first_pixels = Some(frame.as_bytes().to_vec());
+                    }
+                }
+            }
+        }
+        let frozen = first_snapshot.materialize();
+        let (plan, mono, bins) = derive(&frozen, cfg, default_tiling());
+        let job =
+            FrameJob::with_identity(&plan, &mono, &bins, cfg, EngineIdentity::fast()).unwrap();
+        assert!(matches!(
+            job.draws()[0].as_ref().unwrap().kernel,
+            FillKernel::Disc { .. }
+        ));
+        assert_eq!(job.render(1).unwrap().as_bytes(), first_pixels.unwrap());
+    }
+
+    #[test]
+    fn rounded_geometry_recovery_uses_current_monotone_corners() {
+        let points = rounded_rect_points();
+        let mut cfg = config();
+        cfg.map = ScreenMap {
+            scale: 1.25,
+            origin: [5.25, 91.5],
+            y_up: true,
+        };
+        for (name, linear, admitted) in [
+            ("translated", Placement::IDENTITY.linear(), true),
+            (
+                "stretched",
+                [[1.25, 0.0, 0.0], [0.0, 0.75, 0.0], [0.0, 0.0, 1.0]],
+                true,
+            ),
+            (
+                "reflected quarter-turn",
+                [[0.0, -1.25, 0.0], [-0.75, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                true,
+            ),
+            (
+                "general rotation",
+                [[0.6, -0.8, 0.0], [0.8, 0.6, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+            (
+                "shear",
+                [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                false,
+            ),
+        ] {
+            let mut stage = Stage::new();
+            let mob = stage.add(vmob(&points, [0.2, 0.7, 0.9, 0.8], [0.0; 4], 0.0));
+            stage.add_to_scene(mob).expect("rounded root");
+            stage.apply_affine(mob, Placement::new(linear, [34.25, 38.5, 0.0]));
+            let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap();
+                let draw = job.draws()[0].as_ref().expect("rounded draw");
+                let shape = plan.shapes().shape(draw.shape).expect("rounded shape");
+                assert_eq!(
+                    fill::QuadraticRoundedRect::from_shape(shape, job.pieces_of(draw)).is_some(),
+                    admitted,
+                    "actual native rounded geometry: {name}",
+                );
+                assert_eq!(
+                    draw.kernel,
+                    FillKernel::General,
+                    "ideal circular corners must not substitute for the authored curves"
+                );
+                assert_eq!(
+                    draw.recovered_geometry,
+                    admitted && identity.engine == EngineKind::FastCpu,
+                    "rounded recovery not wired for {name}, {identity:?}",
+                );
+                assert_eq!(
+                    draw.rounded_rect.is_some(),
+                    admitted && identity.engine == EngineKind::FastCpu,
+                    "rounded descriptor admission: {name}, {identity:?}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_geometry_recovery_preserves_pixels_sampling_and_threads() {
+        let stage = rounded_rect_field(2, 3, true);
+        let cfg = config();
+        let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+                let cfg = cfg.with_aa_policy(aa);
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap();
+                assert_eq!(job.draw_count(), 6);
+                assert_eq!(
+                    job.arena().rounded_rects.len(),
+                    if identity.engine == EngineKind::FastCpu {
+                        6
+                    } else {
+                        0
+                    }
+                );
+                for draw in job.draws().iter().flatten() {
+                    assert_eq!(draw.kernel, FillKernel::General);
+                    assert_eq!(
+                        draw.rounded_rect.is_some(),
+                        identity.engine == EngineKind::FastCpu
+                    );
+                    assert!(draw.field.is_some() && draw.stroke.is_some());
+                }
+                let general = without_geometry_recovery(
+                    FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap(),
+                );
+                let (expected, expected_stats) = general.render_with_stats(1).unwrap();
+                let (first, stats) = job.render_with_stats(1).unwrap();
+                assert_eq!(
+                    stats, expected_stats,
+                    "rounded recovery changed AA sampling"
+                );
+                if identity.engine == EngineKind::CertifiedCpu {
+                    assert_frames_equal(&first, &expected, "certified rounded route changed");
+                } else {
+                    let (maximum, _) = visual_error(&first, &expected);
+                    assert!(
+                        maximum <= fill::HINT_BUDGET_PX,
+                        "quadratic corner integration exceeded the existing budget: {maximum}"
+                    );
+                }
+                for threads in [4, 16] {
+                    let (frame, parallel_stats) = job.render_with_stats(threads).unwrap();
+                    assert_frames_equal(
+                        &frame,
+                        &first,
+                        "rounded recovery changed with worker count",
+                    );
+                    assert_eq!(parallel_stats, stats);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rounded_geometry_recovery_reuses_its_pool_and_keeps_frozen_view_geometry() {
+        let mut stage = Stage::new();
+        let mob = stage.add(vmob(
+            &rounded_rect_points(),
+            [0.2, 0.7, 0.9, 0.8],
+            [0.0; 4],
+            0.0,
+        ));
+        stage.add_to_scene(mob).expect("live rounded root");
+        stage.apply_affine(
+            mob,
+            Placement::new(
+                [[0.0, -1.25, 0.0], [-0.75, 0.0, 0.0], [0.0, 0.0, 1.0]],
+                [40.25, 43.5, 0.0],
+            ),
+        );
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("foreign rounded point view");
+        let first_snapshot = stage.snapshot();
+        let frozen = first_snapshot.materialize();
+        let cfg = config().with_aa_policy(AaPolicy::Ssaa4x);
+        let mut arena = FrameArena::new();
+        let mut plan = RenderPlan::new();
+        let mut frame = FrameBuffer::new(cfg.layout().unwrap());
+        let render = |frozen: &Stage,
+                      plan: &mut RenderPlan,
+                      arena: &mut FrameArena,
+                      frame: &mut FrameBuffer,
+                      admitted: bool| {
+            let sync = plan
+                .sync(frozen, 0)
+                .expect("observe rounded foreign geometry");
+            assert_eq!(sync.shapes_reused, 0);
+            let instance = &plan.shapes().instances()[0];
+            assert!(instance.volatile && instance.hint_unsafe);
+            assert!(!instance.placement.is_translation());
+            let mono = MonoTable::build(plan, cfg.map).unwrap();
+            let bins = Binning::build(plan, cfg.viewport, default_tiling(), cfg.map).unwrap();
+            let job =
+                FrameJob::with_identity_in(arena, plan, &mono, &bins, cfg, EngineIdentity::fast())
+                    .unwrap();
+            assert_eq!(
+                job.arena().rounded_rects.len(),
+                usize::from(admitted),
+                "descriptor pool retained an earlier frame's logical rows"
+            );
+            assert_eq!(
+                job.draws()[0].as_ref().unwrap().rounded_rect.is_some(),
+                admitted
+            );
+            job.render_into(4, frame).unwrap();
+            job.allocation_stats()
+        };
+        let warm = render(&frozen, &mut plan, &mut arena, &mut frame, true);
+        assert!(warm.heap_allocs_this_frame > 0);
+        let first_pixels = frame.as_bytes().to_vec();
+        let reused = render(&frozen, &mut plan, &mut arena, &mut frame, true);
+        assert_eq!(
+            reused.heap_allocs_this_frame, 0,
+            "rounded frame preparation allocated after warm-up"
+        );
+        assert_eq!(reused.arena_buffer_bytes, warm.arena_buffer_bytes);
+        assert_eq!(frame.as_bytes(), first_pixels);
+
+        let revision = stage.get(mob).unwrap().buffer.field_revision("point");
+        assert!(view.write_foreign(1, "point", &[35.0, 12.0, 0.0]));
+        assert_eq!(
+            stage.get(mob).unwrap().buffer.field_revision("point"),
+            revision
+        );
+        let changed = stage.snapshot().materialize();
+        render(&changed, &mut plan, &mut arena, &mut frame, false);
+        assert_ne!(
+            frame.as_bytes(),
+            first_pixels,
+            "foreign corner edit did not reach pixels"
+        );
+
+        let frozen = first_snapshot.materialize();
+        render(&frozen, &mut plan, &mut arena, &mut frame, true);
+        assert_eq!(
+            frame.as_bytes(),
+            first_pixels,
+            "later writes altered captured corner geometry"
+        );
     }
 
     #[test]
@@ -6594,7 +7313,7 @@ mod tests {
                     },
                     "production recovery admission"
                 );
-                let reference = without_rectangle_recovery(
+                let reference = without_geometry_recovery(
                     FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
                         .expect("general job"),
                 );
@@ -6613,6 +7332,195 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    #[test]
+    fn bounded_disc_recovery_observes_foreign_points_without_changing_certified_admission() {
+        let mut stage = Stage::new();
+        let points = ring(32.25, 30.5, 10.8, 16, true);
+        let mob = stage.add(vmob(&points, [0.8, 0.2, 0.7, 0.75], [0.0; 4], 0.0));
+        stage.add_to_scene(mob).expect("disc root");
+        let view = stage
+            .get_mut(mob)
+            .expect("live")
+            .buffer
+            .export_field_view("point", true)
+            .expect("foreign writable point view");
+        let cfg = config();
+        let first_snapshot = stage.snapshot();
+        let mut first_pixels = None;
+        for changed in [false, true] {
+            if changed {
+                let revision = stage.get(mob).unwrap().buffer.field_revision("point");
+                assert!(view.write_foreign(1, "point", &[45.0, 36.0, 0.0]));
+                assert_eq!(
+                    stage.get(mob).unwrap().buffer.field_revision("point"),
+                    revision,
+                    "the negative must bypass revision tracking"
+                );
+            }
+            let frozen = stage.snapshot().materialize();
+            let (plan, mono, bins) = derive(&frozen, cfg, default_tiling());
+            assert!(plan.shapes().instances()[0].volatile);
+            assert!(plan.shapes().instances()[0].hint_unsafe);
+            for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity)
+                    .expect("current job");
+                let draw = job.draws()[0].as_ref().expect("visible disc");
+                assert_eq!(
+                    matches!(draw.kernel, FillKernel::Disc { .. }),
+                    !changed && identity.engine == EngineKind::FastCpu,
+                    "identity={identity:?}, changed={changed}: {:?}",
+                    draw.kernel
+                );
+                let expected = job.render(1).expect("one worker");
+                for threads in [4, 16] {
+                    assert_frames_equal(
+                        &expected,
+                        &job.render(threads).expect("parallel frame"),
+                        "disc recovery depends on worker count",
+                    );
+                }
+                if identity.engine == EngineKind::FastCpu {
+                    if changed {
+                        assert_ne!(
+                            expected.as_bytes(),
+                            first_pixels.as_ref().expect("initial frame")
+                        );
+                    } else {
+                        first_pixels = Some(expected.as_bytes().to_vec());
+                    }
+                }
+            }
+        }
+        // A later untracked edit cannot alter a previously captured frame or
+        // make its proved outline inherit the current record's deformation.
+        let frozen = first_snapshot.materialize();
+        let (plan, mono, bins) = derive(&frozen, cfg, default_tiling());
+        let job =
+            FrameJob::with_identity(&plan, &mono, &bins, cfg, EngineIdentity::fast()).unwrap();
+        assert!(matches!(
+            job.draws()[0].as_ref().unwrap().kernel,
+            FillKernel::Disc { .. }
+        ));
+        assert_eq!(job.render(1).unwrap().as_bytes(), first_pixels.unwrap());
+    }
+
+    fn small_disc_field() -> Stage {
+        let mut stage = Stage::new();
+        for row in 0..8 {
+            for column in 0..8 {
+                let points = ring(
+                    7.3 + f64::from(column) * 13.5,
+                    6.7 + f64::from(row) * 13.5,
+                    3.1,
+                    16,
+                    (row + column) % 2 == 0,
+                );
+                let mob = stage.add(vmob(&points, [0.2, 0.6, 0.9, 0.8], [0.0; 4], 0.0));
+                stage.add_to_scene(mob).expect("disc root");
+            }
+        }
+        stage
+    }
+
+    #[test]
+    fn bounded_disc_recovery_preserves_sampling_and_the_existing_error_budget() {
+        let stage = small_disc_field();
+        let cfg = config();
+        let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+        for identity in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x] {
+                let cfg = cfg.with_aa_policy(aa);
+                let job = FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap();
+                assert_eq!(
+                    job.draws()
+                        .iter()
+                        .flatten()
+                        .filter(|draw| matches!(draw.kernel, FillKernel::Disc { .. }))
+                        .count(),
+                    if identity.engine == EngineKind::FastCpu {
+                        64
+                    } else {
+                        0
+                    }
+                );
+                let general = without_geometry_recovery(
+                    FrameJob::with_identity(&plan, &mono, &bins, cfg, identity).unwrap(),
+                );
+                let (expected, expected_stats) = general.render_with_stats(1).unwrap();
+                let (first, stats) = job.render_with_stats(1).unwrap();
+                assert_eq!(
+                    stats, expected_stats,
+                    "primitive recovery changed adaptive choices"
+                );
+                if identity.engine == EngineKind::CertifiedCpu {
+                    assert_frames_equal(&first, &expected, "certified disc admission changed");
+                } else {
+                    let (maximum, _) = visual_error(&first, &expected);
+                    assert!(
+                        maximum <= 3.0 * fill::HINT_BUDGET_PX,
+                        "recovered disc exceeded existing coverage bound: {maximum}"
+                    );
+                }
+                for threads in [4, 16] {
+                    let (frame, parallel_stats) = job.render_with_stats(threads).unwrap();
+                    assert_frames_equal(&frame, &first, "recovered disc changed with worker count");
+                    assert_eq!(parallel_stats, stats);
+                }
+            }
+        }
+    }
+
+    /// The original general solver remains live in the same invocation. This
+    /// measures only native raster work, including the ordinary general first
+    /// pass, and is not an end-to-end portal or incumbent-renderer speed claim.
+    #[test]
+    #[ignore = "run in release mode for interleaved native raster timings"]
+    fn bounded_disc_recovery_interleaved_raster_timing() {
+        let stage = small_disc_field();
+        for aa in [AaPolicy::Adaptive, AaPolicy::Ssaa4x] {
+            let cfg = config().with_aa_policy(aa);
+            let (plan, mono, bins) = derive(&stage, cfg, default_tiling());
+            let recovered =
+                FrameJob::with_identity(&plan, &mono, &bins, cfg, EngineIdentity::fast()).unwrap();
+            assert_eq!(
+                recovered
+                    .draws()
+                    .iter()
+                    .flatten()
+                    .filter(|draw| matches!(draw.kernel, FillKernel::Disc { .. }))
+                    .count(),
+                64
+            );
+            let general = without_geometry_recovery(
+                FrameJob::with_identity(&plan, &mono, &bins, cfg, EngineIdentity::fast()).unwrap(),
+            );
+            let mut frame = FrameBuffer::new(cfg.layout().unwrap());
+            for _ in 0..3 {
+                general.render_into(1, &mut frame).unwrap();
+                recovered.render_into(1, &mut frame).unwrap();
+            }
+            let mut elapsed = [std::time::Duration::ZERO; 2];
+            for iteration in 0..12 {
+                for index in if iteration % 2 == 0 { [0, 1] } else { [1, 0] } {
+                    let start = std::time::Instant::now();
+                    if index == 0 {
+                        general.render_into(1, &mut frame).unwrap();
+                    } else {
+                        recovered.render_into(1, &mut frame).unwrap();
+                    }
+                    elapsed[index] += start.elapsed();
+                    std::hint::black_box(frame.as_bytes());
+                }
+            }
+            println!(
+                "disc raster {aa:?}: general_ms={:.3}, recovered_ms={:.3}, ratio={:.4}, draws=64, paired_frames=12",
+                elapsed[0].as_secs_f64() * 1000.0 / 12.0,
+                elapsed[1].as_secs_f64() * 1000.0 / 12.0,
+                elapsed[1].as_secs_f64() / elapsed[0].as_secs_f64()
+            );
         }
     }
 

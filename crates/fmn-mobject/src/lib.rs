@@ -123,6 +123,9 @@ pub enum StageError {
     /// or a result that cannot be represented by finite point records.
     /// The whole family is unchanged.
     InvalidWag(&'static str),
+    /// A checked point map or translation produced non-finite geometry or
+    /// coordinates outside finite f32 record storage. The family is unchanged.
+    InvalidPointMap(&'static str),
     /// A record sizing proof refused the operation (fm-vek.2) — the
     /// target record count and schema stride cannot be addressed. The
     /// buffer is untouched.
@@ -177,6 +180,7 @@ impl std::fmt::Display for StageError {
                 write!(f, "frame width and height must be finite and positive")
             }
             Self::InvalidWag(reason) => write!(f, "wag deformation refused: {reason}"),
+            Self::InvalidPointMap(reason) => write!(f, "point mapping refused: {reason}"),
             Self::Record(err) => {
                 write!(f, "record sizing refused: {err}")
             }

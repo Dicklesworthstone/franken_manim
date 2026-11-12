@@ -296,6 +296,7 @@ fn interpolate_fields_with_scratch(
         let lerp = |x: f64, y: f64| (1.0 - alpha) * x + alpha * y;
         u.is_fixed_in_frame = lerp(ua.is_fixed_in_frame, ub.is_fixed_in_frame);
         u.anti_alias_width = lerp(ua.anti_alias_width, ub.anti_alias_width);
+        u.glow_factor = lerp(ua.glow_factor, ub.glow_factor);
         for k in 0..3 {
             u.shading[k] = lerp(ua.shading[k], ub.shading[k]);
         }
@@ -481,13 +482,13 @@ impl TargetPrep {
 /// function.
 #[derive(Debug, Clone)]
 pub struct Transform {
-    state: AnimState,
-    target: Mob,
-    target_copy: Option<Mob>,
-    path: PathFunc,
-    replace_in_scene: bool,
-    start_prep: Option<StartPrep>,
-    target_prep: Option<TargetPrep>,
+    pub(crate) state: AnimState,
+    pub(crate) target: Mob,
+    pub(crate) target_copy: Option<Mob>,
+    pub(crate) path: PathFunc,
+    pub(crate) replace_in_scene: bool,
+    pub(crate) start_prep: Option<StartPrep>,
+    pub(crate) target_prep: Option<TargetPrep>,
     interpolation_scratch: FieldInterpolationScratch,
 }
 

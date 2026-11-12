@@ -27,6 +27,10 @@ ft-kernel-metal = { workspace = true, optional = true }
 wasm = []
 accel-annex = []
 metal = ["accel-annex", "dep:ft-kernel-metal"]
+# Test seam for dependents' tests: `NativePreviewRenderer::post_synthetic`
+# posts real AppKit events into the application queue (frankentorch's
+# `synthetic-input`). Never enable it in a shipped build.
+synthetic-input = ["metal", "ft-kernel-metal/synthetic-input"]
 cuda = ["accel-annex"]
 
 [lints]

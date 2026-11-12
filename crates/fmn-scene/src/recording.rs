@@ -1,7 +1,8 @@
 //! Bounded recording of imperative scenes into the existing FMTL/1 format.
 //!
 //! Unlike the declarative timeline exporter, this sink never runs an animation
-//! or updater. It records the real Scene's captures as kind-1 snapshots. A
+//! or updater. It records the real Scene's captures as kind-1 snapshots, or
+//! explicit compact mode's lossless kind-2 snapshot blocks. A
 //! callback's observed output is replayable; its callable is not serialized and
 //! its purity is not inferred. The ordinary bundle reader and native/WASM
 //! players remain authoritative.
@@ -11,21 +12,60 @@
 //! `show()` captures are one-frame holds. Skipped previews and presenter input
 //! are refused rather than silently retimed. Minor 1 can record the exact camera
 //! sampled by a composition root; no rig binding or camera callback is inferred.
-//! Audio remains unsupported and must be refused by composition roots.
+//! Audio is attached separately by composition roots after recording succeeds.
 
 use fmn_anim::timeline::{TIMELINE_SCHEMA, TimelineError, TimelinePlan};
 use fmn_anim::{FramePacket, RationalFrameClock, SegmentKind};
 use fmn_hash::serial::{Limits, Writer};
 use fmn_hash::{Digest, SerialError, sha256};
-use fmn_mobject::{RenderSnapshotError, Snapshot, Stage};
+use fmn_mobject::{RenderSnapshotError, RenderSnapshotLimits, Snapshot, Stage};
 use fmn_render::Camera;
 use fmn_render::camera::CameraSample;
 
+use crate::timeline_bundle::compact::CompactFramesBuilder;
 use crate::timeline_bundle::{
     BundleError, BundleExportLimits, BundleReadError, CAMERA_TIMELINE_BUNDLE_SCHEMA,
-    TIMELINE_BUNDLE_SCHEMA, TimelineBundle, bundle_engine_version,
+    COMPACT_TIMELINE_BUNDLE_SCHEMA, TIMELINE_BUNDLE_SCHEMA, TimelineBundle, bundle_engine_version,
 };
 use crate::{CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, SceneSink};
+
+/// Separate limits for lossless compact recordings of observed frames.
+///
+/// This is an explicit alternative to [`BundleExportLimits`], whose cumulative
+/// capture-byte meaning remains unchanged. Compact storage bounds retained
+/// encoded data independently from full canonical snapshot serialization work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CompactRecordingLimits {
+    /// Maximum admitted output frames, including explicit still captures.
+    pub max_frames: u64,
+    /// Cumulative encoded blocks, destination tables and camera storage.
+    pub max_retained_bytes: usize,
+    /// Maximum canonical bytes of one captured snapshot, before encoding grows.
+    pub max_snapshot_bytes: usize,
+    /// Cumulative canonical snapshot bytes processed, including unchanged frames.
+    pub max_snapshot_work_bytes: u64,
+}
+
+impl CompactRecordingLimits {
+    /// One million frames, 256 MiB retained, 64 MiB per snapshot, 16 GiB work.
+    pub const DEFAULT: Self = Self {
+        max_frames: 1_000_000,
+        max_retained_bytes: Limits::DEFAULT.max_total,
+        max_snapshot_bytes: Limits::DEFAULT.max_field,
+        max_snapshot_work_bytes: 16 * 1024 * 1024 * 1024,
+    };
+}
+
+impl Default for CompactRecordingLimits {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+struct CompactBudget {
+    limits: CompactRecordingLimits,
+    snapshot_work: u64,
+}
 
 /// A failed recording cannot be finalized into a successful partial artifact.
 #[derive(Debug)]
@@ -45,6 +85,20 @@ pub enum RecordingError {
         /// Effective output cap, no larger than the production reader limit.
         limit: usize,
     },
+    /// A captured snapshot exceeded the compact mode's individual byte budget.
+    SnapshotLimit {
+        /// Size requested by the next canonical append.
+        needed: usize,
+        /// Individual snapshot budget in force.
+        limit: usize,
+    },
+    /// Processing another canonical snapshot would exceed the work budget.
+    SnapshotWorkLimit {
+        /// Cumulative bytes requested by the next canonical append.
+        needed: u64,
+        /// Work budget in force.
+        limit: u64,
+    },
     /// A capture protocol or capability that FMTL/1 cannot represent.
     Unsupported(&'static str),
 }
@@ -60,6 +114,14 @@ impl std::fmt::Display for RecordingError {
                 f,
                 "scene bundle needs {needed} bytes, exceeding the {limit}-byte output budget"
             ),
+            Self::SnapshotLimit { needed, limit } => write!(
+                f,
+                "compact recording snapshot needs {needed} bytes, exceeding the {limit}-byte snapshot budget"
+            ),
+            Self::SnapshotWorkLimit { needed, limit } => write!(
+                f,
+                "compact recording snapshot work needs {needed} bytes, exceeding the {limit}-byte work budget"
+            ),
             Self::Unsupported(message) => write!(f, "scene bundle recording: {message}"),
         }
     }
@@ -72,7 +134,10 @@ impl std::error::Error for RecordingError {
             Self::Projection(error) => Some(error),
             Self::Plan(error) => Some(error),
             Self::Decode(error) => Some(error),
-            Self::OutputLimit { .. } | Self::Unsupported(_) => None,
+            Self::OutputLimit { .. }
+            | Self::SnapshotLimit { .. }
+            | Self::SnapshotWorkLimit { .. }
+            | Self::Unsupported(_) => None,
         }
     }
 }
@@ -104,7 +169,29 @@ pub struct RecordedSceneBundle {
 
 struct RecordedSegment {
     kind: SegmentKind,
-    frames: Vec<Vec<u8>>,
+    frames: RecordedFrames,
+}
+
+enum RecordedFrames {
+    Snapshots(Vec<Vec<u8>>),
+    Compact(CompactFramesBuilder),
+}
+
+impl RecordedFrames {
+    fn new(compact: bool) -> Self {
+        if compact {
+            Self::Compact(CompactFramesBuilder::new())
+        } else {
+            Self::Snapshots(Vec::new())
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Snapshots(frames) => frames.len(),
+            Self::Compact(frames) => frames.frame_count() as usize,
+        }
+    }
 }
 
 struct ActiveSegment {
@@ -121,6 +208,8 @@ struct ActiveSegment {
 /// admission is checked before serializing the next snapshot. As with Scene's
 /// other sinks, an error stops capture, not the deterministic completion of the
 /// already-running animation segment.
+/// Compact constructors use separate retained, per-snapshot and cumulative work
+/// limits; they still observe every frame and never change callback execution.
 pub struct SceneBundleRecorder {
     fps: u32,
     limits: BundleExportLimits,
@@ -131,6 +220,7 @@ pub struct SceneBundleRecorder {
     failure: Option<RecordingError>,
     render_only: bool,
     cameras: Option<Vec<CameraSample>>,
+    compact: Option<CompactBudget>,
 }
 
 impl SceneBundleRecorder {
@@ -156,6 +246,7 @@ impl SceneBundleRecorder {
             failure: None,
             render_only: false,
             cameras: None,
+            compact: None,
         })
     }
 
@@ -192,14 +283,150 @@ impl SceneBundleRecorder {
         Ok(recorder)
     }
 
+    /// Record observed full state using independent lossless delta blocks.
+    ///
+    /// Every ordinary capture and authored callback still runs. Compact FMTL/1
+    /// minor 3 preserves the exact canonical snapshot bytes, without
+    /// inferring purity or changing the frame grid. Legacy constructors retain
+    /// their original wire format and cumulative capture-byte contract.
+    /// As with [`Self::new`], detached objects and authoring state remain in
+    /// each capture. Select [`Self::new_compact_render_only`] for pictures.
+    ///
+    /// # Errors
+    /// Refuses zero FPS or a zero/unsupported compact budget before recording.
+    pub fn new_compact(fps: u32, limits: CompactRecordingLimits) -> Result<Self, RecordingError> {
+        if limits.max_frames == 0
+            || limits.max_frames > u64::from(u32::MAX)
+            || limits.max_retained_bytes == 0
+            || limits.max_retained_bytes > CompactRecordingLimits::DEFAULT.max_retained_bytes
+            || limits.max_snapshot_bytes == 0
+            || limits.max_snapshot_bytes > CompactRecordingLimits::DEFAULT.max_snapshot_bytes
+            || limits.max_snapshot_work_bytes == 0
+            || limits.max_snapshot_work_bytes
+                > CompactRecordingLimits::DEFAULT.max_snapshot_work_bytes
+        {
+            return Err(RecordingError::Unsupported(
+                "compact limits require 1..u32::MAX frames, 1..256 MiB retained, 1..64 MiB per snapshot and 1..16 GiB snapshot work",
+            ));
+        }
+        let mut recorder = Self::new(
+            fps,
+            BundleExportLimits {
+                max_frames: limits.max_frames,
+                max_capture_bytes: limits.max_retained_bytes,
+            },
+        )?;
+        recorder.compact = Some(CompactBudget {
+            limits,
+            snapshot_work: 0,
+        });
+        Ok(recorder)
+    }
+
+    /// Compact the rooted render projection of each observed frame.
+    ///
+    /// This combines [`Self::new_render_only`]'s picture-only snapshot contract
+    /// with [`Self::new_compact`]'s lossless storage and independent budgets.
+    /// It does not preserve authoring state for live editing or undo.
+    ///
+    /// # Errors
+    /// As [`Self::new_compact`]; projection is checked at every capture.
+    pub fn new_compact_render_only(
+        fps: u32,
+        limits: CompactRecordingLimits,
+    ) -> Result<Self, RecordingError> {
+        let mut recorder = Self::new_compact(fps, limits)?;
+        recorder.render_only = true;
+        Ok(recorder)
+    }
+
+    /// Compact observed geometry plus the exact camera at every capture.
+    ///
+    /// Camera samples are retained unchanged and count toward the retained
+    /// byte budget. They never become inferred animation or interpolation laws.
+    ///
+    /// # Errors
+    /// As [`Self::new_compact`]; camera invariants are checked at capture.
+    pub fn new_compact_with_camera(
+        fps: u32,
+        limits: CompactRecordingLimits,
+    ) -> Result<Self, RecordingError> {
+        let mut recorder = Self::new_compact_render_only(fps, limits)?;
+        recorder.cameras = Some(Vec::new());
+        Ok(recorder)
+    }
+
+    fn encoding_limits(&self) -> Limits {
+        self.compact.as_ref().map_or(Limits::DEFAULT, |budget| {
+            let remaining = budget
+                .limits
+                .max_snapshot_work_bytes
+                .saturating_sub(budget.snapshot_work);
+            let max_total = budget
+                .limits
+                .max_snapshot_bytes
+                .min(usize::try_from(remaining).unwrap_or(usize::MAX));
+            Limits {
+                max_total,
+                max_field: max_total.min(Limits::DEFAULT.max_field),
+            }
+        })
+    }
+
+    fn encoding_error(&self, error: SerialError) -> RecordingError {
+        if let (Some(budget), SerialError::SizeLimit { needed, .. }) = (&self.compact, &error) {
+            let remaining = budget
+                .limits
+                .max_snapshot_work_bytes
+                .saturating_sub(budget.snapshot_work);
+            if remaining < budget.limits.max_snapshot_bytes as u64 {
+                return RecordingError::SnapshotWorkLimit {
+                    needed: budget.snapshot_work.saturating_add(*needed as u64),
+                    limit: budget.limits.max_snapshot_work_bytes,
+                };
+            }
+            return RecordingError::SnapshotLimit {
+                needed: *needed,
+                limit: budget.limits.max_snapshot_bytes,
+            };
+        }
+        RecordingError::from(error)
+    }
+
     fn encode_snapshot(&self, snapshot: &Snapshot) -> Result<Vec<u8>, RecordingError> {
         if self.render_only {
             snapshot
-                .to_render_bytes()
-                .map_err(RecordingError::Projection)
+                .to_render_bytes_with_encoding_limits(
+                    RenderSnapshotLimits::DEFAULT,
+                    self.encoding_limits(),
+                )
+                .map_err(|error| match error {
+                    RenderSnapshotError::Serial(error) if self.compact.is_some() => {
+                        self.encoding_error(error)
+                    }
+                    error => RecordingError::Projection(error),
+                })
+        } else if self.compact.is_some() {
+            snapshot
+                .to_bytes_with_limits(self.encoding_limits())
+                .map_err(|error| self.encoding_error(error))
         } else {
             snapshot.to_bytes().map_err(RecordingError::from)
         }
+    }
+
+    fn charge_snapshot_work(&mut self, bytes: usize) -> Result<(), RecordingError> {
+        if let Some(budget) = &mut self.compact {
+            let needed = budget.snapshot_work.saturating_add(bytes as u64);
+            if needed > budget.limits.max_snapshot_work_bytes {
+                return Err(RecordingError::SnapshotWorkLimit {
+                    needed,
+                    limit: budget.limits.max_snapshot_work_bytes,
+                });
+            }
+            budget.snapshot_work = needed;
+        }
+        Ok(())
     }
 
     /// Captures admitted so far. This is output order, not the Scene clock.
@@ -358,6 +585,7 @@ impl SceneBundleRecorder {
     ) -> Result<(), RecordingError> {
         self.admit_frame()?;
         let bytes = bytes?;
+        self.charge_snapshot_work(bytes.len())?;
         if let Some(sample) = camera {
             // Charge the retained table AND serialization work, as for snapshots.
             self.charge(CameraSample::WIRE_BYTES, "recorded camera sample")?;
@@ -372,20 +600,45 @@ impl SceneBundleRecorder {
             self.cameras = Some(cameras);
             result?;
         }
-        self.charge(bytes.len(), "recorded frame snapshot")?;
-        let mut frames = self.active.as_mut().map_or_else(Vec::new, |active| {
-            std::mem::take(&mut active.recorded.frames)
-        });
-        self.reserve(&mut frames, "recorded frame table")?;
-        frames.push(bytes);
+        let compact = self.compact.is_some();
+        let mut frames = self.active.as_mut().map_or_else(
+            || RecordedFrames::new(compact),
+            |active| std::mem::replace(&mut active.recorded.frames, RecordedFrames::new(compact)),
+        );
+        let result = match &mut frames {
+            RecordedFrames::Snapshots(frames) => (|| {
+                self.charge(bytes.len(), "recorded frame snapshot")?;
+                self.reserve(frames, "recorded frame table")?;
+                frames.push(bytes);
+                Ok(())
+            })(),
+            RecordedFrames::Compact(frames) => (|| {
+                let before = frames.retained_bytes();
+                let remaining = self.limits.max_capture_bytes.saturating_sub(self.charged);
+                let ceiling =
+                    before
+                        .checked_add(remaining)
+                        .ok_or(BundleError::CaptureLimitExceeded {
+                            context: "compact frame storage",
+                            needed: usize::MAX,
+                            limit: self.limits.max_capture_bytes,
+                        })?;
+                frames.append(bytes, ceiling)?;
+                self.charge(
+                    frames.retained_bytes().saturating_sub(before),
+                    "compact frame storage",
+                )
+            })(),
+        };
         if let Some(active) = &mut self.active {
             active.recorded.frames = frames;
-        } else {
+        } else if result.is_ok() {
             self.append_segment(RecordedSegment {
                 kind: SegmentKind::Wait,
                 frames,
             })?;
         }
+        result?;
         self.frames += 1;
         Ok(())
     }
@@ -404,7 +657,7 @@ impl SceneBundleRecorder {
                         kind: event
                             .segment
                             .ok_or(RecordingError::Unsupported("segment kind missing"))?,
-                        frames: Vec::new(),
+                        frames: RecordedFrames::new(self.compact.is_some()),
                     },
                     base_frame: event.time.frames(),
                     play_index: event.play_index,
@@ -528,7 +781,10 @@ impl SceneBundleRecorder {
         schedule.put_u32(0); // Imperative Scene has no authored Timeline labels.
         let plan_bytes = schedule.finish().map_err(encoding_error)?;
         TimelinePlan::from_bytes(&plan_bytes).map_err(RecordingError::Plan)?;
-        let schema = if self.cameras.is_some() {
+        let compact = self.compact.is_some();
+        let schema = if compact {
+            COMPACT_TIMELINE_BUNDLE_SCHEMA
+        } else if self.cameras.is_some() {
             CAMERA_TIMELINE_BUNDLE_SCHEMA
         } else {
             TIMELINE_BUNDLE_SCHEMA
@@ -539,15 +795,30 @@ impl SceneBundleRecorder {
         writer.put_bytes(&plan_bytes);
         writer.put_u32(count);
         for segment in self.segments {
-            writer.put_u8(1); // Observed snapshots, never an unproven pure law.
-            writer.put_u32(
-                u32::try_from(segment.frames.len()).map_err(|_| {
-                    RecordingError::Unsupported("segment frame count exceeds FMTL/1")
-                })?,
-            );
-            for frame in segment.frames {
-                writer.put_bytes(&frame);
+            match segment.frames {
+                RecordedFrames::Snapshots(frames) => {
+                    writer.put_u8(1); // Observed snapshots, never an unproven pure law.
+                    writer.put_u32(u32::try_from(frames.len()).map_err(|_| {
+                        RecordingError::Unsupported("segment frame count exceeds FMTL/1")
+                    })?);
+                    for frame in frames {
+                        writer.put_bytes(&frame);
+                    }
+                }
+                RecordedFrames::Compact(frames) => {
+                    writer.put_u8(2); // Lossless observed bytes; source effects stay stateful.
+                    frames
+                        .finish()
+                        .write_to(&mut writer)
+                        .map_err(|error| match error {
+                            BundleError::Serial(error) => encoding_error(error),
+                            error => RecordingError::Bundle(error),
+                        })?;
+                }
             }
+        }
+        if compact {
+            writer.put_bool(self.cameras.is_some());
         }
         if let Some(cameras) = self.cameras {
             if cameras.len() as u64 != self.frames {

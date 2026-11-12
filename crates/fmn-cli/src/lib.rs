@@ -28,6 +28,7 @@ pub use generated::{
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::fmt::{self, Write as _};
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 #[cfg(feature = "batch")]
@@ -61,15 +62,15 @@ use fmn_output::{
     Y4mSinkConfig, frames_to_samples, publish_svg_new, publish_wav_new,
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
-#[cfg(test)]
-use fmn_render::RetainedFrameRenderer;
-use fmn_render::RetainedFrameRendererConfig;
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
-use fmn_render::engine::{EngineIdentity, FrameConfig, FrameJob, journal as render_engine_journal};
+#[cfg(any(test, feature = "metal"))]
+use fmn_render::engine::FrameJob;
+use fmn_render::engine::{EngineIdentity, FrameConfig, journal as render_engine_journal};
 use fmn_render::fill::MonoTable;
 #[cfg(feature = "metal")]
 use fmn_render::metal::{MetalRenderer, MetalReport};
 use fmn_render::plan::RenderPlan;
+use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig};
 use fmn_scene::studio_bridge::SceneState;
 use fmn_scene::{
     AssetRead, BundleReadError, CaptureReason, CommandRecord, DEFAULT_MAX_BUNDLE_BYTES,
@@ -166,6 +167,18 @@ pub struct AnimationRange {
     pub start: u64,
     /// Exclusive final play index, when bounded.
     pub end: Option<u64>,
+}
+
+/// A compiled scene selection on its original, unmodified capture grid.
+///
+/// Segment ordinals and frame indices are zero-based, half-open intervals.
+/// Output numbering starts at zero independently of these source indices.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompiledSelection {
+    /// Authored play/wait ordinals, including any zero-frame segments.
+    pub segments: Range<usize>,
+    /// Contiguous captured frames belonging to the selected segments.
+    pub frames: Range<u32>,
 }
 
 /// Quality preset or exact output dimensions.
@@ -620,6 +633,12 @@ pub struct DoctorSnapshot {
     pub logical_cores: u32,
     /// Physical CPU count.
     pub physical_cores: u32,
+    /// CPU-bandwidth ceiling expressed as whole workers, when detected.
+    pub cpu_quota: Option<u32>,
+    /// Logical CPU parallelism after affinity and bandwidth limits.
+    pub cpu_thread_budget: u32,
+    /// Effective physical/cgroup memory capacity, when detected.
+    pub effective_memory_bytes: Option<u64>,
     /// Hardware-supported SIMD tier.
     pub hardware_supported_tier: String,
     /// Tier compiled into this binary.
@@ -2099,6 +2118,9 @@ pub fn collect_doctor_snapshot(
         topology_source,
         logical_cores: topology.logical_cores(),
         physical_cores: topology.physical_cores,
+        cpu_quota: topology.cpu_quota,
+        cpu_thread_budget: topology.cpu_thread_budget(),
+        effective_memory_bytes: topology.total_memory_bytes,
         hardware_supported_tier: topology.simd_tier.name().to_owned(),
         active_compiled_tier: active_compiled_tier(),
         plan,
@@ -2470,13 +2492,19 @@ impl DoctorSnapshot {
             out,
             "{{\"schema\":\"fmn.doctor\",\"version\":{},\"kind\":\"topology\",\
              \"source\":{},\"source_detail\":{},\"logical_cores\":{},\
-             \"physical_cores\":{},\"hardware_supported_tier\":{},\
+             \"physical_cores\":{},\"cpu_quota\":{},\"cpu_thread_budget\":{},\
+             \"effective_memory_bytes\":{},\"hardware_supported_tier\":{},\
              \"active_compiled_tier\":{}}}",
             ROBOT_SCHEMA_VERSION,
             json_string(source),
             json_option(source_detail),
             self.logical_cores,
             self.physical_cores,
+            self.cpu_quota
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
+            self.cpu_thread_budget,
+            self.effective_memory_bytes
+                .map_or_else(|| "null".to_owned(), |value| value.to_string()),
             json_string(&self.hardware_supported_tier),
             json_string(self.active_compiled_tier),
         );
@@ -2640,6 +2668,21 @@ impl DoctorSnapshot {
             "cores: {} logical / {} physical",
             self.logical_cores, self.physical_cores
         );
+        let quota = self.cpu_quota.map_or_else(
+            || "no detected quota".to_owned(),
+            |quota| format!("quota ceiling: {quota}"),
+        );
+        let _ = writeln!(
+            out,
+            "CPU thread budget: {} ({quota})",
+            self.cpu_thread_budget
+        );
+        match self.effective_memory_bytes {
+            Some(bytes) => {
+                let _ = writeln!(out, "effective memory capacity: {bytes} bytes");
+            }
+            None => out.push_str("effective memory capacity: unknown\n"),
+        }
         let _ = writeln!(
             out,
             "SIMD: hardware {} / active build {}",
@@ -2977,21 +3020,37 @@ enum ManifestPublication {
 
 enum RenderSourceReport {
     Builtin,
-    Compiled(PathBuf),
+    Compiled {
+        path: PathBuf,
+        selection: CompiledSelection,
+    },
 }
 
 impl RenderSourceReport {
     const fn kind(&self) -> &'static str {
         match self {
             Self::Builtin => "builtin",
-            Self::Compiled(_) => "compiled",
+            Self::Compiled { .. } => "compiled",
         }
     }
 
     fn artifact(&self) -> Option<&Path> {
         match self {
             Self::Builtin => None,
-            Self::Compiled(path) => Some(path),
+            Self::Compiled { path, .. } => Some(path),
+        }
+    }
+
+    fn selection_json(&self) -> String {
+        match self {
+            Self::Builtin => String::new(),
+            Self::Compiled { selection, .. } => format!(
+                ",\"source_frames\":[{},{}],\"source_segments\":[{},{}]",
+                selection.frames.start,
+                selection.frames.end,
+                selection.segments.start,
+                selection.segments.end,
+            ),
         }
     }
 }
@@ -3159,6 +3218,7 @@ enum NativeRenderInput {
         source_item: ClosureItem,
         name: String,
         bundle: Box<TimelineBundle>,
+        selection: CompiledSelection,
     },
 }
 
@@ -3236,26 +3296,72 @@ impl NativeStudioFrames {
     }
 }
 
+struct NativeStudioCpu {
+    renderer: RetainedFrameRenderer,
+    rgba: FrameBuffer,
+}
+
 struct NativeStudioRenderer {
     frame_config: FrameConfig,
     tiling: Tiling,
     engine: EngineIdentity,
     render_threads: usize,
+    rgba_layout: FrameLayout,
+    cpu: Option<NativeStudioCpu>,
+    png: fmn_codec::PngEncoder,
     #[cfg(feature = "metal")]
     preview: Option<fmn_studio::StudioPreviewRenderer>,
 }
 
 impl NativeStudioRenderer {
+    fn new(config: RetainedFrameRendererConfig) -> Result<Self, fmn_studio::ServiceError> {
+        // Validate both layouts and team width before accepting the worker,
+        // without allocating CPU surfaces for an annex-selected preview.
+        if config.threads == 0 {
+            return Err(studio_service_error(
+                fmn_render::RetainedFrameRendererError::InvalidThreads.to_string(),
+            ));
+        }
+        config
+            .frame
+            .layout()
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        let rgba_layout = FrameLayout::tight(
+            PixelFormat::Rgba8,
+            config.frame.viewport.width,
+            config.frame.viewport.height,
+        )
+        .map_err(|error| studio_service_error(error.to_string()))?;
+        Ok(Self {
+            frame_config: config.frame,
+            tiling: config.tiling,
+            engine: config.engine,
+            render_threads: config.threads,
+            rgba_layout,
+            cpu: None,
+            png: fmn_codec::PngEncoder::new(),
+            #[cfg(feature = "metal")]
+            preview: None,
+        })
+    }
+
     fn render(
         &mut self,
         scene: &str,
         frame_index: usize,
         stage: &fmn_scene::studio_bridge::Stage,
     ) -> Result<fmn_studio::FrameStream, fmn_studio::ServiceError> {
-        let (render_plan, mono, binning) = self.prepare(stage, frame_index)?;
         let mut render_backends = Vec::new();
         #[cfg(feature = "metal")]
-        if let Some(preview) = self.preview.as_mut() {
+        let annex_frame = self
+            .preview
+            .as_ref()
+            .map(|_| self.prepare(stage))
+            .transpose()?;
+        #[cfg(feature = "metal")]
+        if let (Some(preview), Some((render_plan, mono, binning))) =
+            (self.preview.as_mut(), annex_frame)
+        {
             match preview
                 .render(&render_plan, &mono, &binning, self.frame_config)
                 .map_err(|error| studio_service_error(error.to_string()))?
@@ -3270,7 +3376,9 @@ impl NativeStudioRenderer {
                         .try_reserve(1)
                         .map_err(|error| studio_service_error(error.to_string()))?;
                     render_backends.push(backend);
-                    return self.encode_rgba8(
+                    return Self::encode_rgba8(
+                        &mut self.png,
+                        self.frame_config.viewport,
                         scene,
                         frame_index,
                         frame.frame.as_bytes(),
@@ -3293,25 +3401,65 @@ impl NativeStudioRenderer {
                     render_backends.push(backend);
                 }
             }
+            // Metal admission predates the retained CPU cache and worker-band
+            // surfaces. Keep its explicit browser/terminal companion scoped,
+            // as before, without starting a second retained renderer. A
+            // demoted annex already returned its own CPU stream above.
+            let raw = FrameJob::with_identity(
+                &render_plan,
+                &mono,
+                &binning,
+                self.frame_config,
+                self.engine,
+            )
+            .map_err(|error| studio_service_error(error.to_string()))?
+            .render(self.render_threads)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+            let mut rgba = FrameBuffer::new(self.rgba_layout.clone());
+            rgba16f_to_rgba8(&raw, &mut rgba)
+                .map_err(|error| studio_service_error(error.to_string()))?;
+            render_backends.push(
+                RenderBackendRecord::new(
+                    RenderBackendRole::FrameStream,
+                    render_engine_journal(self.engine, &self.frame_config, self.tiling),
+                )
+                .map_err(|error| studio_service_error(error.to_string()))?,
+            );
+            return Self::encode_rgba8(
+                &mut self.png,
+                self.frame_config.viewport,
+                scene,
+                frame_index,
+                rgba.as_bytes(),
+                render_backends,
+            );
         }
-        let frame = FrameJob::with_identity(
-            &render_plan,
-            &mono,
-            &binning,
-            self.frame_config,
-            self.engine,
-        )
-        .map_err(|error| studio_service_error(error.to_string()))?
-        .render(self.render_threads)
-        .map_err(|error| studio_service_error(error.to_string()))?;
-        let layout = FrameLayout::tight(
-            PixelFormat::Rgba8,
-            self.frame_config.viewport.width,
-            self.frame_config.viewport.height,
-        )
-        .map_err(|error| studio_service_error(error.to_string()))?;
-        let mut rgba = FrameBuffer::new(layout);
-        rgba16f_to_rgba8(&frame, &mut rgba)
+        // This worker's planar camera and output policy are fixed. A scrub
+        // ordinal is not a camera revision: scene/record revisions already
+        // invalidate the exact resources that changed, including backward
+        // seeks and independently materialized stages. Retain the compiler,
+        // tile cache, raw frame and worker team across CPU preview requests.
+        if self.cpu.is_none() {
+            let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+                frame: self.frame_config,
+                tiling: self.tiling,
+                engine: self.engine,
+                threads: self.render_threads,
+            })
+            .map_err(|error| studio_service_error(error.to_string()))?;
+            self.cpu = Some(NativeStudioCpu {
+                renderer,
+                rgba: FrameBuffer::new(self.rgba_layout.clone()),
+            });
+        }
+        let cpu = self
+            .cpu
+            .as_mut()
+            .ok_or_else(|| studio_service_error("CPU preview owner was not initialized"))?;
+        cpu.renderer
+            .render(stage, 0)
+            .map_err(|error| studio_service_error(error.to_string()))?;
+        rgba16f_to_rgba8(cpu.renderer.frame(), &mut cpu.rgba)
             .map_err(|error| studio_service_error(error.to_string()))?;
         let stream_backend = RenderBackendRecord::new(
             RenderBackendRole::FrameStream,
@@ -3324,19 +3472,27 @@ impl NativeStudioRenderer {
                 .map_err(|error| studio_service_error(error.to_string()))?;
         }
         render_backends.push(stream_backend);
-        self.encode_rgba8(scene, frame_index, rgba.as_bytes(), render_backends)
+        Self::encode_rgba8(
+            &mut self.png,
+            self.frame_config.viewport,
+            scene,
+            frame_index,
+            cpu.rgba.as_bytes(),
+            render_backends,
+        )
     }
 
     fn encode_rgba8(
-        &self,
+        encoder: &mut fmn_codec::PngEncoder,
+        viewport: Viewport,
         scene: &str,
         frame_index: usize,
         rgba: &[u8],
         render_backends: Vec<RenderBackendRecord>,
     ) -> Result<fmn_studio::FrameStream, fmn_studio::ServiceError> {
-        let png = fmn_codec::encode_rgba8(
-            self.frame_config.viewport.width,
-            self.frame_config.viewport.height,
+        let png = encoder.encode_rgba8(
+            viewport.width,
+            viewport.height,
             rgba,
             fmn_codec::CompressionLevel::Fast,
         );
@@ -3345,8 +3501,8 @@ impl NativeStudioRenderer {
             scene: scene.to_owned(),
             frame_index: u64::try_from(frame_index)
                 .map_err(|_| studio_service_error("preview frame index exceeds u64"))?,
-            width: self.frame_config.viewport.width,
-            height: self.frame_config.viewport.height,
+            width: viewport.width,
+            height: viewport.height,
             stride: 0,
             encoding: fmn_studio::FrameEncoding::Png,
             payload: fmn_studio::FramePayload::Pipe { bytes: png, digest },
@@ -3357,13 +3513,10 @@ impl NativeStudioRenderer {
     fn prepare(
         &self,
         stage: &fmn_scene::studio_bridge::Stage,
-        revision: usize,
     ) -> Result<(RenderPlan, MonoTable, Binning), fmn_studio::ServiceError> {
-        let revision = u64::try_from(revision)
-            .map_err(|_| studio_service_error("preview revision exceeds u64"))?;
         let mut render_plan = RenderPlan::new();
         render_plan
-            .sync(stage, revision.saturating_add(1))
+            .sync(stage, 0)
             .map_err(|error| studio_service_error(error.to_string()))?;
         let mono = MonoTable::build(&render_plan, self.frame_config.map)
             .map_err(|error| studio_service_error(error.to_string()))?;
@@ -3383,10 +3536,9 @@ impl NativeStudioRenderer {
     fn overlay_json(
         &self,
         stage: &fmn_scene::studio_bridge::Stage,
-        frame_index: usize,
         layers: fmn_studio::DebugLayerSet,
     ) -> Result<Vec<u8>, fmn_studio::ServiceError> {
-        let (_, _, binning) = self.prepare(stage, frame_index)?;
+        let (_, _, binning) = self.prepare(stage)?;
         let limits = fmn_studio::InspectorLimits::default();
         fmn_studio::DebugOverlaySnapshot::capture(
             stage,
@@ -3505,6 +3657,7 @@ impl NativeStudioWorker {
                 source_item,
                 ..
             } => {
+                require_full_compiled_preview(&command.render)?;
                 let mut compiled_command = command.render.clone();
                 if let Some(requested_fps) = compiled_command.fps
                     && requested_fps != bundle.fps()
@@ -3586,21 +3739,27 @@ impl NativeStudioWorker {
                 ));
             }
         };
+        let renderer = NativeStudioRenderer::new(RetainedFrameRendererConfig {
+            frame: resolved_frame_config(&config)?,
+            tiling: Tiling {
+                macro_tile: plan.macro_tile,
+                fine_tile: plan.fine_tile,
+            },
+            engine,
+            threads: render_threads,
+        })
+        .map_err(|error| CliError::new("scene", error.to_string()))?;
+        #[cfg(feature = "metal")]
+        let renderer = {
+            let mut renderer = renderer;
+            renderer.preview = preview;
+            renderer
+        };
         Ok(Self {
             build_id: fmn_studio::protocol_digest(BUILD_ID.as_bytes()),
             scene,
             frames,
-            renderer: NativeStudioRenderer {
-                frame_config: resolved_frame_config(&config)?,
-                tiling: Tiling {
-                    macro_tile: plan.macro_tile,
-                    fine_tile: plan.fine_tile,
-                },
-                engine,
-                render_threads,
-                #[cfg(feature = "metal")]
-                preview,
-            },
+            renderer,
             current_frame: 0,
             max_frame_bytes: fmn_studio::ProtocolLimits::default().max_frame_bytes,
             fps,
@@ -3839,6 +3998,25 @@ impl NativeStudioWorker {
     }
 }
 
+/// Compose a reusable Studio preview worker for an embedded host.
+///
+/// Successive [`fmn_studio::SupervisorRequest`] values use the same scene and
+/// renderer owner as the disposable `fmn studio` worker. For CPU previews,
+/// retaining this service across scrub requests preserves compiled resources,
+/// raster workers, pixel buffers and PNG encoder scratch. The caller owns its
+/// lifetime and may drive the existing worker protocol through
+/// [`fmn_studio::serve_worker`].
+///
+/// # Errors
+/// Returns the production worker's typed configuration, capability and scene
+/// errors. Rendering failures are reported by [`fmn_studio::WorkerService`].
+pub fn compose_studio_preview_worker(
+    fs: &dyn FileSystem,
+    command: &StudioCommand,
+) -> Result<Box<dyn fmn_studio::WorkerService>, CliError> {
+    studio_live::worker(fs, command)
+}
+
 /// Compose one Studio preview frame through the same scene registration,
 /// execution-plan selection, and renderer owner used by the disposable worker.
 ///
@@ -3856,7 +4034,7 @@ pub fn compose_studio_preview_frame(
     frame: i64,
 ) -> Result<fmn_studio::FrameStream, CliError> {
     let scene = studio_scene_name(fs, &command.render)?;
-    let mut worker = studio_live::worker(fs, command)?;
+    let mut worker = compose_studio_preview_worker(fs, command)?;
     match worker
         .handle(fmn_studio::SupervisorRequest::Scrub { scene, frame })
         .map_err(|error| CliError::new("render", error.to_string()))?
@@ -3939,9 +4117,7 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
             fmn_studio::SupervisorRequest::Overlay { scene, layers } => {
                 self.require_scene(&scene)?;
                 let stage = self.frames.stage_at(self.current_frame)?;
-                let bytes = self
-                    .renderer
-                    .overlay_json(&stage, self.current_frame, layers)?;
+                let bytes = self.renderer.overlay_json(&stage, layers)?;
                 Ok(self.studio_data(fmn_studio::StudioDataKind::Overlay, bytes))
             }
             fmn_studio::SupervisorRequest::ReplayJournal(replay) => self.replay(replay),
@@ -6171,6 +6347,75 @@ fn compiled_scene_name(command: &RenderCommand, source: &Path) -> Result<String,
     Ok(name)
 }
 
+/// Resolve a CLI play range against a compiled recording's stored boundaries.
+///
+/// This is shared by picture-only and narrated FMTL replay. `-n START,END`
+/// selects authored segment ordinals with an exclusive end; `-n START`
+/// selects the remaining segments. The artifact owns every frame boundary,
+/// so selection never rounds durations, evaluates callbacks, or resamples.
+/// `max_frames` bounds only the selected work, not its unrendered prefix.
+///
+/// # Errors
+/// Refuses empty, reversed or out-of-bounds segment ranges, selections without
+/// captured frames, and selected work above the caller's frame budget.
+pub fn select_compiled_segments(
+    bundle: &TimelineBundle,
+    selection: Option<AnimationRange>,
+    max_frames: u64,
+) -> Result<CompiledSelection, CliError> {
+    let total = bundle.segment_count();
+    let (start, end) = match selection {
+        Some(range) => {
+            let start = usize::try_from(range.start)
+                .map_err(|_| usage("play-range start exceeds this recording"))?;
+            let end = range
+                .end
+                .map_or(Ok(total), usize::try_from)
+                .map_err(|_| usage("play-range end exceeds this recording"))?;
+            (start, end)
+        }
+        None => (0, total),
+    };
+    if start >= end || end > total {
+        return Err(usage(format!(
+            "compiled play range must be nonempty and lie inside 0..{total}; END is exclusive"
+        )));
+    }
+    let first = bundle
+        .segment_frame_range(start)
+        .ok_or_else(|| CliError::new("scene", "missing compiled start segment"))?;
+    let last = bundle
+        .segment_frame_range(end - 1)
+        .ok_or_else(|| CliError::new("scene", "missing compiled end segment"))?;
+    let frames = first.start..last.end;
+    if frames.is_empty() {
+        return Err(CliError::new(
+            "scene",
+            "selected compiled segments contain no captured frames",
+        ));
+    }
+    if u64::from(frames.end - frames.start) > max_frames {
+        return Err(CliError::new(
+            "budget",
+            "selected compiled schedule exceeds the output frame budget",
+        ));
+    }
+    Ok(CompiledSelection {
+        segments: start..end,
+        frames,
+    })
+}
+
+fn require_full_compiled_preview(command: &RenderCommand) -> Result<(), CliError> {
+    if command.animation_range.is_some() {
+        return Err(CliError::new(
+            "capability",
+            "compiled Studio previews the complete recording; use offline render or batch with -n to export selected segments",
+        ));
+    }
+    Ok(())
+}
+
 fn resolve_native_render_input(
     fs: &dyn FileSystem,
     command: &RenderCommand,
@@ -6251,7 +6496,6 @@ fn resolve_native_render_input(
         ));
     }
     if command.skip_animations
-        || command.animation_range.is_some()
         || command.presenter_mode
         || command.full_screen
         || command.autoreload
@@ -6259,7 +6503,7 @@ fn resolve_native_render_input(
     {
         return Err(CliError::new(
             "capability",
-            "an FMTL artifact has a fixed compiled schedule; skip, range, presenter, fullscreen, reload, and embed controls require an authored scene source",
+            "an FMTL artifact has a fixed compiled schedule; skip, presenter, fullscreen, reload, and embed controls require an authored scene source; -n selects recorded segments",
         ));
     }
     let name = compiled_scene_name(command, source)?;
@@ -6284,21 +6528,17 @@ fn resolve_native_render_input(
     )
     .map_err(|error| internal(error.to_string()))?;
     let bundle = TimelineBundle::from_bytes(&bytes).map_err(bundle_read_error)?;
-    if u64::from(bundle.frame_count()) > fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES {
-        return Err(CliError::new(
-            "budget",
-            format!(
-                "compiled artifact schedules {} frames, exceeding the {}-frame CLI output budget",
-                bundle.frame_count(),
-                fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES
-            ),
-        ));
-    }
+    let selection = select_compiled_segments(
+        &bundle,
+        command.animation_range,
+        fmn_scene::DEFAULT_MAX_BUNDLE_EXPORT_FRAMES,
+    )?;
     Ok(NativeRenderInput::Compiled {
         source: source.to_owned(),
         source_item,
         name,
         bundle: Box::new(bundle),
+        selection,
     })
 }
 
@@ -6895,6 +7135,7 @@ fn execute_native_render_with_cancellation(
             source_item,
             name,
             bundle,
+            selection,
         } => {
             // A compiled artifact replays recorded stages and carries no
             // sound-cue requests, so a WAV soundtrack has no input model.
@@ -6904,6 +7145,18 @@ fn execute_native_render_with_cancellation(
                     "compiled FMTL artifacts do not carry scene sound cues; --format wav requires a live native scene (@builtin)",
                 ));
             }
+            let summary = PreRunSummary {
+                frames: u64::from(selection.frames.end - selection.frames.start),
+                play_indices: selection
+                    .segments
+                    .clone()
+                    .map(|index| {
+                        u64::try_from(index).map_err(|_| {
+                            CliError::new("budget", "compiled subdivision index exceeds u64")
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            };
             if matches!(target, RenderTarget::Svg) {
                 let artifact_destination = destination(&name);
                 preflight_render_generation(fs.as_ref(), &artifact_destination)?;
@@ -6913,7 +7166,7 @@ fn execute_native_render_with_cancellation(
                         &adjacent_manifest_destination(&artifact_destination)?,
                     )?;
                 }
-                let final_frame = bundle.frame_count().checked_sub(1).ok_or_else(|| {
+                let final_frame = selection.frames.end.checked_sub(1).ok_or_else(|| {
                     CliError::new(
                         "scene",
                         "the compiled timeline has no frame to publish as a final-state SVG",
@@ -6934,18 +7187,14 @@ fn execute_native_render_with_cancellation(
                     &stage,
                     &svg_camera,
                 )?;
-                let summary = PreRunSummary {
-                    frames: u64::from(bundle.frame_count()),
-                    play_indices: (0..bundle.segment_count())
-                        .map(|index| {
-                            u64::try_from(index).map_err(|_| {
-                                CliError::new("budget", "compiled subdivision index exceeds u64")
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?,
-                };
                 reports.push(complete(
-                    RenderSourceReport::Compiled(source),
+                    RenderSourceReport::Compiled {
+                        path: source,
+                        selection: CompiledSelection {
+                            segments: selection.segments,
+                            frames: final_frame..selection.frames.end,
+                        },
+                    },
                     source_item,
                     name,
                     FinishedRender {
@@ -6960,19 +7209,15 @@ fn execute_native_render_with_cancellation(
             }
             // Keep only immutable frame inputs in the producer. Source clock
             // indices survive output rebasing for stills and subdivisions.
-            let segment_ranges = (0..bundle.segment_count())
+            let segment_ranges = selection
+                .segments
+                .clone()
                 .map(|index| {
                     bundle.segment_frame_range(index).ok_or_else(|| {
                         CliError::new("internal", "validated bundle omitted a segment frame range")
                     })
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            if bundle.frame_count() == 0 {
-                return Err(CliError::new(
-                    "scene",
-                    "the compiled timeline has no frames to render",
-                ));
-            }
             if command.subdivide && segment_ranges.iter().any(std::ops::Range::is_empty) {
                 return Err(CliError::new(
                     "scene",
@@ -6980,17 +7225,6 @@ fn execute_native_render_with_cancellation(
                 ));
             }
             let bundle = (*bundle).into_shared().map_err(bundle_read_error)?;
-            let play_indices = (0..bundle.segment_count())
-                .map(|index| {
-                    u64::try_from(index).map_err(|_| {
-                        CliError::new("budget", "compiled subdivision index exceeds u64")
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let summary = PreRunSummary {
-                frames: u64::from(bundle.frame_count()),
-                play_indices,
-            };
             if command.subdivide {
                 for &play_index in &summary.play_indices {
                     let artifact_destination =
@@ -7048,7 +7282,7 @@ fn execute_native_render_with_cancellation(
                     } else {
                         segment_frames
                     };
-                    for index in frames {
+                    for index in frames.clone() {
                         if let Some(cancellation) = cancellation {
                             cancellation.cli_checkpoint()?;
                         }
@@ -7058,7 +7292,14 @@ fn execute_native_render_with_cancellation(
                     }
                     let artifact = sink.finish(None)?;
                     reports.push(complete(
-                        RenderSourceReport::Compiled(source.clone()),
+                        RenderSourceReport::Compiled {
+                            path: source.clone(),
+                            selection: CompiledSelection {
+                                segments: selection.segments.start + segment_index
+                                    ..selection.segments.start + segment_index + 1,
+                                frames,
+                            },
+                        },
                         source_item.clone(),
                         name.clone(),
                         artifact,
@@ -7091,17 +7332,17 @@ fn execute_native_render_with_cancellation(
                 cancellation.cli_checkpoint()?;
             }
             let frames = if matches!(target, RenderTarget::Native(NativeFrameFormat::Png)) {
-                let final_frame = bundle.frame_count().checked_sub(1).ok_or_else(|| {
+                let final_frame = selection.frames.end.checked_sub(1).ok_or_else(|| {
                     CliError::new(
                         "scene",
                         "the compiled timeline has no frame to publish as a final-state PNG",
                     )
                 })?;
-                final_frame..bundle.frame_count()
+                final_frame..selection.frames.end
             } else {
-                0..bundle.frame_count()
+                selection.frames
             };
-            for index in frames {
+            for index in frames.clone() {
                 if let Some(cancellation) = cancellation {
                     cancellation.cli_checkpoint()?;
                 }
@@ -7113,7 +7354,13 @@ fn execute_native_render_with_cancellation(
                 cancellation.cli_checkpoint()?;
             }
             reports.push(complete(
-                RenderSourceReport::Compiled(source),
+                RenderSourceReport::Compiled {
+                    path: source,
+                    selection: CompiledSelection {
+                        segments: selection.segments,
+                        frames,
+                    },
+                },
                 source_item,
                 name,
                 sink.finish(None)?,
@@ -7313,7 +7560,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
         typesetting,
     } in reports
     {
-        let source_artifact = source.artifact().map_or_else(String::new, |path| {
+        let mut source_artifact = source.artifact().map_or_else(String::new, |path| {
             format!(
                 ",\"source_artifact\":{}",
                 json_string(&path.to_string_lossy())
@@ -7343,6 +7590,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                 );
             }
         }
+        source_artifact.push_str(&source.selection_json());
         let subdivision_json =
             subdivision.map_or_else(String::new, |index| format!(",\"subdivision\":{index}"));
         let human_subdivision =
@@ -7954,15 +8202,17 @@ fn execute_batch(
     };
     let (topology, _) = detect_topology(fs.as_ref());
     let physical_cores = usize::try_from(topology.physical_cores).unwrap_or(usize::MAX);
-    let logical_cores = usize::try_from(topology.logical_cores()).unwrap_or(usize::MAX);
-    let default_scenes = physical_cores.max(1).min(jobs.len());
+    let cpu_budget = usize::try_from(topology.cpu_thread_budget())
+        .unwrap_or(usize::MAX)
+        .max(1);
+    let default_scenes = physical_cores.max(1).min(cpu_budget).min(jobs.len());
     let max_scenes = command
         .max_scenes
         .unwrap_or(default_scenes)
         .min(jobs.len())
         .max(1);
     if command.render.common.threads.is_none() {
-        let per_scene_threads = (logical_cores / max_scenes).max(1);
+        let per_scene_threads = (cpu_budget / max_scenes).max(1);
         for job in &mut jobs {
             job.command.common.threads = Some(per_scene_threads);
         }
@@ -8447,7 +8697,7 @@ pub fn run_internal_studio_worker_os(args: &[OsString]) -> RunOutput {
     if command.render.scene_source_kind() == Some(SceneSourceKind::Python) {
         return internal_worker_failure(PYTHON_SOURCE_PORTAL_MESSAGE);
     }
-    let mut service = match studio_live::worker(&fmn_platform::fs::StdFs, &command) {
+    let mut service = match compose_studio_preview_worker(&fmn_platform::fs::StdFs, &command) {
         Ok(service) => service,
         Err(error) => return internal_worker_failure(error),
     };
@@ -8489,7 +8739,10 @@ fn studio_scene_name(fs: &dyn FileSystem, command: &RenderCommand) -> Result<Str
                 .pop()
                 .ok_or_else(|| CliError::new("scene", "Studio requires exactly one scene name"))
         }
-        NativeRenderInput::Compiled { name, .. } => Ok(name),
+        NativeRenderInput::Compiled { name, .. } => {
+            require_full_compiled_preview(command)?;
+            Ok(name)
+        }
     }
 }
 
@@ -11538,6 +11791,61 @@ mod tests {
         assert!(!human.contains("cache maintenance"));
     }
 
+    #[cfg(target_os = "linux")]
+    fn constrained_linux_fs() -> Arc<VirtualFs> {
+        let fs = Arc::new(VirtualFs::new());
+        for (path, contents) in [
+            ("/sys/devices/system/cpu/online", "0-7\n"),
+            ("/proc/thread-self/status", "Cpus_allowed_list:\t2-7\n"),
+            ("/proc/meminfo", "MemTotal: 8388608 kB\n"),
+            ("/proc/self/cgroup", "0::/tenant/job\n"),
+            (
+                "/proc/self/mountinfo",
+                "29 23 0:26 / /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+            ),
+            ("/sys/fs/cgroup/tenant/cpu.max", "200000 100000\n"),
+            ("/sys/fs/cgroup/tenant/memory.max", "8388608\n"),
+            ("/sys/fs/cgroup/tenant/job/cpu.max", "max 100000\n"),
+            ("/sys/fs/cgroup/tenant/job/memory.max", "max\n"),
+        ] {
+            fs.insert(path, contents.as_bytes().to_vec());
+        }
+        fs
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn doctor_reports_effective_resources_and_the_constrained_plan() {
+        let fs = constrained_linux_fs();
+        let Invocation::Doctor(command) = parse_args(["doctor", "--robot"]).unwrap() else {
+            panic!("doctor command expected");
+        };
+        let snapshot = collect_doctor_snapshot(
+            fs.as_ref(),
+            &fmn_platform::process::ScriptedRunner::new(),
+            &no_ffmpeg_locator(),
+            &command,
+        )
+        .unwrap();
+        assert_eq!(snapshot.topology_source, TopologySource::LinuxSysfs);
+        assert_eq!(snapshot.logical_cores, 6);
+        assert_eq!(snapshot.physical_cores, 6);
+        assert_eq!(snapshot.cpu_quota, Some(2));
+        assert_eq!(snapshot.cpu_thread_budget, 2);
+        assert_eq!(snapshot.effective_memory_bytes, Some(8 * 1024 * 1024));
+        assert_eq!(snapshot.plan.render_threads, 2);
+        assert_eq!(snapshot.plan.frames_in_flight, 1);
+        let robot = snapshot.to_ndjson().unwrap();
+        let topology = robot.lines().next().unwrap();
+        assert!(topology.contains("\"cpu_quota\":2,"));
+        assert!(topology.contains("\"cpu_thread_budget\":2,"));
+        assert!(topology.contains("\"effective_memory_bytes\":8388608,"));
+        let human = snapshot.to_human();
+        assert!(human.contains("cores: 6 logical / 6 physical"));
+        assert!(human.contains("CPU thread budget: 2 (quota ceiling: 2)"));
+        assert!(human.contains("effective memory capacity: 8388608 bytes"));
+    }
+
     fn synthetic_doctor() -> DoctorSnapshot {
         DoctorSnapshot {
             topology_source: TopologySource::Fallback {
@@ -11545,6 +11853,9 @@ mod tests {
             },
             logical_cores: 8,
             physical_cores: 4,
+            cpu_quota: None,
+            cpu_thread_budget: 8,
+            effective_memory_bytes: None,
             hardware_supported_tier: "x86-64-v4".to_owned(),
             active_compiled_tier: "portable",
             plan: ExecutionPlanReport {
@@ -11600,7 +11911,7 @@ mod tests {
     #[test]
     fn doctor_robot_output_is_a_bit_locked_ndjson_schema() {
         let expected = concat!(
-            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
+            "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"topology\",\"source\":\"fallback\",\"source_detail\":\"fixture fallback\",\"logical_cores\":8,\"physical_cores\":4,\"cpu_quota\":null,\"cpu_thread_budget\":8,\"effective_memory_bytes\":null,\"hardware_supported_tier\":\"x86-64-v4\",\"active_compiled_tier\":\"portable\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"execution_plan\",\"determinism\":\"certified\",\"engine\":\"certified-cpu\",\"frames_in_flight\":2,\"scene_threads\":1,\"render_teams\":2,\"render_threads\":4,\"output_threads\":1,\"fine_tile\":16,\"macro_tile\":128,\"estimated_in_flight_bytes\":4096,\"output_format\":\"rgba8\",\"tuning_source\":\"certified-profile\"}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"ffmpeg\",\"available\":true,\"path\":\"/opt/ffmpeg\",\"sha256\":\"abc123\",\"ffmpeg_version\":\"ffmpeg \\\"7\\\"\",\"hardware_encoders\":[\"h264_nvenc\"],\"hardware_encoder_probe_error\":null,\"usable_hardware_encoders\":[],\"hardware_encoder_probes\":[{\"encoder\":\"h264_nvenc\",\"available\":false,\"detail\":\"Cannot load libcuda.so.1\"}]}\n",
             "{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"cache\",\"resolved\":true,\"root\":\"/cache\",\"exists\":true,\"direct_entries\":3,\"typeset_max_bytes\":1073741824,\"typeset_bytes\":512,\"warning\":null}\n",
@@ -12304,6 +12615,69 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "batch", target_os = "linux"))]
+    #[test]
+    fn batch_automatic_scheduling_respects_resource_limits_and_explicit_overrides() {
+        let scenes = ["circle_shift.v1", "rectangle_shift.v1", "triangle_shift.v1"];
+        let mut expected_frames = None;
+        for (flags, expected_scenes, expected_threads) in [
+            (&[][..], 2, 1),
+            (&["--max-scenes", "1"][..], 1, 2),
+            (&["--max-scenes", "3"][..], 3, 1),
+            (&["--max-scenes", "3", "--threads", "2"][..], 3, 2),
+        ] {
+            let fs = constrained_linux_fs();
+            let output = run_with_capabilities(
+                [
+                    "batch",
+                    "--robot",
+                    "--reproducible",
+                    "--format",
+                    "png_sequence",
+                    "--resolution",
+                    "32x24",
+                    "--fps",
+                    "8",
+                    "--video_dir",
+                    "/out",
+                ]
+                .into_iter()
+                .chain(flags.iter().copied())
+                .chain([BUILTIN_SCENE_SOURCE])
+                .chain(scenes),
+                fs_capability(&fs),
+                Arc::new(fmn_platform::process::ScriptedRunner::new()),
+                &no_ffmpeg_locator(),
+            );
+            assert_eq!(output.code, 0, "{flags:?}: {}", output.stdout);
+            assert!(output.stderr.is_empty());
+            let records = output.stdout.lines().collect::<Vec<_>>();
+            assert_eq!(records.len(), 4);
+            assert!(records[3].contains("\"kind\":\"batch\""));
+            assert!(records[3].contains("\"succeeded\":3,"));
+            assert!(records[3].contains(&format!("\"max_scenes\":{expected_scenes},")));
+            let mut frames = Vec::new();
+            for (scene, record) in scenes.into_iter().zip(&records) {
+                assert!(record.contains(&format!("\"scene\":\"{scene}\"")));
+                assert!(record.contains(&format!("\"render_threads\":{expected_threads},")));
+                for index in 0..3 {
+                    frames.push(
+                        fs.read(&PathBuf::from(format!("/out/{scene}/frame_{index:06}.png")))
+                            .expect("batch publishes every scheduled PNG"),
+                    );
+                }
+            }
+            if let Some(expected) = &expected_frames {
+                assert_eq!(
+                    expected, &frames,
+                    "batch scheduling changed certified PNG bytes"
+                );
+            } else {
+                expected_frames = Some(frames);
+            }
+        }
+    }
+
     #[cfg(feature = "batch")]
     #[test]
     fn batch_cancellation_reaches_the_reel_emitter() {
@@ -12497,6 +12871,386 @@ mod tests {
             .expect_err("version-1 schema cannot carry native non-UTF-8");
         assert_eq!(error.exit_name(), "config");
         assert!(error.message().contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn retained_studio_preview_validates_before_allocating_cpu_surfaces() {
+        let config = RetainedFrameRendererConfig {
+            frame: FrameConfig::new(
+                Viewport {
+                    width: 48,
+                    height: 32,
+                },
+                ScreenMap {
+                    scale: 6.0,
+                    origin: [24.0, 16.0],
+                    y_up: true,
+                },
+                fmn_core::color::LinearRgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
+            tiling: Tiling {
+                macro_tile: 16,
+                fine_tile: 8,
+            },
+            engine: EngineIdentity::fast(),
+            threads: 4,
+        };
+        assert!(NativeStudioRenderer::new(config).unwrap().cpu.is_none());
+        assert!(
+            NativeStudioRenderer::new(RetainedFrameRendererConfig {
+                threads: 0,
+                ..config
+            })
+            .is_err()
+        );
+        let mut empty = config;
+        empty.frame.viewport.width = 0;
+        assert!(NativeStudioRenderer::new(empty).is_err());
+        empty = config;
+        empty.frame.viewport.height = 0;
+        assert!(NativeStudioRenderer::new(empty).is_err());
+    }
+
+    #[cfg(all(feature = "metal", not(target_os = "macos")))]
+    #[test]
+    fn retained_studio_preview_metal_stream_keeps_cpu_owner_absent() {
+        use fmn_library::Square;
+        use fmn_scene::studio_bridge::Stage;
+
+        let mut stage = Stage::new();
+        let mob = stage.add(Square::new());
+        stage.add_to_scene(mob).unwrap();
+        let mut renderer = NativeStudioRenderer::new(RetainedFrameRendererConfig {
+            frame: FrameConfig::new(
+                Viewport {
+                    width: 48,
+                    height: 32,
+                },
+                ScreenMap {
+                    scale: 6.0,
+                    origin: [24.0, 16.0],
+                    y_up: true,
+                },
+                fmn_core::color::LinearRgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
+            tiling: Tiling {
+                macro_tile: 16,
+                fine_tile: 8,
+            },
+            engine: EngineIdentity::fast(),
+            threads: 4,
+        })
+        .unwrap();
+        renderer.preview = Some(
+            fmn_studio::StudioPreviewRenderer::new(fmn_studio::StudioPreviewConfig::new(
+                48,
+                32,
+                "compiled preview".to_owned(),
+                4,
+            ))
+            .unwrap(),
+        );
+        assert!(matches!(
+            renderer.preview.as_ref().unwrap().route(),
+            fmn_studio::StudioPreviewRoute::CpuStream(_)
+        ));
+        for index in 0..3 {
+            stage.shift(mob, [0.25, 0.0, 0.0]);
+            let expected = cold_studio_preview(&renderer, &stage);
+            let frame = renderer.render("annex", index, &stage).unwrap();
+            let fmn_studio::FramePayload::Pipe { bytes, .. } = frame.payload else {
+                panic!("annex fallback must return its PNG stream");
+            };
+            assert_eq!(bytes, expected);
+            assert!(renderer.cpu.is_none());
+            assert_eq!(frame.render_backends.len(), 1);
+            assert_eq!(
+                frame.render_backends[0].role(),
+                RenderBackendRole::FrameStream
+            );
+        }
+    }
+
+    #[test]
+    fn retained_studio_preview_matches_cold_seeks_and_reuses_workers() {
+        use fmn_core::color::LinearRgba;
+        use fmn_library::{Square, Style};
+        use fmn_scene::studio_bridge::Stage;
+
+        let mut stage = Stage::new();
+        let foreground = stage.add(Square::new().style(Style::default().fill_opacity(0.7)));
+        let neighbor = stage.add(Square::new().side_length(0.75));
+        stage.shift(neighbor, [1.5, 0.5, 0.0]);
+        stage.add_to_scene(foreground).unwrap();
+        stage.add_to_scene(neighbor).unwrap();
+        let mut snapshots = vec![stage.snapshot()];
+        stage.shift(foreground, [0.5, 0.25, 0.0]);
+        snapshots.push(stage.snapshot());
+        stage.set_color_lanes(foreground, "fill_rgba", Some([0.1, 0.7, 0.3]), None, false);
+        snapshots.push(stage.snapshot());
+        stage.remove_from_scene(neighbor);
+        snapshots.push(stage.snapshot());
+
+        for engine in [EngineIdentity::certified(), EngineIdentity::fast()] {
+            for threads in [1, 4, 16] {
+                let mut renderer = NativeStudioRenderer::new(RetainedFrameRendererConfig {
+                    frame: FrameConfig::new(
+                        Viewport {
+                            width: 48,
+                            height: 32,
+                        },
+                        ScreenMap {
+                            scale: 6.0,
+                            origin: [24.0, 16.0],
+                            y_up: true,
+                        },
+                        LinearRgba {
+                            r: 0.03,
+                            g: 0.05,
+                            b: 0.08,
+                            a: 1.0,
+                        },
+                    ),
+                    tiling: Tiling {
+                        macro_tile: 16,
+                        fine_tile: 8,
+                    },
+                    engine,
+                    threads,
+                })
+                .unwrap();
+                assert!(renderer.cpu.is_none());
+                let mut storage = None;
+                let expected_backend = RenderBackendRecord::new(
+                    RenderBackendRole::FrameStream,
+                    render_engine_journal(engine, &renderer.frame_config, renderer.tiling),
+                )
+                .unwrap();
+                let mut previous = None;
+                for (ordinal, index) in [0, 1, 2, 3, 1, 1, 0, 0, 2, 3, 3].into_iter().enumerate() {
+                    let stage = snapshots[index].materialize();
+                    let expected = cold_studio_preview(&renderer, &stage);
+                    let before = renderer
+                        .cpu
+                        .as_ref()
+                        .map_or(0, |cpu| cpu.renderer.raster_team_stats().frames_completed);
+                    let frame = renderer.render("scrub", ordinal, &stage).unwrap();
+                    assert_eq!(frame.frame_index, ordinal as u64);
+                    assert_eq!(frame.render_backends, [expected_backend.clone()]);
+                    let fmn_studio::FramePayload::Pipe { bytes, .. } = frame.payload else {
+                        panic!("native preview must return PNG bytes");
+                    };
+                    assert_eq!(
+                        bytes, expected,
+                        "{engine:?}, threads={threads}, frame={index}"
+                    );
+                    let cpu = renderer.cpu.as_ref().unwrap();
+                    if previous == Some(index) {
+                        assert!(
+                            cpu.renderer.last_frame_reused(),
+                            "scrub ordinal must not dirty the camera"
+                        );
+                        assert_eq!(cpu.renderer.raster_team_stats().frames_completed, before);
+                    }
+                    let team = cpu.renderer.raster_team_stats();
+                    assert_eq!(team.workers_spawned, if threads == 1 { 0 } else { threads });
+                    let current_storage = (
+                        cpu.renderer.frame().as_bytes().as_ptr(),
+                        cpu.rgba.as_bytes().as_ptr(),
+                    );
+                    assert_eq!(current_storage, *storage.get_or_insert(current_storage));
+                    previous = Some(index);
+                }
+            }
+        }
+    }
+
+    // The former per-request production route is the cold oracle: compile all
+    // geometry, bin, raster once and encode with no retained input or tile cache.
+    fn cold_studio_preview(
+        renderer: &NativeStudioRenderer,
+        stage: &fmn_scene::studio_bridge::Stage,
+    ) -> Vec<u8> {
+        let (plan, mono, binning) = renderer.prepare(stage).unwrap();
+        let raw = FrameJob::with_identity(
+            &plan,
+            &mono,
+            &binning,
+            renderer.frame_config,
+            renderer.engine,
+        )
+        .unwrap()
+        .render(1)
+        .unwrap();
+        let mut rgba = FrameBuffer::new(renderer.rgba_layout.clone());
+        rgba16f_to_rgba8(&raw, &mut rgba).unwrap();
+        fmn_codec::encode_rgba8(
+            renderer.frame_config.viewport.width,
+            renderer.frame_config.viewport.height,
+            rgba.as_bytes(),
+            fmn_codec::CompressionLevel::Fast,
+        )
+    }
+
+    #[test]
+    fn retained_studio_preview_invalidates_foreign_writes_and_recovers_after_refusal() {
+        use fmn_library::{Square, Style};
+        use fmn_scene::studio_bridge::Stage;
+
+        let fs = VirtualFs::new();
+        let Invocation::Studio(command) = parse_args([
+            "studio",
+            "--resolution",
+            "48x32",
+            "--threads",
+            "4",
+            "--reproducible",
+            BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+        .unwrap() else {
+            panic!("Studio command expected");
+        };
+        let mut worker = NativeStudioWorker::from_command(&fs, &command).unwrap();
+        let renderer = &mut worker.renderer;
+        let mut stage = Stage::new();
+        let mob = stage.add(Square::new().style(Style::default().fill_opacity(1.0)));
+        stage.add_to_scene(mob).unwrap();
+        renderer.render("edits", 0, &stage).unwrap();
+        let original = renderer.cpu.as_ref().unwrap().rgba.as_bytes().to_vec();
+        let view = stage
+            .get_mut(mob)
+            .unwrap()
+            .buffer
+            .export_field_view("fill_rgba", true)
+            .unwrap();
+        for record in 0..stage.get(mob).unwrap().buffer.len() {
+            assert!(view.write_foreign(record, "fill_rgba", &[0.0, 0.8, 0.1, 1.0]));
+        }
+        let expected = cold_studio_preview(renderer, &stage);
+        let frame = renderer.render("edits", 0, &stage).unwrap();
+        let fmn_studio::FramePayload::Pipe { bytes, .. } = frame.payload else {
+            panic!("native preview must return PNG bytes");
+        };
+        assert_eq!(bytes, expected);
+        assert_ne!(renderer.cpu.as_ref().unwrap().rgba.as_bytes(), original);
+        drop(view);
+
+        let valid = stage.snapshot();
+        let cpu = renderer.cpu.as_ref().unwrap();
+        let last_pixels = cpu.rgba.as_bytes().to_vec();
+        let team = cpu.renderer.raster_team_stats();
+        stage.get_mut(mob).unwrap().buffer.resize(2).unwrap();
+        assert!(renderer.render("edits", 0, &stage).is_err());
+        let cpu = renderer.cpu.as_ref().unwrap();
+        assert_eq!(cpu.rgba.as_bytes(), last_pixels);
+        assert_eq!(cpu.renderer.raster_team_stats(), team);
+        let recovered = valid.materialize();
+        renderer.render("edits", 0, &recovered).unwrap();
+        assert_eq!(renderer.cpu.as_ref().unwrap().rgba.as_bytes(), last_pixels);
+
+        // A different Stage can recycle local slot/revision numbers. Its
+        // content must replace the prior picture even at the same frame index.
+        let mut replacement = Stage::new();
+        let replacement_mob = replacement.add(Square::new().side_length(0.5));
+        replacement.shift(replacement_mob, [-1.0, 0.75, 0.0]);
+        replacement.add_to_scene(replacement_mob).unwrap();
+        let expected = cold_studio_preview(renderer, &replacement);
+        let frame = renderer.render("replacement", 0, &replacement).unwrap();
+        let fmn_studio::FramePayload::Pipe { bytes, .. } = frame.payload else {
+            panic!("native preview must return PNG bytes");
+        };
+        assert_eq!(bytes, expected);
+        assert_ne!(renderer.cpu.as_ref().unwrap().rgba.as_bytes(), last_pixels);
+    }
+
+    #[test]
+    fn retained_studio_preview_compiled_worker_replays_nonmonotone_scrubs() {
+        use fmn_library::Square;
+        use fmn_scene::studio_bridge::Stage;
+        use fmn_studio::{SupervisorRequest, WorkerResponse, WorkerService};
+
+        let mut stage = Stage::new();
+        let mob = stage.add(Square::new());
+        stage.add_to_scene(mob).unwrap();
+        stage
+            .add_dt_updater(
+                mob,
+                |stage, mob, dt| {
+                    stage.shift(mob, [dt, 0.25 * dt, 0.0]);
+                },
+                false,
+            )
+            .unwrap();
+        let mut timeline = fmn::animation::Timeline::new(8).unwrap();
+        timeline.wait(0.5).unwrap();
+        let bytes = fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(7))
+            .unwrap();
+        let fs = VirtualFs::new();
+        fs.insert("/retained_preview.fmtl", bytes);
+        for threads in ["1", "4", "16"] {
+            let Invocation::Studio(command) = parse_args([
+                "studio",
+                "--resolution",
+                "48x32",
+                "--threads",
+                threads,
+                "--reproducible",
+                "/retained_preview.fmtl",
+            ])
+            .unwrap() else {
+                panic!("compiled Studio command expected");
+            };
+            assert!(!studio_live::selected(&command.render));
+            let mut worker = NativeStudioWorker::from_command(&fs, &command).unwrap();
+            let NativeStudioFrames::Compiled(bundle) = &worker.frames else {
+                panic!("compiled Studio frames expected");
+            };
+            assert!(
+                !bundle.requires_camera(),
+                "exercise the planar bundle worker"
+            );
+            let mut previous = None;
+            for frame_index in [0, 3, 1, 1, 2, 0] {
+                let stage = worker.frames.stage_at(frame_index).unwrap();
+                let expected = cold_studio_preview(&worker.renderer, &stage);
+                let completed = worker
+                    .renderer
+                    .cpu
+                    .as_ref()
+                    .map_or(0, |cpu| cpu.renderer.raster_team_stats().frames_completed);
+                let WorkerResponse::Frame(frame) = worker
+                    .handle(SupervisorRequest::Scrub {
+                        scene: worker.scene.clone(),
+                        frame: frame_index as i64,
+                    })
+                    .unwrap()
+                else {
+                    panic!("compiled scrub must return a frame");
+                };
+                let fmn_studio::FramePayload::Pipe { bytes, .. } = frame.payload else {
+                    panic!("compiled scrub must publish PNG bytes");
+                };
+                assert_eq!(bytes, expected);
+                assert_eq!(worker.current_frame, frame_index);
+                if previous == Some(frame_index) {
+                    let cpu = worker.renderer.cpu.as_ref().unwrap();
+                    assert!(cpu.renderer.last_frame_reused());
+                    assert_eq!(cpu.renderer.raster_team_stats().frames_completed, completed);
+                }
+                previous = Some(frame_index);
+            }
+        }
     }
 
     #[test]
