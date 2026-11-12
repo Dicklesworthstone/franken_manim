@@ -2284,6 +2284,22 @@ impl<'a> FlatThreeDFrame<'a> {
         };
         let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
         let mut uploaded = std::collections::HashMap::new();
+        // The frame's triangle rows are reserved once, at their exact count,
+        // instead of growing a triangle at a time (a frame of 50,000 dots
+        // holds about 22 MB of them). The rows are unchanged.
+        let triangle_scalars = job
+            .prepared_draws()
+            .iter()
+            .map(|draw| match &draw.primitive {
+                CompiledPrimitive::Triangles { triangles, .. } => triangles.len(),
+                CompiledPrimitive::Vector(_) => 0,
+            })
+            .try_fold(0_usize, usize::checked_add)
+            .and_then(|triangles| triangles.checked_mul(THREE_D_TRIANGLE_STRIDE))
+            .ok_or(MetalError::SizeOverflow("3D triangles"))?;
+        flat.triangles
+            .try_reserve_exact(triangle_scalars)
+            .map_err(|_| MetalError::SizeOverflow("3D triangles"))?;
 
         for (draw_index, draw) in job.prepared_draws().iter().enumerate() {
             let CompiledPrimitive::Triangles { triangles, shader } = &draw.primitive else {
@@ -3322,6 +3338,41 @@ mod tests {
             }));
         }
         draws
+    }
+
+    #[test]
+    fn a_three_d_frame_reserves_its_triangle_rows_once_at_their_exact_count() {
+        // Grown a triangle at a time, the rows would end with slack (the
+        // vector doubles); reserved once, they end exactly full. Every
+        // tile-list job, whose rows the other tile-list tests check value by
+        // value.
+        let mut rows = 0_usize;
+        for (case, (camera, meshes, dots, fine)) in tile_list_jobs().into_iter().enumerate() {
+            let draws = tile_list_draws(&meshes, &dots, case);
+            let job = ThreeDJob::new(
+                &camera,
+                &draws,
+                crate::bin::Tiling {
+                    macro_tile: 32,
+                    fine_tile: fine,
+                },
+            )
+            .expect("job");
+            let expected = job
+                .prepared_draws()
+                .iter()
+                .map(|draw| match &draw.primitive {
+                    CompiledPrimitive::Triangles { triangles, .. } => triangles.len(),
+                    CompiledPrimitive::Vector(_) => 0,
+                })
+                .sum::<usize>()
+                * THREE_D_TRIANGLE_STRIDE;
+            let flat = FlatThreeDFrame::derive(&job).expect("packet");
+            assert_eq!(flat.triangles.len(), expected, "case {case}");
+            assert_eq!(flat.triangles.capacity(), expected, "case {case}");
+            rows += expected / THREE_D_TRIANGLE_STRIDE;
+        }
+        assert!(rows > 5_000, "{rows} triangle rows");
     }
 
     #[test]
