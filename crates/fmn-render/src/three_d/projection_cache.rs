@@ -488,25 +488,31 @@ impl PreparedThreeDProjection {
         let mut projected = Vec::new();
         budget.reserve_retained(&mut projected, "retained projection rows", draws.len())?;
         let mut stats = CameraProjectionStats::default();
+        // The camera's constants, once for the projection rather than per point.
+        let projection = camera.projection();
+        let location = camera.location();
         for (index, (&draw, source)) in draws.iter().zip(sources).enumerate() {
-            let (row, charge) = if let Some(reused) =
-                cache.reuse(&publication, index, source, &mut budget)
-            {
-                stats.reused_draws += 1;
-                reused
-            } else {
-                let before = CompileCharge::capture(&budget);
-                let row = match draw {
-                    ThreeDDraw::Vector(vector) => compile_vector(camera, vector, &mut budget)?,
-                    ThreeDDraw::Surface(surface) => compile_surface(camera, surface, &mut budget)?,
-                    ThreeDDraw::TrueDot(dot) => compile_dot(camera, dot, &mut budget)?,
-                }
-                .share_rows(&mut budget)?
-                .map_material(|_| ());
-                let charge = CompileCharge::capture(&budget).difference(before)?;
-                stats.compiled_draws += 1;
-                (row, charge)
-            };
+            let (row, charge) =
+                if let Some(reused) = cache.reuse(&publication, index, source, &mut budget) {
+                    stats.reused_draws += 1;
+                    reused
+                } else {
+                    let before = CompileCharge::capture(&budget);
+                    let row = match draw {
+                        ThreeDDraw::Vector(vector) => compile_vector(camera, vector, &mut budget)?,
+                        ThreeDDraw::Surface(surface) => {
+                            compile_surface(camera, &projection, surface, &mut budget)?
+                        }
+                        ThreeDDraw::TrueDot(dot) => {
+                            compile_dot(camera, &projection, location, dot, &mut budget)?
+                        }
+                    }
+                    .share_rows(&mut budget)?
+                    .map_material(|_| ());
+                    let charge = CompileCharge::capture(&budget).difference(before)?;
+                    stats.compiled_draws += 1;
+                    (row, charge)
+                };
             publication.retain(index, source, &row, charge, draws.len());
             projected.push(row);
         }

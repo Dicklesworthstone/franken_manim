@@ -26,7 +26,9 @@ use fmn_frame::{
 use crate::arena::{Pool, Sink};
 use crate::bin::{ScreenMap, Tiling};
 use crate::bloom::Bloom;
-use crate::camera::{Camera, CameraError, ClippedFillQuadratic, ClippedQuadratic, EdgeSampleLimit};
+use crate::camera::{
+    Camera, CameraError, ClippedFillQuadratic, ClippedQuadratic, EdgeSampleLimit, Projection,
+};
 use crate::engine::{NativeScopedSpawner, ScopedSpawner, run_scoped_workers};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
 use crate::plan::RenderPlan;
@@ -2147,11 +2149,18 @@ impl<'a> ThreeDJob<'a> {
         let mut budget = PreparationBudget::new(limits);
         let mut compiled = Vec::new();
         budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
+        // The camera's constants, once for the job rather than per point.
+        let projection = camera.projection();
+        let location = camera.location();
         for draw in draws {
             compiled.push(match *draw {
                 ThreeDDraw::Vector(vector) => compile_vector(camera, vector, &mut budget)?,
-                ThreeDDraw::Surface(surface) => compile_surface(camera, surface, &mut budget)?,
-                ThreeDDraw::TrueDot(dot) => compile_dot(camera, dot, &mut budget)?,
+                ThreeDDraw::Surface(surface) => {
+                    compile_surface(camera, &projection, surface, &mut budget)?
+                }
+                ThreeDDraw::TrueDot(dot) => {
+                    compile_dot(camera, &projection, location, dot, &mut budget)?
+                }
             });
         }
         let sample_grid = match camera.edge_sample_limit() {
@@ -3438,6 +3447,7 @@ fn perspective_stroke_reach_px(camera: &Camera, style: &Style, world: [Vec3; 3])
 
 fn compile_surface<'a>(
     camera: &'a Camera,
+    projection: &Projection,
     draw: SurfaceDraw<'a>,
     budget: &mut PreparationBudget,
 ) -> Result<CompiledDraw<'a>, ThreeDError> {
@@ -3489,6 +3499,7 @@ fn compile_surface<'a>(
         });
         append_clipped_triangle(
             camera,
+            projection,
             &world,
             draw.is_fixed_in_frame,
             draw.clip_planes,
@@ -3515,8 +3526,12 @@ fn compile_surface<'a>(
     })
 }
 
+/// `projection` is `camera.projection()` and `location` is
+/// `camera.location()`, built once by the job.
 fn compile_dot<'a>(
     camera: &'a Camera,
+    projection: &Projection,
+    location: Vec3,
     draw: TrueDotDraw,
     budget: &mut PreparationBudget,
 ) -> Result<CompiledDraw<'a>, ThreeDError> {
@@ -3548,7 +3563,7 @@ fn compile_dot<'a>(
     if draw.anti_alias_width < 0.0 {
         return Err(ThreeDError::InvalidAntiAliasWidth);
     }
-    let to_camera = normalize(sub(camera.location(), draw.center)).unwrap_or([0.0, 0.0, 1.0]);
+    let to_camera = normalize(sub(location, draw.center)).unwrap_or([0.0, 0.0, 1.0]);
     let mut right = normalize(cross([0.0, 1.0, 1.0], to_camera));
     if right.is_none() {
         right = normalize(cross([1.0, 0.0, 0.0], to_camera));
@@ -3584,6 +3599,7 @@ fn compile_dot<'a>(
             let triangle = indices.map(|index| corners[index]);
             append_clipped_triangle(
                 camera,
+                projection,
                 &triangle,
                 draw.is_fixed_in_frame,
                 draw.clip_planes,
@@ -3609,15 +3625,17 @@ fn compile_dot<'a>(
                     0.0
                 },
                 light_position: camera.light_source_position(),
-                camera_position: camera.location(),
+                camera_position: location,
             },
         },
         depth_test: draw.depth_test,
     })
 }
 
+/// `projection` is `camera.projection()`.
 fn append_clipped_triangle(
     camera: &Camera,
+    projection: &Projection,
     triangle: &[WorldVertex; 3],
     fixed: f64,
     clip_planes: [[f64; 4]; 4],
@@ -3632,7 +3650,7 @@ fn append_clipped_triangle(
     // the clipper's passes leave unchanged up to a plane it is wholly outside
     // leaves the clipper empty (off-screen dots): skip the clipper for those
     // too.
-    match unclipped(camera, triangle, fixed, clip_planes) {
+    match unclipped(projection, triangle, fixed, clip_planes) {
         Ok(projected) => {
             if let Some(triangle) = raster_triangle(projected, camera.pixel_shape()) {
                 budget.reserve_rows(output, PreparationRows::RasterTriangles, 1)?;
@@ -3641,9 +3659,15 @@ fn append_clipped_triangle(
             Ok(())
         }
         Err(Clipper::Empty) => Ok(()),
-        Err(Clipper::Needed) => {
-            append_clipped_polygon(camera, triangle, fixed, clip_planes, output, budget)
-        }
+        Err(Clipper::Needed) => append_clipped_polygon(
+            camera,
+            projection,
+            triangle,
+            fixed,
+            clip_planes,
+            output,
+            budget,
+        ),
     }
 }
 
@@ -3683,7 +3707,7 @@ fn homogeneous_distance([x, y, z, w]: [f64; 4], plane: usize) -> f64 {
 /// volume (by the projected clipper's), as the clipper would return it;
 /// otherwise what the clipper would do, as [`Clipper`] says.
 fn unclipped(
-    camera: &Camera,
+    projection: &Projection,
     triangle: &[WorldVertex; 3],
     fixed: f64,
     clip_planes: [[f64; 4]; 4],
@@ -3700,7 +3724,7 @@ fn unclipped(
         }
     }
     let projected = triangle.map(|vertex| ProjectedVertex {
-        clip: camera.project(vertex.attributes.world, fixed).clip,
+        clip: projection.project(vertex.attributes.world, fixed).clip,
         attributes: vertex.attributes,
     });
     homogeneous_clipper(&projected)?;
@@ -3729,6 +3753,7 @@ fn homogeneous_clipper(projected: &[ProjectedVertex; 3]) -> Result<(), Clipper> 
 /// against the six homogeneous planes, and fan the polygon into triangles.
 fn append_clipped_polygon(
     camera: &Camera,
+    projection: &Projection,
     triangle: &[WorldVertex; 3],
     fixed: f64,
     clip_planes: [[f64; 4]; 4],
@@ -3754,7 +3779,7 @@ fn append_clipped_polygon(
     }
 
     let first = ProjectedVertex {
-        clip: camera.project(polygon[0].attributes.world, fixed).clip,
+        clip: projection.project(polygon[0].attributes.world, fixed).clip,
         attributes: polygon[0].attributes,
     };
     let mut projected = [first; MAX_CLIPPED_POLYGON_VERTICES];
@@ -3763,7 +3788,7 @@ fn append_clipped_polygon(
         .zip(&polygon[..polygon_len])
     {
         *slot = ProjectedVertex {
-            clip: camera.project(vertex.attributes.world, fixed).clip,
+            clip: projection.project(vertex.attributes.world, fixed).clip,
             attributes: vertex.attributes,
         };
     }
@@ -8450,6 +8475,79 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_faces_the_cameras_location_and_is_shaded_from_it() {
+        // The job takes the camera's location once for all its dots. Each
+        // dot's billboard must face that location and its shading must see
+        // the dot from there, the values `Camera::location` gives, bit for
+        // bit, for a camera turned and moved away from its light and the
+        // origin; shaded dots and glow dots, on screen and off.
+        let mut camera = camera();
+        camera
+            .frame_mut()
+            .set_center([0.4, -0.3, 0.2])
+            .expect("finite center");
+        camera
+            .frame_mut()
+            .set_euler_angles(Some(0.7), Some(1.1), Some(-0.4))
+            .expect("finite angles");
+        camera
+            .set_light_source_position([2.0, -5.0, 7.0])
+            .expect("finite light");
+        let location = camera.location();
+        let light = camera.light_source_position();
+        assert_ne!(location, light);
+        let white = color("#ffffff", 1.0);
+        let mut draws = Vec::new();
+        for i in 0..12 {
+            let t = f64::from(i);
+            let center = [0.9 * t - 5.0, 0.6 * t - 3.0, 0.05 * t];
+            let mut dot = TrueDotDraw::new(center, 0.2, white);
+            dot.shading = [0.5, 0.3, 0.2];
+            draws.push(ThreeDDraw::TrueDot(dot));
+            draws.push(ThreeDDraw::TrueDot(TrueDotDraw::glow(center, 0.3, white)));
+        }
+        for center in [[400.0, 300.0, 0.0], [-400.0, 200.0, 1.0]] {
+            let mut dot = TrueDotDraw::new(center, 0.2, white);
+            dot.shading = [0.5, 0.3, 0.2];
+            draws.push(ThreeDDraw::TrueDot(dot));
+        }
+        let job = ThreeDJob::new(&camera, &draws, Tiling::default()).expect("job");
+        let (mut drawn, mut empty) = (0, 0);
+        assert_eq!(job.draws.len(), draws.len());
+        for (draw, compiled) in draws.iter().zip(&job.draws) {
+            let ThreeDDraw::TrueDot(dot) = draw else {
+                panic!("only dots were drawn")
+            };
+            let CompiledPrimitive::Triangles {
+                triangles,
+                shader:
+                    Shader::Dot {
+                        to_camera,
+                        light_position,
+                        camera_position,
+                        ..
+                    },
+            } = &compiled.primitive
+            else {
+                panic!("a dot compiles to a dot")
+            };
+            assert_eq!(
+                camera_position.map(f64::to_bits),
+                location.map(f64::to_bits)
+            );
+            assert_eq!(light_position.map(f64::to_bits), light.map(f64::to_bits));
+            let facing = normalize(sub(location, dot.center)).unwrap_or([0.0, 0.0, 1.0]);
+            assert_eq!(to_camera.map(f64::to_bits), facing.map(f64::to_bits));
+            if triangles.is_empty() {
+                empty += 1;
+            } else {
+                drawn += 1;
+            }
+        }
+        assert!(drawn > 0 && empty > 0, "drawn {drawn}, off screen {empty}");
+    }
+
+    #[test]
     fn unclipped_triangles_skip_the_clipper_with_its_exact_output() {
         // Random triangles from well inside the view to far outside and
         // behind the camera, with and without user planes, a few vertices
@@ -8459,6 +8557,7 @@ mod tests {
         // general clipper bit for bit, result for result, and budget for
         // budget, and every path must be exercised.
         let camera = camera();
+        let projection = camera.projection();
         let eye = camera.location();
         let mut state = 0x9E37_79B9_7F4A_7C15_u64;
         let mut unit = move || {
@@ -8512,6 +8611,7 @@ mod tests {
             let mut quick_budget = PreparationBudget::new(ThreeDPreparationLimits::default());
             let quick_result = append_clipped_triangle(
                 &camera,
+                &projection,
                 &triangle,
                 fixed,
                 planes,
@@ -8522,6 +8622,7 @@ mod tests {
             let mut slow_budget = PreparationBudget::new(ThreeDPreparationLimits::default());
             let slow_result = append_clipped_polygon(
                 &camera,
+                &projection,
                 &triangle,
                 fixed,
                 planes,
@@ -8548,7 +8649,7 @@ mod tests {
             {
                 near += 1;
             }
-            match unclipped(&camera, &triangle, fixed, planes) {
+            match unclipped(&projection, &triangle, fixed, planes) {
                 Ok(_) => fast += 1,
                 Err(Clipper::Empty) => {
                     assert!(

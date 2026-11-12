@@ -459,13 +459,7 @@ impl CameraFrame {
     /// Map a world point into the camera's fixed-frame coordinates.
     #[must_use]
     pub fn to_fixed_frame_point(&self, point: Vec3, relative: bool) -> Vec3 {
-        let view = self.view_matrix();
-        let w = if relative { 0.0 } else { 1.0 };
-        [
-            view[0][0] * point[0] + view[0][1] * point[1] + view[0][2] * point[2] + view[0][3] * w,
-            view[1][0] * point[0] + view[1][1] * point[1] + view[1][2] * point[2] + view[1][3] * w,
-            view[2][0] * point[0] + view[2][1] * point[1] + view[2][2] * point[2] + view[2][3] * w,
-        ]
+        fixed_frame_point(&self.view_matrix(), point, relative)
     }
 
     /// Inverse of [`CameraFrame::to_fixed_frame_point`].
@@ -808,20 +802,15 @@ impl Camera {
     /// Apply the kept camera projection to one world-space point.
     #[must_use]
     pub fn project(&self, point: Vec3, is_fixed_in_frame: f64) -> ClipPoint {
-        let view = self.frame.to_fixed_frame_point(point, false);
-        let fixed = is_fixed_in_frame;
-        let mut mixed = [
-            view[0] + fixed * (point[0] - view[0]),
-            view[1] + fixed * (point[1] - view[1]),
-            view[2] + fixed * (point[2] - view[2]),
-        ];
-        let factors = self.frame_rescale_factors();
-        for (component, factor) in mixed.iter_mut().zip(factors) {
-            *component *= factor;
-        }
-        ClipPoint {
-            world: point,
-            clip: [mixed[0], mixed[1], -0.1 * mixed[2], 1.0 - mixed[2]],
+        self.projection().project(point, is_fixed_in_frame)
+    }
+
+    /// This camera's projection constants, for projecting many points:
+    /// [`Projection::project`] is [`Camera::project`].
+    pub(crate) fn projection(&self) -> Projection {
+        Projection {
+            view: self.frame.view_matrix(),
+            factors: self.frame_rescale_factors(),
         }
     }
 
@@ -1070,6 +1059,49 @@ impl std::ops::Deref for ThreeDCamera {
 impl std::ops::DerefMut for ThreeDCamera {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
+    }
+}
+
+/// `view` applied to `point` (a direction when `relative`):
+/// [`CameraFrame::to_fixed_frame_point`] with its view matrix.
+fn fixed_frame_point(view: &[[f64; 4]; 4], point: Vec3, relative: bool) -> Vec3 {
+    let w = if relative { 0.0 } else { 1.0 };
+    [
+        view[0][0] * point[0] + view[0][1] * point[1] + view[0][2] * point[2] + view[0][3] * w,
+        view[1][0] * point[0] + view[1][1] * point[1] + view[1][2] * point[2] + view[1][3] * w,
+        view[2][0] * point[0] + view[2][1] * point[1] + view[2][2] * point[2] + view[2][3] * w,
+    ]
+}
+
+/// A camera's projection constants: the view matrix and rescale factors
+/// [`Camera::project`] applies to every point, built once by
+/// [`Camera::projection`]. A job projecting many points against one camera
+/// builds them once rather than per point (the view matrix from the
+/// orientation, the focal distance from a tangent); [`Camera::project`]
+/// projects through one, so the two cannot differ.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Projection {
+    view: [[f64; 4]; 4],
+    factors: Vec3,
+}
+
+impl Projection {
+    /// [`Camera::project`] of the camera these constants came from.
+    pub(crate) fn project(&self, point: Vec3, is_fixed_in_frame: f64) -> ClipPoint {
+        let view = fixed_frame_point(&self.view, point, false);
+        let fixed = is_fixed_in_frame;
+        let mut mixed = [
+            view[0] + fixed * (point[0] - view[0]),
+            view[1] + fixed * (point[1] - view[1]),
+            view[2] + fixed * (point[2] - view[2]),
+        ];
+        for (component, factor) in mixed.iter_mut().zip(self.factors) {
+            *component *= factor;
+        }
+        ClipPoint {
+            world: point,
+            clip: [mixed[0], mixed[1], -0.1 * mixed[2], 1.0 - mixed[2]],
+        }
     }
 }
 
@@ -1996,5 +2028,141 @@ mod tests {
             .set_field_of_view(60.0 * DEG)
             .expect("valid fov");
         assert!(camera.revision() > moved);
+    }
+
+    /// `Camera::project` as it was before [`Projection`]: the view matrix and
+    /// the rescale factors built for every point, with
+    /// `CameraFrame::to_fixed_frame_point`'s body inlined as it was.
+    fn project_per_point(camera: &Camera, point: Vec3, is_fixed_in_frame: f64) -> ClipPoint {
+        let view = {
+            let view = camera.frame().view_matrix();
+            let w = 1.0;
+            [
+                view[0][0] * point[0]
+                    + view[0][1] * point[1]
+                    + view[0][2] * point[2]
+                    + view[0][3] * w,
+                view[1][0] * point[0]
+                    + view[1][1] * point[1]
+                    + view[1][2] * point[2]
+                    + view[1][3] * w,
+                view[2][0] * point[0]
+                    + view[2][1] * point[1]
+                    + view[2][2] * point[2]
+                    + view[2][3] * w,
+            ]
+        };
+        let fixed = is_fixed_in_frame;
+        let mut mixed = [
+            view[0] + fixed * (point[0] - view[0]),
+            view[1] + fixed * (point[1] - view[1]),
+            view[2] + fixed * (point[2] - view[2]),
+        ];
+        let factors = camera.frame_rescale_factors();
+        for (component, factor) in mixed.iter_mut().zip(factors) {
+            *component *= factor;
+        }
+        ClipPoint {
+            world: point,
+            clip: [mixed[0], mixed[1], -0.1 * mixed[2], 1.0 - mixed[2]],
+        }
+    }
+
+    #[test]
+    fn a_projection_built_once_projects_every_point_as_the_camera_did_per_point() {
+        // Cameras turned, moved, zoomed and widened, at three resolutions;
+        // points near and far, signed zeros and non-finite coordinates; and
+        // fixed-in-frame mixes 0, 1 and between. One projection per camera
+        // must give every point's clip coordinates bit for bit, and the
+        // frame's own point and direction maps must be unchanged.
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let mut cameras = 0;
+        let mut points = 0;
+        for (index, resolution) in [(1920, 1080), (800, 600), (333, 777), (3840, 2160)]
+            .into_iter()
+            .enumerate()
+        {
+            let mut camera = Camera::new(CameraConfig {
+                resolution,
+                ..CameraConfig::default()
+            })
+            .expect("valid camera");
+            if index > 0 {
+                let frame = camera.frame_mut();
+                frame
+                    .set_center([unit() * 40.0 - 20.0, unit() * 10.0 - 5.0, unit() * 3.0])
+                    .expect("finite center");
+                frame
+                    .set_shape([0.5 + unit() * 30.0, 0.5 + unit() * 20.0])
+                    .expect("positive shape");
+                frame
+                    .set_euler_angles(
+                        Some(unit() * 6.0 - 3.0),
+                        Some(unit() * 3.0),
+                        Some(unit() * 6.0 - 3.0),
+                    )
+                    .expect("finite angles");
+                frame
+                    .set_field_of_view((10.0 + unit() * 100.0) * DEG)
+                    .expect("valid fov");
+            }
+            let projection = camera.projection();
+            cameras += 1;
+            for case in 0..20_000_usize {
+                let scale = [0.01, 1.0, 30.0, 1.0e4][case % 4];
+                let mut point: Vec3 = std::array::from_fn(|_| (unit() - 0.5) * scale);
+                match case % 101 {
+                    0 => point = [0.0, -0.0, 0.0],
+                    1 => point[2] = f64::NAN,
+                    2 => point[0] = f64::INFINITY,
+                    3 => point[1] = f64::NEG_INFINITY,
+                    4 => point[0] = -0.0,
+                    _ => {}
+                }
+                let fixed = match case % 7 {
+                    0 => 1.0,
+                    1 => unit(),
+                    2 => -0.0,
+                    _ => 0.0,
+                };
+                let once = projection.project(point, fixed);
+                let per_point = project_per_point(&camera, point, fixed);
+                assert_eq!(
+                    once.clip.map(f64::to_bits),
+                    per_point.clip.map(f64::to_bits),
+                    "camera {index} case {case}"
+                );
+                assert_eq!(once.world.map(f64::to_bits), point.map(f64::to_bits));
+                assert_eq!(
+                    camera.project(point, fixed).clip.map(f64::to_bits),
+                    per_point.clip.map(f64::to_bits)
+                );
+                let view = camera.frame().view_matrix();
+                for (relative, w) in [(false, 1.0), (true, 0.0)] {
+                    let inline: Vec3 = std::array::from_fn(|row| {
+                        view[row][0] * point[0]
+                            + view[row][1] * point[1]
+                            + view[row][2] * point[2]
+                            + view[row][3] * w
+                    });
+                    assert_eq!(
+                        camera
+                            .frame()
+                            .to_fixed_frame_point(point, relative)
+                            .map(f64::to_bits),
+                        inline.map(f64::to_bits),
+                        "camera {index} case {case} relative {relative}"
+                    );
+                }
+                points += 1;
+            }
+        }
+        assert_eq!((cameras, points), (4, 80_000));
     }
 }
