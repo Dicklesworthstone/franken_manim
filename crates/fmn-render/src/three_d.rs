@@ -1431,11 +1431,26 @@ impl<M> ProjectedShader<M> {
 
 /// Share the already-admitted vector allocation without copying its rows into
 /// another allocation when a projection becomes owned or is rebound for replay.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub(crate) enum ProjectedRows<T> {
     Owned(Vec<T>),
     Shared(Arc<Vec<T>>),
+    /// Rows `start..end` of a block a dot worker filled for many dots, in
+    /// their order ([`compile_dots_ahead`]): one allocation for the block,
+    /// not one a dot.
+    Block {
+        rows: Arc<Vec<T>>,
+        start: u32,
+        end: u32,
+    },
 }
+
+// A draw row is charged at its size, so a block's range must not make the
+// rows any larger than a Vec.
+const _: () = assert!(
+    std::mem::size_of::<ProjectedRows<RasterTriangle>>()
+        == std::mem::size_of::<Vec<RasterTriangle>>()
+);
 
 impl<T> From<Vec<T>> for ProjectedRows<T> {
     fn from(rows: Vec<T>) -> Self {
@@ -1443,10 +1458,23 @@ impl<T> From<Vec<T>> for ProjectedRows<T> {
     }
 }
 
+/// The rows, whoever holds them: a draw compiled into a block prints as the
+/// same draw compiled into its own rows.
+impl<T: std::fmt::Debug> std::fmt::Debug for ProjectedRows<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_list().entries(self.iter()).finish()
+    }
+}
+
 impl<T> ProjectedRows<T> {
     fn shared_owner_bytes(&self) -> u64 {
         match self {
-            Self::Owned(_) => std::mem::size_of::<(Vec<T>, [usize; 2])>() as u64,
+            // A block's draw is charged the owner its rows would need on
+            // their own, so no byte of the accounting depends on whether a
+            // worker or the calling thread compiled them.
+            Self::Owned(_) | Self::Block { .. } => {
+                std::mem::size_of::<(Vec<T>, [usize; 2])>() as u64
+            }
             Self::Shared(_) => 0,
         }
     }
@@ -1460,6 +1488,11 @@ impl<T> ProjectedRows<T> {
                 budget.charge_buffer::<(Vec<T>, [usize; 2])>("shared projection owners", 1)?;
                 Ok(Self::Shared(Arc::new(rows)))
             }
+            // Already shared; charged as an owned draw is (above).
+            block @ Self::Block { .. } => {
+                budget.charge_buffer::<(Vec<T>, [usize; 2])>("shared projection owners", 1)?;
+                Ok(block)
+            }
             shared @ Self::Shared(_) => Ok(shared),
         }
     }
@@ -1472,6 +1505,7 @@ impl<T> std::ops::Deref for ProjectedRows<T> {
         match self {
             Self::Owned(rows) => rows,
             Self::Shared(rows) => rows,
+            Self::Block { rows, start, end } => &rows[*start as usize..*end as usize],
         }
     }
 }
@@ -3712,9 +3746,19 @@ fn compile_dot_round<'a>(
     Ok(count)
 }
 
+/// The rows a dot worker reserves for a block, at most: about 110 KB, for
+/// about 128 dots of two rows. A block a dot outgrows grows.
+const DOT_BLOCK_ROWS: usize = 256;
+
 /// Compile `dots` in order into `slots`, ahead of admission, under a private
 /// budget of `share` raster-triangle rows; stop at the first error. Returns
 /// how many it compiled.
+///
+/// The dots' rows go into blocks, in order, each dot's a range of its block
+/// ([`ProjectedRows::Block`]): one allocation for many dots, where the
+/// calling thread's [`compile_dot`] makes one a dot. A block is reserved for
+/// at most [`DOT_BLOCK_ROWS`] rows, and no more than the share still admits
+/// (two at least). The rows of a dot that fails are taken back out.
 fn compile_dots_ahead<'a>(
     camera: &'a Camera,
     projection: &Projection,
@@ -3730,18 +3774,66 @@ fn compile_dots_ahead<'a>(
         max_working_bytes: rows.saturating_mul(row_bytes),
         ..ThreeDPreparationLimits::default()
     });
+    let mut block: Vec<RasterTriangle> = Vec::new();
+    // Where each dot's rows end in the open block, from the first slot
+    // since it was opened.
+    let mut ends: Vec<u32> = Vec::new();
+    let mut first = 0;
     let mut done = 0;
-    for (&draw, slot) in dots.iter().zip(slots) {
-        let ThreeDDraw::TrueDot(dot) = draw else {
+    while done < slots.len() {
+        let Some(&ThreeDDraw::TrueDot(dot)) = dots.get(done) else {
             break;
         };
-        match compile_dot(camera, projection, location, dot, &mut budget) {
-            Ok(compiled) => *slot = compiled,
-            Err(_) => break,
+        if block.capacity() - block.len() < 2 {
+            seal_dot_block(&mut block, &ends, &mut slots[first..done]);
+            ends.clear();
+            first = done;
+            let room = budget
+                .remaining_rows::<RasterTriangle>(PreparationRows::RasterTriangles)
+                .clamp(2, DOT_BLOCK_ROWS);
+            if block.try_reserve_exact(room).is_err() {
+                break;
+            }
+        }
+        let start = block.len();
+        let compiled = compile_dot_into(camera, projection, location, dot, &mut block, &mut budget);
+        match (compiled, u32::try_from(block.len())) {
+            (Ok(compiled), Ok(end)) => {
+                slots[done] = compiled;
+                ends.push(end);
+            }
+            _ => {
+                block.truncate(start);
+                break;
+            }
         }
         done += 1;
     }
+    seal_dot_block(&mut block, &ends, &mut slots[first..done]);
     done
+}
+
+/// Share `block` among `slots`, whose dots compiled their rows into it in
+/// order, ending at `ends`: each slot with rows gets its range of the block.
+/// An empty block is left as it is, and so are the slots, which hold none.
+fn seal_dot_block(block: &mut Vec<RasterTriangle>, ends: &[u32], slots: &mut [CompiledDraw<'_>]) {
+    if block.is_empty() {
+        return;
+    }
+    let rows = Arc::new(std::mem::take(block));
+    let mut start = 0;
+    for (slot, &end) in slots.iter_mut().zip(ends) {
+        if end > start
+            && let ProjectedPrimitive::Triangles { triangles, .. } = &mut slot.primitive
+        {
+            *triangles = ProjectedRows::Block {
+                rows: Arc::clone(&rows),
+                start,
+                end,
+            };
+        }
+        start = end;
+    }
 }
 
 /// A worker's share of `allowance` rows for `dots` of a round's `count`:
@@ -3808,6 +3900,24 @@ fn compile_dot<'a>(
     draw: TrueDotDraw,
     budget: &mut PreparationBudget,
 ) -> Result<CompiledDraw<'a>, ThreeDError> {
+    let mut rows = Vec::new();
+    let mut compiled = compile_dot_into(camera, projection, location, draw, &mut rows, budget)?;
+    if let ProjectedPrimitive::Triangles { triangles, .. } = &mut compiled.primitive {
+        *triangles = rows.into();
+    }
+    Ok(compiled)
+}
+
+/// [`compile_dot`], appending the dot's rows to `rows`: the draw returned
+/// holds none of them. On an error, rows it appended may stay.
+fn compile_dot_into<'a>(
+    camera: &'a Camera,
+    projection: &Projection,
+    location: Vec3,
+    draw: TrueDotDraw,
+    rows: &mut Vec<RasterTriangle>,
+    budget: &mut PreparationBudget,
+) -> Result<CompiledDraw<'a>, ThreeDError> {
     if !finite3(draw.center)
         || !finite3(draw.shading)
         || ![
@@ -3862,7 +3972,7 @@ fn compile_dot<'a>(
         corner(1.0, -1.0),
         corner(1.0, 1.0),
     ];
-    let mut triangles = Vec::new();
+    let start = rows.len();
     // A shrinking dot reaches radius zero during ordinary animation. Keep
     // its draw slot (projection rebinding preserves draw order), but emit no
     // triangles or depth writes. In particular, never divide its AA width by
@@ -3876,15 +3986,15 @@ fn compile_dot<'a>(
                 &triangle,
                 draw.is_fixed_in_frame,
                 draw.clip_planes,
-                &mut triangles,
+                rows,
                 budget,
             )?;
         }
     }
     Ok(CompiledDraw {
-        bounds: union_bounds(&triangles),
+        bounds: union_bounds(&rows[start..]),
         primitive: CompiledPrimitive::Triangles {
-            triangles: triangles.into(),
+            triangles: ProjectedRows::Owned(Vec::new()),
             shader: Shader::Dot {
                 center: draw.center,
                 radius: draw.radius,
@@ -8882,6 +8992,47 @@ mod tests {
         (bits, text)
     }
 
+    /// Check the blocks the dots of `draws` share and return how many there
+    /// are. Each such dot's rows are a nonempty range of its block; a block's
+    /// ranges follow one another in draw order from its first row to its
+    /// last, leaving none out; and a block was reserved for at most
+    /// [`DOT_BLOCK_ROWS`] rows, or grew for a dot that outgrew it.
+    fn assert_dot_blocks(draws: &[CompiledDraw<'_>]) -> usize {
+        let mut blocks = 0;
+        let mut open: Option<(&Arc<Vec<RasterTriangle>>, u32)> = None;
+        for draw in draws {
+            let ProjectedPrimitive::Triangles {
+                triangles: ProjectedRows::Block { rows, start, end },
+                ..
+            } = &draw.primitive
+            else {
+                continue;
+            };
+            assert!(start < end && *end as usize <= rows.len(), "{start}..{end}");
+            match open {
+                Some((block, last)) if Arc::ptr_eq(block, rows) => assert_eq!(*start, last),
+                _ => {
+                    if let Some((block, last)) = open {
+                        assert_eq!(last as usize, block.len(), "rows left out");
+                    }
+                    assert_eq!(*start, 0);
+                    assert!(
+                        rows.capacity() <= DOT_BLOCK_ROWS.max(2 * rows.len()),
+                        "{} rows reserved for {}",
+                        rows.capacity(),
+                        rows.len()
+                    );
+                    blocks += 1;
+                }
+            }
+            open = Some((rows, *end));
+        }
+        if let Some((block, last)) = open {
+            assert_eq!(last as usize, block.len(), "rows left out");
+        }
+        blocks
+    }
+
     type CompileOutcome = Result<(Vec<u64>, String, String), String>;
 
     /// A compile's draws, its budget's every counter, or its error.
@@ -9019,6 +9170,7 @@ mod tests {
         };
         let row_bytes = std::mem::size_of::<RasterTriangle>() as u64;
         let (mut rounds, mut stopped, mut exhausted, mut many_rows) = (0, 0, 0, 0);
+        let mut blocks = 0;
         let (mut passed, mut mixed, mut failed, mut limited) = (0, 0, 0, 0);
         for case in 0..8_usize {
             // A skewed scene's first run is rounded dots on screen, then dots
@@ -9149,8 +9301,11 @@ mod tests {
                 };
                 for threads in [1, 2, 3, 8] {
                     DOT_ROUNDS.with_borrow_mut(Vec::clear);
-                    let outcome =
-                        compile_outcome(threaded_compile(&camera, draws, limits, threads));
+                    let result = threaded_compile(&camera, draws, limits, threads);
+                    if let Ok((compiled, _)) = &result {
+                        blocks += assert_dot_blocks(compiled);
+                    }
+                    let outcome = compile_outcome(result);
                     assert!(
                         outcome == oracle,
                         "case {case}, threads {threads}, limits {limits:?}: {:?} vs {:?}",
@@ -9196,6 +9351,17 @@ mod tests {
                         compiled_record(&threaded.draws),
                         compiled_record(&sequential.draws)
                     );
+                    // Dots a worker compiled share its blocks; they print,
+                    // and are charged, as dots compiled one by one.
+                    blocks += assert_dot_blocks(&threaded.draws);
+                    assert_eq!(
+                        format!("{:?}", threaded.draws),
+                        format!("{:?}", sequential.draws)
+                    );
+                    assert_eq!(
+                        projection_owner_bytes(&threaded.draws),
+                        projection_owner_bytes(&sequential.draws)
+                    );
                     assert_eq!(threaded.preparation_bytes(), sequential.preparation_bytes());
                     assert_eq!(
                         format!("{:?}", threaded.draw_bins),
@@ -9206,13 +9372,23 @@ mod tests {
                         format!("{:?}", sequential.triangle_bins)
                     );
                     assert_eq!(threaded.sample_grid, sequential.sample_grid);
+                    assert_eq!(
+                        threaded
+                            .into_projection()
+                            .expect("threaded projection")
+                            .preparation_bytes,
+                        sequential
+                            .into_projection()
+                            .expect("sequential projection")
+                            .preparation_bytes
+                    );
                 }
             }
         }
         assert!(
-            rounds > 0 && stopped > 0 && exhausted > 0 && many_rows > 0,
+            rounds > 0 && stopped > 0 && exhausted > 0 && many_rows > 0 && blocks > 0,
             "rounds {rounds}, stopped {stopped}, share ran out {exhausted}, \
-             dots of more than two rows {many_rows}"
+             dots of more than two rows {many_rows}, blocks {blocks}"
         );
         assert!(
             mixed > 0 && passed > mixed && failed > 0 && limited > 0,
