@@ -393,6 +393,8 @@ pub enum AnimError {
     PathArcUnsupported,
     /// The `.animate` build failed (stale handle, chaining-rule violation).
     Builder(AnimateError),
+    /// Explicit native override arguments were invalid before its factory ran.
+    InvalidOverrideArgument(&'static str),
     /// The segment's run time was refused by the clock (non-finite, or
     /// beyond the frame counter's range).
     Clock(crate::clock::ClockError),
@@ -479,6 +481,9 @@ impl std::fmt::Display for AnimError {
                  not yet available on built .animate chains"
             ),
             Self::Builder(e) => write!(f, "animate build failed: {e}"),
+            Self::InvalidOverrideArgument(message) => {
+                write!(f, "invalid animation override argument: {message}")
+            }
             Self::Clock(e) => write!(f, "segment refused by the clock: {e}"),
             Self::SegmentNotPure => write!(
                 f,
@@ -1312,7 +1317,7 @@ pub(crate) fn validate_begin_state(
 
 #[path = "method_animation.rs"]
 mod method_animation;
-pub use method_animation::MethodAnimation;
+pub use method_animation::{MethodAnimation, MethodOverride};
 
 // ----------------------------------------------------- prepare_animation
 

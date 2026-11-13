@@ -34,9 +34,9 @@
 //!   `_override_animate` may be neither preceded nor followed by another
 //!   chained call. Here: [`AnimBuilder::with_override`] errors with
 //!   [`AnimateError::OverrideNotChainable`] if anything was chained before
-//!   it, and every recording method errors the same way after it. (The
-//!   library's overridden methods arrive with W7; the rule and its
-//!   enforcement live here.)
+//!   it, and every recording method errors the same way after it. A native
+//!   overriding factory is bound by Choreo's `MethodOverride`; a name alone
+//!   cannot be built into an ordinary target transform.
 //! - **`prepare_animation` accepts an `Animation` or a builder, nothing
 //!   else.** The Reference rejects bare bound methods with a `TypeError`;
 //!   in Rust that contract is the [`IntoAnimate`] trait — implemented for
@@ -178,13 +178,14 @@ pub enum AnimateCommand {
     Fade(f64),
 }
 
-/// Marker for a W7 `override_animate` animation: the builder enforces the
-/// no-chaining rule now; the actual overridden animations arrive with the
-/// library classes.
+/// A named `override_animate` request, subject to the no-chaining rule.
+///
+/// The request is not executable by the mobject layer. Choreo's
+/// `MethodOverride` binds a native factory without reversing the dependency
+/// between the two crates. Building an unresolved request is a typed error.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OverrideAnimation {
-    /// The overriding animation's name (diagnostic identity until W7 binds
-    /// real animation constructors here).
+    /// The overriding animation's diagnostic name.
     pub name: &'static str,
 }
 
@@ -195,6 +196,11 @@ pub enum AnimateError {
     ArgsAlreadySet,
     /// An overridden animation was mixed with chained calls.
     OverrideNotChainable,
+    /// A named override has no native factory at the animation boundary.
+    UnresolvedOverride {
+        /// The overriding animation requested by the caller.
+        name: &'static str,
+    },
     /// A handle (the source, or a command's Mob target) is dead at build.
     StaleHandle(Mob),
     /// A new layout command has an invalid dimension or undefined divisor.
@@ -223,6 +229,10 @@ impl std::fmt::Display for AnimateError {
             Self::OverrideNotChainable => write!(
                 f,
                 "method chaining is not supported for overridden animations"
+            ),
+            Self::UnresolvedOverride { name } => write!(
+                f,
+                "animation override {name:?} needs a native factory; use fmn_anim::MethodOverride"
             ),
             Self::StaleHandle(_) => write!(f, "animate target handle is stale"),
             Self::InvalidLayoutArgument(message) => {
@@ -287,6 +297,13 @@ impl AnimBuilder {
     #[must_use]
     pub fn commands(&self) -> &[AnimateCommand] {
         &self.commands
+    }
+
+    /// Explicit animation arguments, with unset fields left as `None`.
+    /// Choreo's overriding factories use these without allocating a target.
+    #[must_use]
+    pub fn animation_args(&self) -> AnimateArgs {
+        self.args.unwrap_or_default()
     }
 
     /// Pass the transform arguments — once per chain, as in the Reference.
@@ -885,10 +902,17 @@ impl AnimBuilder {
     /// command on a non-scalar source or a complex command on a non-complex one.
     /// [`AnimateError::InvalidLayoutArgument`] for an undefined layout.
     /// [`AnimateError::Wag`] for undefined deformation geometry.
+    /// [`AnimateError::UnresolvedOverride`] when an override was recorded
+    /// without binding a Choreo factory. This refuses before target allocation.
     pub fn build(self, stage: &mut Stage) -> Result<BuiltAnimate, AnimateError> {
         // Validate every Mob reference before mutating anything.
         if !stage.contains(self.source) {
             return Err(AnimateError::StaleHandle(self.source));
+        }
+        if let Some(animation) = self.overridden {
+            return Err(AnimateError::UnresolvedOverride {
+                name: animation.name,
+            });
         }
         for command in &self.commands {
             let expected = match command {

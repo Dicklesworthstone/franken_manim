@@ -13881,6 +13881,132 @@ fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
         .with_counter("spring_seeds_diverge", seeds_diverge))
 }
 
+/// A native method override reaches the actual scene owner once, reads its
+/// current geometry, and produces the same certified frames as an explicit
+/// method animation under serial and parallel render schedules.
+fn native_method_override_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{MethodOverride, Transform};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct OverrideScene {
+        overridden: bool,
+        calls: Rc<Cell<u64>>,
+    }
+    impl fmn::SceneConstruct for OverrideScene {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.35).color(BLUE_C))?;
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            let builder = circle.animate().set_anim_args(AnimateArgs {
+                run_time_frames: Some(4),
+                rate_func: Some(fmn_core::rate::linear),
+                ..AnimateArgs::default()
+            })?;
+            if self.overridden {
+                let calls = Rc::clone(&self.calls);
+                let animation =
+                    MethodOverride::new(builder, "native-shift", move |arena, source, _args| {
+                        calls.set(calls.get() + 1);
+                        let target = arena.copy_family(source)?;
+                        arena.shift(target, [2.0, 0.5, 0.0]);
+                        Ok(Transform::new(source, target))
+                    })?;
+                // Preparation must read this later placement, rather than
+                // the position at which the override was recorded.
+                assert_eq!(self.calls.get(), 0);
+                stage.shift(circle, [-1.0, -0.25, 0.0]);
+                stage.play(animation)?;
+                assert_eq!(self.calls.get(), 1);
+            } else {
+                stage.shift(circle, [-1.0, -0.25, 0.0]);
+                stage.play(builder.shift([2.0, 0.5, 0.0])?)?;
+            }
+            let center = stage.get_center(circle);
+            assert!((center[0] - 1.0).abs() < 1e-6);
+            assert!((center[1] - 0.25).abs() < 1e-6);
+            Ok(())
+        }
+    }
+
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut rendered_frames = 0;
+    let mut factory_calls = 0;
+    for threads in [1, 4, 16] {
+        for overridden in [false, true] {
+            let calls = Rc::new(Cell::new(0));
+            let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+            let mut options = fmn::RenderOptions::new("/method-override")
+                .map_err(|error| fail(format!("method override options: {error}")))?;
+            options.config.camera.resolution = (64, 48);
+            options.config.camera.fps = 8;
+            options.config.sizes.frame_height = 3.0;
+            options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+            options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+            options.frames_in_flight = 2;
+            let report = fmn::render_with_fs(
+                &mut OverrideScene {
+                    overridden,
+                    calls: Rc::clone(&calls),
+                },
+                options,
+                fs.clone(),
+            )
+            .map_err(|error| fail(format!("native method override render: {error}")))?;
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("method override omitted the native frame pipeline"))?;
+            if report.scene.play_count != 1
+                || report.artifact.frame_count != 4
+                || pipeline.submitted != 4
+                || pipeline.emitted != 4
+                || pipeline.outstanding_slots != 0
+                || calls.get() != u64::from(overridden)
+            {
+                return Err(fail(
+                    "method override changed factory count, timing or publication",
+                ));
+            }
+            let mut frames = Vec::new();
+            for frame in 0..4 {
+                frames.push(
+                    fs.read(
+                        &PathBuf::from("/method-override").join(format!("frame_{frame:06}.png")),
+                    )
+                    .map_err(|error| fail(format!("method override PNG: {error}")))?,
+                );
+            }
+            if frames[0] == frames[3] {
+                return Err(fail("method override failed to animate visible geometry"));
+            }
+            if let Some(expected) = &baseline {
+                if &frames != expected {
+                    return Err(fail(format!(
+                        "method override differs from explicit animation at {threads} threads"
+                    )));
+                }
+            } else {
+                baseline = Some(frames);
+            }
+            factory_calls += calls.get();
+            rendered_frames += report.artifact.frame_count;
+        }
+    }
+    let frames = baseline.ok_or_else(|| fail("no method override frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.native.method_override")
+            .field("factory_calls", factory_calls)
+            .field("rendered_frames", rendered_frames)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("method-override-first.png", frames[0].clone())
+        .with_artifact("method-override-last.png", frames[3].clone())
+        .with_counter("method_override_factory_calls", factory_calls)
+        .with_counter("method_override_frames", rendered_frames)
+        .with_counter("method_override_thread_counts", 3))
+}
+
 /// Graph authoring through the public native facade, including layout motion,
 /// ordered traversal and weighted directed flow (including a self-loop), at
 /// three worker counts.
@@ -20866,6 +20992,29 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     ));
     specs.push(
         spec(
+            "lifecycle.native_method_override.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(native_method_override_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("method_override_factory_calls", 3),
+                counter_eq("method_override_frames", 24),
+                counter_eq("method_override_thread_counts", 3),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.native.method_override",
+                vec![
+                    FieldPred::u64_eq("factory_calls", 3),
+                    FieldPred::u64_eq("rendered_frames", 24),
+                    FieldPred::u64_eq("thread_counts", 3),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "lifecycle.graph_animations.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -22449,6 +22598,16 @@ fn python_graph_animations_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_graph_animations.v1")
         .expect("Python graph animation scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_method_override_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.native_method_override.v1")
+        .expect("native method override scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

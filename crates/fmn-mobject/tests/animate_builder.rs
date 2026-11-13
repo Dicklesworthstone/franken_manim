@@ -146,13 +146,18 @@ fn overridden_animations_do_not_chain_in_either_direction() {
             .and_then(|b| b.with_override(ov)),
         Err(AnimateError::OverrideNotChainable)
     );
-    // An override alone builds, carrying its marker.
-    let built = mob
+    // A name alone is not an animation factory and cannot become a no-op
+    // transform. Refuse before allocating even an unchanged target copy.
+    let before = stage.len();
+    let result = mob
         .animate()
         .with_override(ov)
-        .and_then(|b| b.build(&mut stage))
-        .expect("override alone builds");
-    assert_eq!(built.overridden, Some(ov));
+        .and_then(|b| b.build(&mut stage));
+    assert_eq!(
+        result,
+        Err(AnimateError::UnresolvedOverride { name: "fade_stub" })
+    );
+    assert_eq!(stage.len(), before);
 }
 
 #[test]

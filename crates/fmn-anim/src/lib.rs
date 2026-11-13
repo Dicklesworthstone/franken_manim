@@ -69,8 +69,8 @@ pub mod update;
 
 pub use animation::{
     AnimConfig, AnimError, AnimState, Animation, AnimationSignature, DEFAULT_ANIMATION_LAG_RATIO,
-    DEFAULT_ANIMATION_RUN_TIME, IntoAnimation, IntoAnimations, MethodAnimation, RateFunc,
-    prepare_animation, prepare_animations, sub_alpha, time_spanned_alpha,
+    DEFAULT_ANIMATION_RUN_TIME, IntoAnimation, IntoAnimations, MethodAnimation, MethodOverride,
+    RateFunc, prepare_animation, prepare_animations, sub_alpha, time_spanned_alpha,
 };
 pub use apply_method::ApplyMethod;
 pub use bundle::{
