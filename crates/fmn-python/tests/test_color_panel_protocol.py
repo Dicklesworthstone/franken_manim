@@ -105,6 +105,26 @@ class ColorPanelTests(unittest.TestCase):
         self.assertIsNot(panel.panel_kwargs, config)
         self.assertEqual(panel.opener_kwargs, {"height": .5})
         self.assertEqual(str(inspect.signature(self.n.ControlPanel.__init__)), str(inspect.signature(self.original)))
+    def test_composite_defaults_follow_rebinding_and_restoration(self):
+        previous = self.original.__kwdefaults__
+        portrait = {**previous, "panel_kwargs": {"width": 1.125},
+                    "opener_kwargs": {"width": .5625, "height": .5}}
+        try:
+            self.original.__kwdefaults__ = portrait
+            for content in (self.n.ControlMobject(), self.n.ColorSliders()):
+                panel = self.n.ControlPanel(content)
+                self.assertEqual(panel.panel_kwargs, portrait["panel_kwargs"])
+                self.assertEqual(panel.opener_kwargs, portrait["opener_kwargs"])
+                self.assertIsNot(panel.panel_kwargs, portrait["panel_kwargs"])
+            explicit = {"width": 2.25}
+            panel = self.n.ControlPanel(self.n.ColorSliders(), panel_kwargs=explicit)
+            self.assertEqual(panel.panel_kwargs, explicit)
+            self.assertIsNot(panel.panel_kwargs, explicit)
+        finally:
+            self.original.__kwdefaults__ = previous
+        panel = self.n.ControlPanel(self.n.ColorSliders())
+        self.assertEqual(panel.panel_kwargs, previous["panel_kwargs"])
+        self.assertEqual(panel.opener_kwargs, previous["opener_kwargs"])
     def test_invalid_options_and_content_fail_before_native_layout(self):
         bank = self.n.ColorSliders()
         for kwargs in ({"panel_kwargs": {"shader": "x"}},

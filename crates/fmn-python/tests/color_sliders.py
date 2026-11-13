@@ -4,6 +4,7 @@ The companion protocol suite uses storage doubles. This suite requires native
 controls, actual scene input/playback, and decoded Lumen/Reel output.
 """
 import hashlib
+import inspect
 from pathlib import Path
 import tempfile
 import unittest
@@ -335,6 +336,97 @@ class ColorSliderAcceptance(unittest.TestCase):
         finally:
             m.Text.init_points = original
         self.assertEqual(calls, [panel.panel_info_text])
+    def test_panel_frame_defaults_follow_cli_source_scope_and_restore(self):
+        from fmn_python.scene_loading import SceneSource
+
+        baseline_width, baseline_resolution = m.FRAME_WIDTH, m.DEFAULT_RESOLUTION
+        previous_defaults = inspect.signature(m.ControlPanel).parameters
+        previous_panel = dict(previous_defaults["panel_kwargs"].default)
+        previous_opener = dict(previous_defaults["opener_kwargs"].default)
+        with tempfile.TemporaryDirectory(prefix="fmn-panel-frame-") as directory:
+            path = Path(directory, "controls.py")
+            path.write_text("from manimlib import *\nWIDTH_AT_IMPORT = FRAME_WIDTH\n"
+                            "class Controls(Scene): pass\n")
+            # SceneSource is the actual CLI -r scope. Construct after import
+            # so both the native layout and late-bound wrapper see its frame.
+            for resolution, width, capture in (
+                ((1080, 1920), 4.5, (90, 160)),
+                ((1080, 1080), 8., (96, 96)),
+            ):
+                with self.subTest(resolution=resolution):
+                    with SceneSource(path, m.Scene, frame_resolution=resolution) as source:
+                        self.assertEqual(source.module.WIDTH_AT_IMPORT, width)
+                        parameters = inspect.signature(m.ControlPanel).parameters
+                        self.assertEqual(parameters["panel_kwargs"].default["width"], width / 4)
+                        self.assertEqual(parameters["opener_kwargs"].default["width"], width / 8)
+                        scene = source.scenes["Controls"](camera_config={"resolution": capture})
+                        for content in (m.Checkbox(), self.bank()):
+                            panel = m.ControlPanel(content)
+                            self.owned.append(panel)
+                            self.assertAlmostEqual(panel.panel.get_width(), width / 4, places=5)
+                            self.assertAlmostEqual(panel.panel_opener_rect.get_width(), width / 8, places=5)
+                            self.assertAlmostEqual(panel.panel.get_left()[0], -width / 2, places=5)
+                            scene.add(panel)
+                            family = tuple(panel.get_family())
+                            panel.open_panel()
+                            self.assertAlmostEqual(panel.panel_opener.get_bottom()[1], -4., places=5)
+                            opened = scene.camera.capture_snapshot(panel).png()
+                            panel.close_panel()
+                            self.assertAlmostEqual(panel.panel_opener.get_top()[1], 4., places=5)
+                            closed = scene.camera.capture_snapshot(panel).png()
+                            self.assertNotEqual(opened, closed)
+                            self.assertEqual(tuple(panel.get_family()), family)
+                            self.assertIs(panel.controls[0], content)
+                            scene.remove(panel)
+                    self.assertEqual((m.FRAME_WIDTH, m.DEFAULT_RESOLUTION),
+                                     (baseline_width, baseline_resolution))
+        parameters = inspect.signature(m.ControlPanel).parameters
+        self.assertEqual(parameters["panel_kwargs"].default, previous_panel)
+        self.assertEqual(parameters["opener_kwargs"].default, previous_opener)
+        fresh = m.ControlPanel(self.bank())
+        self.owned.append(fresh)
+        self.assertAlmostEqual(fresh.panel.get_width(), baseline_width / 4, places=5)
+        self.assertAlmostEqual(fresh.panel.get_left()[0], -baseline_width / 2, places=5)
+
+    def test_panel_frame_scope_preserves_explicit_options_and_exception_restoration(self):
+        from fmn_python.scene_loading import SceneSource
+
+        class ScopeFailure(Exception):
+            pass
+
+        before = (m.FRAME_WIDTH, m.DEFAULT_RESOLUTION)
+        panel_options = dict(width=1.7, height=3., fill_color=m.RED, fill_opacity=.4)
+        opener_options = dict(width=.8, height=.6, fill_color=m.GREEN, fill_opacity=.8)
+        with tempfile.TemporaryDirectory(prefix="fmn-panel-options-") as directory:
+            path = Path(directory, "controls.py")
+            path.write_text("from manimlib import *\nclass Controls(Scene): pass\n")
+            with self.assertRaises(ScopeFailure):
+                with SceneSource(path, m.Scene, frame_resolution=(1080, 1920)):
+                    for content in (m.Checkbox(), m.Group(m.Checkbox())):
+                        panel = m.ControlPanel(content, panel_kwargs=panel_options,
+                                               opener_kwargs=opener_options)
+                        self.owned.append(panel)
+                        for operation in (panel.open_panel, panel.close_panel):
+                            operation()
+                            self.assertAlmostEqual(panel.panel.get_width(), 1.7, places=5)
+                            self.assertAlmostEqual(panel.panel.get_height(), 3., places=5)
+                            self.assertAlmostEqual(panel.panel_opener_rect.get_width(), .8, places=5)
+                            self.assertAlmostEqual(panel.panel_opener_rect.get_height(), .6, places=5)
+                            self.assertEqual(panel.panel.get_fill_color(), m.RED)
+                            self.assertEqual(panel.panel_opener_rect.get_fill_color(), m.GREEN)
+                            self.assertAlmostEqual(panel.panel.get_fill_opacity(), .4, places=5)
+                            self.assertAlmostEqual(panel.panel_opener_rect.get_fill_opacity(), .8, places=5)
+                            self.assertAlmostEqual(panel.panel.get_left()[0], -2.25, places=5)
+                        self.assertEqual(panel.panel_kwargs, panel_options)
+                        self.assertEqual(panel.opener_kwargs, opener_options)
+                        self.assertIsNot(panel.panel_kwargs, panel_options)
+                        self.assertIsNot(panel.opener_kwargs, opener_options)
+                    raise ScopeFailure()
+        self.assertEqual((m.FRAME_WIDTH, m.DEFAULT_RESOLUTION), before)
+        fresh = m.ControlPanel(m.Checkbox())
+        self.owned.append(fresh)
+        self.assertAlmostEqual(fresh.panel.get_width(), before[0] / 4, places=5)
+        self.assertAlmostEqual(fresh.panel.get_left()[0], -before[0] / 2, places=5)
     def test_panel_contains_live_color_bank_and_accepts_late_composite_content(self):
         bank = self.bank()
         panel = m.ControlPanel(bank)
@@ -398,7 +490,13 @@ class ColorSliderAcceptance(unittest.TestCase):
             self.assertEqual(hashlib.sha256(outputs[0]).digest(), hashlib.sha256(outputs[1]).digest())
 
 
-result = unittest.TextTestRunner(verbosity=2).run(
-    unittest.defaultTestLoader.loadTestsFromTestCase(ColorSliderAcceptance)
-)
+if globals().get("_fmn_control_panel_frame_only", False):
+    suite = unittest.TestSuite(ColorSliderAcceptance(name) for name in (
+        "test_panel_frame_defaults_follow_cli_source_scope_and_restore",
+        "test_panel_frame_scope_preserves_explicit_options_and_exception_restoration",
+    ))
+else:
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(ColorSliderAcceptance)
+result = unittest.TextTestRunner(verbosity=2).run(suite)
 assert result.wasSuccessful(), "native color-control acceptance failed"
+_fmn_control_panel_frame_checks = result.testsRun

@@ -12719,6 +12719,7 @@ class ControlPanel(Group):
             opener_font_size,
             opener_text_color,
             bool(open),
+            _FRAME_SHAPE,
             (
                 float(panel_config.get("width", _FRAME_SHAPE[0] / 4.0)),
                 float(panel_config.get("height", _MED_SMALL_BUFF + _FRAME_HEIGHT)),
@@ -21556,6 +21557,19 @@ def _frame_dependent_defaults():
         (CameraFrame, "frame_shape", _FRAME_SHAPE),
         (Camera, "resolution", _DEFAULT_RESOLUTION),
         (Camera, "max_allowable_norm", _FRAME_WIDTH),
+        (ControlPanel, "panel_kwargs", dict(
+            width=_FRAME_SHAPE[0] / 4.0,
+            height=_MED_SMALL_BUFF + _FRAME_HEIGHT,
+            fill_color=_GREY_C,
+            fill_opacity=1.0,
+            stroke_width=0.0,
+        )),
+        (ControlPanel, "opener_kwargs", dict(
+            width=_FRAME_SHAPE[0] / 8.0,
+            height=0.5,
+            fill_color=_GREY_C,
+            fill_opacity=1.0,
+        )),
     )
 
 

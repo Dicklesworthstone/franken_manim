@@ -6440,6 +6440,15 @@ fn python_camera_frame_points_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("camera_frame_point_cases", cases))
 }
 
+/// Control panels use the active CLI frame for defaults and native placement,
+/// including composite controls, explicit options and scoped restoration.
+fn python_control_panel_frame_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_control_panel_frames()
+        .map_err(|error| fail(format!("Python control panel frame scopes: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.control_panel_frame").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("control_panel_frame_cases", cases))
+}
+
 /// Standard CPU rectangle recovery observes live NumPy writes and frozen
 /// captures in the actual portal. This route carries no certified bit claim.
 fn python_rectangle_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -19162,6 +19171,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_control_panel_frame.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_control_panel_frame_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("control_panel_frame_cases", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.control_panel_frame",
+            vec![FieldPred::u64_eq("cases", 2)],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_rectangle_recovery.standard.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -22436,6 +22459,16 @@ fn graph_animations_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.graph_animations.v1")
         .expect("native graph animation lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_control_panel_frame_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_control_panel_frame.v1")
+        .expect("frame-aware Python control panel scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

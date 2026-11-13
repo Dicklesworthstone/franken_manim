@@ -223,7 +223,6 @@ def _install_panel_content(g):
     if Panel is None:
         return
     original = Panel.__init__
-    signature = inspect.signature(original)
     Group, ScalarControl, Bank = g["Group"], g["ControlMobject"], g["ColorSliders"]
     rectangle_keys = {"width", "height", "color", "fill_color", "fill_opacity",
                       "stroke_color", "stroke_width", "stroke_opacity"}
@@ -290,7 +289,10 @@ def _install_panel_content(g):
         if all(isinstance(control, ScalarControl) for control in controls):
             return original(self, *controls, **kwargs)
         validate(controls)
-        bound = signature.bind(self, *controls, **kwargs)
+        # SceneSource rebinds frame-dependent defaults after import and then
+        # restores them. Resolve the wrapped constructor's current signature
+        # so composite controls use the same defaults as scalar controls.
+        bound = inspect.signature(original).bind(self, *controls, **kwargs)
         bound.apply_defaults()
         args = bound.arguments
         extra = args.get("kwargs", {})

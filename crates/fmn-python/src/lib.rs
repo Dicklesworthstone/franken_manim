@@ -4837,6 +4837,8 @@ impl BridgeMobject {
     /// `ControlPanel(*controls)` over Atlas's native panel, opener tab, and
     /// controls column. The Python root is a `Group`; these three children
     /// keep stable shell identities across open/close rebuilds.
+    /// `frame_shape` is the source scope's configured `FRAME_SHAPE`, including
+    /// a CLI resolution selected after the portal was imported.
     /// `panel` is `(width, height, fill_rgb, fill_opacity, stroke_rgb,
     /// stroke_width, stroke_opacity)`; `opener` is the same 7-tuple.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
@@ -4848,6 +4850,7 @@ impl BridgeMobject {
         opener_font_size: f64,
         opener_text_color: [f64; 3],
         open: bool,
+        frame_shape: [f64; 2],
         panel: (f64, f64, [f64; 3], f64, [f64; 3], f64, f64),
         opener: (f64, f64, [f64; 3], f64, [f64; 3], f64, f64),
     ) -> PyResult<Bound<'py, PyList>> {
@@ -4873,7 +4876,7 @@ impl BridgeMobject {
             .into_iter()
             .map(|extent| matcher_extent_vmobject(Some(extent)));
         let built = with_font_book(|book| {
-            let mut panel = fmn_library::ControlPanel::new(controls)
+            let builder = fmn_library::ControlPanel::new(controls)
                 .opener_text(opener_text)
                 .opener_font_size(opener_font_size)
                 .opener_text_color(fmn_core::color::Srgb {
@@ -4918,9 +4921,11 @@ impl BridgeMobject {
                     },
                     opener_stroke_width,
                     opener_stroke_opacity,
-                )
-                .build(book)
-                .map_err(native_error)?;
+                );
+            let mut panel = with_stage(slf, |stage, _| {
+                stage.set_frame_shape(frame_shape).map_err(stage_error)?;
+                builder.build_in(stage, book).map_err(native_error)
+            })??;
             if open {
                 panel.open_panel();
             } else {
@@ -14278,6 +14283,28 @@ pub fn run_portal_gauntlet_video_options() -> Result<(), String> {
     })
 }
 
+/// Exercise scalar and composite control panels under the CLI's scoped frame
+/// resolution, including native layout, rendering and exception restoration.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_control_panel_frames() -> Result<u64, String> {
+    with_python_test_module("control panel frame Gauntlet", |py, _module, globals| {
+        globals
+            .set_item("_fmn_control_panel_frame_only", true)
+            .map_err(|error| error.to_string())?;
+        let source = CString::new(include_str!("../tests/color_sliders.py"))
+            .expect("color-control suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("_fmn_control_panel_frame_checks")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "control panel frame suite emitted no case count".to_owned())?
+            .extract::<u64>()
+            .map_err(|error| error.to_string())
+    })
+}
+
 /// Exercise standalone SceneFileWriter inserts through the production native
 /// recording owner, checking decoded motion, ownership and no-clobber failure.
 /// Returns the number of completed acceptance cases; no ffmpeg is required.
@@ -15395,6 +15422,11 @@ except Exception:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_panels_follow_scoped_frame_defaults_and_placement() {
+        assert_eq!(run_portal_gauntlet_control_panel_frames().unwrap(), 2);
+    }
 
     /// A suite owns the modules imported from the import roots it added, even
     /// when it panics, through a symlinked root, and inside nested namespace
