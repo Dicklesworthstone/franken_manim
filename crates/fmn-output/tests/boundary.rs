@@ -2054,6 +2054,133 @@ mod private_boundary {
         (tool, runner)
     }
 
+    #[cfg(feature = "ffmpeg-test-fixture")]
+    fn separate_filesystem_directory(source: &Path) -> Option<PathBuf> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let device = std::fs::metadata(source).unwrap().dev();
+        let candidates = [
+            PathBuf::from("/dev/shm"),
+            PathBuf::from("/var/tmp"),
+            std::env::current_dir().unwrap(),
+        ];
+        for parent in candidates {
+            let Ok(metadata) = std::fs::metadata(&parent) else {
+                continue;
+            };
+            if metadata.dev() == device || !metadata.is_dir() {
+                continue;
+            }
+            let directory = parent.join(format!(
+                "fmn-cross-filesystem-output-{}-{}",
+                std::process::id(),
+                DIR_SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            if std::fs::create_dir(&directory).is_ok() {
+                std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                    .unwrap();
+                return Some(directory);
+            }
+        }
+        None
+    }
+
+    #[cfg(feature = "ffmpeg-test-fixture")]
+    #[test]
+    fn ffmpeg_publication_crosses_filesystems_without_losing_atomic_policies() {
+        let (dir, _gate) = scratch("cross-filesystem-publication");
+        let Some(output) = separate_filesystem_directory(&dir) else {
+            // A second mount is an optional host capability, not a missing
+            // project input. The portable copy-integrity tests still run on
+            // single-filesystem hosts, including strict full-input gates.
+            let line = concat!(
+                "SKIPPED ffmpeg_publication_crosses_filesystems_without_losing_atomic_policies ",
+                "no writable second filesystem; portable atomic-copy tests remain active\n",
+            );
+            eprint!("{line}");
+            if let Some(path) = std::env::var_os("FMN_SKIP_LEDGER")
+                && let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+            {
+                let _ = std::io::Write::write_all(&mut file, line.as_bytes());
+            }
+            return;
+        };
+        // Prove this host exercises EXDEV rather than accidentally testing a
+        // rename on one device. Neither an existing output nor its old bytes
+        // may be exposed to a partial copy during the actual publications.
+        let probe = dir.join("rename-probe");
+        std::fs::write(&probe, b"private bytes").unwrap();
+        let error = std::fs::rename(&probe, output.join("rename-probe")).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::CrossesDevices);
+        assert_eq!(std::fs::read(&probe).unwrap(), b"private bytes");
+
+        let (tool, runner) = real_tool(&dir);
+        let boundary =
+            Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone()).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let video_job = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
+        let frames = vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let input = dir.join("input.media");
+        std::fs::write(&input, b"native fixture input").unwrap();
+        for route in ["encode", "mux", "audio", "image", "concat"] {
+            let destination = output.join(format!("{route}.mp4"));
+            std::fs::write(&destination, b"the old render").unwrap();
+            let result = match route {
+                "encode" => boundary.encode(&video_job, frames.clone(), &caps, &destination),
+                "mux" => boundary.encode_with_audio(
+                    &video_job,
+                    frames.clone(),
+                    &input,
+                    &caps,
+                    &destination,
+                ),
+                "audio" => boundary.transcode_audio(&input, &destination),
+                "image" => boundary.transcode_image(&input, &destination),
+                "concat" => boundary.concat(std::slice::from_ref(&input), &destination),
+                _ => unreachable!(),
+            };
+            let report = result.unwrap_or_else(|error| {
+                panic!("{route} cannot publish across filesystems: {error}")
+            });
+            assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
+            assert_eq!(report.destination, destination);
+            assert_eq!(report.artifact_bytes, 9);
+            assert_eq!(report.artifact_digest, sha256(b"FAKEVIDEO"));
+        }
+
+        for existing in [false, true] {
+            let destination = output.join(format!("create-only-{existing}.mp4"));
+            if existing {
+                std::fs::write(&destination, b"keep this render").unwrap();
+            }
+            let bytes = frames.len() as u64;
+            let mut stream = boundary
+                .start_encode(
+                    &video_job,
+                    &caps,
+                    &destination,
+                    None,
+                    ProcessCancellation::new(),
+                    ProcessStdinLimits::new(bytes, bytes),
+                )
+                .unwrap();
+            stream.write_stdin(&frames).unwrap();
+            let prepared = stream.prepare().unwrap();
+            if existing {
+                assert!(prepared.commit_new().is_err());
+                assert_eq!(std::fs::read(destination).unwrap(), b"keep this render");
+            } else {
+                let report = prepared.commit_new().unwrap();
+                assert_eq!(std::fs::read(destination).unwrap(), b"FAKEVIDEO");
+                assert_eq!(report.artifact_digest, sha256(b"FAKEVIDEO"));
+            }
+        }
+        assert_eq!(std::fs::read_dir(output).unwrap().count(), 7);
+    }
+
     #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
     #[test]
     fn real_hardware_probe_succeeds_and_is_recorded_in_encode_provenance() {

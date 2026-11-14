@@ -1685,30 +1685,6 @@ impl Boundary {
         check_process_outcome(&self.limits, outcome)
     }
 
-    /// Verify the artifact and publish it to `destination` by atomic
-    /// rename. A failure at any point leaves the destination untouched.
-    fn publish(&self, artifact: &Path, destination: &Path) -> Result<(), BoundaryError> {
-        let meta = std::fs::metadata(artifact).map_err(|_| BoundaryError::ArtifactMissing)?;
-        if meta.len() > self.limits.max_artifact_bytes {
-            return Err(BoundaryError::ArtifactOversized {
-                bytes: meta.len(),
-                max: self.limits.max_artifact_bytes,
-            });
-        }
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| BoundaryError::Workdir {
-                detail: format!("create {}: {e}", parent.display()),
-            })?;
-        }
-        std::fs::rename(artifact, destination).map_err(|e| BoundaryError::Workdir {
-            detail: format!(
-                "publish {} -> {}: {e}",
-                artifact.display(),
-                destination.display()
-            ),
-        })
-    }
-
     fn cleanup(&self, workdir: &OwnedWorkdir) {
         if !self.limits.keep_workdir {
             workdir.cleanup_recursive();
@@ -1777,7 +1753,14 @@ impl Boundary {
         workdir.verify_current("publish ffmpeg artifact")?;
         let (artifact_bytes, artifact_digest) =
             hash_private_artifact(artifact, self.limits.max_artifact_bytes)?;
-        self.publish(artifact, destination)?;
+        publish_verified_artifact(
+            artifact,
+            destination,
+            artifact_bytes,
+            artifact_digest,
+            self.limits.max_artifact_bytes,
+            false,
+        )?;
         Ok(BoundaryReport {
             invocations: vec![invocation_report(
                 &self.tool,
@@ -2261,7 +2244,11 @@ pub struct PreparedFfmpegArtifact {
 }
 
 impl PreparedFfmpegArtifact {
-    /// Atomically publish the verified artifact.
+    /// Atomically publish the verified artifact, replacing an existing file.
+    ///
+    /// A different destination filesystem uses a bounded, rehashed copy into
+    /// a private destination sibling before the final atomic rename. Encodes
+    /// and destinations on the same filesystem keep their rename fast path.
     ///
     /// # Errors
     /// Artifact revalidation or rename failure.
@@ -2285,33 +2272,16 @@ impl PreparedFfmpegArtifact {
         self.workdir.verify_current("commit ffmpeg artifact")?;
         let (artifact_bytes, artifact_digest) =
             hash_private_artifact(&self.artifact, self.limits.max_artifact_bytes)?;
-        if let Some(parent) = self.destination.parent() {
-            std::fs::create_dir_all(parent).map_err(|error| BoundaryError::Workdir {
-                detail: format!("create {}: {error}", parent.display()),
-            })?;
-        }
         self.workdir
             .verify_current("publish prepared ffmpeg artifact")?;
-        verify_private_artifact(&self.artifact, self.limits.max_artifact_bytes)?;
-        if no_clobber {
-            publish_artifact_new(
-                &self.artifact,
-                &self.destination,
-                artifact_bytes,
-                artifact_digest,
-                self.limits.max_artifact_bytes,
-            )?;
-        } else {
-            std::fs::rename(&self.artifact, &self.destination).map_err(|error| {
-                BoundaryError::Workdir {
-                    detail: format!(
-                        "publish {} -> {}: {error}",
-                        self.artifact.display(),
-                        self.destination.display()
-                    ),
-                }
-            })?;
-        }
+        publish_verified_artifact(
+            &self.artifact,
+            &self.destination,
+            artifact_bytes,
+            artifact_digest,
+            self.limits.max_artifact_bytes,
+            no_clobber,
+        )?;
         self.cleanup = false;
         cleanup_workdir(&self.limits, &self.workdir);
         Ok(BoundaryReport {
@@ -2323,17 +2293,65 @@ impl PreparedFfmpegArtifact {
     }
 }
 
-fn publish_artifact_new(
+/// Publish an already verified private artifact without ever copying directly
+/// into the public destination. Only EXDEV enables the replacement copy path;
+/// other rename failures retain their original filesystem refusal.
+fn publish_verified_artifact(
     artifact: &Path,
     destination: &Path,
     expected_bytes: u64,
     expected_digest: Digest,
     limit: u64,
+    no_clobber: bool,
+) -> Result<(), BoundaryError> {
+    verify_private_artifact(artifact, limit)?;
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| BoundaryError::Workdir {
+            detail: format!("create {}: {error}", parent.display()),
+        })?;
+    }
+    if !no_clobber {
+        match std::fs::rename(artifact, destination) {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::CrossesDevices => {}
+            Err(error) => {
+                return Err(BoundaryError::Workdir {
+                    detail: format!(
+                        "publish {} -> {}: {error}",
+                        artifact.display(),
+                        destination.display()
+                    ),
+                });
+            }
+        }
+    }
+    copy_artifact_atomically(
+        artifact,
+        destination,
+        expected_bytes,
+        expected_digest,
+        limit,
+        no_clobber,
+    )
+}
+
+fn copy_artifact_atomically(
+    artifact: &Path,
+    destination: &Path,
+    expected_bytes: u64,
+    expected_digest: Digest,
+    limit: u64,
+    no_clobber: bool,
 ) -> Result<(), BoundaryError> {
     use fmn_platform::fs::{FileSystem as _, StdFs};
 
+    let operation = if no_clobber {
+        "create-only"
+    } else {
+        "replacement"
+    };
     let failure = |error: &dyn std::fmt::Display| BoundaryError::Workdir {
-        detail: format!("create-only publication {}: {error}", destination.display()),
+        detail: format!("{operation} publication {}: {error}", destination.display()),
     };
     let mut source = File::open(artifact).map_err(|error| failure(&error))?;
     let mut writer = Arc::new(StdFs)
@@ -2361,11 +2379,13 @@ fn publish_artifact_new(
     if bytes != expected_bytes || digest.finalize() != expected_digest {
         return Err(failure(&"prepared artifact changed during publication"));
     }
-    writer
-        .prepare()
-        .map_err(|error| failure(&error))?
-        .commit_new()
-        .map_err(|error| failure(&error))
+    let prepared = writer.prepare().map_err(|error| failure(&error))?;
+    if no_clobber {
+        prepared.commit_new()
+    } else {
+        prepared.commit()
+    }
+    .map_err(|error| failure(&error))
 }
 
 impl Drop for PreparedFfmpegArtifact {
@@ -2552,11 +2572,14 @@ mod tests {
             (150_000, fmn_hash::sha256(b"wrong bytes"), 150_000),
             (150_000, digest, 149_999),
         ] {
-            assert!(publish_artifact_new(&source, &destination, length, expected, limit).is_err());
+            assert!(
+                copy_artifact_atomically(&source, &destination, length, expected, limit, true)
+                    .is_err()
+            );
             assert!(!destination.exists());
             assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
         }
-        publish_artifact_new(&source, &destination, 150_000, digest, 150_000).unwrap();
+        copy_artifact_atomically(&source, &destination, 150_000, digest, 150_000, true).unwrap();
         assert_eq!(std::fs::read(&destination).unwrap(), bytes);
         std::fs::write(&source, b"changed private bytes").unwrap();
         assert_eq!(
@@ -2565,16 +2588,77 @@ mod tests {
             "published video must not alias a retained debug artifact"
         );
         assert!(
-            publish_artifact_new(
+            copy_artifact_atomically(
                 &source,
                 &destination,
                 21,
                 fmn_hash::sha256(b"changed private bytes"),
-                150_000
+                150_000,
+                true,
             )
             .is_err()
         );
         assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_video_copy_preserves_existing_output_until_verified() {
+        let root = std::env::temp_dir().join(format!(
+            "fmn-video-replacement-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&root).unwrap();
+        let source = root.join("private-video");
+        let destination = root.join("output.mp4");
+        let bytes = vec![59_u8; 150_000];
+        let digest = fmn_hash::sha256(&bytes);
+        std::fs::write(&source, &bytes).unwrap();
+        std::fs::write(&destination, b"the previous render").unwrap();
+        for (length, expected, limit) in [
+            (149_999, digest, 150_000),
+            (150_000, fmn_hash::sha256(b"wrong bytes"), 150_000),
+            (150_000, digest, 149_999),
+        ] {
+            assert!(
+                copy_artifact_atomically(&source, &destination, length, expected, limit, false)
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&destination).unwrap(), b"the previous render");
+            assert_eq!(std::fs::read_dir(&root).unwrap().count(), 2);
+        }
+        copy_artifact_atomically(&source, &destination, 150_000, digest, 150_000, false).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), bytes);
+        std::fs::write(&source, b"changed private bytes").unwrap();
+        assert_eq!(
+            std::fs::read(&destination).unwrap(),
+            bytes,
+            "replacement must not alias a retained private artifact"
+        );
+
+        let blocked = root.join("existing-directory");
+        std::fs::create_dir(&blocked).unwrap();
+        std::fs::write(blocked.join("sentinel"), b"untouched").unwrap();
+        assert!(
+            copy_artifact_atomically(
+                &source,
+                &blocked,
+                21,
+                fmn_hash::sha256(b"changed private bytes"),
+                150_000,
+                false,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            std::fs::read(blocked.join("sentinel")).unwrap(),
+            b"untouched"
+        );
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 3);
         std::fs::remove_dir_all(root).unwrap();
     }
 
