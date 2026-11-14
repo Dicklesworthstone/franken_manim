@@ -528,7 +528,19901 @@ fn sink_limits(frames: u64) -> Result<SinkLimits, ScenarioError> {
 /// same members and tree digest), and the run logs the sink's frame
 /// concurrency, its in-flight byte bound, and the encoder lanes the profile
 /// saw. Lane counts depend on scheduling, so they are logged, not asserted.
-fn png_sequence_frame_concur…200152 tokens truncated…  counter_eq("cli_ffmpeg_admitted_timeout", 21_600),
+fn png_sequence_frame_concurrency_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    const PRESET: Preset = Preset {
+        flag: "png-concurrency",
+        width: 160,
+        height: 90,
+        tier: Tier::Fast,
+    };
+    const FRAMES: u32 = 12;
+    let frames = (0..FRAMES)
+        .map(|index| {
+            let layout = FrameLayout::tight(PixelFormat::Rgba8, PRESET.width, PRESET.height)
+                .map_err(|error| fail(format!("frame layout: {error}")))?;
+            let mut frame = FrameBuffer::new(layout);
+            for (pixel, rgba) in frame
+                .as_bytes_mut()
+                .as_chunks_mut::<4>()
+                .0
+                .iter_mut()
+                .enumerate()
+            {
+                let pixel = u32::try_from(pixel).unwrap_or(u32::MAX);
+                let (x, y) = (pixel % PRESET.width, pixel / PRESET.width);
+                let block = x.abs_diff(10 * index + 20) < 12 && y.abs_diff(45) < 12;
+                *rgba = if block {
+                    [255, 200, 40, 255]
+                } else {
+                    let ramp =
+                        |value: u32, span: u32| u8::try_from(value * 255 / span).unwrap_or(255);
+                    [ramp(x, PRESET.width), ramp(y, PRESET.height), 51, 255]
+                };
+            }
+            Ok(frame)
+        })
+        .collect::<Result<Vec<_>, ScenarioError>>()?;
+    let serial_dir = scenario_dir("png_sequence_concurrency_serial")?;
+    let (serial, serial_report) =
+        publish_png_sequence(&serial_dir, &PRESET, &frames, true, 1, None)?;
+    let recorder = fmn_platform::profile::ProfileRecorder::enabled();
+    let profile = fmn_output::OutputProfile::new(
+        Arc::new(fmn_platform::clock::StdClock::new()),
+        recorder.clone(),
+        fmn_platform::profile::ProfilePath::scene(0),
+    );
+    let pooled_dir = scenario_dir("png_sequence_concurrency_pooled")?;
+    let (pooled, pooled_report) =
+        publish_png_sequence(&pooled_dir, &PRESET, &frames, true, 4, Some(profile))?;
+    let probe = PngSinkConfig {
+        target: PngTarget::Sequence {
+            directory: pooled_dir.join("probe"),
+            stem: "frame".to_string(),
+            digits: 4,
+        },
+        width: PRESET.width,
+        height: PRESET.height,
+        first_sequence: 0,
+        compression: fmn_codec::CompressionLevel::Best,
+        threads: 4,
+        limits: sink_limits(u64::from(FRAMES))?,
+        profile: None,
+    };
+    let concurrency = probe.sequence_frame_concurrency() as u64;
+    let frame_bytes = u64::from(PRESET.width) * u64::from(PRESET.height) * 4;
+    let ndjson = recorder.snapshot().to_ndjson();
+    let encode_spans = ndjson
+        .lines()
+        .filter(|line| line.contains("\"phase\":\"encode\""))
+        .count() as u64;
+    let lanes = ndjson
+        .lines()
+        .filter(|line| line.contains("\"lane_role\":\"encoder\""))
+        .filter_map(|line| line.split("\"lane_index\":").nth(1))
+        .filter_map(|rest| rest.split(|c: char| !c.is_ascii_digit()).next())
+        .collect::<std::collections::BTreeSet<_>>()
+        .len() as u64;
+    let identical = serial == pooled && serial_report.digest == pooled_report.digest;
+    ctx.event(
+        LogEvent::new("e2e.png.frame_concurrency")
+            .field("frames", u64::from(FRAMES))
+            .field("threads", 4_u64)
+            .field("concurrency", concurrency)
+            .field("in_flight_bound_bytes", concurrency * 2 * frame_bytes)
+            .field("encode_spans", encode_spans)
+            .field("encoder_lanes_observed", lanes)
+            .field("identical", truth(identical)),
+    );
+    if !identical || concurrency < 2 || encode_spans != u64::from(FRAMES) {
+        return Err(fail(format!(
+            "frame-concurrent PNG sequence: identical={identical} concurrency={concurrency} \
+             encode_spans={encode_spans} lanes={lanes} serial={} pooled={}",
+            serial.len(),
+            pooled.len()
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("png_concurrency_identical", 1)
+        .with_counter("png_encode_spans", encode_spans))
+}
+
+/// Drive the real native y4m sink over the rendered frames and read the
+/// published artifact back from disk.
+fn publish_y4m(
+    dir: &std::path::Path,
+    preset: &Preset,
+    frames: &[FrameBuffer],
+) -> Result<(String, Vec<u8>, NativeArtifactReport), ScenarioError> {
+    let destination = dir.join("out.y4m");
+    let mut sink = Y4mSink::new(
+        Arc::new(fmn_platform::fs::StdFs),
+        Y4mSinkConfig {
+            destination: destination.clone(),
+            width: preset.width,
+            height: preset.height,
+            fps: (FPS, 1),
+            colorspace: fmn_codec::Y4mColorspace::C420Mpeg2,
+            first_sequence: 0,
+            limits: sink_limits(frames.len() as u64)?,
+            profile: None,
+        },
+    )
+    .map_err(|error| fail(format!("y4m sink constructs: {error}")))?;
+    let receipt = sink.receipt();
+    for (index, frame) in frames.iter().enumerate() {
+        match sink.write_frame(index as u64, frame) {
+            Ok(SinkWrite::Consumed) => {}
+            Ok(SinkWrite::WouldBlock) => {
+                return Err(fail("reliable y4m sink reported WouldBlock"));
+            }
+            Err(error) => return Err(fail(format!("y4m sink write: {error}"))),
+        }
+    }
+    sink.finish()
+        .map_err(|error| fail(format!("y4m sink finish: {error}")))?;
+    let report = receipt
+        .take()
+        .map_err(|error| fail(format!("y4m receipt: {error}")))?;
+    let bytes = std::fs::read(&destination)
+        .map_err(|error| fail(format!("read {}: {error}", destination.display())))?;
+    Ok(("out.y4m".to_string(), bytes, report))
+}
+
+/// The published PNG-sequence payload: `(file name, bytes)` pairs in
+/// sequence order, plus the sink's completion report.
+type PublishedSequence = (Vec<(String, Vec<u8>)>, NativeArtifactReport);
+
+/// Drive the real canonical PNG-sequence sink with `threads` encoder workers
+/// and read every published frame back from disk (file order = sequence
+/// order).
+fn publish_png_sequence(
+    dir: &std::path::Path,
+    preset: &Preset,
+    frames: &[FrameBuffer],
+    certified: bool,
+    threads: usize,
+    profile: Option<fmn_output::OutputProfile>,
+) -> Result<PublishedSequence, ScenarioError> {
+    let directory = dir.join("frames");
+    let mut sink = PngSink::new(
+        Arc::new(fmn_platform::fs::StdFs),
+        PngSinkConfig {
+            target: PngTarget::Sequence {
+                directory: directory.clone(),
+                stem: "frame".to_string(),
+                digits: 4,
+            },
+            width: preset.width,
+            height: preset.height,
+            first_sequence: 0,
+            compression: if certified {
+                fmn_codec::CompressionLevel::Best
+            } else {
+                fmn_codec::CompressionLevel::Default
+            },
+            threads,
+            limits: sink_limits(frames.len() as u64)?,
+            profile,
+        },
+    )
+    .map_err(|error| fail(format!("png sink constructs: {error}")))?;
+    let receipt = sink.receipt();
+    for (index, frame) in frames.iter().enumerate() {
+        match sink.write_frame(index as u64, frame) {
+            Ok(SinkWrite::Consumed) => {}
+            Ok(SinkWrite::WouldBlock) => {
+                return Err(fail("reliable png sink reported WouldBlock"));
+            }
+            Err(error) => return Err(fail(format!("png sink write: {error}"))),
+        }
+    }
+    sink.finish()
+        .map_err(|error| fail(format!("png sink finish: {error}")))?;
+    let report = receipt
+        .take()
+        .map_err(|error| fail(format!("png receipt: {error}")))?;
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&directory)
+        .map_err(|error| fail(format!("list {}: {error}", directory.display())))?
+        .map(|entry| entry.map(|entry| entry.path()))
+        .collect::<Result<_, _>>()
+        .map_err(|error| fail(format!("read dir entry: {error}")))?;
+    files.sort();
+    let mut published = Vec::new();
+    for file in files {
+        if file.extension().is_some_and(|ext| ext == "png") {
+            let name = file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .ok_or_else(|| fail("png sequence child has no file name"))?;
+            let bytes = std::fs::read(&file)
+                .map_err(|error| fail(format!("read {}: {error}", file.display())))?;
+            published.push((name, bytes));
+        }
+    }
+    Ok((published, report))
+}
+
+// ---------------------------------------------------------------------------
+// Render-matrix invocation
+// ---------------------------------------------------------------------------
+
+/// One matrix row: run the scene, render every packet under the row's
+/// engine identity, convert, publish through the real native sink, and
+/// return the emitted files as artifacts plus the structural counters and
+/// the machinery events (engine identity, plan decision, per-frame render,
+/// per-file emission).
+fn render_matrix_run(
+    ctx: &mut RunCtx,
+    preset: &Preset,
+    sink_kind: SinkKind,
+    certified: bool,
+    stem: &str,
+) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let identity = if certified {
+        EngineIdentity::certified()
+    } else {
+        EngineIdentity::fast()
+    };
+    let threads = if certified { 1 } else { 4 };
+    let config = preset_frame_config(preset);
+
+    // The ExecutionPlan decision for this row, derived over a fixed
+    // synthetic topology so the recorded decision is a function of the
+    // request, never of the host running the test.
+    let topology = HardwareTopology::fallback(8);
+    let request = if certified {
+        PlanRequest::certified(
+            RenderIntent::Offline,
+            SurfaceSpec::lumen(preset.width, preset.height),
+            OutputPixelFormat::Rgba8,
+        )
+    } else {
+        PlanRequest::standard(
+            RenderIntent::Offline,
+            SurfaceSpec::lumen(preset.width, preset.height),
+            OutputPixelFormat::Rgba8,
+        )
+    };
+    let plan = ExecutionPlan::derive(request, &topology, None)
+        .map_err(|error| fail(format!("execution plan derives: {error}")))?;
+    ctx.event(
+        LogEvent::new(e2e::spans::EXECUTION_PLAN)
+            .field(
+                "determinism",
+                if certified { "certified" } else { "standard" },
+            )
+            .field("engine", engine_kind_name(identity.engine))
+            .field("tuning_source", tuning_source_name(plan.tuning_source))
+            .field("fine_tile", u64::from(plan.fine_tile))
+            .field("macro_tile", u64::from(plan.macro_tile)),
+    );
+    ctx.event(
+        LogEvent::new(e2e::spans::ENGINE)
+            .field("engine", engine_kind_name(identity.engine))
+            .field("reproducible", if certified { "true" } else { "false" })
+            .field("renderer_version", u64::from(identity.renderer_version)),
+    );
+
+    let packets = run_matrix_scene(ctx.seed, preset.tier == Tier::Full)?;
+    ctx.event(
+        LogEvent::new(e2e::spans::SCENE_CONSTRUCT)
+            .field("scene", "e2e_render_matrix")
+            .field("seed", ctx.seed)
+            .field("frames", packets.len() as u64),
+    );
+
+    let mut converted = Vec::with_capacity(packets.len());
+    for (index, packet) in packets.iter().enumerate() {
+        let frame = render_packet(packet, identity, config, threads)?;
+        converted.push(convert_for_sink(
+            &frame,
+            sink_kind,
+            preset.width,
+            preset.height,
+        )?);
+        ctx.event(
+            LogEvent::new(e2e::spans::RENDER_FRAME)
+                .field("frame", index as u64)
+                .field("engine", engine_kind_name(identity.engine)),
+        );
+    }
+
+    let dir = scenario_dir("render_matrix")?;
+    let mut outcome = RunOutcome::ok();
+    let mut total_bytes = 0_u64;
+    match sink_kind {
+        SinkKind::Y4m => {
+            let (name, bytes, report) = publish_y4m(&dir, preset, &converted)?;
+            if report.kind != NativeArtifactKind::Y4m {
+                return Err(fail("y4m receipt reports the wrong artifact kind"));
+            }
+            total_bytes += bytes.len() as u64;
+            ctx.event(
+                LogEvent::new(e2e::spans::EMIT)
+                    .field("file", name.as_str())
+                    .field("bytes", bytes.len() as u64),
+            );
+            outcome = outcome.with_artifact(stem, bytes);
+        }
+        SinkKind::PngSequence => {
+            let (published, report) =
+                publish_png_sequence(&dir, preset, &converted, certified, 1, None)?;
+            if report.kind != NativeArtifactKind::PngSequence {
+                return Err(fail("png receipt reports the wrong artifact kind"));
+            }
+            for (index, (file, bytes)) in published.into_iter().enumerate() {
+                total_bytes += bytes.len() as u64;
+                ctx.event(
+                    LogEvent::new(e2e::spans::EMIT)
+                        .field("file", file.as_str())
+                        .field("bytes", bytes.len() as u64),
+                );
+                let artifact = format!("{stem}.{index:04}");
+                outcome = outcome.with_artifact(&artifact, bytes);
+            }
+        }
+    }
+
+    let frames = converted.len() as u64;
+    ctx.counter(e2e::counters::FRAMES_RASTERIZED, frames);
+    ctx.counter(e2e::counters::FRAMES_CONVERTED, frames);
+    ctx.counter(e2e::counters::FRAMES_EMITTED, frames);
+    outcome = outcome
+        .with_counter("frames", frames)
+        .with_counter("width", u64::from(preset.width))
+        .with_counter("height", u64::from(preset.height))
+        .with_counter("emitted_bytes", total_bytes);
+    Ok(outcome)
+}
+
+fn matrix_spec(
+    preset: &Preset,
+    sink_kind: SinkKind,
+    certified: bool,
+    drill_name: Option<&'static str>,
+) -> ScenarioSpec {
+    let base: &'static str = match (preset.flag, sink_kind, certified) {
+        ("low", SinkKind::Y4m, true) => "render_matrix.low.y4m.certified.v1",
+        ("low", SinkKind::Y4m, false) => "render_matrix.low.y4m.standard.v1",
+        ("low", SinkKind::PngSequence, true) => "render_matrix.low.png_seq.certified.v1",
+        ("low", SinkKind::PngSequence, false) => "render_matrix.low.png_seq.standard.v1",
+        ("medium", SinkKind::Y4m, true) => "render_matrix.medium.y4m.certified.v1",
+        ("medium", SinkKind::Y4m, false) => "render_matrix.medium.y4m.standard.v1",
+        ("medium", SinkKind::PngSequence, true) => "render_matrix.medium.png_seq.certified.v1",
+        ("medium", SinkKind::PngSequence, false) => "render_matrix.medium.png_seq.standard.v1",
+        ("hd", SinkKind::Y4m, true) => "render_matrix.hd.y4m.certified.v1",
+        ("hd", SinkKind::Y4m, false) => "render_matrix.hd.y4m.standard.v1",
+        ("hd", SinkKind::PngSequence, true) => "render_matrix.hd.png_seq.certified.v1",
+        ("hd", SinkKind::PngSequence, false) => "render_matrix.hd.png_seq.standard.v1",
+        ("uhd", SinkKind::Y4m, true) => "render_matrix.uhd.y4m.certified.v1",
+        ("uhd", SinkKind::Y4m, false) => "render_matrix.uhd.y4m.standard.v1",
+        ("uhd", SinkKind::PngSequence, true) => "render_matrix.uhd.png_seq.certified.v1",
+        ("uhd", SinkKind::PngSequence, false) => "render_matrix.uhd.png_seq.standard.v1",
+        _ => "render_matrix.unknown.v1",
+    };
+    // The drill row gets its own scenario name (its log and bundle files)
+    // but reuses the base row's artifact stem: the harness evaluates a
+    // golden drill in forced check mode against the base row's blessed
+    // lock entries, so the injected flip lands as self-golden drift —
+    // never as a blessable new entry.
+    let name: &'static str = drill_name.unwrap_or(base);
+    let stem: &'static str = base;
+
+    let expected_frames: u64 = match preset.tier {
+        Tier::Fast => 3,
+        Tier::Full => 1,
+    };
+    let preset_copy = *preset;
+    let invocation = Invocation::new(move |ctx: &mut RunCtx| {
+        render_matrix_run(ctx, &preset_copy, sink_kind, certified, stem)
+    });
+
+    let mut assertions = vec![
+        Assertion::ExitCode(0),
+        counter_eq("frames", expected_frames),
+        counter_eq("width", u64::from(preset.width)),
+        counter_eq("height", u64::from(preset.height)),
+    ];
+    if certified {
+        // Certified rows bit-lock every emitted artifact against the
+        // shared certified-matrix lock (D-16).
+        assertions.push(Assertion::GoldenLock {
+            suite: E2E_SUITE,
+            scope: Scope::Certified,
+        });
+    } else {
+        // Standard rows assert the emitted-file inventory instead: the
+        // fast engine's bits may legitimately differ across SIMD tiers.
+        let inventory = match sink_kind {
+            SinkKind::Y4m => vec![stem.to_string()],
+            SinkKind::PngSequence => (0..expected_frames)
+                .map(|index| format!("{stem}.{index:04}"))
+                .collect(),
+        };
+        assertions.push(Assertion::FileInventory(inventory));
+    }
+    // The runner's own NDJSON log contract is under test on every run.
+    assertions.push(Assertion::NdjsonSchema);
+
+    ScenarioSpec {
+        name,
+        class: ScenarioClass::RenderMatrix,
+        surface: Surface::RustApi,
+        tier: preset.tier,
+        invocation,
+        assertions,
+        logs: vec![
+            LogExpect::span_present(
+                e2e::spans::ENGINE,
+                vec![
+                    FieldPred::str_eq("engine", engine_kind_name_str(certified)),
+                    FieldPred::str_eq("reproducible", truth(certified)),
+                ],
+            ),
+            LogExpect::span_present(
+                e2e::spans::EXECUTION_PLAN,
+                vec![FieldPred::str_eq(
+                    "tuning_source",
+                    if certified {
+                        "certified_profile"
+                    } else {
+                        "standard_baseline"
+                    },
+                )],
+            ),
+            LogExpect::event_order(e2e::spans::SCENE_CONSTRUCT, e2e::spans::RENDER_FRAME),
+            LogExpect::counter_ge(e2e::counters::FRAMES_EMITTED, expected_frames),
+        ],
+        regression: None,
+    }
+}
+
+const fn engine_kind_name_str(certified: bool) -> &'static str {
+    if certified {
+        "certified_cpu"
+    } else {
+        "fast_cpu"
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Determinism drills
+// ---------------------------------------------------------------------------
+
+/// Twice-in-a-row: the identical scene rendered twice within one run must
+/// produce byte-identical artifacts (PG-5's reproducibility form).
+fn determinism_repeat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let preset = PRESETS[0];
+    let identity = EngineIdentity::certified();
+    let config = preset_frame_config(&preset);
+
+    let mut runs = Vec::with_capacity(2);
+    for run in 0..2_u64 {
+        let packets = run_matrix_scene(ctx.seed, false)?;
+        let mut encoded = Vec::with_capacity(packets.len());
+        for packet in &packets {
+            let frame = render_packet(packet, identity, config, 1)?;
+            encoded.push(
+                encode_frame(&frame).map_err(|error| fail(format!("frame encodes: {error}")))?,
+            );
+        }
+        ctx.event(
+            LogEvent::new(e2e::spans::RENDER_FRAME)
+                .field("run", run)
+                .field("frames", encoded.len() as u64),
+        );
+        runs.push(encoded.concat());
+    }
+    let equal = runs[0] == runs[1];
+    ctx.counter("repeat_byte_equal", u64::from(equal));
+    if !equal {
+        return Err(fail(
+            "twice-in-a-row certified renders diverged byte-for-byte",
+        ));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("determinism.repeat.v1", runs[0].clone())
+        .with_counter("frames", 3)
+        .with_counter("repeat_byte_equal", 1))
+}
+
+/// Thread-count invariance: the certified terminal frame at {1, 4}
+/// threads (and 16 in the full tier) is byte-identical — PG-5's form.
+fn determinism_threads_run(
+    ctx: &mut RunCtx,
+    max_threads: usize,
+) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let preset = PRESETS[0];
+    let identity = EngineIdentity::certified();
+    let config = preset_frame_config(&preset);
+
+    let packets = run_matrix_scene(ctx.seed, false)?;
+    let terminal = packets
+        .last()
+        .ok_or_else(|| fail("scene produced no terminal packet"))?;
+    let scalar = render_packet(terminal, identity, config, 1)?;
+    let scalar_doc = encode_frame(&scalar).map_err(|error| fail(format!("encode: {error}")))?;
+    let mut equal = true;
+    for threads in [4, 16]
+        .into_iter()
+        .filter(|threads| *threads <= max_threads)
+    {
+        let threaded = render_packet(terminal, identity, config, threads)?;
+        let threaded_doc =
+            encode_frame(&threaded).map_err(|error| fail(format!("encode: {error}")))?;
+        ctx.event(
+            LogEvent::new(e2e::spans::RENDER_FRAME)
+                .field("threads", threads as u64)
+                .field("byte_equal", truth(threaded_doc == scalar_doc)),
+        );
+        equal &= threaded_doc == scalar_doc;
+    }
+    ctx.counter("thread_byte_equal", u64::from(equal));
+    if !equal {
+        return Err(fail(format!(
+            "certified terminal frame drifted at up to {max_threads} threads"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("frames", 3)
+        .with_counter("max_threads", max_threads as u64)
+        .with_counter("thread_byte_equal", 1))
+}
+
+// ---------------------------------------------------------------------------
+// Failure-path drills
+// ---------------------------------------------------------------------------
+
+/// Unsupported TeX construct: `\dx` is a named, tier-tagged refusal
+/// (fmd-math T2; `\substack` was the example until it graduated under
+/// fm-j5t) that must surface verbatim through the e2e runner — never a
+/// blank render, never a panic.
+fn failure_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let source = r"\dx";
+    match engine.typeset(fmn_tex::Mode::Math(fmd_math::Style::Text), source) {
+        Ok(_) => Err(fail(
+            "unsupported construct \\dx typeset successfully — the named refusal is gone",
+        )),
+        Err(error) => {
+            let message = error.to_string();
+            let is_math = matches!(error, TexError::Math(_));
+            let names_construct = message.contains("dx");
+            let named_refusal = message.contains("not yet supported");
+            ctx.event(
+                LogEvent::new("e2e.failure")
+                    .field(
+                        "error_kind",
+                        if is_math { "TexError::Math" } else { "other" },
+                    )
+                    .field("names_construct", truth(names_construct))
+                    .field("named_refusal", truth(named_refusal)),
+            );
+            ctx.counter(
+                "error_named",
+                u64::from(is_math && names_construct && named_refusal),
+            );
+            if !(is_math && names_construct && named_refusal) {
+                return Err(fail(format!(
+                    "unsupported-construct refusal lost its precise identity: {message}"
+                )));
+            }
+            Ok(RunOutcome::ok()
+                .with_counter("error_named", 1)
+                .with_counter("exit_code", 0))
+        }
+    }
+}
+
+/// Resource budget: a Tex string past fmd-math's input budget, and one
+/// nested past its depth bound, are named budget refusals
+/// (`MathError::Budget`, fm-fmd-math-fuzz-budgets-k8fe) that surface
+/// verbatim through the e2e runner, in bounded time — never a hang, a stack
+/// overflow, or a malformed-input report.
+fn failure_tex_budget_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let cases = [
+        ("input-bytes", "x+".repeat(1 << 19)),
+        (
+            "nesting",
+            format!("{}x{}", "{".repeat(10_000), "}".repeat(10_000)),
+        ),
+    ];
+    let mut named = 0_u64;
+    for (budget, source) in &cases {
+        let start = std::time::Instant::now();
+        let result = engine.typeset(fmn_tex::Mode::Math(fmd_math::Style::Display), source);
+        let elapsed = start.elapsed();
+        let Err(error) = result else {
+            return Err(fail(format!(
+                "a {}-byte string past the `{budget}` budget typeset successfully",
+                source.len()
+            )));
+        };
+        let message = error.to_string();
+        let is_budget = matches!(error, TexError::Math(fmd_math::MathError::Budget { .. }));
+        let names_budget = message.contains(&format!("resource budget `{budget}`"));
+        let prompt = elapsed < std::time::Duration::from_secs(1);
+        ctx.event(
+            LogEvent::new("e2e.failure")
+                .field("budget", *budget)
+                .field(
+                    "error_kind",
+                    if is_budget {
+                        "MathError::Budget"
+                    } else {
+                        "other"
+                    },
+                )
+                .field("names_budget", truth(names_budget))
+                .field("prompt", truth(prompt)),
+        );
+        if !(is_budget && names_budget && prompt) {
+            return Err(fail(format!(
+                "the `{budget}` refusal lost its name or took {elapsed:?}: {message}"
+            )));
+        }
+        named += 1;
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("budgets_named", named)
+        .with_counter("exit_code", 0))
+}
+
+/// Corrupt cache: a flipped byte in a store object is detected, evicted,
+/// and reported as a miss — and the read-through path recomputes. The
+/// whole drill runs in the deterministic lab (VirtualFs + FakeClock), so
+/// the corruption is a function of the scenario, never the host disk.
+fn failure_cache_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_cache::{CacheKey, NamespacePolicy, Store, StoreConfig};
+    use fmn_platform::clock::FakeClock;
+    use fmn_platform::fs::VirtualFs;
+
+    let fs = Arc::new(VirtualFs::new());
+    let clock = Arc::new(FakeClock::new());
+    let cache_root = if cfg!(windows) {
+        r"C:\e2e-cache"
+    } else {
+        "/e2e-cache"
+    };
+    let store = Store::open(fs.clone(), clock, cache_root, StoreConfig::default())
+        .map_err(|error| fail(format!("store opens: {error}")))?;
+    let namespace = store
+        .namespace(
+            "e2e",
+            1,
+            NamespacePolicy {
+                ceiling_bytes: None,
+            },
+        )
+        .map_err(|error| fail(format!("namespace opens: {error}")))?;
+    let key = CacheKey::of_content(b"e2e.corruption-drill.victim");
+    namespace
+        .put(&key, b"good value")
+        .map_err(|error| fail(format!("cache put: {error}")))?;
+
+    // Find the one object file and flip a byte in the middle.
+    let mut objects = Vec::new();
+    collect_virtual_objects(fs.as_ref(), std::path::Path::new(cache_root), &mut objects);
+    if objects.len() != 1 {
+        return Err(fail(format!(
+            "expected exactly one cache object, found {}",
+            objects.len()
+        )));
+    }
+    let victim = &objects[0];
+    let mut bytes = fs
+        .read(victim)
+        .map_err(|error| fail(format!("read cache object: {error}")))?;
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0x40;
+    fs.write_atomic(victim, &bytes)
+        .map_err(|error| fail(format!("corrupt cache object: {error}")))?;
+
+    // Detection ⇒ eviction ⇒ miss, never an error, never a panic.
+    let after = namespace
+        .get(&key)
+        .map_err(|error| fail(format!("corrupt lookup escalated to an error: {error}")))?;
+    let evicted = !fs.exists(victim);
+    let miss = after.is_none();
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("cache_corrupt_miss", truth(miss))
+            .field("cache_corrupt_evicted", truth(evicted)),
+    );
+
+    // The read-through path recomputes and repopulates cleanly.
+    let recomputed: Vec<u8> = match namespace.get_or_compute(&key, || {
+        Ok::<_, std::convert::Infallible>(b"good value".to_vec())
+    }) {
+        Ok(value) => value,
+        Err(error) => match error {},
+    };
+    let recovered = recomputed == b"good value"
+        && namespace
+            .get(&key)
+            .map_err(|error| fail(format!("post-recovery get: {error}")))?
+            .as_deref()
+            == Some(&b"good value"[..]);
+    ctx.counter("cache_corrupt_miss", u64::from(miss));
+    ctx.counter("cache_recovery_ok", u64::from(evicted && recovered));
+    if !(miss && evicted && recovered) {
+        return Err(fail(
+            "corrupt cache entry was not (detected, evicted, recomputed)",
+        ));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cache_corrupt_miss", 1)
+        .with_counter("cache_recovery_ok", 1))
+}
+
+fn collect_virtual_objects(
+    fs: &fmn_platform::fs::VirtualFs,
+    dir: &std::path::Path,
+    out: &mut Vec<PathBuf>,
+) {
+    if let Ok(children) = fs.list_dir(dir) {
+        for child in children {
+            if fs.read(&child).is_ok() {
+                // Component-wise: Windows paths separate with backslashes.
+                if child.components().any(|c| c.as_os_str() == "objects") {
+                    out.push(child);
+                }
+            } else {
+                collect_virtual_objects(fs, &child, out);
+            }
+        }
+    }
+}
+
+/// Invalid CLI flag combination: `-l -m` is a usage error with the
+/// `quality-exclusive` rule identity, exit code 2, one NDJSON line on
+/// stdout, and an empty stderr — through fmn_cli's in-process runner
+/// (never a subprocess). Parse errors never touch the host filesystem.
+fn failure_cli_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let output = fmn_cli::run(["--robot", "-l", "-m"]);
+    let single_line = output.stdout.lines().count() == 1 && !output.stdout.is_empty();
+    let names_rule = output.stdout.contains("\"rule\":\"quality-exclusive\"");
+    let names_exit = output.stdout.contains("\"exit_name\":\"usage\"");
+    let clean_stderr = output.stderr.is_empty();
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("rule", "quality-exclusive")
+            .field("rule_named", truth(names_rule))
+            .field("exit_named", truth(names_exit))
+            .field("ndjson_single_line", truth(single_line))
+            .field("stderr_empty", truth(clean_stderr)),
+    );
+    ctx.counter("cli_rule_named", u64::from(names_rule && names_exit));
+    if output.code != 2 || !names_rule || !names_exit || !single_line || !clean_stderr {
+        return Err(fail(format!(
+            "quality-exclusive lost its named identity: code={} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .exit_code(2)
+        .with_counter("cli_rule_named", 1))
+}
+
+/// The CLI rejects invalid quality policies before probing an external tool.
+fn failure_cli_video_quality_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct CountTool(AtomicU64);
+    impl FfmpegLocator for CountTool {
+        fn locate_ffmpeg(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = CountTool(AtomicU64::new(0));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let cases: &[(&[&str], u8, &str)] = &[
+        (
+            &["--crf", "16", "--video-bitrate", "2000000"],
+            2,
+            "mutually exclusive",
+        ),
+        (&["--gif", "--preset", "slow"], 2, "ffmpeg video"),
+        (&["--crf", "52"], 2, "0..=51"),
+        (&["--vcodec", "h264_nvenc", "--crf", "16"], 3, "software"),
+        (
+            &["--vcodec", "libx265", "--tune", "film"],
+            3,
+            "require libx264",
+        ),
+        (
+            &["--transparent", "--video-bitrate", "2000000"],
+            3,
+            "opaque MP4/MOV",
+        ),
+    ];
+    let mut refused = 0;
+    for (args, code, message) in cases {
+        let output = fmn_cli::run_with_capabilities(
+            args.iter().copied().chain([
+                "--robot",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ]),
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != *code
+            || !output.stderr.is_empty()
+            || output.stdout.lines().count() != 1
+            || !output.stdout.contains(message)
+        {
+            return Err(fail(format!(
+                "video-quality admission {args:?}: code={} stdout={:?} stderr={:?}",
+                output.code, output.stdout, output.stderr
+            )));
+        }
+        refused += 1;
+    }
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    ctx.event(
+        LogEvent::new("e2e.failure.cli_video_quality")
+            .field("refused", refused)
+            .field("tool_calls", tool_calls),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cli_video_quality_refusals", refused)
+        .with_counter("cli_video_quality_tool_calls", tool_calls))
+}
+
+/// Documented native keys must reach the actual constructor, artifact publisher,
+/// and video negotiator, with one effective C4 identity for either spelling.
+fn documented_config_effects_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_config::config::Layer;
+    use fmn_output::negotiate::{
+        ColorDescription, Container, EncoderChoice, VideoJob, WireFormat, encode_argv,
+    };
+    use fmn_platform::fs::VirtualFs;
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::path::Path;
+
+    struct NoTool(AtomicU64);
+    impl FfmpegLocator for NoTool {
+        fn locate_ffmpeg(&self, _: &Path) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = NoTool(AtomicU64::new(0));
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let native = "directories:\n  base: /project\n  output: media\nstyle:\n  font: IBM Plex Sans\n  tex_pack: empty\noutput:\n  vcodec: auto\n  pix_fmt: auto\ncamera:\n  resolution: (160, 90)\n  fps: 8\nrender:\n  threads: 1\n";
+    let reference = "directories:\n  base: /project\n  subdirs:\n    output: media\ntext:\n  font: IBM Plex Sans\ntex:\n  template: empty\nfile_writer:\n  video_codec: auto\n  pixel_format: auto\ncamera:\n  resolution: (160, 90)\n  fps: 8\nrender:\n  threads: 1\n";
+    let render = |document: &str| -> Result<_, ScenarioError> {
+        let fs = Arc::new(VirtualFs::new());
+        fs.insert("/scene.yml", document.as_bytes().to_vec());
+        let output = fmn_cli::run_with_capabilities(
+            [
+                "--robot",
+                "--config_file",
+                "/scene.yml",
+                "--format",
+                "png",
+                "--file_name",
+                "configured",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "tex_span.v1",
+            ],
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != 0 || !output.stderr.is_empty() {
+            return Err(fail(format!(
+                "documented config render: code={} stdout={:?} stderr={:?}",
+                output.code, output.stdout, output.stderr
+            )));
+        }
+        let bytes = fs
+            .read(Path::new("/project/media/configured.png"))
+            .map_err(|error| fail(format!("configured output directory: {error}")))?;
+        let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+            .map_err(|error| fail(format!("decode configured PNG: {error}")))?;
+        if (decoded.width, decoded.height) != (160, 90)
+            || !decoded
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .windows(2)
+                .any(|pair| pair[0] != pair[1])
+        {
+            return Err(fail("configured scene did not publish visible 160x90 ink"));
+        }
+        let manifest_bytes = fs
+            .read(Path::new(
+                "/project/media/configured.png.manifest/manifest.fmnp",
+            ))
+            .map_err(|error| fail(format!("configured manifest path: {error}")))?;
+        let manifest = ProvenanceManifest::from_bytes(&manifest_bytes)
+            .map_err(|error| fail(format!("decode configured manifest: {error}")))?;
+        let c4 = manifest
+            .items
+            .iter()
+            .find(|item| item.item_id == 4)
+            .ok_or_else(|| fail("configured render omitted C4"))?
+            .digest;
+        Ok((bytes, manifest, c4))
+    };
+    let (native_png, native_manifest, native_c4) = render(native)?;
+    let (reference_png, _, reference_c4) = render(reference)?;
+    let alternate = native.replace("IBM Plex Sans", "Computer Modern");
+    let (alternate_png, _, alternate_c4) = render(&alternate)?;
+    let (repeated_png, _, repeated_c4) = render(native)?;
+    if native_png != reference_png
+        || native_c4 != reference_c4
+        || native_png != repeated_png
+        || native_c4 != repeated_c4
+    {
+        return Err(fail(
+            "alias spelling or a preceding scene changed the effective render",
+        ));
+    }
+    if native_png == alternate_png || native_c4 == alternate_c4 {
+        return Err(fail(
+            "style.font did not change both real ink and effective C4",
+        ));
+    }
+
+    let config = fmn_config::Config::resolve(
+        &[Layer {
+            name: "scene.yml",
+            text: native,
+        }],
+        None,
+    )
+    .map_err(|error| fail(format!("typed documented config: {error}")))?
+    .config;
+    let canonical = config
+        .canonical_bytes()
+        .map_err(|error| fail(format!("canonical documented config: {error}")))?;
+    if sha256(&canonical) != native_c4 {
+        return Err(fail("CLI C4 differs from the shared typed resolver"));
+    }
+
+    // Observe the engine actually used to construct math, not just the field
+    // that was parsed. Rendering also proves the empty pack remains usable.
+    #[derive(Default)]
+    struct PackProbe {
+        selected: String,
+    }
+    impl fmn::SceneConstruct for PackProbe {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let engine = stage.tex_engine()?;
+            self.selected = engine.pack_content_id().to_owned();
+            let math = fmn_library::Tex::new(r"\frac{x}{y}").build(engine)?;
+            stage.add(math)?;
+            Ok(())
+        }
+    }
+    let probe_fs = Arc::new(VirtualFs::new());
+    let mut options = fmn::RenderOptions::with_format("/pack.png", fmn::RenderFormat::Png)
+        .map_err(|error| fail(format!("pack probe options: {error}")))?;
+    options.config = config.clone();
+    options.typeset_cache = false;
+    let mut probe = PackProbe::default();
+    fmn::render_with_fs(&mut probe, options, probe_fs.clone())
+        .map_err(|error| fail(format!("configured math construction: {error}")))?;
+    if probe.selected != "fmd-math/pack/empty" || !probe_fs.exists(Path::new("/pack.png")) {
+        return Err(fail("style.tex_pack did not reach the rendering engine"));
+    }
+
+    // Exercise the production ffmpeg argument planner without claiming a
+    // compressed artifact or requiring a host ffmpeg for this native scenario.
+    let wire = WireFormat::from_config(&config.file_writer.pixel_format, false)
+        .map_err(|error| fail(format!("configured wire: {error}")))?;
+    let encoder = if config.file_writer.video_codec.eq_ignore_ascii_case("auto") {
+        EncoderChoice::Auto
+    } else {
+        EncoderChoice::Named(config.file_writer.video_codec.clone())
+    };
+    let job = VideoJob {
+        width: config.camera.resolution.0,
+        height: config.camera.resolution.1,
+        fps: (config.camera.fps, 1),
+        wire,
+        color: ColorDescription::for_native_wire(wire),
+        container: Container::Mp4,
+        encoder,
+        crf: None,
+    };
+    let argv = encode_argv(&job, Path::new("/project/media/configured.mp4"))
+        .map_err(|error| fail(format!("configured sink plan: {error}")))?;
+    let encoder = job
+        .resolved_encoder()
+        .map_err(|error| fail(format!("configured encoder: {error}")))?;
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    if wire != WireFormat::Nv12
+        || encoder.as_deref() != Some("libx264")
+        || !argv.windows(2).any(|pair| pair == ["-pix_fmt", "nv12"])
+        || !argv.windows(2).any(|pair| pair == ["-c:v", "libx264"])
+        || tool_calls != 0
+    {
+        return Err(fail(
+            "documented auto output selection or native capability boundary drifted",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.documented_config_effects")
+            .field("output", "/project/media/configured.png")
+            .field("font", config.text.font.as_str())
+            .field("pack", probe.selected.as_str())
+            .field("wire", wire.ffmpeg_pix_fmt())
+            .field("encoder", encoder.as_deref().unwrap_or("none"))
+            .field("config_c4", native_c4.to_hex())
+            .field("alternate_c4", alternate_c4.to_hex())
+            .field("build_id", native_manifest.identity.build_id.as_str())
+            .field("tool_calls", tool_calls),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("configured.png", native_png)
+        .with_artifact("alternate_font.png", alternate_png)
+        .with_counter("documented_config_renders", 5)
+        .with_counter("documented_config_alias_identity", 1)
+        .with_counter("documented_config_font_effect", 1)
+        .with_counter("documented_config_pack_effect", 1)
+        .with_counter("documented_config_tool_calls", tool_calls))
+}
+
+/// A constrained Linux worker derives its actual plan from the filesystem
+/// capability and publishes the same moving scene at automatic and serial
+/// thread counts. The fixture deliberately exposes more host resources than
+/// its caller affinity and inherited cgroup budget permit.
+#[cfg(target_os = "linux")]
+fn linux_resource_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_config::config::{DeterminismMode, ThreadPolicy};
+    use fmn_platform::fs::VirtualFs;
+
+    struct MovingCircle;
+    impl fmn::SceneConstruct for MovingCircle {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.5).color(BLUE_C))?;
+            for shift in [[-0.75, 0.0, 0.0], [1.5, 0.0, 0.0], [-0.75, 0.75, 0.0]] {
+                stage.shift(circle, shift);
+                stage.wait_frames(1)?;
+            }
+            Ok(())
+        }
+    }
+
+    let fs = Arc::new(VirtualFs::new());
+    for (path, contents) in [
+        ("/sys/devices/system/cpu/online", "0-7\n"),
+        ("/proc/self/status", "Cpus_allowed_list:\t0-7\n"),
+        ("/proc/thread-self/status", "Cpus_allowed_list:\t2-5\n"),
+        ("/proc/meminfo", "MemTotal: 8388608 kB\n"),
+        ("/proc/self/cgroup", "0::/workload/renderer/job\n"),
+        (
+            "/proc/self/mountinfo",
+            "29 23 0:26 /workload /sys/fs/cgroup rw - cgroup2 cgroup rw\n",
+        ),
+        ("/sys/fs/cgroup/renderer/cpu.max", "200000 100000\n"),
+        ("/sys/fs/cgroup/renderer/memory.max", "8388608\n"),
+        ("/sys/fs/cgroup/renderer/job/cpu.max", "max 100000\n"),
+        ("/sys/fs/cgroup/renderer/job/memory.max", "max\n"),
+        ("/sys/devices/system/cpu/cpu2/cache/index0/level", "3\n"),
+        (
+            "/sys/devices/system/cpu/cpu2/cache/index0/type",
+            "Unified\n",
+        ),
+        (
+            "/sys/devices/system/cpu/cpu2/cache/index0/shared_cpu_list",
+            "0-7\n",
+        ),
+        ("/sys/devices/system/cpu/cpu2/cache/index0/size", "8M\n"),
+        ("/sys/devices/system/node/node0/cpulist", "0-7\n"),
+    ] {
+        fs.insert(path, contents.as_bytes().to_vec());
+    }
+    let topology = HardwareTopology::detect_linux(fs.as_ref())
+        .map_err(|error| fail(format!("constrained Linux topology: {error}")))?;
+    let allowed = vec![2, 3, 4, 5];
+    if topology.cpus.iter().map(|cpu| cpu.id).collect::<Vec<_>>() != allowed
+        || topology.physical_cores != 4
+        || topology.cpu_quota != Some(2)
+        || topology.cpu_thread_budget() != 2
+        || topology.total_memory_bytes != Some(8 * 1024 * 1024)
+        || topology.l3_domains.len() != 1
+        || topology.l3_domains[0].cpus != allowed
+        || topology.numa_nodes.len() != 1
+        || topology.numa_nodes[0].cpus != allowed
+    {
+        return Err(fail(format!(
+            "Linux limits failed to constrain host resources: {topology:?}"
+        )));
+    }
+    let mut unlimited = topology.clone();
+    unlimited.cpu_quota = None;
+    unlimited.total_memory_bytes = Some(8 * 1024 * 1024 * 1024);
+    let mut outcome = RunOutcome::ok();
+    let mut rendered_frames = 0;
+    for (name, certified) in [("standard", false), ("certified", true)] {
+        let request = if certified {
+            PlanRequest::certified(
+                RenderIntent::Offline,
+                SurfaceSpec::lumen(64, 40),
+                OutputPixelFormat::Rgba8,
+            )
+        } else {
+            PlanRequest::standard(
+                RenderIntent::Offline,
+                SurfaceSpec::lumen(64, 40),
+                OutputPixelFormat::Rgba8,
+            )
+        }
+        .with_max_frames_in_flight(4);
+        let constrained = ExecutionPlan::derive(request, &topology, None)
+            .map_err(|error| fail(format!("constrained {name} plan: {error}")))?;
+        let full = ExecutionPlan::derive(request, &unlimited, None)
+            .map_err(|error| fail(format!("unlimited {name} plan: {error}")))?;
+        let workers = |plan: &ExecutionPlan| {
+            plan.render_teams
+                .iter()
+                .map(|team| team.threads())
+                .sum::<usize>()
+        };
+        if workers(&constrained) != 2
+            || workers(&full) != 4
+            || constrained.encoder_threads() > 2
+            || constrained.frames_in_flight != 1
+            || full.frames_in_flight <= constrained.frames_in_flight
+            || constrained.topology_fingerprint == full.topology_fingerprint
+        {
+            return Err(fail(format!(
+                "{name} plan ignored effective CPU or memory limits"
+            )));
+        }
+
+        let mut expected_frames = None;
+        for (schedule, policy) in [
+            ("auto", ThreadPolicy::Auto),
+            ("serial", ThreadPolicy::Fixed(1)),
+        ] {
+            let expected_request = if policy == ThreadPolicy::Auto {
+                request
+            } else {
+                request.with_max_cpu_threads(1)
+            };
+            let expected_plan = ExecutionPlan::derive(expected_request, &topology, None)
+                .map_err(|error| fail(format!("{name}/{schedule} plan: {error}")))?;
+            let path = format!("/linux-limits-{name}-{schedule}");
+            let mut options = fmn::RenderOptions::new(&path)
+                .map_err(|error| fail(format!("Linux resource render options: {error}")))?;
+            options.config.camera.resolution = (64, 40);
+            options.config.camera.fps = 8;
+            options.config.sizes.frame_height = 4.0;
+            options.config.determinism.mode = if certified {
+                DeterminismMode::Certified
+            } else {
+                DeterminismMode::Standard
+            };
+            options.config.render.threads = policy;
+            options.config.directories.cache = "/linux-limits-cache".to_owned();
+            options.frames_in_flight = 4;
+            options.typeset_cache = false;
+            let report = fmn::render_with_fs(&mut MovingCircle, options, fs.clone())
+                .map_err(|error| fail(format!("{name}/{schedule} Linux render: {error}")))?;
+            let plan = &report.execution_plan;
+            if *plan != expected_plan
+                || plan
+                    .render_teams
+                    .iter()
+                    .flat_map(|team| team.cpu_ids.iter())
+                    .chain(plan.scene_team.cpu_ids.iter())
+                    .chain(plan.output_team.cpu_ids.iter())
+                    .any(|cpu| !allowed.contains(cpu))
+            {
+                return Err(fail(format!(
+                    "{name}/{schedule} render ignored the filesystem resource plan"
+                )));
+            }
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("Linux resource render omitted the frame pipeline"))?;
+            if report.artifact.frame_count != 3
+                || pipeline.submitted != 3
+                || pipeline.emitted != 3
+                || pipeline.outstanding_slots != 0
+                || pipeline.max_in_flight > plan.frames_in_flight
+            {
+                return Err(fail(
+                    "Linux resource render exceeded its queue or lost frames",
+                ));
+            }
+            let frames = (0..3)
+                .map(|index| {
+                    fs.read(&PathBuf::from(format!("{path}/frame_{index:06}.png")))
+                        .map_err(|error| fail(format!("Linux resource PNG: {error}")))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if frames[0] == frames[1] || frames[1] == frames[2] {
+                return Err(fail("Linux resource scene did not visibly move"));
+            }
+            if let Some(expected) = &expected_frames {
+                if *expected != frames {
+                    return Err(fail(format!(
+                        "{name} PNG bytes changed with resource scheduling"
+                    )));
+                }
+            } else {
+                outcome = outcome.with_artifact(&format!("{name}.png"), frames[0].clone());
+                expected_frames = Some(frames);
+            }
+            rendered_frames += 3;
+            ctx.event(
+                LogEvent::new("e2e.lifecycle.linux_resource_limits")
+                    .field("determinism", name)
+                    .field("schedule", schedule)
+                    .field("render_workers", workers(plan) as u64)
+                    .field("frames_in_flight", plan.frames_in_flight as u64)
+                    .field("cpu_quota", 2_u64)
+                    .field("effective_memory", 8_u64 * 1024 * 1024)
+                    .field("allowed_cpus", "2-5")
+                    .field("frames", 3_u64),
+            );
+        }
+    }
+    Ok(outcome
+        .with_counter("linux_resource_modes", 2)
+        .with_counter("linux_resource_schedules", 4)
+        .with_counter("linux_resource_frames", rendered_frames))
+}
+
+/// Native CLI job limits are admitted without spawning; invalid limits fail
+/// with stable identities before a tool or output generation is selected.
+fn failure_cli_ffmpeg_limits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct CountTool(AtomicU64);
+    impl FfmpegLocator for CountTool {
+        fn locate_ffmpeg(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = CountTool(AtomicU64::new(0));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let runner = Arc::new(fmn_platform::process::ScriptedRunner::new());
+    let mut refused = 0;
+    for (args, code) in [
+        (&["--ffmpeg-timeout", "0"][..], 2),
+        (&["--ffmpeg-max-input-bytes", "0"], 2),
+        (&["--gif", "--ffmpeg-max-log-bytes", "73"], 2),
+        (&["--ffmpeg-timeout", "18446744073709551615"], 3),
+    ] {
+        let output = fmn_cli::run_with_capabilities(
+            args.iter().copied().chain([
+                "--robot",
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                "circle_shift.v1",
+            ]),
+            fs.clone(),
+            runner.clone(),
+            &locator,
+        );
+        if output.code != code || !output.stderr.is_empty() || output.stdout.lines().count() != 1 {
+            return Err(fail(format!(
+                "CLI ffmpeg limit admission {args:?}: code={} stdout={:?}",
+                output.code, output.stdout
+            )));
+        }
+        refused += 1;
+    }
+    let invocation = fmn_cli::parse_args([
+        "--ffmpeg-timeout",
+        "21600",
+        "--ffmpeg-max-artifact-bytes",
+        "17179869184",
+        "--ffmpeg-max-input-bytes",
+        "8589934592",
+    ])
+    .map_err(|error| fail(error.to_string()))?;
+    let fmn_cli::Invocation::Render(command) = invocation else {
+        return Err(fail(
+            "ffmpeg resource flags did not select a render request",
+        ));
+    };
+    let (limits, input) = command
+        .ffmpeg_limits
+        .effective_limits()
+        .map_err(|error| fail(error.to_string()))?;
+    let tool_calls = locator.0.load(Ordering::SeqCst);
+    ctx.event(
+        LogEvent::new("e2e.failure.cli_ffmpeg_limits")
+            .field("refused", refused)
+            .field("tool_calls", tool_calls)
+            .field("admitted_timeout_seconds", limits.timeout.as_secs())
+            .field("admitted_artifact_bytes", limits.max_artifact_bytes)
+            .field("admitted_input_bytes", input),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cli_ffmpeg_limit_refusals", refused)
+        .with_counter("cli_ffmpeg_limit_tool_calls", tool_calls)
+        .with_counter("cli_ffmpeg_admitted_timeout", limits.timeout.as_secs())
+        .with_counter("cli_ffmpeg_admitted_artifact", limits.max_artifact_bytes)
+        .with_counter("cli_ffmpeg_admitted_input", input))
+}
+
+/// Actual supervised native children establish propagation of three terminal
+/// reasons. These planted failures do not diagnose a real FFmpeg/driver failure.
+#[cfg(unix)]
+fn failure_encoder_help_evidence_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_output::{BoundaryError, EncoderCapabilities, FfmpegTool};
+    use fmn_platform::process::{
+        FfmpegLocator, ProcessTermination, StdFfmpegLocator, StdProcessRunner,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    // Cargo's target tmpdir may have shared writable ancestors; private tool
+    // sessions must instead live beneath Unix's canonical sticky temp root.
+    let root = Path::new("/tmp")
+        .canonicalize()
+        .map_err(|error| fail(error.to_string()))?
+        .join(format!(
+            "fmn-e2e-encoder-help.{}.{}",
+            std::process::id(),
+            RUN_SUFFIX.fetch_add(1, Ordering::Relaxed),
+        ));
+    std::fs::create_dir(&root).map_err(|error| fail(error.to_string()))?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| fail(error.to_string()))?;
+    let runner = StdProcessRunner;
+    let mut outcome = RunOutcome::ok();
+    for (mode, expected) in [
+        ("help-exit", ProcessTermination::Exited(Some(23))),
+        ("help-timeout", ProcessTermination::TimedOut),
+        (
+            "help-output-overflow",
+            ProcessTermination::OutputLimitExceeded,
+        ),
+    ] {
+        let dir = root.join(mode);
+        std::fs::create_dir(&dir).map_err(|error| fail(error.to_string()))?;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| fail(error.to_string()))?;
+        std::fs::write(dir.join(".fmn-native-ffmpeg-mode"), mode)
+            .map_err(|error| fail(error.to_string()))?;
+        let executable = StdFfmpegLocator::default()
+            .locate_ffmpeg(Path::new(env!(
+                "CARGO_BIN_FILE_FMN_OUTPUT_fmn-ffmpeg-test-fixture"
+            )))
+            .map_err(|error| fail(error.to_string()))?;
+        let tool = FfmpegTool::resolve(executable, &runner, &dir)
+            .map_err(|error| fail(error.to_string()))?;
+        let caps =
+            EncoderCapabilities::probe(&tool, &runner).map_err(|error| fail(error.to_string()))?;
+        let error = caps
+            .probe_pixel_formats(&tool, &runner, "h264_nvenc")
+            .expect_err("the native fixture must fail its help query");
+        let message = error.to_string();
+        let BoundaryError::ProbeProcessFailed(failure) = error else {
+            return Err(fail(format!("{mode}: lost process evidence: {message}")));
+        };
+        if failure.outcome.termination != expected
+            || failure.spec.timeout != std::time::Duration::from_secs(2)
+            || failure.spec.max_output_bytes != 65_536
+            || failure.spec.argv != ["-hide_banner", "-h", "encoder=h264_nvenc"]
+            || failure.source_path != tool.path()
+            || failure.executable_sha256 != tool.sha256_hex()
+            || failure.version != tool.version()
+            || !message.contains(&format!("{expected:?}"))
+        {
+            return Err(fail(format!(
+                "{mode}: incorrect process evidence: {failure:?}"
+            )));
+        }
+        let streams_match = match expected {
+            ProcessTermination::Exited(_) => {
+                failure.outcome.stdout == b"partial help\0"
+                    && failure.outcome.stderr == b"driver diagnostic\xff\n"
+            }
+            ProcessTermination::TimedOut => failure.outcome.stderr == b"help is blocked\n",
+            ProcessTermination::OutputLimitExceeded => failure.outcome.stderr == vec![b'x'; 65_536],
+            ProcessTermination::Cancelled => false,
+        };
+        if !streams_match {
+            return Err(fail(format!(
+                "{mode}: bounded streams changed: {failure:?}"
+            )));
+        }
+        ctx.event(
+            LogEvent::new("e2e.failure.encoder_help")
+                .field("mode", mode)
+                .field("termination", format!("{expected:?}"))
+                .field("timeout_ms", 2_000_u64)
+                .field("log_cap", 65_536_u64),
+        );
+        outcome = outcome
+            .with_artifact(&format!("{mode}.stdout"), failure.outcome.stdout)
+            .with_artifact(&format!("{mode}.stderr"), failure.outcome.stderr);
+    }
+    Ok(outcome.with_counter("encoder_help_terminal_modes", 3))
+}
+
+/// Native equation and reordered-string transitions cross the public facade,
+/// materialize on a worker, and retain both nominal sampling and owner cleanup.
+fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Matching;
+    impl fmn::SceneConstruct for Matching {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let from = fmn_library::Tex::new("a^2+b^2=c^2")
+                .font_size(36.0)
+                .build(stage.tex_engine()?)?;
+            let to = fmn_library::Tex::new("c^2=a^2+b^2")
+                .font_size(36.0)
+                .build(stage.tex_engine()?)?;
+            let (from_spans, to_spans) = (from.span_map(), to.span_map());
+            let source = stage.add(from)?;
+            let target = stage.arena_mut().add(to);
+            stage.shift(source, [-0.4, 0.8, 0.0]);
+            stage.shift(target, [0.3, 0.8, 0.0]);
+            let timing = fmn_library::TextMatchingConfig {
+                run_time: 0.5,
+                lag_ratio: 0.2,
+                ..fmn_library::TextMatchingConfig::default()
+            };
+            let matching = fmn_library::TransformMatchingTex::with_config(
+                stage.arena_mut(),
+                source,
+                target,
+                &from_spans,
+                &to_spans,
+                timing.clone(),
+            )?;
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "native equation matching did not publish its original target",
+                )
+                .into());
+            }
+
+            let book =
+                fmn_library::FontBook::bundled().map_err(fmn_library::TextMobjectError::Text)?;
+            let from = fmn_library::Text::new("AB CD")
+                .font("IBM Plex Sans")
+                .font_size(32.0)
+                .build(&book)?;
+            let to = fmn_library::Text::new("CD AB!")
+                .font("IBM Plex Sans")
+                .font_size(32.0)
+                .build(&book)?;
+            let (from_spans, to_spans) = (from.span_map(), to.span_map());
+            let source = stage.add(from)?;
+            let text_target = stage.arena_mut().add(to);
+            stage.shift(source, [-0.4, -0.8, 0.0]);
+            stage.shift(text_target, [0.3, -0.8, 0.0]);
+            let matching = fmn_library::TransformMatchingStrings::with_config(
+                stage.arena_mut(),
+                source,
+                text_target,
+                &from_spans,
+                &to_spans,
+                timing,
+            )?;
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target, text_target] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "native string matching lost target identity or unrelated roots",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Jobs {
+        programs: u64,
+        times: Vec<i64>,
+        owner_captures: u64,
+    }
+    impl fmn_scene::SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+
+        fn capture_pure_segment(
+            &mut self,
+            segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for frame in 1..=segment.frame_count() {
+                let job = segment
+                    .job(frame)
+                    .map_err(|error| IntegrationError::new("matching", error.to_string()))?;
+                self.times.push(job.time().frames());
+                let expected_time = job.time().to_f64();
+                let observed_time = std::thread::spawn(move || job.materialize().time())
+                    .join()
+                    .map_err(|_| IntegrationError::new("matching", "worker panicked"))?;
+                if observed_time.to_bits() != expected_time.to_bits() {
+                    return Err(IntegrationError::new(
+                        "matching",
+                        "worker did not retain its exact nominal time",
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.owner_captures += 1;
+            Err(IntegrationError::new(
+                "matching",
+                "native matching fell back to owner-thread capture",
+            ))
+        }
+    }
+
+    let mut jobs = Jobs::default();
+    let completed = fmn::run_scene(
+        &mut Matching,
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        42,
+        &mut jobs,
+    )
+    .map_err(|error| fail(format!("native matching workers: {error}")))?;
+    if jobs.programs != 2
+        || jobs.times != (1..=8).collect::<Vec<_>>()
+        || jobs.owner_captures != 0
+        || completed.report().play_count != 2
+        || completed.report().time.frames() != 8
+    {
+        return Err(fail(
+            "native matching lost pure programs or nominal samples",
+        ));
+    }
+
+    let mut first_frames: Option<Vec<Vec<u8>>> = None;
+    let mut thread_counts = 0;
+    let mut rendered_frames = 0;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/matching")
+            .map_err(|error| fail(format!("native matching options: {error}")))?;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        let report = fmn::render_with_fs(&mut Matching, options, fs.clone())
+            .map_err(|error| fail(format!("native matching render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("native matching did not use the frame pipeline"))?;
+        if report.artifact.frame_count != 8
+            || pipeline.submitted != 8
+            || pipeline.emitted != 8
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail("native matching lost bounded ordered publication"));
+        }
+        let mut frames = Vec::new();
+        for index in 0..8 {
+            let path = PathBuf::from("/matching").join(format!("frame_{index:06}.png"));
+            frames.push(
+                fs.read(&path)
+                    .map_err(|error| fail(format!("native matching frame: {error}")))?,
+            );
+        }
+        if frames[0] == frames[3] || frames[4] == frames[7] {
+            return Err(fail(
+                "native equation or string transition did not change pixels",
+            ));
+        }
+        if let Some(first) = &first_frames {
+            if *first != frames {
+                return Err(fail(format!(
+                    "native matching PNG bytes changed at {threads} threads"
+                )));
+            }
+        } else {
+            first_frames = Some(frames);
+        }
+        thread_counts += 1;
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = first_frames.ok_or_else(|| fail("native matching rendered no frames"))?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_matching_workers")
+            .field("programs", jobs.programs)
+            .field("jobs", jobs.times.len() as u64)
+            .field("owner_captures", jobs.owner_captures)
+            .field("thread_counts", thread_counts)
+            .field("rendered_frames", rendered_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("matching-first.png", frames[0].clone())
+        .with_artifact("matching-last.png", frames[7].clone())
+        .with_counter("native_matching_programs", jobs.programs)
+        .with_counter("native_matching_jobs", jobs.times.len() as u64)
+        .with_counter("native_matching_owner_captures", jobs.owner_captures)
+        .with_counter("native_matching_thread_counts", thread_counts)
+        .with_counter("native_matching_rendered_frames", rendered_frames))
+}
+
+/// Discarded captures retain every nominal sample, callback and lifecycle
+/// boundary while avoiding immutable packets across the native front door.
+fn metadata_only_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, FrameMetadata, Transform};
+    use fmn_mobject::Mobject;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct Trace {
+        metadata_only: bool,
+        packets: u64,
+        samples: Vec<(CaptureReason, FrameMetadata)>,
+        events: Vec<fmn_scene::LifecycleEvent>,
+    }
+    impl SceneSink for Trace {
+        fn capture_state_required(&self) -> bool {
+            !self.metadata_only
+        }
+        fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
+            self.events.push(event);
+            Ok(())
+        }
+        fn capture(
+            &mut self,
+            reason: CaptureReason,
+            packet: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.packets += 1;
+            self.samples.push((reason, packet.metadata()));
+            Ok(())
+        }
+        fn capture_metadata(
+            &mut self,
+            reason: CaptureReason,
+            metadata: FrameMetadata,
+        ) -> Result<(), IntegrationError> {
+            self.samples.push((reason, metadata));
+            Ok(())
+        }
+    }
+
+    struct Program {
+        ticks: Rc<RefCell<Vec<(u64, u64)>>>,
+        terminal: Vec<[u64; 3]>,
+    }
+    impl SceneProgram for Program {
+        fn name(&self) -> &str {
+            "MetadataCapture"
+        }
+        fn construct(
+            &mut self,
+            scene: &mut Scene,
+            sink: &mut dyn SceneSink,
+        ) -> Result<(), SceneError> {
+            let animated = scene.add_mobject(Mobject::from_points(&[[0.0; 3]]))?;
+            let updated = scene.add_mobject(Mobject::from_points(&[[0.0; 3]]))?;
+            let trace = Rc::clone(&self.ticks);
+            scene.stage_mut().add_dt_updater(
+                updated,
+                move |stage, mob, dt| {
+                    trace
+                        .borrow_mut()
+                        .push((dt.to_bits(), stage.time().to_bits()));
+                    let position = stage.get_center(mob);
+                    stage.shift(mob, [0.0, dt * (1.0 + position[1]), 0.0]);
+                },
+                false,
+            )?;
+            let target = scene.stage_mut().copy_family(animated)?;
+            scene.stage_mut().shift(target, [3.0, 0.0, 0.0]);
+            let animation = Transform::new(animated, target).with_config(AnimConfig {
+                run_time: 0.375,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            });
+            scene.play(vec![Box::new(animation)], PlayOverrides::default(), sink)?;
+            scene.wait(Some(0.25), sink)?;
+            scene.wait_until(1.0, &mut |stage| stage.time() >= 0.875, sink)?;
+            scene.show(sink)?;
+            self.terminal = [animated, updated]
+                .into_iter()
+                .map(|mob| scene.stage().get_center(mob).map(f64::to_bits))
+                .collect();
+            Ok(())
+        }
+    }
+
+    let mut runs = Vec::new();
+    let mut full_packets = 0;
+    let mut metadata_packets = 0;
+    for metadata_only in [false, true] {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: FPS,
+                ..RuntimeConfig::default()
+            },
+            ctx.seed,
+        )
+        .map_err(|error| fail(format!("metadata scene: {error}")))?;
+        let mut program = Program {
+            ticks: Rc::new(RefCell::new(Vec::new())),
+            terminal: Vec::new(),
+        };
+        let mut sink = Trace {
+            metadata_only,
+            ..Trace::default()
+        };
+        let report = scene
+            .run(&mut program, &mut sink)
+            .map_err(|error| fail(format!("metadata capture lifecycle: {error}")))?;
+        if sink.samples.len() != 8 || report.time.frames() != 7 || report.play_count != 3 {
+            return Err(fail(
+                "metadata capture lost a nominal sample or lifecycle boundary",
+            ));
+        }
+        if metadata_only {
+            metadata_packets = sink.packets;
+        } else {
+            full_packets = sink.packets;
+        }
+        runs.push((
+            sink.samples,
+            sink.events,
+            program.ticks.borrow().clone(),
+            program.terminal,
+            report,
+        ));
+    }
+
+    struct Facade;
+    impl fmn::SceneConstruct for Facade {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let mut facade = Trace {
+        metadata_only: true,
+        ..Trace::default()
+    };
+    fmn::run_scene(
+        &mut Facade,
+        RuntimeConfig {
+            fps: FPS,
+            ..RuntimeConfig::default()
+        },
+        ctx.seed,
+        &mut facade,
+    )
+    .map_err(|error| fail(format!("metadata facade: {error}")))?;
+    let equivalent = runs[0] == runs[1];
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.metadata_only_capture")
+            .field("equivalent", truth(equivalent))
+            .field("full_packets", full_packets)
+            .field("metadata_packets", metadata_packets)
+            .field("facade_packets", facade.packets),
+    );
+    if !equivalent
+        || full_packets != 8
+        || metadata_packets != 0
+        || facade.packets != 0
+        || facade.samples.len() != 2
+    {
+        return Err(fail(
+            "metadata-only capture changed observations or froze discarded frames",
+        ));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("metadata_capture_samples", 8)
+        .with_counter("metadata_capture_packets", metadata_packets)
+        .with_counter("metadata_capture_equivalent", u64::from(equivalent))
+        .with_counter("metadata_facade_samples", 2))
+}
+
+/// The native still-image route executes every updater tick and captures
+/// construction's final edits. An independently authored static scene rendered
+/// through the existing sequence route supplies the expected artifact.
+fn native_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    struct Animated {
+        ticks: Arc<AtomicU64>,
+    }
+    impl fmn::SceneConstruct for Animated {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.4).color(RED_C))?;
+            stage.set_fill(circle, Some(RED_C), Some(1.0), None, true);
+            stage.set_stroke(circle, None, Some(0.0), None, None, true);
+            let ticks = self.ticks.clone();
+            let updater = stage.arena_mut().add_dt_updater(
+                circle,
+                move |stage, mob, dt| {
+                    if dt > 0.0 {
+                        ticks.fetch_add(1, Ordering::SeqCst);
+                    }
+                    stage.shift(mob, [dt, 0.0, 0.0]);
+                },
+                false,
+            )?;
+            stage.wait(0.25)?;
+            stage.arena_mut().remove_updater(circle, updater);
+            stage.shift(circle, [1.0, 1.0, 0.0]);
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            Ok(())
+        }
+    }
+
+    struct Expected;
+    impl fmn::SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.4).color(BLUE_C))?;
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            stage.set_stroke(circle, None, Some(0.0), None, None, true);
+            stage.shift(circle, [1.25, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+
+    let options = |path: &str, format: fmn::RenderFormat, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("native final PNG options: {error}")))?;
+        options.config.camera.resolution = (64, 48);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        Ok::<_, ScenarioError>(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fmn::render_with_fs(
+        &mut Expected,
+        options("/expected-final", fmn::RenderFormat::PngSequence, 1)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("independent final geometry: {error}")))?;
+    let expected = fs
+        .read(std::path::Path::new("/expected-final/frame_000000.png"))
+        .map_err(|error| fail(format!("expected final PNG: {error}")))?;
+    let decoded = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("expected PNG decode: {error}")))?;
+    if !decoded
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .windows(2)
+        .any(|pair| pair[0] != pair[1])
+    {
+        return Err(fail(
+            "the independently authored final circle is not visible",
+        ));
+    }
+
+    let mut checked = 0;
+    let mut total_ticks = 0;
+    let mut published_frames = 0;
+    let mut first_png = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-final-{threads}.png");
+        let ticks = Arc::new(AtomicU64::new(0));
+        let report = fmn::render_with_fs(
+            &mut Animated {
+                ticks: ticks.clone(),
+            },
+            options(&path, fmn::RenderFormat::Png, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("native final PNG at {threads} threads: {error}")))?;
+        let png = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("published final PNG: {error}")))?;
+        let observed_ticks = ticks.load(Ordering::SeqCst);
+        if png != expected
+            || report.artifact.frame_count != 1
+            || report.emission.stats.emitted != 1
+            || report.scene.play_count != 1
+            || report.scene.time.frames() != 2
+            || observed_ticks != 2
+        {
+            return Err(fail(format!(
+                "final PNG lost final geometry or lifecycle at {threads} threads"
+            )));
+        }
+        checked += 1;
+        total_ticks += observed_ticks;
+        published_frames += report.artifact.frame_count;
+        if first_png.is_none() {
+            first_png = Some(png);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_final_png")
+            .field("thread_counts", checked)
+            .field("nominal_ticks", total_ticks)
+            .field("published_frames", published_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            "native-final.png",
+            first_png.ok_or_else(|| fail("no final PNG was rendered"))?,
+        )
+        .with_counter("native_final_png_thread_counts", checked)
+        .with_counter("native_final_png_nominal_ticks", total_ticks)
+        .with_counter("native_final_png_published_frames", published_frames))
+}
+
+/// The public video route preserves every changing frame across vector and
+/// camera rendering. At 1058 rows conversion can use all sixteen requested
+/// workers, including a short final band. Both complete Y4M streams and decoded
+/// changing frames must agree across execution widths.
+fn native_y4m_conversion_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Moving;
+    impl fmn::SceneConstruct for Moving {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let bar = stage.add(
+                fmn_library::Rectangle::new()
+                    .width(0.6)
+                    .height(66.0)
+                    .color(BLUE_C)
+                    .build()?,
+            )?;
+            stage.set_fill(bar, Some(BLUE_C), Some(0.8), None, true);
+            stage.set_stroke(bar, None, Some(0.0), None, None, true);
+            stage.shift(bar, [-0.25, 0.0, 0.0]);
+            stage.play(
+                bar.animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.5),
+                        rate_func: Some(fmn::core::rate::linear),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift([0.5, 0.0, 0.0])?,
+            )?;
+            Ok(())
+        }
+    }
+
+    ctx.set_fps((8, 1));
+    let mut outcome = RunOutcome::ok();
+    let mut renders = 0;
+    let mut decoded_frames = 0;
+    for (route, camera) in [("vector", false), ("camera", true)] {
+        let mut expected_bytes = None;
+        let mut expected_frames = None;
+        for threads in [1, 4, 16] {
+            let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+            let mut options = fmn::RenderOptions::with_format("/movie.y4m", fmn::RenderFormat::Y4m)
+                .map_err(|error| fail(format!("native Y4M options: {error}")))?;
+            options.config.camera.resolution = (32, 1058);
+            options.config.camera.fps = 8;
+            // Sixteen pixels per scene unit, with changing content in every
+            // conversion band rather than a tiny shape in an otherwise empty frame.
+            options.config.sizes.frame_height = 66.125;
+            options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+            options.config.determinism.seed = ctx.seed;
+            options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+            options.frames_in_flight = 1;
+            options.typeset_cache = false;
+            if camera {
+                options.camera = Some(
+                    options
+                        .camera_config()
+                        .map_err(|error| fail(format!("native Y4M camera: {error}")))?,
+                );
+            }
+            let report = fmn::render_with_fs(&mut Moving, options, fs.clone())
+                .map_err(|error| fail(format!("native Y4M {route}/{threads}: {error}")))?;
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("native Y4M bypassed the frame pipeline"))?;
+            if report.artifact.frame_count != 4
+                || (
+                    pipeline.submitted,
+                    pipeline.rasterized,
+                    pipeline.converted,
+                    pipeline.emitted,
+                ) != (4, 4, 4, 4)
+                || pipeline.outstanding_slots != 0
+                || pipeline.max_in_flight > 1
+            {
+                return Err(fail("native Y4M lost bounded, ordered frame publication"));
+            }
+            let bytes = fs
+                .read(std::path::Path::new("/movie.y4m"))
+                .map_err(|error| fail(format!("native Y4M read: {error}")))?;
+            let movie = fmn_codec::decode_y4m(&bytes)
+                .map_err(|error| fail(format!("native Y4M decode: {error}")))?;
+            if (movie.width, movie.height, movie.fps) != (32, 1058, (8, 1))
+                || movie.colorspace != "C420mpeg2"
+                || movie.frames.len() != 4
+                || movie.frames.windows(2).any(|pair| pair[0] == pair[1])
+            {
+                return Err(fail(
+                    "native Y4M metadata or changing frame sequence was lost",
+                ));
+            }
+            if let Some(expected) = &expected_bytes {
+                if expected != &bytes || expected_frames.as_ref() != Some(&movie.frames) {
+                    return Err(fail(format!(
+                        "native Y4M {route} changed pixels or bytes at {threads} threads"
+                    )));
+                }
+            } else {
+                expected_frames = Some(movie.frames);
+                expected_bytes = Some(bytes);
+            }
+            renders += 1;
+            decoded_frames += 4;
+        }
+        outcome = outcome.with_artifact(
+            &format!("native-conversion-{route}.y4m"),
+            expected_bytes.ok_or_else(|| fail("native Y4M produced no artifact"))?,
+        );
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_y4m_conversion")
+            .field("routes", 2_u64)
+            .field("thread_counts", 3_u64)
+            .field("renders", renders)
+            .field("decoded_frames", decoded_frames),
+    );
+    Ok(outcome
+        .with_counter("native_y4m_conversion_renders", renders)
+        .with_counter("native_y4m_conversion_frames", decoded_frames))
+}
+
+/// Issue #10's twenty audio-sized segments cross the public frame-native
+/// authoring API, pure-frame workers, and a decoded video artifact. The
+/// expected 864 is the reporter's integer sum, independent of scheduling.
+fn native_exact_frame_duration_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct ExactFrames;
+    impl fmn::SceneConstruct for ExactFrames {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(fmn_library::Square::new().side_length(0.8).color(WHITE))?;
+            stage.set_fill(square, Some(WHITE), Some(1.0), None, true);
+            let frames = [
+                43, 17, 61, 29, 101, 7, 55, 13, 89, 31, 47, 19, 73, 11, 37, 23, 67, 3, 97, 41,
+            ];
+            let mut base = 0;
+            for (index, frames) in frames.into_iter().enumerate() {
+                let report = if index % 2 == 1 {
+                    stage.wait_frames(frames)?
+                } else {
+                    stage.play(
+                        square
+                            .animate()
+                            .set_anim_args(AnimateArgs {
+                                run_time_frames: Some(frames),
+                                ..AnimateArgs::default()
+                            })?
+                            .shift([0.05, 0.0, 0.0])?,
+                    )?
+                };
+                if report.n_frames != frames as i64 || report.base_frame != base {
+                    return Err(SceneError::InvalidLifecycle(
+                        "exact-frame segment changed its integer frame range",
+                    )
+                    .into());
+                }
+                base += frames as i64;
+            }
+            Ok(())
+        }
+    }
+
+    ctx.set_fps((24, 1));
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut options = fmn::RenderOptions::with_format("/exact-frames.y4m", fmn::RenderFormat::Y4m)
+        .map_err(|error| fail(format!("exact-frame options: {error}")))?;
+    options.config.camera.resolution = (32, 24);
+    options.config.camera.fps = 24;
+    options.config.sizes.frame_height = 4.0;
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    options.config.determinism.seed = ctx.seed;
+    options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(4);
+    options.typeset_cache = false;
+    let report = fmn::render_with_fs(&mut ExactFrames, options, fs.clone())
+        .map_err(|error| fail(format!("exact-frame render: {error}")))?;
+    let bytes = fs
+        .read(std::path::Path::new("/exact-frames.y4m"))
+        .map_err(|error| fail(format!("exact-frame artifact: {error}")))?;
+    let decoded = fmn_codec::decode_y4m(&bytes)
+        .map_err(|error| fail(format!("exact-frame video decode: {error}")))?;
+    let pipeline = report
+        .frame_pipeline
+        .as_ref()
+        .ok_or_else(|| fail("exact-frame render did not use the frame pipeline"))?;
+    if decoded.frames.len() != 864
+        || decoded.fps != (24, 1)
+        || report.artifact.frame_count != 864
+        || report.scene.time.frames() != 864
+        || report.scene.play_count != 20
+        || report.emission.stats.emitted != 864
+        || (
+            pipeline.submitted,
+            pipeline.emitted,
+            pipeline.outstanding_slots,
+        ) != (864, 864, 0)
+    {
+        return Err(fail(
+            "the reporter's 864-frame scene changed length in rendering or reporting",
+        ));
+    }
+    if decoded.frames.first() == decoded.frames.last() {
+        return Err(fail(
+            "the exact-frame animations produced no visible motion",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_exact_frames")
+            .field("segments", report.scene.play_count)
+            .field("decoded_frames", decoded.frames.len() as u64)
+            .field("emitted_frames", pipeline.emitted),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("exact-frames.y4m", bytes)
+        .with_counter("exact_frame_segments", report.scene.play_count)
+        .with_counter("exact_frame_decoded_frames", decoded.frames.len() as u64)
+        .with_counter("exact_frame_emitted_frames", pipeline.emitted))
+}
+
+/// A complete shape replacement crosses the native authoring facade, runs
+/// prepared frames on workers, and leaves only the untouched original target.
+fn native_shape_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Shapes {
+        final_only: bool,
+    }
+    impl fmn::SceneConstruct for Shapes {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let source = stage.arena_mut().add(fmn_mobject::Mobject::new());
+            let circle = stage.arena_mut().add(Circle::new().radius(0.35));
+            let square = stage
+                .arena_mut()
+                .add(fmn_library::Square::new().side_length(0.65));
+            stage.arena_mut().attach(source, circle)?;
+            stage.arena_mut().attach(source, square)?;
+            stage.shift(circle, [-0.8, 0.55, 0.0]);
+            stage.shift(square, [-0.8, -0.55, 0.0]);
+            stage.set_fill(source, Some(RED_C), Some(1.0), None, true);
+            stage.set_stroke(source, None, Some(0.0), None, None, true);
+
+            let target = stage.arena_mut().add(fmn_mobject::Mobject::new());
+            let circle = stage.arena_mut().add(Circle::new().radius(0.35));
+            let triangle = stage
+                .arena_mut()
+                .add(fmn_library::triangle().radius(0.4).build()?);
+            stage.arena_mut().attach(target, circle)?;
+            stage.arena_mut().attach(target, triangle)?;
+            stage.shift(circle, [0.8, 0.55, 0.0]);
+            stage.shift(triangle, [0.8, -0.55, 0.0]);
+            stage.set_fill(target, Some(BLUE_C), Some(1.0), None, true);
+            stage.set_stroke(target, None, Some(0.0), None, None, true);
+            if self.final_only {
+                stage.arena_mut().add_to_scene(target)?;
+                return Ok(());
+            }
+            stage.arena_mut().add_to_scene(source)?;
+            let matching: fmn_anim::TransformMatchingShapes =
+                fmn_anim::TransformMatchingParts::with_config(
+                    stage.arena_mut(),
+                    source,
+                    target,
+                    &[],
+                    fmn_anim::MatchingPartsConfig {
+                        run_time: 0.5,
+                        lag_ratio: 0.15,
+                        ..fmn_anim::MatchingPartsConfig::default()
+                    },
+                )?;
+            let plan: Vec<_> = matching
+                .animations()
+                .iter()
+                .map(|animation| animation.state().config.name.as_str())
+                .collect();
+            if plan != ["Transform", "FadeOutToPoint", "FadeInFromPoint"] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "shape replacement lost matching or unmatched-piece fades",
+                )
+                .into());
+            }
+            stage.play_prepared(vec![Box::new(matching)])?;
+            if stage.roots() != [target] {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "shape replacement did not publish the original target exactly once",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Jobs {
+        programs: u64,
+        frames: u64,
+    }
+    impl fmn_scene::SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(
+            &mut self,
+            segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for index in 1..=segment.frame_count() {
+                let job = segment
+                    .job(index)
+                    .map_err(|error| IntegrationError::new("shape-matching", error.to_string()))?;
+                let expected = job.time().to_f64().to_bits();
+                let observed = std::thread::spawn(move || job.materialize().time().to_bits())
+                    .join()
+                    .map_err(|_| IntegrationError::new("shape-matching", "worker panicked"))?;
+                if observed != expected {
+                    return Err(IntegrationError::new(
+                        "shape-matching",
+                        "worker changed nominal time",
+                    ));
+                }
+                self.frames += 1;
+            }
+            Ok(())
+        }
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            Err(IntegrationError::new(
+                "shape-matching",
+                "unexpected owner capture",
+            ))
+        }
+    }
+    let mut jobs = Jobs::default();
+    fmn::run_scene(
+        &mut Shapes { final_only: false },
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        42,
+        &mut jobs,
+    )
+    .map_err(|error| fail(format!("shape worker lifecycle: {error}")))?;
+    if jobs.programs != 1 || jobs.frames != 4 {
+        return Err(fail(
+            "shape matching did not submit its complete prepared segment",
+        ));
+    }
+    let options = |path: &str, format: fmn::RenderFormat, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("shape render options: {error}")))?;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        Ok::<_, ScenarioError>(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fmn::render_with_fs(
+        &mut Shapes { final_only: true },
+        options("/shape-expected", fmn::RenderFormat::PngSequence, 1)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("independent shape target: {error}")))?;
+    let expected = fs
+        .read(std::path::Path::new("/shape-expected/frame_000000.png"))
+        .map_err(|error| fail(format!("independent shape target bytes: {error}")))?;
+    let mut baseline = None;
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/shape-frames-{threads}");
+        let report = fmn::render_with_fs(
+            &mut Shapes { final_only: false },
+            options(&path, fmn::RenderFormat::PngSequence, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("shape animation render: {error}")))?;
+        if report.artifact.frame_count != 4 || report.scene.time.frames() != 4 {
+            return Err(fail("shape animation changed the nominal frame count"));
+        }
+        let frames: Vec<_> = (0..4)
+            .map(|index| {
+                fs.read(&PathBuf::from(&path).join(format!("frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("shape frame: {error}")))
+            })
+            .collect::<Result<_, _>>()?;
+        if frames[0] == frames[3] {
+            return Err(fail("shape replacement did not change rendered pixels"));
+        }
+        if baseline.as_ref().is_some_and(|first| first != &frames) {
+            return Err(fail("shape animation PNG bytes depend on worker count"));
+        }
+        if baseline.is_none() {
+            baseline = Some(frames);
+        }
+        let path = format!("/shape-final-{threads}.png");
+        fmn::render_with_fs(
+            &mut Shapes { final_only: false },
+            options(&path, fmn::RenderFormat::Png, threads)?,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("shape replacement final state: {error}")))?;
+        if fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("shape final PNG: {error}")))?
+            != expected
+        {
+            return Err(fail(
+                "shape replacement left altered target geometry or temporary pieces",
+            ));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_shape_matching")
+            .field("programs", jobs.programs)
+            .field("jobs", jobs.frames)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("shape-matching-final.png", expected)
+        .with_counter("native_shape_matching_programs", jobs.programs)
+        .with_counter("native_shape_matching_jobs", jobs.frames)
+        .with_counter("native_shape_matching_thread_counts", checked))
+}
+
+/// Conditional native waits and explicit show reach the active renderer.
+fn native_conditional_waits_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    #[derive(Default)]
+    struct ConditionalScene {
+        observed: Vec<f64>,
+        after_show: Vec3,
+        frame_after_show: i64,
+    }
+    impl SceneConstruct for ConditionalScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(Square::new().side_length(0.5).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.set_stroke(square, None, Some(0.0), None, None, true);
+            stage.add_dt_updater(
+                square,
+                |arena, me, dt| arena.shift(me, [dt, 0.0, 0.0]),
+                false,
+            )?;
+            let first = stage.wait_until(2.0, |arena| {
+                let x = arena.get_center(square)[0];
+                self.observed.push(x);
+                x >= 0.375
+            })?;
+            let second = stage.wait_until_frames(16, |arena| {
+                let x = arena.get_center(square)[0];
+                self.observed.push(x);
+                x >= 0.625
+            })?;
+            if (
+                first.base_frame,
+                first.n_frames,
+                second.base_frame,
+                second.n_frames,
+            ) != (0, 3, 3, 2)
+            {
+                return Err(SceneError::InvalidLifecycle(
+                    "native conditional waits did not stop on their observed frames",
+                )
+                .into());
+            }
+            let before = stage.scene().time().frames();
+            stage.add_updater(
+                square,
+                |arena, me| {
+                    let y = arena.get_center(me)[1];
+                    arena.shift(me, [0.0, 0.5 - y, 0.0]);
+                },
+                false,
+            )?;
+            stage.show()?;
+            self.after_show = stage.get_center(square);
+            self.frame_after_show = stage.scene().time().frames();
+            if self.frame_after_show != before || stage.scene().play_count() != 2 {
+                return Err(SceneError::InvalidLifecycle(
+                    "explicit native show advanced time or created a segment",
+                )
+                .into());
+            }
+            Ok(())
+        }
+    }
+    struct Expected;
+    impl SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(Square::new().side_length(0.5).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.set_stroke(square, None, Some(0.0), None, None, true);
+            stage.shift(square, [0.625, 0.5, 0.0]);
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    render_with_fs(&mut Expected, options("/wait-expected.png", 1)?, fs.clone())
+        .map_err(|e| fail(e.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/wait-expected.png"))
+        .map_err(|e| fail(e.to_string()))?;
+    let decoded = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    if !decoded
+        .rgba
+        .chunks_exact(4)
+        .any(|pixel| pixel != &decoded.rgba[..4])
+    {
+        return Err(fail("conditional wait oracle rendered no ink"));
+    }
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/wait-{threads}.png");
+        let mut program = ConditionalScene::default();
+        let report = render_with_fs(&mut program, options(&path, threads)?, fs.clone())
+            .map_err(|e| fail(e.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|e| fail(e.to_string()))?;
+        if actual != expected
+            || report.artifact.frame_count != 1
+            || report.scene.play_count != 2
+            || program.observed != [0.125, 0.25, 0.375, 0.5, 0.625]
+            || program.after_show != [0.625, 0.5, 0.0]
+            || program.frame_after_show != 5
+        {
+            return Err(fail(format!(
+                "native conditional waits/show disagree with independent geometry at {threads} threads"
+            )));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_conditional_waits")
+            .field("predicate_checks", 5_u64)
+            .field("nominal_ticks", 5_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("conditional-wait.png", expected)
+        .with_counter("native_wait_predicate_checks", 5)
+        .with_counter("native_wait_nominal_ticks", 5)
+        .with_counter("native_wait_thread_counts", checked))
+}
+
+/// Native point flow moves a placed group through the chart's actual units.
+fn native_field_advection_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct FlowScene {
+        oracle: bool,
+        center: Vec3,
+        frame: i64,
+    }
+    impl SceneConstruct for FlowScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let offset = if self.oracle {
+                [0.5, -0.25, 0.0]
+            } else {
+                ORIGIN
+            };
+            let children = [(-0.75, BLUE), (0.75, YELLOW)].map(|(x, color)| {
+                Square::new()
+                    .side_length(0.5)
+                    .style(Style::default().fill(color, 1.0).stroke_width(0.0))
+                    .build()
+                    .shifted([x + offset[0], offset[1], 0.0])
+            });
+            let group = stage.add(v_group(children))?;
+            if !self.oracle {
+                // Retained family placement must survive the first update.
+                stage.shift(group, [0.25, -0.5, 0.0]);
+                let axes = Axes::new()
+                    .x_range([-2.0, 2.0, 1.0])
+                    .y_range([-2.0, 2.0, 1.0])
+                    .width(8.0)
+                    .height(4.0)
+                    .build(&FontBook::bundled().unwrap())?
+                    .shifted([2.0, -1.0, 0.0]);
+                // The chart converts (.25, .5) to world velocity (.5, .5).
+                // Four ticks at 8 fps add (.25, .25), independently encoded
+                // in the oracle's literal child coordinates above.
+                fmn_library::fields::move_points_along_vector_field(
+                    stage.arena_mut(),
+                    group,
+                    |_, _| [0.25, 0.5],
+                    axes,
+                )?;
+                stage.wait_frames(4)?;
+            }
+            self.center = stage.get_center(group);
+            self.frame = stage.scene().time().frames();
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|error| fail(error.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    let mut oracle = FlowScene {
+        oracle: true,
+        center: ORIGIN,
+        frame: 0,
+    };
+    render_with_fs(&mut oracle, options("/field-expected.png", 1)?, fs.clone())
+        .map_err(|error| fail(error.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/field-expected.png"))
+        .map_err(|error| fail(error.to_string()))?;
+    let decoded = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(error.to_string()))?;
+    if !decoded
+        .rgba
+        .chunks_exact(4)
+        .any(|pixel| pixel != &decoded.rgba[..4])
+    {
+        return Err(fail("field-advection oracle rendered no ink"));
+    }
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/field-{threads}.png");
+        let mut program = FlowScene {
+            oracle: false,
+            center: ORIGIN,
+            frame: 0,
+        };
+        let report = render_with_fs(&mut program, options(&path, threads)?, fs.clone())
+            .map_err(|error| fail(error.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(error.to_string()))?;
+        if actual != expected
+            || program.center != [0.5, -0.25, 0.0]
+            || program.frame != 4
+            || report.scene.play_count != 1
+            || report.artifact.frame_count != 1
+        {
+            return Err(fail(format!(
+                "grouped native field motion disagrees with independent geometry at {threads} threads"
+            )));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_field_advection")
+            .field("nominal_ticks", 4_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("field-advection.png", expected)
+        .with_counter("native_field_ticks", 4)
+        .with_counter("native_field_thread_counts", checked))
+}
+
+/// Detached charts clip actual data-x bounds and keep discontinuity gaps empty.
+fn native_detached_areas_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_geom::QuadPath;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct AreaScene {
+        gaps: bool,
+        oracle: bool,
+    }
+    impl SceneConstruct for AreaScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let axes = Axes::new()
+                .x_range([-1.0, 4.0, 1.0])
+                .y_range([-1.0, 3.0, 1.0])
+                .width(5.0)
+                .height(4.0)
+                .axis_config(AxisConfig {
+                    include_tip: Some(false),
+                    include_ticks: Some(false),
+                    ..AxisConfig::default()
+                })
+                .build(&FontBook::bundled().unwrap())?;
+            let point = |x, y| axes.c2p(&[x, y]);
+            let mut source = QuadPath::new();
+            let (bounds, clipped) = if self.gaps {
+                source
+                    .add_subpath(&[point(0.0, 2.0), point(0.5, 2.0), point(1.0, 2.0)])
+                    .unwrap();
+                // The second component runs backwards and has a different
+                // sampling density. Neither fact can change the shaded domain.
+                source
+                    .add_subpath(&[point(4.0, 1.0), point(3.0, 1.0), point(2.0, 1.0)])
+                    .unwrap();
+                (
+                    [0.5, 3.0],
+                    vec![
+                        ([0.5, 1.0], [(0.5, 2.0), (0.75, 2.0), (1.0, 2.0)]),
+                        ([2.0, 3.0], [(2.0, 1.0), (2.5, 1.0), (3.0, 1.0)]),
+                    ],
+                )
+            } else {
+                source
+                    .add_subpath(&[point(0.0, 1.0), point(0.0, 2.0), point(4.0, 3.0)])
+                    .unwrap();
+                // x=4t², y=1+2t: x=.25..2.25 means t=.25...75.
+                (
+                    [0.25, 2.25],
+                    vec![([0.25, 2.25], [(0.25, 1.5), (0.75, 2.0), (2.25, 2.5)])],
+                )
+            };
+            let graph = VMobject::from_path(&source);
+            let area = if self.oracle {
+                let mut expected = QuadPath::new();
+                for ([left, right], curve) in clipped {
+                    let points = curve.map(|(x, y)| point(x, y));
+                    let mut component = QuadPath::from_points(points.to_vec()).unwrap();
+                    component.add_line_to(point(right, 0.0), false).unwrap();
+                    component.add_line_to(point(left, 0.0), false).unwrap();
+                    component.add_line_to(points[0], false).unwrap();
+                    expected.add_subpath(component.points()).unwrap();
+                }
+                VMobject::from_path(&expected)
+                    .with_style(Style::default().stroke_width(0.0).fill(BLUE, 0.5))
+            } else {
+                axes.get_area_under_graph(&graph, Some(bounds))?
+            };
+            stage.add(area)?;
+            Ok(())
+        }
+    }
+
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    let mut outcome = RunOutcome::ok();
+    let mut checked = 0;
+    for (name, gaps) in [("quadratic", false), ("gaps", true)] {
+        let expected_path = format!("/{name}-expected.png");
+        render_with_fs(
+            &mut AreaScene { gaps, oracle: true },
+            options(&expected_path, 1)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let expected = fs
+            .read(std::path::Path::new(&expected_path))
+            .map_err(|e| fail(e.to_string()))?;
+        let image = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+            .map_err(|e| fail(e.to_string()))?;
+        if !image
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel != &image.rgba[..4])
+        {
+            return Err(fail(
+                "the independent integral-region oracle rendered no ink",
+            ));
+        }
+        for threads in [1, 4, 16] {
+            let path = format!("/{name}-{threads}.png");
+            let report = render_with_fs(
+                &mut AreaScene {
+                    gaps,
+                    oracle: false,
+                },
+                options(&path, threads)?,
+                fs.clone(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            let actual = fs
+                .read(std::path::Path::new(&path))
+                .map_err(|e| fail(e.to_string()))?;
+            if actual != expected || report.artifact.frame_count != 1 {
+                return Err(fail(format!(
+                    "{name} integral region differs from analytic geometry at {threads} threads"
+                )));
+            }
+            checked += 1;
+        }
+        outcome = outcome.with_artifact(&format!("{name}.png"), expected);
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_detached_areas")
+            .field("cases", 2_u64)
+            .field("renders", checked),
+    );
+    Ok(outcome
+        .with_counter("native_detached_area_cases", 2)
+        .with_counter("native_detached_area_renders", checked))
+}
+
+/// Detached differential and integral helpers retain the chart's 3D geometry.
+fn native_detached_calculus_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct CalculusScene {
+        case: u8,
+        oracle: bool,
+    }
+    impl SceneConstruct for CalculusScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let axes = Axes::new()
+                .x_range([-2.0, 2.0, 1.0])
+                .y_range([-2.0, 2.0, 1.0])
+                .width(4.0)
+                .height(4.0)
+                .axis_config(AxisConfig {
+                    include_tip: Some(false),
+                    include_ticks: Some(false),
+                    ..AxisConfig::default()
+                })
+                .build(&FontBook::bundled().unwrap())?
+                .rotated_about(std::f64::consts::FRAC_PI_3, RIGHT, ORIGIN);
+            let point = |x, y| axes.c2p(&[x, y]);
+            let object = match self.case {
+                0 => {
+                    let style = Style::default().stroke(YELLOW, 4.0, 1.0);
+                    // Equal chart scales make the line y=x have world length
+                    // sqrt(2) per numeric x, before and after the rigid rotation.
+                    let extent = 3.0 / (2.0 * 2.0_f64.sqrt());
+                    let expected = Line::new(point(-extent, -extent), point(extent, extent))
+                        .style(style)
+                        .build()?;
+                    if self.oracle {
+                        expected
+                    } else {
+                        let actual = axes.tangent_line_styled(0.0, &|x| x, 3.0, 0.125, style)?;
+                        if actual.points().len() != expected.points().len()
+                            || actual
+                                .points()
+                                .iter()
+                                .zip(expected.points())
+                                .any(|(a, b)| (0..3).any(|lane| (a[lane] - b[lane]).abs() > 1e-10))
+                        {
+                            return Err(SceneError::InvalidLifecycle(
+                                "detached tangent does not retain the tilted chart's direction",
+                            )
+                            .into());
+                        }
+                        actual
+                    }
+                }
+                1 => {
+                    if self.oracle {
+                        // Midpoint samples of f(x)=2x on [-1,0], [0,1] and
+                        // the final partial bin [1,1.25], independently authored.
+                        let rectangles = [
+                            (-1.0, 0.0, -1.0, RED),
+                            (0.0, 1.0, 1.0, BLUE),
+                            (1.0, 1.25, 2.25, BLUE),
+                        ]
+                        .into_iter()
+                        .map(|(left, right, height, color)| {
+                            Polygon::new([
+                                point(left, 0.0),
+                                point(right, 0.0),
+                                point(right, height),
+                                point(left, height),
+                            ])
+                            .style(Style::default().stroke(BLACK, 0.0, 1.0).fill(color, 0.75))
+                            .build()
+                            .with_stroke_behind(true)
+                        });
+                        v_group(rectangles)
+                    } else {
+                        axes.riemann_rectangles_styled(
+                            &|x| 2.0 * x,
+                            Some([-1.0, 1.25]),
+                            Some(1.0),
+                            "center",
+                            &RiemannConfig {
+                                colors: vec![BLUE],
+                                stroke_width: 0.0,
+                                fill_opacity: 0.75,
+                                ..RiemannConfig::default()
+                            },
+                        )?
+                    }
+                }
+                _ => {
+                    if self.oracle {
+                        let start = point(-1.0, 1.0);
+                        let corner = point(0.5, 1.0);
+                        let end = point(0.5, 0.25);
+                        let mut lines = Vec::new();
+                        for (a, b, color) in [
+                            (start, corner, YELLOW),
+                            (corner, end, GREEN),
+                            (start, end, RED),
+                        ] {
+                            lines.push(
+                                Line::new(a, b)
+                                    .style(Style::default().stroke(color, 2.0, 1.0))
+                                    .build()?,
+                            );
+                        }
+                        v_group(lines)
+                    } else {
+                        axes.get_secant_slope_group(-1.0, &|x| x * x, 1.5, None)?
+                    }
+                }
+            };
+            stage.add(object)?;
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (96, 64);
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    let mut outcome = RunOutcome::ok();
+    let mut checked = 0;
+    for (case, name) in [(0, "tangent"), (1, "riemann"), (2, "secant")] {
+        let expected_path = format!("/{name}-expected.png");
+        render_with_fs(
+            &mut CalculusScene { case, oracle: true },
+            options(&expected_path, 1)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let expected = fs
+            .read(std::path::Path::new(&expected_path))
+            .map_err(|e| fail(e.to_string()))?;
+        let image = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+            .map_err(|e| fail(e.to_string()))?;
+        if !image
+            .rgba
+            .chunks_exact(4)
+            .any(|pixel| pixel != &image.rgba[..4])
+        {
+            return Err(fail(format!("{name} oracle rendered no ink")));
+        }
+        for threads in [1, 4, 16] {
+            let path = format!("/{name}-{threads}.png");
+            let report = render_with_fs(
+                &mut CalculusScene {
+                    case,
+                    oracle: false,
+                },
+                options(&path, threads)?,
+                fs.clone(),
+            )
+            .map_err(|e| fail(e.to_string()))?;
+            let actual = fs
+                .read(std::path::Path::new(&path))
+                .map_err(|e| fail(e.to_string()))?;
+            if actual != expected || report.artifact.frame_count != 1 {
+                return Err(fail(format!(
+                    "{name} geometry differs from its independent oracle at {threads} threads"
+                )));
+            }
+            checked += 1;
+        }
+        outcome = outcome.with_artifact(&format!("{name}.png"), expected);
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_detached_calculus")
+            .field("cases", 3_u64)
+            .field("renders", checked),
+    );
+    Ok(outcome
+        .with_counter("native_detached_calculus_cases", 3)
+        .with_counter("native_detached_calculus_renders", checked))
+}
+
+/// A shared Reel job cannot claim transparency with an unadmitted encoder.
+fn transparent_video_encoder_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::path::Path;
+
+    use fmn_output::negotiate::{VideoQuality, encode_argv, encode_argv_with_formats};
+    use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
+
+    let mut accepted = 0;
+    let mut rejected = 0;
+    for wire in [WireFormat::Rgba8, WireFormat::Bgra8] {
+        let mut job = VideoJob {
+            width: 64,
+            height: 36,
+            fps: (30000, 1001),
+            wire,
+            color: ColorDescription::for_native_wire(wire),
+            container: Container::MovTransparent,
+            encoder: EncoderChoice::Auto,
+            crf: None,
+        };
+        for encoder in [
+            EncoderChoice::Auto,
+            EncoderChoice::Named("qtrle".into()),
+            EncoderChoice::Configured {
+                name: "qtrle".into(),
+                quality: VideoQuality::default(),
+            },
+        ] {
+            job.encoder = encoder;
+            let resolved = job.resolved_encoder().map_err(|e| fail(e.to_string()))?;
+            let argv =
+                encode_argv(&job, Path::new("/alpha.mov")).map_err(|e| fail(e.to_string()))?;
+            let formats: Vec<_> = argv
+                .windows(2)
+                .filter(|pair| pair[0] == "-pix_fmt")
+                .map(|pair| pair[1].as_str())
+                .collect();
+            if resolved.as_deref() != Some("qtrle") || formats != [wire.ffmpeg_pix_fmt(), "argb"] {
+                return Err(fail(
+                    "transparent MOV lost its explicit qtrle/argb contract",
+                ));
+            }
+            accepted += 1;
+        }
+        for name in ["libx264", "hevc_nvenc", "prores_ks"] {
+            for encoder in [
+                EncoderChoice::Named(name.into()),
+                EncoderChoice::Configured {
+                    name: name.into(),
+                    quality: VideoQuality::default(),
+                },
+            ] {
+                job.encoder = encoder;
+                job.container = Container::MovTransparent;
+                let error = match job.resolved_encoder() {
+                    Err(error) => error,
+                    Ok(_) => return Err(fail("an unsupported transparent encoder was accepted")),
+                };
+                if !error.to_string().contains("requires the qtrle encoder")
+                    || encode_argv(&job, Path::new("/alpha.mov")).is_ok()
+                    || encode_argv_with_formats(
+                        &job,
+                        Path::new("/alpha.mov"),
+                        &["argb".into(), "rgba".into(), "yuva444p10le".into()],
+                    )
+                    .is_ok()
+                {
+                    return Err(fail(
+                        "advertised input alpha bypassed transparent admission",
+                    ));
+                }
+                job.container = Container::Mov;
+                if job
+                    .resolved_encoder()
+                    .map_err(|e| fail(e.to_string()))?
+                    .as_deref()
+                    != Some(name)
+                {
+                    return Err(fail(
+                        "transparent admission changed opaque encoder selection",
+                    ));
+                }
+                rejected += 1;
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.failure_path.transparent_video_encoder")
+            .field("accepted", accepted)
+            .field("rejected", rejected),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("transparent_encoder_accepted", accepted)
+        .with_counter("transparent_encoder_rejected", rejected))
+}
+
+/// Native legacy and preset constructors retain ordinary Scribe pixels.
+fn native_tex_constructors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct TexScene {
+        oracle: bool,
+    }
+    impl SceneConstruct for TexScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let single = if self.oracle {
+                Tex::new("{x^2}")
+                    .font_size(40.0)
+                    .build(stage.tex_engine()?)?
+            } else {
+                SingleStringTex::new("  {x^2  ")
+                    .font_size(40.0)
+                    .build(stage.tex_engine()?)?
+            };
+            let single = stage.add(single)?;
+            stage.shift(single, [0.0, 1.0, 0.0]);
+
+            let preset = if self.oracle {
+                TexText::new("Area $A$")
+                    .font_size(32.0)
+                    .style(fmn_library::text::text_style().color(RED))
+                    .build(stage.tex_engine()?)?
+            } else {
+                TexTextFromPresetString::from_preset("Area $A$", RED)
+                    .font_size(32.0)
+                    .build(stage.tex_engine()?)?
+            };
+            stage.add(preset)?;
+
+            // The modern oracle has flat children. Legacy argument grouping
+            // must change indexing without changing layout or painter order.
+            let grouped = if self.oracle {
+                let tex = TexText::new("Old $x^2$")
+                    .font_size(32.0)
+                    .build(stage.tex_engine()?)?;
+                stage.add(tex)?
+            } else {
+                let tex = OldTexText::new(&["Old ", "$x^2$"])
+                    .font_size(32.0)
+                    .build(stage.tex_engine()?)?;
+                if tex.tex_strings.len() != 2 || tex.vmob.children().len() != 2 {
+                    return Err(fmn::scene::SceneError::InvalidLifecycle(
+                        "legacy text must retain its two argument groups",
+                    )
+                    .into());
+                }
+                stage.add(tex)?
+            };
+            stage.shift(grouped, [0.0, -1.0, 0.0]);
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (128, 96);
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    render_with_fs(
+        &mut TexScene { oracle: true },
+        options("/native-tex-expected.png", 1)?,
+        fs.clone(),
+    )
+    .map_err(|e| fail(e.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/native-tex-expected.png"))
+        .map_err(|e| fail(e.to_string()))?;
+    let image = fmn_codec::decode_png(&expected, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    let row_height = usize::try_from(image.height / 3).unwrap();
+    let row_bytes = usize::try_from(image.width).unwrap() * 4;
+    for band in image.rgba.chunks_exact(row_height * row_bytes) {
+        if !band.chunks_exact(4).any(|pixel| pixel != &band[..4]) {
+            return Err(fail("a native TeX constructor's reference row has no ink"));
+        }
+    }
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-tex-{threads}.png");
+        let report = render_with_fs(
+            &mut TexScene { oracle: false },
+            options(&path, threads)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|e| fail(e.to_string()))?;
+        if actual != expected || report.artifact.frame_count != 1 {
+            return Err(fail(format!(
+                "native TeX constructors differ from native layout at {threads} threads"
+            )));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_tex_constructors")
+            .field("classes", 3_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("native-tex.png", expected)
+        .with_counter("native_tex_constructor_classes", 3)
+        .with_counter("native_tex_constructor_thread_counts", checked))
+}
+
+/// Prelude-only animation families converge to independently authored geometry.
+fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct PreludeScene;
+    impl SceneConstruct for PreludeScene {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let timing = AnimConfig {
+                run_time: 0.25,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            };
+            let square = stage.add(Square::new().side_length(1.0).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.shift(square, LEFT);
+            let other = stage.add(Square::new().side_length(1.0).color(RED))?;
+            stage.shift(other, RIGHT);
+            let members = cyclic_replace(stage, &[square, other], 0.0)?
+                .into_iter()
+                .map(|animation| {
+                    Box::new(animation.with_config(timing.clone())) as Box<dyn Animation>
+                })
+                .collect();
+            stage.play_prepared(members)?;
+            let shifted = apply_function(stage, square, |arena, target| {
+                arena.shift(target, UP);
+            })?;
+            stage.play(shifted.with_config(timing.clone()))?;
+            let dot = stage.add(Dot::new().radius(1.0).color(YELLOW))?;
+            let target = stage.add(Dot::new().radius(0.0).color(YELLOW))?;
+            stage.play(focus_on(dot, target, true).with_config(timing.clone()))?;
+            let fade = fade_out(stage, other, ORIGIN, 1.0)?.with_config(timing);
+            let sequence = show_creation_then_fade_out(
+                stage,
+                vec![Box::new(show_creation(other)), Box::new(fade)],
+                1.0,
+                true,
+            )?
+            .with_run_time(0.5);
+            stage.play(sequence)?;
+            assert_eq!(stage.get_center(square), [1.0, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+    struct Expected;
+    impl SceneConstruct for Expected {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let square = stage.add(Square::new().side_length(1.0).color(BLUE))?;
+            stage.set_fill(square, Some(BLUE), Some(1.0), None, true);
+            stage.shift(square, [1.0, 1.0, 0.0]);
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<RenderOptions, ScenarioError> {
+        let mut options = RenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.format = RenderFormat::Png;
+        options.config.camera.resolution = (64, 48);
+        options.config.camera.fps = 8;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        Ok(options)
+    };
+    let fs = std::sync::Arc::new(VirtualFs::new());
+    render_with_fs(&mut Expected, options("/expected.png", 1)?, fs.clone())
+        .map_err(|e| fail(e.to_string()))?;
+    let expected = fs
+        .read(std::path::Path::new("/expected.png"))
+        .map_err(|e| fail(e.to_string()))?;
+    let mut checked = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/actual-{threads}.png");
+        let report = render_with_fs(&mut PreludeScene, options(&path, threads)?, fs.clone())
+            .map_err(|e| fail(e.to_string()))?;
+        let actual = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|e| fail(e.to_string()))?;
+        if actual != expected || report.scene.play_count != 4 || report.artifact.frame_count != 1 {
+            return Err(fail(
+                "prelude families disagree with independently placed final geometry",
+            ));
+        }
+        checked += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.prelude_families")
+            .field("families", 4_u64)
+            .field("thread_counts", checked),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("prelude.png", expected)
+        .with_counter("prelude_families", 4)
+        .with_counter("prelude_thread_counts", checked))
+}
+
+/// Native scene cues reach canonical WAV bytes at every requested worker count.
+fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Cues;
+    impl fmn::SceneConstruct for Cues {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.scene_mut().add_sound("/pulse.wav", 0.0, None, None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("/pulse.wav", -0.125, None, None)?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let source = fmn_codec::encode_wav(1, 32, fmn_codec::SampleFormat::F32, &[0.25; 12]);
+    let source_bytes = source.len();
+    fs.insert("/pulse.wav", source);
+    // First cue occupies samples [0,12), the second [4,16): independently
+    // computed overlap on the 32 Hz sample grid, without invoking the mixer.
+    let mut expected_samples = vec![0.25_f32; 16];
+    expected_samples[4..12].fill(0.5);
+    let expected = fmn_codec::encode_wav(1, 32, fmn_codec::SampleFormat::S16, &expected_samples);
+    let mut checked = 0;
+    let mut total_cues = 0;
+    let mut total_samples = 0;
+    let mut first_wav = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/native-soundtrack-{threads}.wav");
+        let mut options = fmn::SoundtrackRenderOptions::new(&path)
+            .map_err(|error| fail(format!("native soundtrack options: {error}")))?;
+        options.config.camera.fps = 8;
+        options.config.camera.resolution = (0, 0);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.mixer.sample_rate = 32;
+        options.mixer.channels = 1;
+        options.mixer.max_output_frames = 16;
+        options.threads = std::num::NonZeroUsize::new(threads)
+            .ok_or_else(|| fail("native soundtrack worker count is zero"))?;
+        options.max_scene_frames = 4;
+        options.max_output_bytes = expected.len() as u64;
+        options.preparation.max_cues = 2;
+        options.preparation.max_source_bytes = source_bytes;
+        options.preparation.max_decoded_samples = 12;
+        options.preparation.max_prepared_samples = 24;
+        options.typeset_cache = false;
+        let report = fmn::render_soundtrack_with_fs(&mut Cues, options, fs.clone())
+            .map_err(|error| fail(format!("native WAV at {threads} threads: {error}")))?;
+        let wav = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(format!("published native WAV: {error}")))?;
+        if wav != expected
+            || report.scene.time.frames() != 4
+            || report.scene.play_count != 2
+            || report.artifact.sample_frames != 16
+            || report.artifact.cues_mixed != 2
+            || report.artifact.clipped_samples != 0
+            || report.workers_used != threads
+            || report.inputs.len() != 2
+            || !Arc::ptr_eq(&report.inputs[0].bytes, &report.inputs[1].bytes)
+            || report
+                .inputs
+                .iter()
+                .any(|input| input.report.invocation.is_some())
+        {
+            return Err(fail(format!(
+                "native WAV lost cue timing, samples or receipts at {threads} threads"
+            )));
+        }
+        checked += 1;
+        total_cues += report.artifact.cues_mixed as u64;
+        total_samples += report.artifact.sample_frames;
+        if first_wav.is_none() {
+            first_wav = Some(wav);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_soundtrack_wav")
+            .field("thread_counts", checked)
+            .field("cues_mixed", total_cues)
+            .field("sample_frames", total_samples),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            "native-soundtrack.wav",
+            first_wav.ok_or_else(|| fail("no native WAV was published"))?,
+        )
+        .with_counter("native_soundtrack_thread_counts", checked)
+        .with_counter("native_soundtrack_cues_mixed", total_cues)
+        .with_counter("native_soundtrack_sample_frames", total_samples))
+}
+
+/// The facade's MP4 request with no ffmpeg capability is a named capability
+/// refusal (D2) that runs no scene code and publishes nothing; a native
+/// format from the same options still renders.
+fn failure_facade_video_capability_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Shift {
+        ran: bool,
+    }
+    impl fmn::SceneConstruct for Shift {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            self.ran = true;
+            let dot = stage.add(fmn::library::Circle::new().radius(0.5))?;
+            let shift = dot.animate().shift([0.5, 0.0, 0.0])?;
+            stage.play(shift)?;
+            Ok(())
+        }
+    }
+    let options = |path: &str, format: fmn::RenderFormat| -> Result<_, ScenarioError> {
+        let mut options = fmn::RenderOptions::with_format(path, format)
+            .map_err(|error| fail(format!("bundled config: {error}")))?;
+        options.config.camera.resolution = (32, 18);
+        options.config.camera.fps = 8;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(1);
+        Ok(options)
+    };
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut refused_scene = Shift { ran: false };
+    let refusal = fmn::render_with_fs(
+        &mut refused_scene,
+        options("/facade.mp4", fmn::RenderFormat::Mp4)?,
+        fs.clone(),
+    );
+    let named = matches!(&refusal, Err(fmn::RenderError::Capability(message))
+        if message.contains("ffmpeg") && message.contains("PNG-sequence"));
+    let published = fs.read(std::path::Path::new("/facade.mp4")).is_ok();
+    let mut native_scene = Shift { ran: false };
+    let native = fmn::render_with_fs(
+        &mut native_scene,
+        options("/facade.y4m", fmn::RenderFormat::Y4m)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("native y4m render failed: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("rule", "facade-video-capability")
+            .field("refusal_named", truth(named))
+            .field("scene_ran", truth(refused_scene.ran))
+            .field("published", truth(published))
+            .field("native_frames", native.artifact.frame_count.to_string()),
+    );
+    if !named || refused_scene.ran || published || !native_scene.ran {
+        return Err(fail(format!(
+            "facade video refusal lost its identity: {refusal:?}, ran={}, published={published}",
+            refused_scene.ran
+        )));
+    }
+    ctx.counter("facade_video_refusal_named", 1);
+    ctx.counter("facade_native_frames", native.artifact.frame_count);
+    Ok(RunOutcome::ok()
+        .with_counter("facade_video_refusal_named", 1)
+        .with_counter("facade_native_frames", native.artifact.frame_count))
+}
+
+/// fm-cli-flag-timing-ht01: a window flag on a file render is refused by name
+/// with the capability exit before anything is published, and the same
+/// render without it keeps the requested timing (60 fps header, 23 frames).
+fn failure_cli_window_flag_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("failure_cli_window_flag")?;
+    let render = |name: &str, extra: &[&str]| -> Result<_, ScenarioError> {
+        let output_dir = dir.join(name);
+        let output_text = output_dir
+            .to_str()
+            .ok_or_else(|| fail("window-flag output path is not UTF-8"))?
+            .to_owned();
+        let mut argv = vec![
+            "--robot",
+            "--format",
+            "y4m",
+            "--resolution",
+            "64x36",
+            "--fps",
+            "60",
+            "--threads",
+            "1",
+        ];
+        argv.extend_from_slice(extra);
+        argv.extend_from_slice(&["--video_dir", &output_text]);
+        argv.extend_from_slice(&[fmn_cli::BUILTIN_SCENE_SOURCE, "circle_shift.v1"]);
+        Ok((fmn_cli::run(argv), output_dir))
+    };
+    let (refused, refused_dir) = render("presenter", &["-p"])?;
+    let published_nothing = !refused_dir.exists()
+        || std::fs::read_dir(&refused_dir)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+    let names_studio = refused.stdout.contains("fmn studio");
+    let (plain, plain_dir) = render("plain", &[])?;
+    let artifact = std::fs::read_dir(&plain_dir)
+        .map_err(|error| fail(format!("list plain output: {error}")))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| path.extension().is_some_and(|ext| ext == "y4m"))
+        .ok_or_else(|| fail("the plain render published no y4m"))?;
+    let bytes =
+        std::fs::read(&artifact).map_err(|error| fail(format!("read plain y4m: {error}")))?;
+    let header_end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| fail("y4m header line missing"))?;
+    let header = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
+    let frames = bytes
+        .windows(6)
+        .filter(|window| window == b"FRAME\n")
+        .count();
+    let rate_ok = header.split_whitespace().any(|token| token == "F60:1");
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("rule", "window-flag-on-file-render")
+            .field("refused_code", u64::from(refused.code))
+            .field("published_nothing", truth(published_nothing))
+            .field("names_studio", truth(names_studio))
+            .field("plain_header", header.clone())
+            .field("plain_frames", frames),
+    );
+    if refused.code != 4
+        || !published_nothing
+        || !names_studio
+        || plain.code != 0
+        || !rate_ok
+        || frames != 23
+    {
+        return Err(fail(format!(
+            "window flag: refused code={} published_nothing={published_nothing} \
+             names_studio={names_studio} stdout={:?}; plain code={} header={header:?} frames={frames}",
+            refused.code, refused.stdout, plain.code
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_window_flag_refused", 1)
+        .with_counter("cli_plain_render_frames", frames as u64))
+}
+
+/// Collect real host capabilities through the same in-process CLI dispatch
+/// used by the shipping executable. The optional encoder is deliberately
+/// absent, so this scenario does not depend on an installed ffmpeg or probe
+/// its hardware. Strict field parsing also lives in the doctor_smoke target;
+/// the harness's NdjsonSchema assertion covers its own event log only.
+fn cli_doctor_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_doctor")?;
+    let missing = dir.join("missing-ffmpeg");
+    let cache = dir.join("cache");
+    let missing_text = missing
+        .to_str()
+        .ok_or_else(|| fail("doctor scenario ffmpeg path is not UTF-8"))?;
+    let cache_text = cache
+        .to_str()
+        .ok_or_else(|| fail("doctor scenario cache path is not UTF-8"))?;
+    let base = [
+        "doctor",
+        "--ffmpeg",
+        missing_text,
+        "--cache-dir",
+        cache_text,
+        "--threads",
+        "1",
+    ];
+    let robot = fmn_cli::run(base.into_iter().chain(["--robot"]));
+    let kinds = [
+        "topology",
+        "execution_plan",
+        "ffmpeg",
+        "cache",
+        "fonts",
+        "math_packs",
+        "certification",
+    ];
+    let lines: Vec<_> = robot.stdout.lines().collect();
+    if robot.code != 0
+        || !robot.stderr.is_empty()
+        || !robot.stdout.ends_with('\n')
+        || lines.len() != kinds.len()
+        || !lines.iter().zip(kinds).all(|(line, kind)| {
+            line.starts_with(&format!(
+                "{{\"schema\":\"fmn.doctor\",\"version\":1,\"kind\":\"{kind}\","
+            )) && line.ends_with('}')
+        })
+    {
+        return Err(fail("doctor omitted its ordered version-1 robot records"));
+    }
+    let human = fmn_cli::run(base);
+    if human.code != 0
+        || !human.stderr.is_empty()
+        || !human.stdout.starts_with("FrankenManim doctor\n")
+        || ![
+            "topology:",
+            "cores:",
+            "SIMD:",
+            "plan:",
+            "ffmpeg: unavailable",
+            "alternative:",
+            "cache:",
+            "fonts:",
+            "math packs:",
+            "certification:",
+        ]
+        .iter()
+        .all(|label| human.stdout.lines().any(|line| line.starts_with(label)))
+    {
+        return Err(fail("doctor human report omitted a capability section"));
+    }
+    let required = fmn_cli::run(base.into_iter().chain(["--robot", "--require-ffmpeg"]));
+    let refusal = required.stdout.lines().last().unwrap_or_default();
+    if required.code != 4
+        || !required.stderr.is_empty()
+        || required.stdout.lines().count() != 8
+        || !refusal.contains("\"kind\":\"error\"")
+        || !refusal.contains("\"exit_name\":\"capability\"")
+        || !refusal.contains("native PNG-sequence, GIF, and y4m outputs remain available")
+        || cache.exists()
+        || missing.exists()
+    {
+        return Err(fail(
+            "doctor lost its read-only capability refusal contract",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.cli.doctor")
+            .field("records", 7_u64)
+            .field("human_sections", 10_u64)
+            .field("required_ffmpeg_exit", 4_u64)
+            .field("read_only", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("doctor_records", 7)
+        .with_counter("doctor_human_sections", 10)
+        .with_counter("doctor_required_ffmpeg_exit", 4))
+}
+
+/// The certified contract permanently refuses accelerator work before
+/// output publication, even when the binary was compiled with an annex.
+fn failure_cli_certified_metal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_certified_metal_refusal")?;
+    let destination = dir.join("must-not-exist");
+    let destination_text = destination
+        .to_str()
+        .ok_or_else(|| fail("certified Metal refusal path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--reproducible",
+        "--engine",
+        "metal",
+        "--format",
+        "png_sequence",
+        "--video_dir",
+        destination_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let single_line = output.stdout.lines().count() == 1 && !output.stdout.is_empty();
+    let names_exit = output.stdout.contains("\"exit_name\":\"config\"");
+    let names_contract = output.stdout.contains("requires render.engine=cpu");
+    let clean_stderr = output.stderr.is_empty();
+    let no_output = !destination.exists();
+    let refused = output.code == 3
+        && single_line
+        && names_exit
+        && names_contract
+        && clean_stderr
+        && no_output;
+    ctx.event(
+        LogEvent::new("e2e.failure")
+            .field("contract", "certified-cpu-only")
+            .field("exit_named", truth(names_exit))
+            .field("contract_named", truth(names_contract))
+            .field("ndjson_single_line", truth(single_line))
+            .field("stderr_empty", truth(clean_stderr))
+            .field("output_absent", truth(no_output)),
+    );
+    ctx.counter("cli_certified_metal_refused", u64::from(refused));
+    if !refused {
+        return Err(fail(format!(
+            "certified Metal refusal drifted: code={} stdout={:?} stderr={:?} output_exists={}",
+            output.code,
+            output.stdout,
+            output.stderr,
+            destination.exists(),
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .exit_code(3)
+        .with_counter("cli_certified_metal_refused", 1))
+}
+
+const CLI_CERTIFIED_PLATFORM: bool = cfg!(any(
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
+    all(target_os = "macos", target_arch = "aarch64")
+));
+
+/// The production CLI composition root must agree with its doctor policy.
+/// Standard frames remain positive coverage on every functional target.
+fn cli_certification_admission_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_certification_admission")?;
+    let invoke = |args: &[&str]| fmn_cli::run(args.iter().copied());
+    let doctor = invoke(&["doctor", "--robot"]);
+    let doctor_text = &doctor.stdout;
+    let record = doctor_text
+        .lines()
+        .find(|line| line.contains("\"kind\":\"certification\""))
+        .ok_or_else(|| fail(format!("doctor lacks certification record: {doctor_text}")))?;
+    if doctor.code != 0
+        || !doctor.stderr.is_empty()
+        || !record.contains(&format!("\"supported\":{}", CLI_CERTIFIED_PLATFORM))
+    {
+        return Err(fail(format!("native doctor policy disagrees: {doctor:?}")));
+    }
+    let mut standard_frames = 0;
+    for certified in [false, true] {
+        let out = dir.join(if certified { "certified" } else { "standard" });
+        let cache = dir.join(if certified {
+            "certified-cache"
+        } else {
+            "standard-cache"
+        });
+        let out_text = out
+            .to_str()
+            .ok_or_else(|| fail("probe output is not UTF-8"))?;
+        let cache_text = cache
+            .to_str()
+            .ok_or_else(|| fail("probe cache is not UTF-8"))?;
+        let mut args = vec![
+            "--robot",
+            "--format",
+            "png_sequence",
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--cache-dir",
+            cache_text,
+            "--video_dir",
+            out_text,
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ];
+        if certified {
+            args.push("--reproducible");
+        }
+        let output = invoke(&args);
+        let stdout = &output.stdout;
+        if certified && !CLI_CERTIFIED_PLATFORM {
+            if output.code != 4
+                || !output.stderr.is_empty()
+                || stdout.lines().count() != 1
+                || !stdout.contains("\"exit_name\":\"capability\"")
+                || !stdout.contains("outside the Revision 4 certified matrix")
+                || !stdout.contains("use standard mode")
+                || out.exists()
+                || cache.exists()
+            {
+                return Err(fail(format!(
+                    "unsupported native certification had effects or wrong refusal: {output:?}"
+                )));
+            }
+            continue;
+        }
+        if output.code != 0 || !output.stderr.is_empty() {
+            return Err(fail(format!("supported native output failed: {output:?}")));
+        }
+        let manifest = ProvenanceManifest::from_bytes(
+            &std::fs::read(out.join("circle_shift.v1.manifest/manifest.fmnp"))
+                .map_err(|error| fail(format!("read native admission manifest: {error}")))?,
+        )
+        .map_err(|error| fail(format!("decode native admission manifest: {error}")))?;
+        let expected_mode = if certified {
+            fmn_output::ManifestMode::Certified
+        } else {
+            fmn_output::ManifestMode::Standard
+        };
+        if manifest.mode != expected_mode
+            || manifest.outputs.len() != 1
+            || manifest.outputs[0].certified != certified
+        {
+            return Err(fail("native admission mislabeled the published artifact"));
+        }
+        let sequence = out.join("circle_shift.v1");
+        if !sequence.join("FMN_COMPLETE").is_file() {
+            return Err(fail("native admission output is incomplete"));
+        }
+        let pngs = std::fs::read_dir(&sequence)
+            .map_err(|error| fail(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| fail(error.to_string()))?
+            .into_iter()
+            .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+            .count();
+        if pngs != 3 {
+            return Err(fail(format!(
+                "native admission expected 3 PNGs, got {pngs}"
+            )));
+        }
+        for frame in 0..3 {
+            let bytes = std::fs::read(sequence.join(format!("frame_{frame:06}.png")))
+                .map_err(|error| fail(error.to_string()))?;
+            let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(error.to_string()))?;
+            if (decoded.width, decoded.height) != (96, 54)
+                || !decoded
+                    .rgba
+                    .as_chunks::<4>()
+                    .0
+                    .windows(2)
+                    .any(|pair| pair[0] != pair[1])
+            {
+                return Err(fail(
+                    "native admission produced an empty or wrong-sized frame",
+                ));
+            }
+        }
+        if !certified {
+            standard_frames = 3;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.cli.certification_admission")
+            .field("certified_supported", truth(CLI_CERTIFIED_PLATFORM))
+            .field("standard_frames", "3")
+            .field("policy_agrees", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("native_standard_frames", standard_frames)
+        .with_counter("native_certification_contract", 1))
+}
+
+/// fm-certified-closure-integrity-4fei: the certified promise, checked from
+/// manifests alone. Two certified renders of one input at different thread
+/// counts share a semantic digest and agree on every certified output; a
+/// render of a different input (another resolution) is not comparable.
+fn determinism_manifest_compare_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("certified_manifest_compare")?;
+    let render = |name: &str, threads: &str, resolution: &str| {
+        let out = dir.join(name);
+        let out_text = out
+            .to_str()
+            .ok_or_else(|| fail("certified compare path is not UTF-8"))?
+            .to_owned();
+        let mut args = vec![
+            "--robot",
+            "--format",
+            "png_sequence",
+            "--resolution",
+            resolution,
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+            "--video_dir",
+            out_text.as_str(),
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ];
+        if CLI_CERTIFIED_PLATFORM {
+            args.push("--reproducible");
+        }
+        let output = fmn_cli::run(args);
+        if output.code != 0 {
+            return Err(fail(format!(
+                "certified render {name} failed: code={} stdout={:?} stderr={:?}",
+                output.code, output.stdout, output.stderr
+            )));
+        }
+        let bytes = std::fs::read(out.join("circle_shift.v1.manifest").join("manifest.fmnp"))
+            .map_err(|error| fail(format!("read {name} manifest: {error}")))?;
+        ProvenanceManifest::from_bytes(&bytes)
+            .map_err(|error| fail(format!("decode {name} manifest: {error}")))
+    };
+    let one = render("threads1", "1", "96x54")?;
+    let four = render("threads4", "4", "96x54")?;
+    let other = render("other_input", "1", "80x45")?;
+    let same = one
+        .compare(&four)
+        .map_err(|error| fail(format!("compare: {error}")))?;
+    let different = one
+        .compare(&other)
+        .map_err(|error| fail(format!("compare: {error}")))?;
+    let has_platform_record = one.items.iter().any(ClosureItem::is_platform_specific);
+    // C6 names every compiled font face by its exact bytes (bundling is
+    // not an exemption).
+    let fonts_recorded = fmn_text::bundled_faces().iter().all(|(name, bytes)| {
+        let path = format!("bundled-font/{name}");
+        one.items.iter().any(|item| {
+            item.item_id == 6
+                && item.virtual_path.as_deref() == Some(path.as_str())
+                && item.digest == sha256(bytes)
+        })
+    });
+    // ADR-0025: the manifest carries exactly the identity the binary reports,
+    // and that identity names its sources (a clean commit, or the commit plus
+    // the digest of its exact uncommitted state).
+    let version = fmn_cli::run(["--version", "--robot"]);
+    let reported = version
+        .stdout
+        .split("\"build_id\":\"")
+        .nth(1)
+        .and_then(|rest| rest.split('"').next())
+        .unwrap_or_default();
+    let build_named = !reported.is_empty()
+        && one.identity.build_id == reported
+        && fmn_output::certified_build_refusal(reported).is_none();
+    let agree = if CLI_CERTIFIED_PLATFORM {
+        same.certified_bits_agree()
+    } else {
+        same.semantic_equal
+            && !same.certified_both
+            && one.outputs == four.outputs
+            && one.outputs.iter().all(|output| !output.certified)
+    };
+    let distinguished = !different.semantic_equal
+        && !different.certified_bits_agree()
+        && one.outputs != other.outputs;
+    ctx.event(
+        LogEvent::new("e2e.determinism.manifest")
+            .field(
+                "mode",
+                if CLI_CERTIFIED_PLATFORM {
+                    "certified"
+                } else {
+                    "standard"
+                },
+            )
+            .field("same_input_agree", truth(agree))
+            .field("same_input_semantic_equal", truth(same.semantic_equal))
+            .field(
+                "other_input_semantic_equal",
+                truth(different.semantic_equal),
+            )
+            .field("platform_record", truth(has_platform_record))
+            .field("fonts_recorded", truth(fonts_recorded))
+            .field("build_identity_named", truth(build_named)),
+    );
+    let agree_counter = if CLI_CERTIFIED_PLATFORM {
+        "certified_manifest_agree"
+    } else {
+        "standard_manifest_agree"
+    };
+    let distinguished_counter = if CLI_CERTIFIED_PLATFORM {
+        "certified_manifest_input_distinguished"
+    } else {
+        "standard_manifest_input_distinguished"
+    };
+    ctx.counter(agree_counter, u64::from(agree));
+    ctx.counter(distinguished_counter, u64::from(distinguished));
+    if !agree || !distinguished || !has_platform_record || !fonts_recorded || !build_named {
+        return Err(fail(format!(
+            "certified manifest comparison drifted: same={same:?} other={different:?} platform_record={has_platform_record} fonts_recorded={fonts_recorded} build_id={:?} reported={reported:?}",
+            one.identity.build_id
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter(agree_counter, 1)
+        .with_counter(distinguished_counter, 1))
+}
+
+/// fm-inr.1: caller-authored baseline qualification bits are not authority.
+/// The real producer identity seam must downgrade them unless a live opaque
+/// host token from `perf_host` is present in the same process.
+fn failure_host_attestation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let key = BenchmarkKey {
+        profile_id: "caller-claimed-host-v1".to_owned(),
+        build_profile: fmn_conformance::perf::COMPILED_CARGO_PROFILE.to_owned(),
+        host_fingerprint: sha256(b"caller-host"),
+        toolchain_fingerprint: sha256(b"caller-toolchain"),
+        suite_lock_digest: sha256(b"caller-suite"),
+        benchmark_definition: sha256(b"definition"),
+        gate: GateId::Pg2,
+        scenario: "fill-canonical".to_owned(),
+        unit: MetricUnit::MegaPixelsPerSecondMilli,
+        engine: "fast-cpu".to_owned(),
+        tier: "portable".to_owned(),
+        thread_profile: "fixed-8".to_owned(),
+        execution_plan_digest: sha256(b"plan"),
+        config_digest: sha256(b"config"),
+        cache_state: "warm".to_owned(),
+        output_mode: "raw".to_owned(),
+        external_tool_fingerprint: None,
+        bare_metal: true,
+        isolated: true,
+    };
+    let (found, evidence) = measurement_identity(&key, None)
+        .map_err(|error| fail(format!("host identity refusal: {error}")))?;
+    let refused = !found.bare_metal && !found.isolated && evidence.is_empty();
+    ctx.event(
+        LogEvent::new("performance.host_attestation")
+            .field("token_present", "false")
+            .field("bare_metal", truth(found.bare_metal))
+            .field("isolated", truth(found.isolated))
+            .field("caller_claim_refused", truth(refused)),
+    );
+    ctx.counter("host_qualification_refused", u64::from(refused));
+    if !refused {
+        return Err(fail(
+            "caller-authored host booleans survived without a live attestation token",
+        ));
+    }
+    Ok(RunOutcome::ok().with_counter("host_qualification_refused", 1))
+}
+
+/// Studio's first real Gauntlet row: select a shipped scene through the CLI
+/// schema and compose its preview through the same worker renderer root used by
+/// `fmn studio`. The CLI runtime-boundary suite separately proves that this
+/// root survives the disposable-worker and loopback-host boundary.
+fn studio_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let invocation = fmn_cli::parse_args([
+        "studio",
+        "--no-browser",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ])
+    .map_err(|error| fail(format!("parse Studio scenario: {error}")))?;
+    let fmn_cli::Invocation::Studio(command) = invocation else {
+        return Err(fail("Studio scenario parsed to a different front door"));
+    };
+    let stream = fmn_cli::compose_studio_preview_frame(&fmn_platform::fs::StdFs, &command, 1)
+        .map_err(|error| fail(format!("compose Studio preview: {error}")))?;
+    stream
+        .validate(fmn_studio::ProtocolLimits::default())
+        .map_err(|error| fail(format!("validate Studio frame protocol: {error}")))?;
+    let backend_is_stream = stream.render_backends.len() == 1
+        && stream.render_backends[0].role() == fmn_scene::RenderBackendRole::FrameStream;
+    let fmn_studio::FramePayload::Pipe { bytes, .. } = stream.payload else {
+        return Err(fail(
+            "Studio scenario did not return its bounded pipe frame",
+        ));
+    };
+    let decoded = fmn_codec::decode_png(
+        &bytes,
+        &fmn_codec::PngLimits {
+            max_pixels: u64::from(stream.width) * u64::from(stream.height),
+            ..fmn_codec::PngLimits::default()
+        },
+    )
+    .map_err(|error| fail(format!("decode Studio preview PNG: {error}")))?;
+    let dimensions_match = decoded.width == 96 && decoded.height == 54;
+    ctx.event(
+        LogEvent::new("e2e.studio.preview")
+            .field("scene", stream.scene.as_str())
+            .field("frame", stream.frame_index)
+            .field("encoding", "png")
+            .field("backend_is_stream", truth(backend_is_stream))
+            .field("dimensions_match", truth(dimensions_match)),
+    );
+    ctx.counter("studio_preview_frames", 1);
+    ctx.counter("studio_png_dimensions", u64::from(dimensions_match));
+    ctx.counter("studio_backend_journaled", u64::from(backend_is_stream));
+    if stream.scene != "circle_shift.v1"
+        || stream.frame_index != 1
+        || !backend_is_stream
+        || !dimensions_match
+    {
+        return Err(fail(format!(
+            "Studio preview drifted: scene={:?} frame={} backend_stream={} dimensions={}x{}",
+            stream.scene, stream.frame_index, backend_is_stream, decoded.width, decoded.height
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("studio_frame.png", bytes)
+        .with_counter("studio_preview_frames", 1)
+        .with_counter("studio_png_dimensions", 1)
+        .with_counter("studio_backend_journaled", 1))
+}
+
+/// Export an ordinary planar scene, then retain one production Studio worker
+/// while seeking both forward and backward through its FMTL frames.
+fn studio_compiled_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::{Square, Style};
+    use fmn_studio::{FramePayload, SupervisorRequest, WorkerResponse};
+
+    let mut stage = Stage::new();
+    let square = stage.add(Square::new().style(Style::default().fill_opacity(1.0)));
+    stage
+        .add_to_scene(square)
+        .map_err(|error| fail(error.to_string()))?;
+    stage
+        .add_dt_updater(
+            square,
+            |stage, mob, dt| {
+                stage.shift(mob, [2.0 * dt, 0.5 * dt, 0.0]);
+            },
+            false,
+        )
+        .map_err(|error| fail(error.to_string()))?;
+    let mut timeline = fmn::animation::Timeline::new(8)
+        .map_err(|error| fail(format!("preview timeline: {error}")))?;
+    timeline
+        .wait(0.5)
+        .map_err(|error| fail(error.to_string()))?;
+    let bundle =
+        fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(ctx.seed))
+            .map_err(|error| fail(format!("export planar preview: {error}")))?;
+    let fs = fmn_platform::fs::VirtualFs::new();
+    fs.insert("/retained_preview.fmtl", bundle);
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut frame_count = 0;
+    let mut refusals = 0;
+    for threads in ["1", "4", "16"] {
+        let mut args = vec![
+            "studio",
+            "--no-browser",
+            "--resolution",
+            "96x64",
+            "--threads",
+            threads,
+        ];
+        if CLI_CERTIFIED_PLATFORM {
+            args.push("--reproducible");
+        }
+        args.push("/retained_preview.fmtl");
+        let fmn_cli::Invocation::Studio(command) = fmn_cli::parse_args(args)
+            .map_err(|error| fail(format!("parse compiled preview: {error}")))?
+        else {
+            return Err(fail("compiled preview did not select Studio"));
+        };
+        let mut worker = fmn_cli::compose_studio_preview_worker(&fs, &command)
+            .map_err(|error| fail(format!("compose retained preview: {error}")))?;
+        let scene = worker
+            .active_scene()
+            .ok_or_else(|| fail("compiled worker omitted its active scene"))?
+            .to_owned();
+        let mut frames = Vec::new();
+        for index in [0, 3, 1, 1, 2, 0] {
+            let WorkerResponse::Frame(stream) = worker
+                .handle(SupervisorRequest::Scrub {
+                    scene: scene.clone(),
+                    frame: index,
+                })
+                .map_err(|error| fail(format!("compiled preview scrub: {error}")))?
+            else {
+                return Err(fail("compiled scrub omitted its frame"));
+            };
+            stream
+                .validate(fmn_studio::ProtocolLimits::default())
+                .map_err(|error| fail(format!("compiled preview protocol: {error}")))?;
+            let fresh = fmn_cli::compose_studio_preview_frame(&fs, &command, index)
+                .map_err(|error| fail(format!("fresh preview oracle: {error}")))?;
+            if stream.frame_index != index as u64
+                || stream.scene != scene
+                || stream.render_backends != fresh.render_backends
+                || (stream.width, stream.height) != (96, 64)
+            {
+                return Err(fail(
+                    "retained preview changed its frame or backend identity",
+                ));
+            }
+            let (
+                FramePayload::Pipe { bytes, .. },
+                FramePayload::Pipe {
+                    bytes: expected, ..
+                },
+            ) = (stream.payload, fresh.payload)
+            else {
+                return Err(fail("compiled preview omitted its bounded PNG payload"));
+            };
+            if bytes != expected {
+                return Err(fail(format!(
+                    "retained preview differs at frame {index}, threads={threads}"
+                )));
+            }
+            frames.push(bytes);
+            frame_count += 1;
+        }
+        if frames[0] == frames[1] || frames[2] != frames[3] || frames[0] != frames[5] {
+            return Err(fail(
+                "compiled preview lost motion or repeatable backward seeks",
+            ));
+        }
+        if worker
+            .handle(SupervisorRequest::Scrub {
+                scene: scene.clone(),
+                frame: 99,
+            })
+            .is_ok()
+        {
+            return Err(fail("compiled preview accepted an out-of-range frame"));
+        }
+        let WorkerResponse::Frame(recovered) = worker
+            .handle(SupervisorRequest::Scrub { scene, frame: 0 })
+            .map_err(|error| fail(format!("preview recovery: {error}")))?
+        else {
+            return Err(fail("preview recovery omitted its frame"));
+        };
+        let FramePayload::Pipe { bytes, .. } = recovered.payload else {
+            return Err(fail("preview recovery omitted its PNG"));
+        };
+        if bytes != frames[0] {
+            return Err(fail("refused scrub changed the next retained preview"));
+        }
+        frame_count += 1;
+        refusals += 1;
+        if let Some(expected) = &baseline {
+            if &frames != expected {
+                return Err(fail(format!(
+                    "compiled preview changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+    }
+    let frames = baseline.ok_or_else(|| fail("compiled preview rendered no frames"))?;
+    ctx.event(
+        LogEvent::new("e2e.studio.compiled_preview")
+            .field("thread_counts", 3_u64)
+            .field("frames", frame_count)
+            .field("refusal_recoveries", refusals),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("compiled_preview_first.png", frames[0].clone())
+        .with_artifact("compiled_preview_moved.png", frames[1].clone())
+        .with_counter("compiled_preview_thread_counts", 3)
+        .with_counter("compiled_preview_frames", frame_count)
+        .with_counter("compiled_preview_refusal_recoveries", refusals))
+}
+
+/// Exercise the live mixed 3D registration through the public Studio root.
+/// Surfaces, point clouds, images and vectors must reach the camera renderer,
+/// retain their motion, and produce identical pixels at either thread width.
+fn studio_camera_preview_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let fs = fmn_platform::fs::VirtualFs::new();
+    let mut baseline = None;
+    let mut camera_frames = 0_u64;
+    let mut moving_runs = 0_u64;
+    let mut matching_runs = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in ["1", "4"] {
+        let invocation = fmn_cli::parse_args([
+            "studio",
+            "--no-browser",
+            "--resolution",
+            "64x48",
+            "--fps",
+            "8",
+            "--threads",
+            threads,
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "mixed_camera.v1",
+        ])
+        .map_err(|error| fail(format!("parse live camera Studio: {error}")))?;
+        let fmn_cli::Invocation::Studio(command) = invocation else {
+            return Err(fail("camera Studio parsed to a different front door"));
+        };
+        let mut frames = Vec::new();
+        for index in [0, 8] {
+            let stream = fmn_cli::compose_studio_preview_frame(&fs, &command, index)
+                .map_err(|error| fail(format!("compose live camera frame: {error}")))?;
+            stream
+                .validate(fmn_studio::ProtocolLimits::default())
+                .map_err(|error| fail(format!("validate live camera frame: {error}")))?;
+            let camera_identity = stream.render_backends.len() == 1
+                && stream.render_backends[0]
+                    .identity()
+                    .windows(b"lumen-retained-camera-cpu-v1".len())
+                    .any(|part| part == b"lumen-retained-camera-cpu-v1");
+            if !camera_identity
+                || stream.scene != "mixed_camera.v1"
+                || stream.frame_index != index as u64
+                || (stream.width, stream.height) != (64, 48)
+            {
+                return Err(fail(
+                    "live Studio lost its requested scene, frame or camera renderer",
+                ));
+            }
+            let fmn_studio::FramePayload::Pipe { bytes, .. } = stream.payload else {
+                return Err(fail("live camera Studio omitted its bounded PNG payload"));
+            };
+            let decoded = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(format!("decode live camera frame: {error}")))?;
+            if (decoded.width, decoded.height) != (64, 48) {
+                return Err(fail(
+                    "live camera PNG dimensions differ from the frame protocol",
+                ));
+            }
+            camera_frames += 1;
+            ctx.event(
+                LogEvent::new("e2e.studio.camera_preview")
+                    .field("scene", "mixed_camera.v1")
+                    .field("threads", threads)
+                    .field("frame", index as u64)
+                    .field("camera_identity", truth(camera_identity))
+                    .field("sha256", sha256(&decoded.rgba).to_hex()),
+            );
+            frames.push(decoded.rgba);
+            if threads == "1" && index == 8 {
+                artifact = bytes;
+            }
+        }
+        moving_runs += u64::from(frames[0] != frames[1]);
+        if let Some(expected) = &baseline {
+            matching_runs += u64::from(&frames == expected);
+        } else {
+            baseline = Some(frames);
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("studio_camera_frame.png", artifact)
+        .with_counter("studio_camera_frames", camera_frames)
+        .with_counter("studio_camera_moving_runs", moving_runs)
+        .with_counter("studio_camera_matching_runs", matching_runs))
+}
+
+const STUDIO_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const STUDIO_HEADER_LIMIT: usize = 16 * 1024;
+const STUDIO_BODY_LIMIT: usize = 8 * 1024 * 1024;
+
+/// The actual Enter-based terminal front door, including its disposable worker,
+/// frame IPC, inspector and clean shutdown. The capability-bearing readiness
+/// line is never retained in an artifact or included in failure diagnostics.
+fn studio_terminal_controls_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            drop(self.0.stdin.take());
+            if !matches!(self.0.try_wait(), Ok(Some(_))) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+    }
+
+    let directory = scenario_dir("studio_terminal_controls")?;
+    let mut command = std::process::Command::new(env!("CARGO_BIN_FILE_FMN_CLI_fmn"));
+    command
+        .args([
+            "studio",
+            "--tui",
+            "--no-browser",
+            "--port",
+            "0",
+            "--resolution",
+            "32x18",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+        .current_dir(&directory)
+        .env_clear()
+        .env("PATH", "")
+        .env("TERM", "xterm-kitty")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if cfg!(windows)
+        && let Some(root) = std::env::var_os("SystemRoot")
+    {
+        command.env("SystemRoot", root);
+    }
+    let mut process = ChildGuard(
+        command
+            .spawn()
+            .map_err(|error| studio_io_error("terminal spawn", error))?,
+    );
+    let stdout = process
+        .0
+        .stdout
+        .take()
+        .ok_or_else(|| fail("terminal stdout missing"))?;
+    let stderr = process
+        .0
+        .stderr
+        .take()
+        .ok_or_else(|| fail("terminal stderr missing"))?;
+    let (output_send, output_receive) = std::sync::mpsc::sync_channel(1);
+    let (error_send, error_receive) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout
+            .take((STUDIO_BODY_LIMIT + 1) as u64)
+            .read_to_end(&mut bytes)
+            .map(|_| bytes);
+        let _ = output_send.send(result);
+    });
+    std::thread::spawn(move || {
+        let _ = error_send.send(studio_drain(stderr));
+    });
+    process
+        .0
+        .stdin
+        .take()
+        .ok_or_else(|| fail("terminal stdin missing"))?
+        // Windowed scenes use the plan's fixed 30 FPS, overriding --fps 8.
+        // The 0.25 s play and 0.125 s hold produce 8 + 4 captures after
+        // constructed frame zero; seeking 0.25 s rounds to frame eight.
+        .write_all(b"seek 0.25s\nstep -1\nmark middle\nfirst\nlabel middle\ninspect\nquit\n")
+        .map_err(|error| studio_io_error("terminal commands", error))?;
+    let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+    loop {
+        if let Some(status) = process
+            .0
+            .try_wait()
+            .map_err(|error| studio_io_error("terminal reap", error))?
+        {
+            if !status.success() {
+                return Err(fail("terminal Studio did not exit successfully"));
+            }
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(fail("terminal Studio shutdown deadline expired"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let output = output_receive
+        .recv_timeout(STUDIO_IO_TIMEOUT)
+        .map_err(|_| fail("terminal output reader did not finish"))?
+        .map_err(|error| studio_io_error("terminal output", error))?;
+    let errors = error_receive
+        .recv_timeout(STUDIO_IO_TIMEOUT)
+        .map_err(|_| fail("terminal error reader did not finish"))?
+        .map_err(|error| studio_io_error("terminal diagnostics", error))?;
+    if output.len() > STUDIO_BODY_LIMIT || errors != 0 {
+        return Err(fail(
+            "terminal transcript exceeded its budget or emitted diagnostics",
+        ));
+    }
+    let transcript =
+        std::str::from_utf8(&output).map_err(|_| fail("terminal transcript is not UTF-8"))?;
+    for expected in [
+        "type a command, then press Enter",
+        "Frame 8/12 | 0.267 s | paused",
+        "Frame 7/12 | 0.233 s | paused",
+        "Frame 0/12 | 0.000 s | paused",
+        "Bookmark saved",
+        "Inspector at frame 7",
+        "root=",
+        "\u{1b}_Ga=T,f=100",
+    ] {
+        if !transcript.contains(expected) {
+            return Err(fail(format!(
+                "terminal control or graphics response is missing: {expected:?}"
+            )));
+        }
+    }
+    if transcript.contains("Studio: ") {
+        return Err(fail("terminal command was refused unexpectedly"));
+    }
+    ctx.set_fps((30, 1));
+    ctx.event(
+        LogEvent::new("e2e.studio.terminal")
+            .field("commands", 6u64)
+            .field("clean_exit", "true"),
+    );
+    Ok(RunOutcome::ok().with_counter("studio_terminal_commands", 6))
+}
+
+/// Own the real CLI process from spawn through every failure path. Pipe
+/// readers retain no diagnostics containing the readiness capability.
+struct StudioProcess {
+    child: std::process::Child,
+    stdout_done: std::sync::mpsc::Receiver<Result<usize, std::io::Error>>,
+    stderr_done: std::sync::mpsc::Receiver<Result<usize, std::io::Error>>,
+}
+
+fn studio_io_error(operation: &'static str, error: std::io::Error) -> ScenarioError {
+    fail(format!("Studio {operation}: {:?}", error.kind()))
+}
+
+fn studio_drain(mut reader: impl Read) -> Result<usize, std::io::Error> {
+    let mut count = 0usize;
+    let mut bytes = [0_u8; 4096];
+    loop {
+        let read = reader.read(&mut bytes)?;
+        if read == 0 {
+            return Ok(count);
+        }
+        // Continue draining to prevent pipe backpressure, retaining only a
+        // bounded count. Any output beyond readiness is a test refusal.
+        count = count.saturating_add(read).min(STUDIO_BODY_LIMIT);
+    }
+}
+
+impl StudioProcess {
+    fn launch(directory: &std::path::Path) -> Result<(Self, StudioEndpoint), ScenarioError> {
+        Self::launch_named(directory, "tex_span.v1")
+    }
+
+    fn launch_named(
+        directory: &std::path::Path,
+        scene: &str,
+    ) -> Result<(Self, StudioEndpoint), ScenarioError> {
+        Self::launch_named_with_flags(directory, scene, &[])
+    }
+
+    fn launch_named_with_flags(
+        directory: &std::path::Path,
+        scene: &str,
+        flags: &[&str],
+    ) -> Result<(Self, StudioEndpoint), ScenarioError> {
+        let (ready_send, ready_recv) = std::sync::mpsc::sync_channel(1);
+        let (stdout_send, stdout_done) = std::sync::mpsc::sync_channel(1);
+        let (stderr_send, stderr_done) = std::sync::mpsc::sync_channel(1);
+        let mut command = std::process::Command::new(env!("CARGO_BIN_FILE_FMN_CLI_fmn"));
+        command
+            .args([
+                "studio",
+                "--robot",
+                "--no-browser",
+                "--resolution",
+                "96x54",
+                "--fps",
+                "8",
+                "--threads",
+                "1",
+            ])
+            .args(flags)
+            .args([fmn_cli::BUILTIN_SCENE_SOURCE, scene])
+            .current_dir(directory)
+            .env_clear()
+            .env("PATH", "")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        // Native Windows system DLL lookup retains its host-owned directory;
+        // no Python, user configuration, or executable search path is inherited.
+        if cfg!(windows)
+            && let Some(root) = std::env::var_os("SystemRoot")
+        {
+            command.env("SystemRoot", root);
+        }
+        let child = command
+            .spawn()
+            .map_err(|error| studio_io_error("spawn", error))?;
+        let mut process = Self {
+            child,
+            stdout_done,
+            stderr_done,
+        };
+        let stdout = process
+            .child
+            .stdout
+            .take()
+            .ok_or_else(|| fail("Studio stdout is missing"))?;
+        let stderr = process
+            .child
+            .stderr
+            .take()
+            .ok_or_else(|| fail("Studio stderr is missing"))?;
+        std::thread::Builder::new()
+            .name("studio-e2e-stdout".to_owned())
+            .spawn(move || {
+                let mut reader = std::io::BufReader::new(stdout);
+                let mut line = Vec::new();
+                let ready = reader
+                    .by_ref()
+                    .take((STUDIO_HEADER_LIMIT + 1) as u64)
+                    .read_until(b'\n', &mut line)
+                    .map(|_| line);
+                let _ = ready_send.send(ready);
+                let _ = stdout_send.send(studio_drain(reader));
+            })
+            .map_err(|error| studio_io_error("stdout reader", error))?;
+        std::thread::Builder::new()
+            .name("studio-e2e-stderr".to_owned())
+            .spawn(move || {
+                let _ = stderr_send.send(studio_drain(stderr));
+            })
+            .map_err(|error| studio_io_error("stderr reader", error))?;
+        let ready = ready_recv
+            .recv_timeout(STUDIO_IO_TIMEOUT)
+            .map_err(|_| fail("Studio readiness deadline expired"))?
+            .map_err(|error| studio_io_error("readiness", error))?;
+        if ready.len() > STUDIO_HEADER_LIMIT || !ready.ends_with(b"\n") {
+            return Err(fail("Studio readiness exceeded its bounded line contract"));
+        }
+        let endpoint = StudioEndpoint::from_ready(&ready, scene)?;
+        Ok((process, endpoint))
+    }
+
+    fn wait_until(
+        &mut self,
+        deadline: std::time::Instant,
+    ) -> Result<std::process::ExitStatus, ScenarioError> {
+        loop {
+            if let Some(status) = self
+                .child
+                .try_wait()
+                .map_err(|error| studio_io_error("reap", error))?
+            {
+                return Ok(status);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(fail("Studio shutdown deadline expired"));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn finish(&mut self) -> Result<(), ScenarioError> {
+        drop(self.child.stdin.take());
+        let status = self.wait_until(std::time::Instant::now() + STUDIO_IO_TIMEOUT)?;
+        if !status.success() {
+            return Err(fail("Studio did not exit successfully after stdin EOF"));
+        }
+        for receiver in [&self.stdout_done, &self.stderr_done] {
+            let count = receiver
+                .recv_timeout(STUDIO_IO_TIMEOUT)
+                .map_err(|_| fail("Studio pipe reader did not finish after process exit"))?
+                .map_err(|error| studio_io_error("pipe drain", error))?;
+            if count != 0 {
+                return Err(fail(
+                    "Studio emitted unexpected diagnostics after readiness",
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for StudioProcess {
+    fn drop(&mut self) {
+        drop(self.child.stdin.take());
+        if self
+            .wait_until(std::time::Instant::now() + std::time::Duration::from_secs(3))
+            .is_err()
+        {
+            let _ = self.child.kill();
+            let _ = self.wait_until(std::time::Instant::now() + std::time::Duration::from_secs(3));
+        }
+    }
+}
+
+/// The capability never implements Debug, enters an error, or reaches logs.
+struct StudioEndpoint {
+    address: std::net::SocketAddr,
+    capability: String,
+}
+
+impl StudioEndpoint {
+    fn from_ready(bytes: &[u8], scene: &str) -> Result<Self, ScenarioError> {
+        let ready =
+            std::str::from_utf8(bytes).map_err(|_| fail("Studio readiness is not UTF-8"))?;
+        if !ready.contains("\"kind\":\"studio_ready\"")
+            || !ready.contains(&format!("\"scene\":\"{scene}\""))
+            || !ready.contains("\"worker_generation\":1")
+        {
+            return Err(fail("Studio readiness has the wrong production identity"));
+        }
+        let url = ready
+            .split_once("\"url\":\"")
+            .and_then(|(_, rest)| rest.split_once('"').map(|(url, _)| url))
+            .and_then(|url| url.strip_prefix("http://"))
+            .ok_or_else(|| fail("Studio readiness omitted its HTTP capability URL"))?;
+        let (authority, capability) = url
+            .split_once("/?cap=")
+            .ok_or_else(|| fail("Studio readiness URL has an unexpected shape"))?;
+        let address = authority
+            .parse::<std::net::SocketAddr>()
+            .map_err(|_| fail("Studio readiness authority is not a socket address"))?;
+        if !address.ip().is_loopback()
+            || address.port() == 0
+            || capability.len() != 64
+            || !capability.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            return Err(fail(
+                "Studio readiness did not supply a loopback session capability",
+            ));
+        }
+        Ok(Self {
+            address,
+            capability: capability.to_owned(),
+        })
+    }
+
+    fn connect(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+    ) -> Result<std::io::BufReader<std::net::TcpStream>, ScenarioError> {
+        let mut stream = std::net::TcpStream::connect_timeout(&self.address, STUDIO_IO_TIMEOUT)
+            .map_err(|error| studio_io_error("connect", error))?;
+        stream
+            .set_write_timeout(Some(STUDIO_IO_TIMEOUT))
+            .map_err(|error| studio_io_error("write timeout", error))?;
+        let header = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {}\r\nOrigin: http://{}\r\nUser-Agent: OpenAI File Downloader, XaiImageApiFetch/1.0\r\nX-FMN-Capability: {}\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            self.address,
+            self.address,
+            self.capability,
+            body.len(),
+        );
+        stream
+            .write_all(header.as_bytes())
+            .and_then(|()| stream.write_all(body))
+            .map_err(|error| studio_io_error("request write", error))?;
+        Ok(std::io::BufReader::new(stream))
+    }
+
+    fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: &[u8],
+        status: u16,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        let mut reader = self.connect(method, path, body)?;
+        let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+        let header = studio_read_header(&mut reader, deadline)
+            .map_err(|error| fail(format!("Studio {method} {path} headers: {error}")))?;
+        if !header.starts_with(&format!("HTTP/1.1 {status} ")) {
+            return Err(fail(format!(
+                "Studio {path} returned an unexpected HTTP status"
+            )));
+        }
+        if !studio_header_field(&header, "Content-Type")?.starts_with("application/json") {
+            return Err(fail("Studio API response is not JSON"));
+        }
+        let count = studio_header_number(&header, "Content-Length")?;
+        let bytes = studio_read_body(&mut reader, count, deadline)
+            .map_err(|error| fail(format!("Studio {method} {path} body: {error}")))?;
+        if bytes
+            .windows(self.capability.len())
+            .any(|part| part == self.capability.as_bytes())
+        {
+            return Err(fail(
+                "Studio API unexpectedly disclosed its session capability",
+            ));
+        }
+        Ok(bytes)
+    }
+
+    fn stream(&self) -> Result<StudioFrameReader, ScenarioError> {
+        let mut reader = self.connect("GET", "/stream", b"")?;
+        let header =
+            studio_read_header(&mut reader, std::time::Instant::now() + STUDIO_IO_TIMEOUT)?;
+        if !header.starts_with("HTTP/1.1 200 ")
+            || studio_header_field(&header, "Content-Type")?
+                != format!(
+                    "multipart/x-mixed-replace; boundary={}",
+                    fmn_studio::MULTIPART_BOUNDARY
+                )
+        {
+            return Err(fail("Studio did not open its real multipart PNG stream"));
+        }
+        Ok(StudioFrameReader { reader })
+    }
+}
+
+fn studio_read_some(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    bytes: &mut [u8],
+    deadline: std::time::Instant,
+) -> Result<usize, ScenarioError> {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .filter(|duration| !duration.is_zero())
+        .ok_or_else(|| fail("Studio HTTP response deadline expired"))?;
+    reader
+        .get_mut()
+        .set_read_timeout(Some(remaining))
+        .map_err(|error| studio_io_error("read timeout", error))?;
+    let read = reader
+        .read(bytes)
+        .map_err(|error| studio_io_error("response read", error))?;
+    if read == 0 {
+        return Err(fail("Studio response ended before its declared boundary"));
+    }
+    Ok(read)
+}
+
+fn studio_read_header(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    deadline: std::time::Instant,
+) -> Result<String, ScenarioError> {
+    let mut header = Vec::new();
+    while header.len() < STUDIO_HEADER_LIMIT {
+        let mut byte = [0];
+        studio_read_some(reader, &mut byte, deadline)?;
+        header.push(byte[0]);
+        if header.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(header)
+                .map_err(|_| fail("Studio HTTP headers are not UTF-8"));
+        }
+    }
+    Err(fail("Studio HTTP header exceeded its byte budget"))
+}
+
+fn studio_header_field<'a>(header: &'a str, key: &str) -> Result<&'a str, ScenarioError> {
+    let mut values = header.lines().skip(1).filter_map(|line| {
+        let (name, value) = line.split_once(':')?;
+        name.eq_ignore_ascii_case(key).then(|| value.trim())
+    });
+    let value = values
+        .next()
+        .ok_or_else(|| fail("Studio response omitted a required header"))?;
+    if values.next().is_some() {
+        return Err(fail("Studio response duplicated a required header"));
+    }
+    Ok(value)
+}
+
+fn studio_header_number(header: &str, key: &str) -> Result<usize, ScenarioError> {
+    studio_header_field(header, key)?
+        .parse()
+        .map_err(|_| fail("Studio response has an invalid numeric header"))
+}
+
+fn studio_read_body(
+    reader: &mut std::io::BufReader<std::net::TcpStream>,
+    count: usize,
+    deadline: std::time::Instant,
+) -> Result<Vec<u8>, ScenarioError> {
+    if count > STUDIO_BODY_LIMIT {
+        return Err(fail("Studio response body exceeded its byte budget"));
+    }
+    let mut bytes = Vec::new();
+    bytes
+        .try_reserve_exact(count)
+        .map_err(|_| fail("Studio response body storage refused"))?;
+    bytes.resize(count, 0);
+    let mut offset = 0;
+    while offset < count {
+        offset += studio_read_some(reader, &mut bytes[offset..], deadline)?;
+    }
+    Ok(bytes)
+}
+
+struct StudioFrameReader {
+    reader: std::io::BufReader<std::net::TcpStream>,
+}
+
+impl StudioFrameReader {
+    fn frame(&mut self, frame: usize, publication: usize) -> Result<Vec<u8>, ScenarioError> {
+        let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+        let header = studio_read_header(&mut self.reader, deadline)?;
+        if !header.starts_with(&format!("--{}\r\n", fmn_studio::MULTIPART_BOUNDARY))
+            || studio_header_field(&header, "Content-Type")? != "image/png"
+            || studio_header_number(&header, "X-FMN-Frame-Index")? != frame
+            || studio_header_number(&header, "X-FMN-Publication-Sequence")? != publication
+        {
+            return Err(fail(
+                "Studio multipart frame or publication identity drifted",
+            ));
+        }
+        let count = studio_header_number(&header, "Content-Length")?;
+        let png = studio_read_body(&mut self.reader, count, deadline)?;
+        if studio_read_body(&mut self.reader, 2, deadline)? != b"\r\n"
+            || sha256(&png).to_string() != studio_header_field(&header, "X-FMN-SHA256")?
+        {
+            return Err(fail("Studio multipart PNG digest or framing drifted"));
+        }
+        let decoded = fmn_codec::decode_png(
+            &png,
+            &fmn_codec::PngLimits {
+                max_pixels: 96 * 54,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| fail("Studio multipart PNG failed native decode"))?;
+        if decoded.width != 96 || decoded.height != 54 {
+            return Err(fail("Studio multipart PNG dimensions drifted"));
+        }
+        let mut pixels = decoded.rgba.as_chunks::<4>().0.iter();
+        let first = pixels
+            .next()
+            .ok_or_else(|| fail("Studio multipart PNG has no pixels"))?;
+        if pixels.all(|pixel| pixel == first) {
+            return Err(fail("Studio multipart PNG is a uniform empty preview"));
+        }
+        Ok(png)
+    }
+}
+
+fn studio_contains(bytes: &[u8], expected: &str) -> Result<(), ScenarioError> {
+    let text = std::str::from_utf8(bytes).map_err(|_| fail("Studio JSON is not UTF-8"))?;
+    if !text.contains(expected) {
+        return Err(fail(format!(
+            "Studio response omitted expected field {expected}"
+        )));
+    }
+    Ok(())
+}
+
+fn studio_restored_inspector_matches(
+    before: &[u8],
+    after: &[u8],
+    mode: &str,
+    frame: u64,
+    fallback: Option<&str>,
+) -> Result<(), ScenarioError> {
+    // The native service appends this receipt last. Assert its exact new
+    // value, then retain byte equality for all scene, editor and span data.
+    let before = before
+        .strip_suffix(b",\"native_restore\":null}")
+        .ok_or_else(|| fail("committed inspector unexpectedly already has a restore receipt"))?;
+    let fallback = fallback.map_or_else(|| "null".to_owned(), |value| format!("\"{value}\""));
+    let receipt = format!("{{\"mode\":\"{mode}\",\"frame\":{frame},\"fallback\":{fallback}}}");
+    let suffix = format!(",\"native_restore\":{receipt}}}");
+    let after = after
+        .strip_suffix(suffix.as_bytes())
+        .ok_or_else(|| fail("restored inspector reports the wrong recovery mechanism"))?;
+    if before != after {
+        return Err(fail(
+            "restored inspector changed committed scene or editor state",
+        ));
+    }
+    Ok(())
+}
+
+fn studio_view(bytes: &[u8], frame: usize) -> Result<(), ScenarioError> {
+    // Constructed frame zero plus the 0.25 s hold's eight native samples.
+    studio_view_with_frame_count(bytes, frame, 9)
+}
+
+fn studio_view_with_frame_count(
+    bytes: &[u8],
+    frame: usize,
+    frame_count: usize,
+) -> Result<(), ScenarioError> {
+    studio_contains(
+        bytes,
+        &format!(
+            "\"view\":{{\"frame_index\":{frame},\"frame_count\":{frame_count},\"fps\":30,\"width\":96,\"height\":54,\"scale\":6.75,\"origin\":[48,27],\"y_up\":true,\"input_events\":true,\"input_revision\":"
+        ),
+    )
+}
+
+const STUDIO_BUILTIN_INPUT_CASES: [(&str, usize, bool); 5] = [
+    ("circle_shift.v1", 13, false),
+    ("tex_span.v1", 9, true),
+    ("formula_sheet.v1", 13, true),
+    ("semantic_witness.v1", 9, true),
+    ("sound_cue.v1", 31, false),
+];
+
+/// Ordinary native scene registrations cross the shipping host's guarded input
+/// boundary, then reproduce their edited state after a real worker restart.
+fn studio_builtin_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn input(
+        endpoint: &StudioEndpoint,
+        frames: &mut StudioFrameReader,
+        frame: usize,
+        revision: &mut usize,
+        publication: &mut usize,
+        fields: &str,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        let body = format!("{fields}&worker_generation=1&frame={frame}&revision={revision}");
+        endpoint.request("POST", "/api/event", body.as_bytes(), 200)?;
+        *revision += 1;
+        *publication += 1;
+        frames.frame(frame, *publication)
+    }
+
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/builtin-source.rs",
+        include_bytes!("../../fmn/src/lib.rs"),
+    );
+    ctx.record_asset(
+        "studio/registrations.rs",
+        include_bytes!("../../fmn-cli/src/studio_live.rs"),
+    );
+    let directory = scenario_dir("studio_builtin_inputs")?;
+    let mut outcome = RunOutcome::ok();
+    for (name, count, has_spans) in STUDIO_BUILTIN_INPUT_CASES {
+        ctx.event(LogEvent::new("e2e.studio.builtin_input.begin").field("scene", name));
+        let (mut process, endpoint) = StudioProcess::launch_named(&directory, name)?;
+        let mut frames = endpoint.stream()?;
+        let initial_png = frames.frame(0, 0)?;
+        let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(&initial, "\"scene_time\":0,")?;
+        studio_contains(&initial, &format!("\"frame_count\":{count},\"fps\":30"))?;
+        studio_contains(&initial, "\"input_events\":true,\"input_revision\":0")?;
+        if has_spans {
+            studio_contains(&initial, "\"source_span\":{\"kind\":\"math_glyph\"")?;
+        }
+        let last = count - 1;
+        endpoint.request(
+            "POST",
+            "/api/scrub",
+            format!("frame={last}&commit=true").as_bytes(),
+            200,
+        )?;
+        frames.frame(last, 1)?;
+        let mut revision = 1;
+        let mut publication = 1;
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=a&modifiers=2",
+        )?;
+        let selected_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=a&modifiers=2",
+        )?;
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=arrow_right",
+        )?;
+        let moved_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=arrow_right",
+        )?;
+        if moved_png == selected_png {
+            return Err(fail(format!(
+                "{name}: native editing did not move any rendered pixels"
+            )));
+        }
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=z&modifiers=2",
+        )?;
+        let undone_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=z&modifiers=2",
+        )?;
+        if undone_png != selected_png {
+            return Err(fail(format!(
+                "{name}: native undo changed the original selected image"
+            )));
+        }
+        input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_press&key=z&modifiers=3",
+        )?;
+        let redone_png = input(
+            &endpoint,
+            &mut frames,
+            last,
+            &mut revision,
+            &mut publication,
+            "type=key_release&key=z&modifiers=3",
+        )?;
+        if redone_png != moved_png {
+            return Err(fail(format!("{name}: native redo lost the edited image")));
+        }
+        let edited = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(
+            &edited,
+            &format!("\"frame_index\":{last},\"frame_count\":{count}"),
+        )?;
+        studio_contains(&edited, &format!("\"input_revision\":{revision}"))?;
+        let stale = endpoint.request(
+            "POST",
+            "/api/event",
+            format!("type=key_press&key=arrow_right&worker_generation=1&frame={last}&revision=0")
+                .as_bytes(),
+            422,
+        )?;
+        studio_contains(&stale, "stale native input revision")?;
+        if endpoint.request("GET", "/api/inspect", b"", 200)? != edited {
+            return Err(fail(format!(
+                "{name}: stale input changed the edited scene"
+            )));
+        }
+
+        endpoint.request("POST", "/api/scrub", b"frame=0&commit=false", 200)?;
+        publication += 1;
+        if frames.frame(0, publication)? != initial_png {
+            return Err(fail(format!(
+                "{name}: later edits leaked into constructed frame zero"
+            )));
+        }
+        endpoint.request(
+            "POST",
+            "/api/scrub",
+            format!("frame={last}&commit=true").as_bytes(),
+            200,
+        )?;
+        publication += 1;
+        if frames.frame(last, publication)? != moved_png {
+            return Err(fail(format!(
+                "{name}: forward scrub discarded the committed edits"
+            )));
+        }
+        let committed = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        let restarted = endpoint.request("POST", "/api/restart", b"", 200)?;
+        studio_contains(&restarted, "\"worker_generation\":2")?;
+        studio_contains(&restarted, &format!("\"frame_index\":{last}"))?;
+        publication += 1;
+        let restored_png = frames.frame(last, publication)?;
+        let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        if restored_png != moved_png || restored != committed {
+            return Err(fail(format!(
+                "{name}: worker replay changed native pixels or inspected state"
+            )));
+        }
+        drop(frames);
+        process.finish()?;
+        ctx.event(
+            LogEvent::new("e2e.studio.builtin_input")
+                .field("scene", name)
+                .field("phase", "edited_undone_replayed")
+                .field("frame_count", count as u64)
+                .field("inputs", (revision - 1) as u64)
+                .field("native_spans", truth(has_spans)),
+        );
+        outcome = outcome
+            .with_artifact(&format!("{name}.replayed.png"), restored_png)
+            .with_artifact(&format!("{name}.inspector.json"), restored);
+    }
+    ctx.counter("studio_live_builtin_families", 5);
+    Ok(outcome.with_counter("studio_live_builtin_families", 5))
+}
+
+/// OS entropy must isolate real hosts without changing their scene output.
+fn studio_session_capability_isolation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/host-entropy.rs",
+        include_bytes!("../../fmn-platform/src/entropy.rs"),
+    );
+    let directory = scenario_dir("studio_session_capability_isolation")?;
+    let (mut first, first_endpoint) = StudioProcess::launch_named(&directory, "circle_shift.v1")?;
+    let (mut second, second_endpoint) = StudioProcess::launch_named(&directory, "circle_shift.v1")?;
+    if first_endpoint.capability == second_endpoint.capability {
+        return Err(fail("independent Studio hosts reused a session capability"));
+    }
+    let mut outcome = RunOutcome::ok();
+    let mut first_initial = None;
+    let mut first_edited = None;
+    for (label, endpoint, foreign) in [
+        ("session_a", &first_endpoint, &second_endpoint),
+        ("session_b", &second_endpoint, &first_endpoint),
+    ] {
+        let mut frames = endpoint.stream()?;
+        let initial_png = frames.frame(0, 0)?;
+        let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_view_with_frame_count(&initial, 0, 13)?;
+        let wrong_session = StudioEndpoint {
+            address: endpoint.address,
+            capability: foreign.capability.clone(),
+        };
+        // Authorization failures use the host's bounded plain-text response;
+        // the successful API helper deliberately requires JSON instead.
+        let mut rejected = wrong_session.connect("POST", "/api/scrub", b"frame=1&commit=true")?;
+        let deadline = std::time::Instant::now() + STUDIO_IO_TIMEOUT;
+        let header = studio_read_header(&mut rejected, deadline)?;
+        if !header.starts_with("HTTP/1.1 403 Forbidden\r\n")
+            || studio_header_field(&header, "Content-Type")? != "text/plain; charset=utf-8"
+        {
+            return Err(fail("foreign session capability was not precisely refused"));
+        }
+        let count = studio_header_number(&header, "Content-Length")?;
+        let refused = studio_read_body(&mut rejected, count, deadline)?;
+        studio_contains(&refused, "invalid capability")?;
+        for capability in [&endpoint.capability, &foreign.capability] {
+            if refused
+                .windows(capability.len())
+                .any(|part| part == capability.as_bytes())
+            {
+                return Err(fail("Studio refusal disclosed a session capability"));
+            }
+        }
+        if endpoint.request("GET", "/api/inspect", b"", 200)? != initial {
+            return Err(fail(
+                "foreign session capability mutated native scene state",
+            ));
+        }
+        endpoint.request("POST", "/api/scrub", b"frame=1&commit=true", 200)?;
+        let edited_png = frames.frame(1, 1)?;
+        studio_view_with_frame_count(&endpoint.request("GET", "/api/inspect", b"", 200)?, 1, 13)?;
+        if edited_png == initial_png {
+            return Err(fail(
+                "authenticated native seek did not change preview pixels",
+            ));
+        }
+        if let (Some(initial), Some(edited)) = (&first_initial, &first_edited) {
+            if initial != &initial_png || edited != &edited_png {
+                return Err(fail("host session entropy changed native rendered frames"));
+            }
+        } else {
+            first_initial = Some(initial_png.clone());
+            first_edited = Some(edited_png.clone());
+        }
+        outcome = outcome
+            .with_artifact(&format!("{label}.initial.png"), initial_png)
+            .with_artifact(&format!("{label}.edited.png"), edited_png);
+        drop(frames);
+    }
+    first.finish()?;
+    second.finish()?;
+    ctx.event(
+        LogEvent::new("e2e.studio.session_isolation")
+            .field("sessions", 2u64)
+            .field("capabilities_distinct", "true")
+            .field("foreign_mutations_refused_atomically", "true")
+            .field("authenticated_seeks", 2u64)
+            .field("scene_frames_equal", "true"),
+    );
+    Ok(outcome
+        .with_counter("studio_isolated_sessions", 2)
+        .with_counter("studio_authenticated_seeks", 2))
+}
+
+fn studio_presenter_holds_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    let directory = scenario_dir("studio_presenter_holds")?;
+    let (mut process, endpoint) =
+        StudioProcess::launch_named_with_flags(&directory, "circle_shift.v1", &["-p"])?;
+    let mut frames = endpoint.stream()?;
+    let initial = frames.frame(0, 0)?;
+    let mut outcome = RunOutcome::ok().with_artifact("presenter.0.png", initial);
+    for (publication, (frame, boundary)) in
+        [(0, true), (1, false), (8, true), (9, false), (12, true)]
+            .into_iter()
+            .enumerate()
+    {
+        if frame != 0 {
+            endpoint.request(
+                "POST",
+                "/api/scrub",
+                format!("frame={frame}&commit=false").as_bytes(),
+                200,
+            )?;
+            outcome = outcome.with_artifact(
+                &format!("presenter.{frame}.png"),
+                frames.frame(frame, publication)?,
+            );
+        }
+        let inspection = endpoint.request("GET", "/api/inspect", b"", 200)?;
+        studio_contains(
+            &inspection,
+            &format!("\"presenter\":{{\"enabled\":true,\"at_boundary\":{boundary}}}"),
+        )?;
+        // circle_shift has eight play samples and four wait samples, plus
+        // its constructed frame zero. The interactive fixture has only nine.
+        studio_view_with_frame_count(&inspection, frame, 13)?;
+        for _ in 0..3 {
+            if endpoint.request("GET", "/api/inspect", b"", 200)? != inspection {
+                return Err(fail(
+                    "presenter inspection advanced a paused native capture",
+                ));
+            }
+        }
+        ctx.event(
+            LogEvent::new("e2e.studio.presenter")
+                .field("frame", frame as u64)
+                .field("boundary", truth(boundary)),
+        );
+    }
+    drop(frames);
+    process.finish()?;
+    ctx.counter("presenter_boundaries", 3);
+    Ok(outcome.with_counter("presenter_boundaries", 3))
+}
+
+fn studio_interactive_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/builtin-source.rs",
+        include_bytes!("../../fmn/src/lib.rs"),
+    );
+    let directory = scenario_dir("studio_interactive_lifecycle")?;
+    let (mut process, endpoint) = StudioProcess::launch_named(&directory, "interactive.v1")?;
+    let mut frames = endpoint.stream()?;
+    let initial_png = frames.frame(0, 0)?;
+    let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_contains(&initial, "\"input_events\":true,\"input_revision\":0")?;
+    studio_contains(&initial, "\"parents\":[0]")?;
+    endpoint.request("POST", "/api/scrub", b"frame=0&commit=true", 200)?;
+    if frames.frame(0, 1)? != initial_png {
+        return Err(fail("Native input checkpoint changed the initial image"));
+    }
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "checkpoint"));
+
+    let inputs = [
+        "type=key_press&key=t&modifiers=2",
+        "type=key_release&key=t&modifiers=2",
+        "type=mouse_press&x=-1.5&y=0&button=left&modifiers=2",
+        "type=mouse_release&x=-1.5&y=0&button=left&modifiers=2",
+        "type=key_press&key=arrow_right",
+        "type=key_release&key=arrow_right",
+    ];
+    let mut moved_png = Vec::new();
+    for (index, input) in inputs.iter().enumerate() {
+        let revision = index + 1;
+        let body = format!("{input}&worker_generation=1&frame=0&revision={revision}");
+        endpoint.request("POST", "/api/event", body.as_bytes(), 200)?;
+        moved_png = frames.frame(0, index + 2)?;
+    }
+    let decode = |png: &[u8]| {
+        fmn_codec::decode_png(
+            png,
+            &fmn_codec::PngLimits {
+                max_pixels: 96 * 54,
+                ..Default::default()
+            },
+        )
+        .map_err(|_| fail("Native interactive PNG could not be decoded"))
+    };
+    if decode(&initial_png)?.rgba == decode(&moved_png)?.rgba {
+        return Err(fail(
+            "Native keyboard movement did not change decoded pixels",
+        ));
+    }
+    let moved = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_contains(&moved, "\"input_revision\":7")?;
+    if moved == initial {
+        return Err(fail(
+            "Native keyboard movement did not change inspected state",
+        ));
+    }
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "edited"));
+
+    for (body, diagnostic) in [
+        (
+            "type=key_press&key=arrow_right&worker_generation=1&frame=0&revision=0",
+            "stale native input revision",
+        ),
+        (
+            "type=key_press&key=arrow_right&worker_generation=1&frame=0&revision=7&target=99999",
+            "stale native input object",
+        ),
+        (
+            "type=mouse_motion&x=10000000&y=0&dx=0&dy=0&worker_generation=1&frame=0&revision=7",
+            "budget",
+        ),
+    ] {
+        let refusal = endpoint.request("POST", "/api/event", body.as_bytes(), 422)?;
+        studio_contains(&refusal, diagnostic)?;
+        if endpoint.request("GET", "/api/inspect", b"", 200)? != moved {
+            return Err(fail("Refused native input mutated inspected state"));
+        }
+    }
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "refused_atomically"));
+
+    endpoint.request("POST", "/api/scrub", b"frame=2&commit=true", 200)?;
+    let committed_png = frames.frame(2, 8)?;
+    if decode(&committed_png)?.rgba != decode(&moved_png)?.rgba {
+        return Err(fail("Scrubbing discarded the native canvas edit"));
+    }
+    let committed = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_contains(&committed, "\"input_revision\":8")?;
+    let restart = endpoint.request("POST", "/api/restart", b"", 200)?;
+    for field in [
+        "\"worker_generation\":2",
+        "\"reused_entries\":8",
+        "\"reexecuted_entries\":0",
+        "\"frame_index\":2",
+    ] {
+        studio_contains(&restart, field)?;
+    }
+    let restored_png = frames.frame(2, 9)?;
+    if decode(&restored_png)?.rgba != decode(&committed_png)?.rgba {
+        return Err(fail("Native input replay changed decoded pixels"));
+    }
+    let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_restored_inspector_matches(
+        &committed,
+        &restored,
+        "cold_verified",
+        0,
+        Some("edited_input"),
+    )?;
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "restarted"));
+
+    endpoint.request(
+        "POST",
+        "/api/event",
+        b"type=key_press&key=arrow_right&worker_generation=2&frame=2&revision=8",
+        200,
+    )?;
+    let continued_png = frames.frame(2, 10)?;
+    if decode(&continued_png)?.rgba == decode(&restored_png)?.rgba {
+        return Err(fail("Native replay lost the interactive selection"));
+    }
+    endpoint.request(
+        "POST",
+        "/api/event",
+        b"type=key_press&key=z&modifiers=2&worker_generation=2&frame=2&revision=9",
+        200,
+    )?;
+    let undone_png = frames.frame(2, 11)?;
+    if decode(&undone_png)?.rgba != decode(&restored_png)?.rgba {
+        return Err(fail("Native undo did not restore the replayed image"));
+    }
+    drop(frames);
+    process.finish()?;
+    ctx.event(LogEvent::new("e2e.studio.interactive").field("phase", "continued_and_undone"));
+    ctx.counter("studio_interactive_inputs", 8);
+    Ok(RunOutcome::ok()
+        .with_artifact("interactive_initial.png", initial_png)
+        .with_artifact("interactive_replayed.png", restored_png)
+        .with_artifact("interactive_initial_inspector.json", initial)
+        .with_artifact("interactive_replayed_inspector.json", restored)
+        .with_counter("studio_interactive_inputs", 8))
+}
+
+/// The registered native lifecycle crosses the actual shipping executable,
+/// supervisor, disposable worker, authenticated HTTP host, and PNG stream.
+fn studio_subprocess_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((30, 1));
+    ctx.record_asset(
+        "studio/builtin-source.rs",
+        include_bytes!("../../fmn/src/lib.rs"),
+    );
+    let directory = scenario_dir("studio_native_lifecycle")?;
+    let (mut process, endpoint) = StudioProcess::launch(&directory)?;
+    let mut frames = endpoint.stream()?;
+    let initial_png = frames.frame(0, 0)?;
+    let initial = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_view(&initial, 0)?;
+    studio_contains(&initial, "\"scene_time\":0,")?;
+    for span in [
+        "\"source_span\":{\"kind\":\"math_glyph\",\"start\":6,\"end\":7,\"source_bytes\":11,\"excerpt\":\"x\"",
+        "\"source_span\":{\"kind\":\"math_rule\",\"start\":0,\"end\":5,\"source_bytes\":11,\"excerpt\":\"\\\\frac\"",
+        "\"source_span\":{\"kind\":\"text_glyph\",\"start\":0,\"end\":1,\"source_bytes\":5,\"excerpt\":\"h\"",
+    ] {
+        studio_contains(&initial, span)?;
+    }
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "initial")
+            .field("frame", 0u64)
+            .field("publication", 0u64),
+    );
+
+    endpoint.request("POST", "/api/scrub", b"frame=0&commit=true", 200)?;
+    if frames.frame(0, 1)? != initial_png {
+        return Err(fail(
+            "Studio checkpoint commit changed the original frame's PNG",
+        ));
+    }
+    studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "checkpoint_committed")
+            .field("frame", 0u64)
+            .field("publication", 1u64),
+    );
+
+    let committed = endpoint.request("POST", "/api/scrub", b"frame=1&commit=true", 200)?;
+    studio_contains(&committed, "\"frame_index\":1")?;
+    let committed_png = frames.frame(1, 2)?;
+    let committed_inspect = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_view(&committed_inspect, 1)?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "committed")
+            .field("frame", 1u64)
+            .field("publication", 2u64),
+    );
+
+    endpoint.request("POST", "/api/scrub", b"frame=0&commit=false", 200)?;
+    let transient_png = frames.frame(0, 3)?;
+    if transient_png != initial_png {
+        return Err(fail(
+            "Studio transient scrub changed the original frame's PNG",
+        ));
+    }
+    studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
+    let refusal = endpoint.request("POST", "/api/scrub", b"frame=9&commit=false", 422)?;
+    studio_contains(
+        &refusal,
+        "native target exceeds the scene or execution budget",
+    )?;
+    studio_view(&endpoint.request("GET", "/api/inspect", b"", 200)?, 0)?;
+    let event_refusal =
+        endpoint.request("POST", "/api/event", b"type=key_press&key=arrow_left", 422)?;
+    studio_contains(
+        &event_refusal,
+        "worker_generation, frame and revision are required",
+    )?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "transient_and_refusals")
+            .field("frame", 0u64)
+            .field("publication", 3u64),
+    );
+
+    let overlays = endpoint.request("GET", "/api/overlays?layers=31", b"", 200)?;
+    for field in [
+        "\"layers\":31",
+        "\"tiles\":[{",
+        "\"control_points\":[[",
+        "\"bounds\":[[",
+        "\"winding\":\"",
+    ] {
+        studio_contains(&overlays, field)?;
+    }
+    let restart = endpoint.request("POST", "/api/restart", b"", 200)?;
+    for field in [
+        "\"status\":\"restarted\"",
+        "\"worker_generation\":2",
+        "\"reused_entries\":2",
+        "\"replayed_entries\":1",
+        "\"reexecuted_entries\":0",
+        "\"frame_index\":1",
+    ] {
+        studio_contains(&restart, field)?;
+    }
+    let replayed_png = frames.frame(1, 4)?;
+    if replayed_png != committed_png {
+        return Err(fail(
+            "Studio worker restart changed the committed frame's PNG",
+        ));
+    }
+    let restored = endpoint.request("GET", "/api/inspect", b"", 200)?;
+    studio_view(&restored, 1)?;
+    studio_restored_inspector_matches(&committed_inspect, &restored, "checkpoint", 0, None)?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "restarted")
+            .field("frame", 1u64)
+            .field("publication", 4u64)
+            .field("generation", 2u64),
+    );
+    drop(frames);
+    process.finish()?;
+    ctx.event(
+        LogEvent::new("e2e.studio.lifecycle")
+            .field("phase", "clean_eof")
+            .field("exit_code", 0u64),
+    );
+    ctx.counter("studio_native_lifecycle_steps", 6);
+    Ok(RunOutcome::ok()
+        .with_artifact("studio_initial_inspector.json", initial)
+        .with_artifact("studio_restored_inspector.json", restored)
+        .with_artifact("studio_overlays.json", overlays)
+        .with_artifact("studio_replayed_frame.png", replayed_png)
+        .with_counter("studio_native_lifecycle_steps", 6))
+}
+
+/// The PyO3 portal's first production-output Gauntlet row: a real Python
+/// subclass constructs a Circle, lifecycle capture crosses the native bridge,
+/// retained Lumen rasterizes it, and Reel publishes an atomic PNG generation.
+fn python_portal_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    python_portal_sequence_run(ctx, false)
+}
+
+/// Audible Python bundles retain PCM and decode receipts across every storage/camera route.
+fn python_bundle_audio_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (comparisons, compressed) = manimlib::run_portal_gauntlet_bundle_audio()
+        .map_err(|error| fail(format!("Python bundle audio capabilities: {error}")))?;
+    if !matches!((comparisons, compressed), (5, 0) | (39, 34)) {
+        return Err(fail(format!(
+            "incomplete Python bundle audio acceptance: {comparisons} total, {compressed} compressed"
+        )));
+    }
+    let native = comparisons - compressed;
+    ctx.event(
+        LogEvent::new("e2e.python.bundle_audio_capabilities")
+            .field("native_comparisons", native)
+            .field("compressed_comparisons", compressed)
+            .field("artifact_comparisons", comparisons),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_bundle_native_comparisons", native)
+        .with_counter("python_bundle_compressed_comparisons", compressed)
+        .with_counter("python_bundle_artifact_comparisons", comparisons))
+}
+
+/// Authored text configurations cross native layout, regeneration and rendering.
+fn python_text_configuration_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_text_configuration()
+        .map_err(|error| fail(format!("Python text configuration: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.text_configuration").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("text_configuration_cases", cases))
+}
+
+/// Live coefficients and matrix entries through actual native animation/output.
+fn python_live_tex_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_live_tex")?;
+    let report = manimlib::run_portal_gauntlet_live_tex(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python live equations: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first live equation: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last live equation: {error}")))?;
+    if (first.width, first.height) != (192, 108)
+        || (last.width, last.height) != (192, 108)
+        || first.rgba == last.rgba
+    {
+        return Err(fail("live equations did not animate native 192x108 pixels"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.live_tex")
+            .field("frames", report.frame_count)
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_tex_frames", report.frame_count)
+        .with_counter("live_tex_thread_counts", report.thread_counts)
+        .with_counter("live_tex_failure_paths", report.failure_paths)
+        .with_artifact("live_tex_first.png", report.first_png)
+        .with_artifact("live_tex_last.png", report.last_png))
+}
+
+/// Complex coefficients and matrix entries through actual native animation/output.
+fn python_complex_readouts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_complex_readouts")?;
+    let report = manimlib::run_portal_gauntlet_complex_readouts(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python complex readouts: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first complex readout: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last complex readout: {error}")))?;
+    if (first.width, first.height) != (192, 108)
+        || (last.width, last.height) != (192, 108)
+        || first.rgba == last.rgba
+    {
+        return Err(fail(
+            "complex readouts did not animate native 192x108 pixels",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.complex_readouts")
+            .field("frames", report.frame_count)
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("complex_readouts_frames", report.frame_count)
+        .with_counter("complex_readouts_thread_counts", report.thread_counts)
+        .with_counter("complex_readouts_failure_paths", report.failure_paths)
+        .with_artifact("complex_readouts_first.png", report.first_png)
+        .with_artifact("complex_readouts_last.png", report.last_png))
+}
+
+/// Native macros retain formula spans through matching and live-number edits.
+fn python_tex_preamble_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_tex_preamble")?;
+    let report = manimlib::run_portal_gauntlet_tex_preamble(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python TeX preambles: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first preamble frame: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last preamble frame: {error}")))?;
+    if (first.width, first.height) != (192, 108)
+        || (last.width, last.height) != (192, 108)
+        || first.rgba == last.rgba
+    {
+        return Err(fail("TeX preambles did not animate native 192x108 pixels"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.tex_preamble")
+            .field("frames", report.frame_count)
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_preamble_frames", report.frame_count)
+        .with_counter("tex_preamble_thread_counts", report.thread_counts)
+        .with_counter("tex_preamble_failure_paths", report.failure_paths)
+        .with_artifact("tex_preamble_first.png", report.first_png)
+        .with_artifact("tex_preamble_last.png", report.last_png))
+}
+
+fn python_textured_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (first, last) = manimlib::run_portal_gauntlet_textures()
+        .map_err(|error| fail(format!("textured surfaces: {error}")))?;
+    let limits = fmn_codec::PngLimits::default();
+    let decoded = fmn_codec::decode_png(&first, &limits)
+        .map_err(|error| fail(format!("decode texture frame: {error}")))?;
+    if (decoded.width, decoded.height) != (96, 54) || first == last {
+        return Err(fail("textured surface did not animate native pixels"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.textures")
+            .field("frames", 4_u64)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("textures_first.png", first)
+        .with_artifact("textures_last.png", last))
+}
+
+fn python_image_inputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_image_inputs()
+        .map_err(|error| fail(format!("Python image input lifecycle: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.image_inputs").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("image_input_checks", checks))
+}
+
+/// fm-portal-asset-virtualization-r13-qve7: a scene's named image, SVG and sound
+/// assets resolve under the configured asset root (`directories.base`), reach the
+/// rendered frame and the mix, and a missing or network asset refuses by name.
+/// The fixture assets are authored by the test, so they are public.
+fn python_asset_root_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_asset_root()
+        .map_err(|error| fail(format!("Python asset root: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.asset_root").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("asset_root_checks", checks))
+}
+
+/// Both front doors build every geometry class the Reference constructs with
+/// no arguments (fm-schema-codegen-front-doors-r8-z206). The portal applies its
+/// Python defaults; fmn-library's builders read the constants generated from
+/// the same API_SCHEMA.tsv rows. Equal family points mean the doors agree; an
+/// Arc built at 1.5 times the schema's radius must not.
+fn geometry_defaults_both_doors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let portal = manimlib::run_portal_gauntlet_geometry_defaults()
+        .map_err(|error| fail(format!("portal geometry defaults: {error}")))?;
+    let native = native_geometry_defaults(fmn_library::reference_defaults::arc::RADIUS)
+        .map_err(|error| fail(format!("native geometry defaults: {error}")))?;
+    let portal_names: Vec<&str> = portal.iter().map(|(name, _)| name.as_str()).collect();
+    let native_names: Vec<&str> = native.iter().map(|(name, _)| *name).collect();
+    if portal_names != native_names {
+        return Err(fail(format!(
+            "the doors built {portal_names:?} and {native_names:?}"
+        )));
+    }
+    for ((name, points), (_, native_points)) in portal.iter().zip(&native) {
+        if let Some(problem) = points_differ(points, native_points) {
+            return Err(fail(format!("{name}: {problem}")));
+        }
+    }
+    let planted = native_geometry_defaults(fmn_library::reference_defaults::arc::RADIUS * 1.5)
+        .map_err(|error| fail(format!("planted geometry defaults: {error}")))?;
+    let detected = points_differ(&portal[0].1, &planted[0].1).is_some();
+    let classes = u64::try_from(portal.len()).unwrap_or(u64::MAX);
+    ctx.event(
+        LogEvent::new("e2e.parity.geometry_defaults")
+            .field("classes", classes)
+            .field("planted_detected", u64::from(detected)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("geometry_classes_compared", classes)
+        .with_counter("planted_default_detected", u64::from(detected)))
+}
+
+fn translated_arc_centers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut checked = 0;
+    let mut rejected_anchors = 0;
+    for radius in [1e-5, 0.08, 1.0, 1e3] {
+        for z in [-1e-9, 0.0, 1e-9, 7.0] {
+            let arc = fmn_library::Arc::new()
+                .radius(radius)
+                .arc_center([0.0, 0.0, z])
+                .build()
+                .map_err(|error| fail(format!("build translated arc: {error}")))?;
+            let center = fmn_library::arc::arc_center_of(arc.points())
+                .ok_or_else(|| fail("translated arc has no center"))?;
+            let error =
+                |point: [f64; 3]| fmn_geom::space_ops::get_norm([point[0], point[1], point[2] - z]);
+            if error(center) > radius * 1e-9 {
+                return Err(fail(format!("radius={radius}, z={z}: center={center:?}")));
+            }
+            let tilted = arc.clone().rotated_about(
+                fmn_core::constants::TAU / 4.0,
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, z],
+            );
+            let tilted_center = fmn_library::arc::arc_center_of(tilted.points())
+                .ok_or_else(|| fail("tilted arc has no center"))?;
+            if error(tilted_center) > radius * 1e-9 {
+                return Err(fail(format!(
+                    "radius={radius}, z={z}: tilted center={tilted_center:?}"
+                )));
+            }
+            checked += 1;
+            // The Reference's small-arc failure returns this exact anchor.
+            rejected_anchors += u64::from(error(arc.points()[0]) > radius * 1e-9);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.geometry.arc_centers")
+            .field("checked", checked)
+            .field("rejected_anchors", rejected_anchors),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("arc_centers_checked", checked)
+        .with_counter("arc_first_anchor_rejected", rejected_anchors))
+}
+
+/// `(class, family points in preorder)` per geometry class.
+type NamedPoints = Vec<(&'static str, Vec<[f64; 3]>)>;
+
+/// The Rust door's no-argument geometry, in the portal's `GEOMETRY_DEFAULTS`
+/// order. Where a builder takes required arguments, they are the generated
+/// schema defaults.
+fn native_geometry_defaults(arc_radius: f64) -> Result<NamedPoints, String> {
+    use fmn_library::reference_defaults as d;
+    let built = [
+        (
+            "Arc",
+            fmn_library::Arc::new()
+                .radius(arc_radius)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("Circle", fmn_library::Circle::new().build()),
+        ("Dot", fmn_library::Dot::new().build()),
+        (
+            "SmallDot",
+            fmn_library::small_dot(d::small_dot::POINT).build(),
+        ),
+        ("Ellipse", fmn_library::Ellipse::new().build()),
+        (
+            "AnnularSector",
+            fmn_library::AnnularSector::new()
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "Sector",
+            fmn_library::sector(d::sector::ANGLE, d::sector::RADIUS)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("Annulus", fmn_library::Annulus::new().build()),
+        ("Elbow", fmn_library::Elbow::new().build()),
+        (
+            "Rectangle",
+            fmn_library::Rectangle::new()
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("Square", fmn_library::Square::new().build()),
+        (
+            "RoundedRectangle",
+            fmn_library::rounded_rectangle(
+                d::rounded_rectangle::WIDTH,
+                d::rounded_rectangle::HEIGHT,
+                d::rounded_rectangle::CORNER_RADIUS,
+            )
+            .build()
+            .map_err(|e| e.to_string())?,
+        ),
+        (
+            "RegularPolygon",
+            fmn_library::RegularPolygon::new(d::regular_polygon::N)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "Triangle",
+            fmn_library::triangle().build().map_err(|e| e.to_string())?,
+        ),
+        (
+            "Line",
+            fmn_library::Line::new(d::line::START, d::line::END)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "DashedLine",
+            fmn_library::DashedLine::new(d::dashed_line::START, d::dashed_line::END)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        (
+            "Vector",
+            fmn_library::vector(d::vector::DIRECTION)
+                .build()
+                .map_err(|e| e.to_string())?,
+        ),
+        ("ArrowTip", fmn_library::ArrowTip::new().build()),
+    ];
+    Ok(built
+        .into_iter()
+        .map(|(name, vmobject)| (name, family_points(&vmobject)))
+        .collect())
+}
+
+fn family_points(vmobject: &VMobject) -> Vec<[f64; 3]> {
+    let mut points = vmobject.points().to_vec();
+    for child in vmobject.children() {
+        points.extend(family_points(child));
+    }
+    points
+}
+
+/// The portal's records are f32, so equal geometry agrees to f32 precision.
+fn points_differ(portal: &[[f64; 3]], native: &[[f64; 3]]) -> Option<String> {
+    if portal.len() != native.len() {
+        return Some(format!(
+            "{} points through the portal, {} natively",
+            portal.len(),
+            native.len()
+        ));
+    }
+    let worst = portal
+        .iter()
+        .zip(native)
+        .flat_map(|(p, q)| p.iter().zip(q).map(|(x, y)| (x - y).abs()))
+        .fold(0.0_f64, f64::max);
+    (worst > 1e-5).then(|| format!("coordinates differ by up to {worst:e}"))
+}
+
+fn python_scene_console_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_console()
+        .map_err(|error| fail(format!("Python scene console: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.scene_console").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("console_checks", checks))
+}
+
+fn python_reference_render_flags_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_reference_flags()
+        .map_err(|error| fail(format!("Python Reference render flags: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.reference_flags").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("reference_flag_checks", checks))
+}
+
+/// Authored Surface hooks (fm-5wq.13): subclasses of the stock solids
+/// sample their authored `uv_func` and dispatch `init_points` once at
+/// construction, and render the same bytes as the equivalent
+/// ParametricSurface.
+fn python_surface_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_surface_lifecycle()
+        .map_err(|error| fail(format!("Python surface hooks: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.surface_hooks").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("surface_hook_cases", cases))
+}
+
+fn python_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_surface_holes()
+        .map_err(|error| fail(format!("Python explicit surface holes: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.surface_holes").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("surface_hole_cases", cases))
+}
+
+/// Reference-packed NumPy point clouds retain a native scalar glow material
+/// through live views, copies, interpolation, snapshots and rendered frames.
+fn python_point_cloud_uniforms_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_point_cloud_uniforms()
+        .map_err(|error| fail(format!("Python point-cloud uniforms: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.point_cloud_uniforms").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("point_cloud_uniform_cases", cases))
+}
+
+/// The same real five-point camera lifecycle suite as the installed-wheel gate,
+/// including live views, Group transforms, capture and SceneState restoration.
+fn python_camera_frame_points_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_camera_frame_points()
+        .map_err(|error| fail(format!("Python live camera frame points: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.camera_frame_points").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("camera_frame_point_cases", cases))
+}
+
+/// Control panels use the active CLI frame for defaults and native placement,
+/// including composite controls, explicit options and scoped restoration.
+fn python_control_panel_frame_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_control_panel_frames()
+        .map_err(|error| fail(format!("Python control panel frame scopes: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.control_panel_frame").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("control_panel_frame_cases", cases))
+}
+
+/// Standard CPU rectangle recovery observes live NumPy writes and frozen
+/// captures in the actual portal. This route carries no certified bit claim.
+fn python_rectangle_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (candidates, frames, digest) = manimlib::run_portal_gauntlet_rectangle_recovery()
+        .map_err(|error| fail(format!("Python rectangle recovery: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.rectangle_recovery")
+            .field("mode", "standard")
+            .field("engine", "fast_cpu")
+            .field("candidates", candidates)
+            .field("frames", frames)
+            .field("thread_counts", 3_u64)
+            .field("sha256", digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("rectangle_recovery_candidates", candidates)
+        .with_counter("rectangle_recovery_frames", frames))
+}
+
+/// Bounded circle and dot recovery uses the live portal's immutable geometry;
+/// large or deformed curves must remain on the general standard CPU route.
+fn python_disc_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (candidates, frames, digest) = manimlib::run_portal_gauntlet_disc_recovery()
+        .map_err(|error| fail(format!("Python disc recovery: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.disc_recovery")
+            .field("mode", "standard")
+            .field("engine", "fast_cpu")
+            .field("candidates", candidates)
+            .field("frames", frames)
+            .field("thread_counts", 3_u64)
+            .field("sha256", digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("disc_recovery_candidates", candidates)
+        .with_counter("disc_recovery_frames", frames))
+}
+
+/// Recover actual quadratic corner coverage after the portal invalidates tags.
+fn python_rounded_rectangle_recovery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (candidates, frames, digest) = manimlib::run_portal_gauntlet_rounded_rectangle_recovery()
+        .map_err(|error| {
+        fail(format!(
+            "Python quadratic rounded rectangle recovery: {error}"
+        ))
+    })?;
+    ctx.event(
+        LogEvent::new("e2e.python.rounded_rectangle_recovery")
+            .field("mode", "standard")
+            .field("engine", "fast_cpu")
+            .field("candidates", candidates)
+            .field("frames", frames)
+            .field("thread_counts", 3_u64)
+            .field("sha256", digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("rounded_rectangle_recovery_candidates", candidates)
+        .with_counter("rounded_rectangle_recovery_frames", frames))
+}
+
+/// Structural parity (fm-5wq.36): the fixed construction set, extracted in
+/// the embedded portal by the same `structural_facts.py` the Reference ran,
+/// matches the checked-in Reference facts except for BN-keyed and open-bead
+/// rows. A stale open-bead row (its bug fixed) fails, forcing its removal.
+fn python_structural_facts_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_structural_facts()
+        .map_err(|error| fail(format!("structural parity with the Reference: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.structural_facts")
+            .field("compared", report.compared)
+            .field("equal", report.equal)
+            .field("equal_with_exclusions", report.equal_with_exclusions)
+            .field("summary", report.summary.as_str()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("structural_subjects", report.compared)
+        .with_counter("structural_equal", report.equal))
+}
+
+/// Tex substring selection against the pinned Reference
+/// (fm-portal-span-parity-sc4k): `tex[sel]`, `t2c`, `isolate`,
+/// `substr_to_path_count` and `TransformMatchingTex` pairings for the
+/// Reference box oracle's authored formulas, run through the embedded
+/// portal's native span maps. Glyphs are matched by position. A mismatch
+/// passes only as Appendix C-36 (the Reference's symbol-count heuristic
+/// contradicting its own isolated selection), C-37 (the Reference's
+/// labelling braces making LaTeX refuse), BN-05 (no leftover shape
+/// matching) or an open bead's row, and at least 95% of rows must agree. A
+/// planted portal one glyph off in `getitem` must fail the comparison.
+fn python_tex_selection_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_tex_selection()
+        .map_err(|error| fail(format!("Tex selection against the Reference: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.tex_selection")
+            .field("rows", report.rows)
+            .field("matches", report.matches)
+            .field("reference_defects", report.reference_defects)
+            .field("behavior_notes", report.behavior_notes)
+            .field("owned", report.owned)
+            .field("planted_mismatches", report.planted_mismatches),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_selection_rows", report.rows)
+        .with_counter("tex_selection_matches", report.matches))
+}
+
+/// The Appendix-A class sweep (fm-5wq.26): every public mobject class's
+/// default and declared constructions, public methods included, match the
+/// pinned Reference's facts in the embedded portal. Anything else must be
+/// covered by a cited BN, ADR or open-bead row.
+fn python_class_sweep_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_class_sweep()
+        .map_err(|error| fail(format!("class sweep against the Reference: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.class_sweep")
+            .field("compared", report.compared)
+            .field("equal", report.equal)
+            .field("equal_with_exclusions", report.equal_with_exclusions)
+            .field("summary", report.summary.as_str()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("class_sweep_subjects", report.compared)
+        .with_counter("class_sweep_equal", report.equal))
+}
+
+/// Envelopes, not blankets (fm-5wq.45): the embedded portal's `Tex` passes the
+/// exclusion table, and the same facts with the root's height doubled fail it
+/// with a named envelope violation. The blanket bbox rows admitted both.
+fn python_structural_envelope_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_envelope_drill()
+        .map_err(|error| fail(format!("structural envelope drill: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.structural_envelope")
+            .field("subject", report.subject.as_str())
+            .field("clean_verdict", report.clean_verdict.as_str())
+            .field("planted_verdict", report.planted_verdict.as_str())
+            .field("violated_row", report.violated_row.as_str())
+            .field(
+                "planted_size_rel_milli",
+                (report.size_rel * 1000.0).round() as u64,
+            ),
+    );
+    Ok(RunOutcome::ok().with_counter("envelope_violations_detected", 1))
+}
+
+/// The differential API fuzzer's plumbing (fm-5wq.34): fifty seeded programs
+/// run in the pinned Reference and in an installed portal wheel through each
+/// engine's own CLI, and are diffed under the structural-facts exclusion
+/// table. A campaign is not an e2e, so this checks that both engines measured
+/// every program and that the log carries its fields, not that they agree.
+/// The surface skips (`not-run: reference-env-absent`) on a host without the
+/// two interpreters.
+fn differential_fuzz_smoke_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let out = scenario_dir("differential_fuzz_smoke")?;
+    let status = std::process::Command::new("python3")
+        .arg(root.join("scripts/api_differential_fuzz.py"))
+        .args(["campaign", "--seed", "5034", "--count", "50"])
+        .args(["--jobs", "2", "--batch", "25", "--limit", "0", "--out"])
+        .arg(&out)
+        .status()
+        .map_err(|error| fail(format!("run the differential fuzzer: {error}")))?;
+    if !status.success() {
+        return Err(fail(format!("the differential fuzzer exited {status}")));
+    }
+    let read = |name: &str| {
+        std::fs::read_to_string(out.join(name))
+            .map_err(|error| fail(format!("read {name}: {error}")))
+    };
+    let summary = read("summary.json")?;
+    let number = |key: &str| -> Result<u64, ScenarioError> {
+        let marker = format!("\"{key}\":");
+        let start = summary
+            .find(&marker)
+            .map(|at| at + marker.len())
+            .ok_or_else(|| fail(format!("summary.json lacks {key}: {summary}")))?;
+        let digits: String = summary[start..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect();
+        digits
+            .parse()
+            .map_err(|error| fail(format!("summary.json {key}: {error}")))
+    };
+    let programs = number("programs")?;
+    let exits = number("engine_exits")?;
+    let drift = number("position_mismatches")?;
+    let log = read("log.ndjson")?;
+    let fields = [
+        "\"seed\":5034",
+        "\"digest\":",
+        "\"statements\":",
+        "\"engines\":",
+        "\"outcome\":",
+        "\"first_difference\":",
+        "\"excluded_by\":",
+        "\"minimized\":",
+    ];
+    let complete = log
+        .lines()
+        .filter(|line| fields.iter().all(|field| line.contains(field)))
+        .count() as u64;
+    ctx.event(
+        LogEvent::new("e2e.parity.differential_fuzz")
+            .field("programs", programs)
+            .field("engine_exits", exits)
+            .field("position_mismatches", drift)
+            .field("complete_log_lines", complete),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("fuzz_programs", programs)
+        .with_counter("fuzz_engine_exits", exits)
+        .with_counter("fuzz_position_mismatches", drift)
+        .with_counter("fuzz_log_lines", complete))
+}
+
+/// Reference corpus regressions (fm-5wq.30 first; fm-5wq.27..29, fm-sq8.10
+/// and fm-5wq.11 add their cases): minimized constructs from corpus scenes the
+/// portal once refused or rendered differently, and Reference helpers it once
+/// computed differently, each checked against what the pinned Reference
+/// showed. One log event per case; a zero-case run fails.
+fn python_reference_corpus_regressions_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_reference_corpus_regressions()
+        .map_err(|error| fail(format!("Reference corpus regressions: {error}")))?;
+    for case in &cases {
+        ctx.event(
+            LogEvent::new("e2e.python.reference_corpus_regression")
+                .field("bead", case.bead.as_str())
+                .field("construct", case.construct.as_str())
+                .field("observed", case.observed.as_str())
+                .field("expected", case.expected.as_str())
+                .field("provenance", case.provenance.as_str())
+                .field("verdict", "pass"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("corpus_regression_cases", cases.len() as u64))
+}
+
+/// Integer key-map selectors claim native parts and render like explicit pairs.
+fn python_integer_matching_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let frames = manimlib::run_portal_gauntlet_integer_matching()
+        .map_err(|error| fail(format!("native integer matching selectors: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.integer_matching")
+            .field("decoded_frames", frames)
+            .field("selector_routes", 3_u64)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok().with_counter("integer_matching_frames", frames))
+}
+
+/// The Parity Ledger's witness registry (fm-5wq.12): its unit suite plants one defect per
+/// failure class the gate's check must catch, and every planted defect must fail the check.
+fn python_witness_registry_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_witness_registry()
+        .map_err(|error| fail(format!("witness registry drill: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.witness_registry")
+            .field("cases", report.cases)
+            .field("failed", report.failed),
+    );
+    if report.failed != 0 {
+        return Err(fail(format!(
+            "{} of {} witness registry cases failed",
+            report.failed, report.cases
+        )));
+    }
+    Ok(RunOutcome::ok().with_counter("witness_registry_cases", report.cases))
+}
+
+fn python_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_svg()
+        .map_err(|error| fail(format!("Python native SVG: {error}")))?;
+    let document = fmn_library::svg::SvgDocument::parse(&report.document)
+        .map_err(|error| fail(format!("parse native SVG: {error}")))?;
+    if document.width != 160.0 || document.height != 90.0 || document.shapes.len() < 6 {
+        return Err(fail("SVG lost its viewport or native text/math outlines"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.svg")
+            .field("thread_counts", report.thread_counts)
+            .field("failure_paths", report.failure_paths),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("svg_thread_counts", report.thread_counts)
+        .with_counter("svg_failure_paths", report.failure_paths)
+        .with_artifact("diagram.svg", report.document))
+}
+
+/// Library-class subclass hooks and authored easing (fm-5wq.13): an `init_points` override on
+/// each required library base is called once and renders, an `interpolate` override drives a
+/// Transform's frames, and authored rate functions are exact at 24/30/60 fps.
+/// fm-pr8c extends the same lifecycle scenario with constructor/class FPS on
+/// bare runs and imperative playback, observing updater dt and authored rates.
+fn python_subclass_hooks_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_subclass_hooks()
+        .map_err(|error| fail(format!("library subclass hooks: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.subclass_hooks")
+            .field("cases", report.cases)
+            .field("failed", report.failed)
+            .field("bases", report.bases),
+    );
+    if report.failed != 0 {
+        return Err(fail(format!(
+            "{} of {} library subclass hook cases failed",
+            report.failed, report.cases
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("subclass_hook_cases", report.cases)
+        .with_counter("subclass_hook_bases", report.bases))
+}
+
+fn python_surface_mesh_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_surface_mesh")?;
+    let (png, checks) = manimlib::run_portal_gauntlet_surface_mesh(&root, ctx.seed)
+        .map_err(|error| fail(format!("Python surface mesh: {error}")))?;
+    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode surface mesh: {error}")))?;
+    let visible = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|pixel| pixel[0] > pixel[1] && pixel[0] > pixel[2])
+        .count() as u64;
+    if (image.width, image.height) != (128, 128) || visible == 0 {
+        return Err(fail("surface mesh did not render visible 128x128 geometry"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.surface_mesh")
+            .field("checks", checks)
+            .field("analytic_oracle", true)
+            .field("thread_replay", true),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("surface_mesh_checks", checks)
+        .with_counter("surface_mesh_visible_pixels", visible)
+        .with_artifact("surface_mesh.png", png))
+}
+
+fn python_studio_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_studio_capture()
+        .map_err(|error| fail(format!("Python Studio capture: {error}")))?;
+    let first = fmn_codec::decode_png(&report.first_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode first Studio frame: {error}")))?;
+    let last = fmn_codec::decode_png(&report.last_png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode last Studio frame: {error}")))?;
+    if report.frames != 6
+        || report.captures != 1
+        || report.contexts_closed != 1
+        || (first.width, first.height) != (96, 54)
+        || (last.width, last.height) != (96, 54)
+        || first.rgba == last.rgba
+    {
+        return Err(fail(
+            "Studio capture did not render six moving native frames",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.studio_capture")
+            .field("frames", report.frames)
+            .field("captures", report.captures)
+            .field("contexts_closed", report.contexts_closed)
+            .field("capture_deferred", true)
+            .field("read_only", true)
+            .field("native_inspector", true),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_studio_frames", report.frames)
+        .with_counter("python_studio_captures", report.captures)
+        .with_counter("python_studio_contexts_closed", report.contexts_closed)
+        .with_artifact("studio_first.png", report.first_png)
+        .with_artifact("studio_last.png", report.last_png)
+        .with_artifact("studio_inspector.json", report.last_inspector))
+}
+
+fn python_studio_editing_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_studio_editing()
+        .map_err(|error| fail(format!("Python Studio editing: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.studio_editing")
+            .field("checks", checks)
+            .field("native_history", true)
+            .field("modifier_transitions", true),
+    );
+    Ok(RunOutcome::ok().with_counter("studio_editing_checks", checks))
+}
+
+fn python_insert_recording_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_insert_recording()
+        .map_err(|error| fail(format!("Python insert recording: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.insert_recording").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("python_insert_recording_checks", checks))
+}
+
+fn python_streamline_colors_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_streamline_colors()
+        .map_err(|error| fail(format!("Python streamline colors: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.streamline_colors").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("python_streamline_color_checks", checks))
+}
+
+fn python_time_varying_copies_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_time_varying_copies()
+        .map_err(|error| fail(format!("Python time-varying field copies: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.time_varying_copies").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("python_time_field_copy_checks", checks))
+}
+
+fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    python_portal_sequence_run(ctx, true)
+}
+
+fn python_ode_solution_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checks = manimlib::run_portal_gauntlet_ode_solution()
+        .map_err(|error| fail(format!("Python ODE trajectories: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.ode_solution").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("ode_checks", checks))
+}
+
+fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_native_outputs")?;
+    let manimlib::PortalOutputGauntletReport {
+        frames,
+        formats,
+        publication_failures: refusals,
+        thread_replays: replays,
+        sample_frames,
+        video_formats,
+        video_frames,
+        video_capability_refusals: video_refusals,
+    } = manimlib::run_portal_gauntlet_native_outputs(&root)
+        .map_err(|error| fail(format!("decoded Python native outputs: {error}")))?;
+    manimlib::run_portal_gauntlet_video_options()
+        .map_err(|error| fail(format!("negotiated Python output profiles: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.native_outputs")
+            .field("frames", frames)
+            .field("formats", formats)
+            .field("publication_failures", refusals)
+            .field("thread_replays", replays)
+            .field("sample_frames", sample_frames)
+            .field("video_formats", video_formats)
+            .field("video_frames", video_frames)
+            .field("video_capability_refusals", video_refusals)
+            .field("live_recording_config_suite", 1_u64),
+    );
+    let mut outcome = RunOutcome::ok()
+        .with_counter("portal_output_options_suite", 1)
+        .with_counter("live_recording_config_suite", 1)
+        .with_counter("native_output_frames", frames)
+        .with_counter("native_output_formats", formats)
+        .with_counter("native_output_publication_failures", refusals)
+        .with_counter("native_output_thread_replays", replays)
+        .with_counter("native_output_sample_frames", sample_frames)
+        .with_counter("video_output_formats", video_formats)
+        .with_counter("video_output_frames", video_frames)
+        .with_counter("video_output_capability_refusals", video_refusals);
+    for name in [
+        "native_scene.py",
+        "motion.gif",
+        "motion.y4m",
+        "primaries.gif",
+        "primaries.y4m",
+        "soundtrack.wav",
+        "cue.wav",
+        "quiet.wav",
+        "camera-pan.gif",
+        "camera-updater.gif",
+        "background-changes.gif",
+        "transparent-transitions.gif",
+        "light-changes.gif",
+        "overridden-light.gif",
+        "escaped-markup.png",
+        "literal-markup.png",
+        "centered-typesetting.gif",
+        "rectangle-flash.gif",
+    ] {
+        let bytes = std::fs::read(root.join(name))
+            .map_err(|error| fail(format!("read native output {name}: {error}")))?;
+        outcome = outcome.with_artifact(name, bytes);
+    }
+    if std::env::var("FMN_REQUIRE_FFMPEG").as_deref() == Ok("1") {
+        if video_formats != 2 || video_frames != 8 {
+            return Err(fail("required real MP4/MOV acceptance did not execute"));
+        }
+        for name in ["motion.mp4", "motion.mov", "soundtrack.mp4", "tone.wav"] {
+            let bytes = std::fs::read(root.join(name))
+                .map_err(|error| fail(format!("read video output {name}: {error}")))?;
+            outcome = outcome.with_artifact(name, bytes);
+        }
+    }
+    Ok(outcome)
+}
+
+fn python_portal_sequence_run(
+    ctx: &mut RunCtx,
+    animation_lifecycle: bool,
+) -> Result<RunOutcome, ScenarioError> {
+    let (directory, scene) = if animation_lifecycle {
+        ("python_animation_lifecycle", "AnimationLifecycleScene")
+    } else {
+        ("python_portal_png", "_GauntletPortalScene")
+    };
+    let root = scenario_dir(directory)?;
+    let destination = root.join("frames");
+    let report = if animation_lifecycle {
+        manimlib::run_portal_gauntlet_animation_lifecycle(&destination, ctx.seed)
+    } else {
+        manimlib::run_portal_gauntlet_png_sequence(&destination, ctx.seed)
+    }
+    .map_err(|error| fail(format!("run Python portal PNG scenario: {error}")))?;
+    let mut png_paths: Vec<PathBuf> = std::fs::read_dir(&destination)
+        .map_err(|error| fail(format!("read {}: {error}", destination.display())))?
+        .map(|entry| {
+            entry
+                .map(|entry| entry.path())
+                .map_err(|error| fail(format!("read Python portal directory entry: {error}")))
+        })
+        .collect::<Result<_, _>>()?;
+    png_paths.retain(|path| path.extension().is_some_and(|extension| extension == "png"));
+    png_paths.sort();
+    let pngs: Vec<Vec<u8>> = png_paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).map_err(|error| fail(format!("read {}: {error}", path.display())))
+        })
+        .collect::<Result<_, _>>()?;
+    let byte_count = pngs.iter().try_fold(0_u64, |total, bytes| {
+        total
+            .checked_add(
+                u64::try_from(bytes.len()).map_err(|_| fail("PNG byte count exceeds u64"))?,
+            )
+            .ok_or_else(|| fail("Python portal byte count overflow"))
+    })?;
+    let first = pngs
+        .first()
+        .ok_or_else(|| fail("Python portal published no PNG frames"))?;
+    let signature = first.starts_with(b"\x89PNG\r\n\x1a\n");
+    let decoded = fmn_codec::decode_png(
+        first,
+        &fmn_codec::PngLimits {
+            max_pixels: 96 * 54,
+            ..fmn_codec::PngLimits::default()
+        },
+    )
+    .map_err(|error| fail(format!("decode Python portal PNG: {error}")))?;
+    let dimensions_match = decoded.width == 96 && decoded.height == 54;
+    let engine_journaled = {
+        let fields: Vec<_> = report.engine.split(':').collect();
+        fields.len() == 3 && fields[0] == "fast-cpu" && fields[2].parse::<u32>().is_ok()
+    };
+    let complete = report.path == destination
+        && report.frame_count == u64::try_from(pngs.len()).unwrap_or(u64::MAX)
+        && report.bytes == byte_count
+        && report.digest.len() == 64
+        && report.threads == 1
+        && signature
+        && dimensions_match
+        && engine_journaled;
+    ctx.event(
+        LogEvent::new("e2e.python.render")
+            .field("scene", scene)
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("dimensions_match", truth(dimensions_match))
+            .field("engine_journaled", truth(engine_journaled)),
+    );
+    ctx.counter("python_render_frames", report.frame_count);
+    ctx.counter("python_png_signature", u64::from(signature));
+    ctx.counter("python_engine_journaled", u64::from(engine_journaled));
+    if !complete {
+        return Err(fail(format!(
+            "Python portal render drifted: path={} frames={} files={} bytes={} tree_bytes={} \
+             digest_len={} engine={:?} threads={} signature={} dimensions={}x{}",
+            report.path.display(),
+            report.frame_count,
+            pngs.len(),
+            report.bytes,
+            byte_count,
+            report.digest.len(),
+            report.engine,
+            report.threads,
+            signature,
+            decoded.width,
+            decoded.height,
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("python_portal_frame.png", first.clone())
+        .with_counter("python_render_frames", report.frame_count)
+        .with_counter("python_png_signature", 1)
+        .with_counter("python_engine_journaled", 1))
+}
+
+/// fm-sq8.11: a pure-2D Python scene renders on Lumen's retained planar
+/// route, and its frames are byte-identical to native `fmn` replaying the
+/// same scene's FMTL/1 export (same engine, one thread), including two static
+/// frames whose output conversion is reused. A surface scene keeps the camera
+/// route and says why. The installed-wheel suite
+/// (scene_execution.py) checks that certified provenance names the route.
+fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_planar_route")?;
+    let report = manimlib::run_portal_gauntlet_planar_route(&root)
+        .map_err(|error| fail(format!("run Python portal planar route: {error}")))?;
+    let native_dir = root.join("native");
+    std::fs::create_dir(&native_dir)
+        .map_err(|error| fail(format!("create native output directory: {error}")))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "64x36",
+        "--threads",
+        "1",
+        "--video_dir",
+        native_dir
+            .to_str()
+            .ok_or_else(|| fail("native output path is not UTF-8"))?,
+        report
+            .bundle
+            .to_str()
+            .ok_or_else(|| fail("bundle path is not UTF-8"))?,
+        "Flat",
+    ]);
+    let pngs = |directory: &std::path::Path| -> Result<Vec<Vec<u8>>, ScenarioError> {
+        let mut paths: Vec<_> = std::fs::read_dir(directory)
+            .map_err(|error| fail(format!("list {}: {error}", directory.display())))?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+            .collect();
+        paths.sort();
+        paths
+            .iter()
+            .map(|path| {
+                std::fs::read(path)
+                    .map_err(|error| fail(format!("read {}: {error}", path.display())))
+            })
+            .collect()
+    };
+    let portal = pngs(&report.portal_sequence)?;
+    let native = pngs(&native_dir.join("Flat"))?;
+    let identical_frames = portal.iter().zip(&native).filter(|(a, b)| a == b).count();
+    let native_identical = output.code == 0
+        && portal.len() as u64 == report.frame_count
+        && native.len() == portal.len()
+        && identical_frames == portal.len();
+    let (planar, camera, reason) = &report.planar_routes;
+    let planar_route = *planar == report.frame_count && *camera == 0 && reason.is_none();
+    let (surface_planar, surface_camera, surface_reason) = &report.surface_routes;
+    let surface_route = *surface_planar == 0 && *surface_camera > 0 && surface_reason.is_some();
+    let conversion_accounted = report.frame_count == 6
+        && report.converted_frames > 0
+        && report.conversion_reuses >= 2
+        && report
+            .converted_frames
+            .checked_add(report.conversion_reuses)
+            == Some(report.frame_count);
+    ctx.event(
+        LogEvent::new("e2e.python.planar_route")
+            .field("frames", report.frame_count)
+            .field("planar_frames", *planar)
+            .field("camera_frames", *camera)
+            .field("identical_frames", identical_frames)
+            .field("native_identical", truth(native_identical))
+            .field("converted_frames", report.converted_frames)
+            .field("conversion_reuses", report.conversion_reuses)
+            .field("conversion_accounted", truth(conversion_accounted))
+            .field("surface_camera_frames", *surface_camera)
+            .field(
+                "surface_reason",
+                surface_reason.clone().unwrap_or_else(|| "none".to_owned()),
+            )
+            .field("teams_used", report.planar_plan.0)
+            .field("teams_planned", report.planar_plan.1)
+            .field("team_threads", report.planar_plan.2)
+            .field("frames_in_flight", report.planar_plan.3),
+    );
+    let (teams_used, teams_planned, team_threads, frames_in_flight) = report.planar_plan;
+    let plan_reported = teams_used >= 1
+        && teams_used <= teams_planned
+        && team_threads >= 1
+        && frames_in_flight >= 1;
+    if !(native_identical && planar_route && surface_route && plan_reported && conversion_accounted)
+    {
+        return Err(fail(format!(
+            "portal planar route: routes={:?} surface={:?} plan={:?} frames={} portal={} \
+             native={} identical={identical_frames} converted={} reused={} cli_code={} stderr={:?}",
+            report.planar_routes,
+            report.surface_routes,
+            report.planar_plan,
+            report.frame_count,
+            portal.len(),
+            native.len(),
+            report.converted_frames,
+            report.conversion_reuses,
+            output.code,
+            output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("python_planar_route_frames", *planar)
+        .with_counter("python_planar_native_identical", 1)
+        .with_counter("python_planar_converted_frames", report.converted_frames)
+        .with_counter("python_planar_conversion_reuses", report.conversion_reuses)
+        .with_counter("python_planar_surface_camera", 1))
+}
+
+/// fm-lrni: ordinary landscape and portrait output retain the planar route,
+/// while live camera changes continue to require projection.
+fn python_portal_planar_aspects_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_planar_aspects")?;
+    let readings = manimlib::run_portal_gauntlet_planar_aspects(&root)
+        .map_err(|error| fail(format!("run Python portal aspect routes: {error}")))?;
+    let resolutions: Vec<_> = readings.iter().map(|reading| reading.resolution).collect();
+    if resolutions != [(854, 480), (480, 854)] {
+        return Err(fail(format!(
+            "portal aspect witness omitted its landscape or portrait output: {resolutions:?}"
+        )));
+    }
+    let mut planar_frames = 0;
+    let mut camera_refusals = 0;
+    for reading in &readings {
+        let (serial_planar, serial_camera, serial_reason) = &reading.serial_routes;
+        let (parallel_planar, parallel_camera, parallel_reason) = &reading.parallel_routes;
+        if reading.frame_count == 0
+            || *serial_planar != reading.frame_count
+            || *parallel_planar != reading.frame_count
+            || *serial_camera != 0
+            || *parallel_camera != 0
+            || serial_reason.is_some()
+            || parallel_reason.is_some()
+            || reading.parallel_teams_used == 0
+            || !reading.readback_matches_file
+            || !reading.serial_matches_parallel
+        {
+            return Err(fail(format!(
+                "portal aspect route or pixel agreement failed: {reading:?}"
+            )));
+        }
+        let mut mutations = Vec::new();
+        for (name, planar, camera, reason) in &reading.camera_mutation_routes {
+            if *planar != 0 || *camera == 0 || reason.is_none() {
+                return Err(fail(format!(
+                    "portal {:?} camera mutation {name} incorrectly retained the planar route: \
+                     planar={planar}, camera={camera}, reason={reason:?}",
+                    reading.resolution
+                )));
+            }
+            mutations.push(name.as_str());
+            camera_refusals += 1;
+        }
+        mutations.sort_unstable();
+        mutations.dedup();
+        if mutations.len() != 3 {
+            return Err(fail(format!(
+                "portal {:?} omitted a camera mutation witness: {mutations:?}",
+                reading.resolution
+            )));
+        }
+        planar_frames += serial_planar + parallel_planar;
+        ctx.event(
+            LogEvent::new("e2e.python.planar_aspect")
+                .field("width", reading.resolution.0)
+                .field("height", reading.resolution.1)
+                .field("serial_planar_frames", *serial_planar)
+                .field("parallel_planar_frames", *parallel_planar)
+                .field("camera_frames", 0_u64)
+                .field("parallel_teams_used", reading.parallel_teams_used)
+                .field("readback_matches_file", "true")
+                .field("serial_matches_parallel", "true")
+                .field("camera_refusals", mutations.len()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("python_planar_aspect_cases", readings.len() as u64)
+        .with_counter("python_planar_aspect_frames", planar_frames)
+        .with_counter("python_planar_aspect_camera_refusals", camera_refusals))
+}
+
+/// Native pure plays must actually reach the bounded worker pipeline while
+/// retaining serial pixels, exact clocks and authored observer fallback.
+fn python_portal_native_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_native_offload")?;
+    let (pure_frames, compared_frames, fallback_cases) =
+        manimlib::run_portal_gauntlet_native_offload(&root)
+            .map_err(|error| fail(format!("run Python portal native offload: {error}")))?;
+    // Four paired scene cases contribute 7 + 10 + 22 + 10 pure samples and
+    // eight wait samples. The separate moving-light pair adds six to both.
+    if (pure_frames, compared_frames, fallback_cases) != (55, 63, 5) {
+        return Err(fail(format!(
+            "portal native offload: pure={pure_frames}, compared={compared_frames}, \
+             fallbacks={fallback_cases}; expected 55, 63, 5"
+        )));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.native_offload")
+            .field("pure_frames", pure_frames)
+            .field("compared_frames", compared_frames)
+            .field("fallback_cases", fallback_cases)
+            .field("serial_pixels_identical", truth(true))
+            .field("authored_observers_preserved", truth(true)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_offload_pure_frames", pure_frames)
+        .with_counter("python_offload_compared_frames", compared_frames)
+        .with_counter("python_offload_fallback_cases", fallback_cases))
+}
+
+/// Declared pure rates retain the exact stepped Python output at every native
+/// sample, including lagged families, discontinuities and nested time windows.
+fn python_exact_rate_offload_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("rate_func_tabulated_offload")?;
+    let (compared_frames, distinct_samples, table_bytes) =
+        manimlib::run_portal_gauntlet_exact_rates(&root)
+            .map_err(|error| fail(format!("run exact Python rate offload: {error}")))?;
+    if compared_frames == 0
+        || distinct_samples == 0
+        || distinct_samples.checked_mul(16) != Some(table_bytes)
+    {
+        return Err(fail(format!(
+            "exact rate accounting: frames={compared_frames}, samples={distinct_samples}, \
+             table_bytes={table_bytes}"
+        )));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.exact_rate_offload")
+            .field("compared_frames", compared_frames)
+            .field("distinct_samples", distinct_samples)
+            .field("logical_table_bytes", table_bytes)
+            .field("serial_pixels_identical", truth(true))
+            .field("cross_path_record_max_ulp", 1u64)
+            .field("native_thread_geometry_bits_identical", truth(true))
+            .field("ordinary_callbacks_preserved", truth(true)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("exact_rate_compared_frames", compared_frames)
+        .with_counter("exact_rate_distinct_samples", distinct_samples)
+        .with_counter("exact_rate_logical_table_bytes", table_bytes))
+}
+
+/// The portal's final-state still route: semantic construction completes with
+/// intermediate raster work skipped, then the same Lumen/Reel composition root
+/// atomically publishes exactly one canonical PNG.
+/// Reference defaults and composite braces through the production portal
+/// route (fm-5wq.44, fm-5wq.43). The Reference's `Scene` merges
+/// `manim_config.camera` first (1920x1080, 30 fps, `#333333`); a portal scene
+/// with no camera configuration once rendered at 60 fps on black, and a brace
+/// around a detached `VGroup` once had width 0 at the origin.
+fn python_portal_reference_defaults_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_reference_defaults")?;
+    let destination = root.join("defaults.y4m");
+    let report = manimlib::run_portal_gauntlet_reference_defaults(&destination)
+        .map_err(|error| fail(format!("run Python portal reference defaults: {error}")))?;
+    let bytes = std::fs::read(&destination)
+        .map_err(|error| fail(format!("read {}: {error}", destination.display())))?;
+    let header_end = bytes
+        .iter()
+        .position(|&b| b == b'\n')
+        .ok_or_else(|| fail("y4m header line missing"))?;
+    let header = String::from_utf8_lossy(&bytes[..header_end]).into_owned();
+    let rate = header
+        .split(' ')
+        .find_map(|field| field.strip_prefix('F'))
+        .unwrap_or("")
+        .to_owned();
+    let frames = bytes.windows(6).filter(|w| w == b"FRAME\n").count();
+    // First frame's first luma sample and first Cb/Cr samples (32x18, 4:2:0).
+    let first = header_end + 1 + 6;
+    let (luma, chroma) = (32 * 18, 16 * 9);
+    let sample = |offset: usize| bytes.get(first + offset).copied().unwrap_or(0);
+    let (y, u, v) = (sample(0), sample(luma), sample(luma + chroma));
+    // BT.709 limited range for #333333: 16 + 219 * 0x33 / 255 = 59.8.
+    let background_is_reference =
+        (58..=62).contains(&y) && u.abs_diff(128) <= 1 && v.abs_diff(128) <= 1;
+    let rate_is_reference = rate == "30:1" && report.fps == 30;
+    let frames_match = frames == 15 && report.frame_count == 15;
+    let brace_spans =
+        (report.brace_width - report.target_width).abs() < 1e-3 && report.target_width > 4.0;
+    // Cross-front-door: the portal Scene's first camera layer is the typed
+    // configuration standalone fmn resolves (defaults, no user file).
+    let native = fmn_config::Config::resolve(&[], None)
+        .map_err(|error| fail(format!("resolve native config: {error}")))?
+        .config
+        .camera;
+    let (resolution, fps, background, opacity) = &report.scene_camera;
+    // The Reference's Tex is align* display math: Tex(r"\frac{1}{2}") is 0.9876
+    // tall at 6199a00d (TeX Live 2025, measured 2026-10-04); text style is
+    // about 0.58 (fm-tex-display-style-nclg).
+    let display_style = (report.display_fraction_height / 0.9876 - 1.0).abs() < 0.02;
+    // The README quick example's Tex is 3.940671 x 1.149994 on the Reference
+    // (measured 2026-10-04); text style would be about half as tall.
+    let (readme_width, readme_height) = report.readme_formula;
+    let readme_envelope = (readme_width / 3.940_671 - 1.0).abs() < 0.10
+        && (readme_height / 1.149_994 - 1.0).abs() < 0.10;
+    // fm-5wq.43: the pinned Reference puts Brace(Matrix.to_corner(UR)).get_text
+    // under the matrix, centred on it. The bug put it at (0, -0.27).
+    let (matrix_bottom, label_top, label_offset) = report.matrix_label;
+    let matrix_label_below = label_top < matrix_bottom && label_offset < 0.05;
+    let front_doors_agree = *resolution == native.resolution
+        && *fps == native.fps
+        && background.eq_ignore_ascii_case(&native.background_color)
+        && (*opacity - native.background_opacity).abs() < 1e-12;
+    ctx.event(
+        LogEvent::new("e2e.python.reference_defaults")
+            .field("rate", rate.as_str())
+            .field("frames", frames)
+            .field("background_yuv", format!("{y},{u},{v}").as_str())
+            .field("brace_width", format!("{:.4}", report.brace_width).as_str())
+            .field(
+                "target_width",
+                format!("{:.4}", report.target_width).as_str(),
+            )
+            .field("background_is_reference", truth(background_is_reference))
+            .field("rate_is_reference", truth(rate_is_reference))
+            .field("brace_spans", truth(brace_spans))
+            .field("matrix_label_below", truth(matrix_label_below))
+            .field("front_doors_agree", truth(front_doors_agree))
+            .field("display_style", truth(display_style))
+            .field(
+                "readme_formula",
+                format!("{readme_width:.4}x{readme_height:.4}"),
+            )
+            .field("readme_envelope", truth(readme_envelope)),
+    );
+    if !(background_is_reference
+        && rate_is_reference
+        && frames_match
+        && brace_spans
+        && matrix_label_below
+        && front_doors_agree
+        && display_style
+        && readme_envelope)
+    {
+        return Err(fail(format!(
+            "portal Reference defaults drifted: header={header:?} frames={frames} \
+             receipt_fps={} receipt_frames={} yuv=({y},{u},{v}) brace={} target={} \
+             matrix_label={:?} portal_camera={:?} native_camera=({:?}, {}, {}, {}) \
+             display_fraction_height={} readme_formula={:?}",
+            report.fps,
+            report.frame_count,
+            report.brace_width,
+            report.target_width,
+            report.matrix_label,
+            report.scene_camera,
+            native.resolution,
+            native.fps,
+            native.background_color,
+            native.background_opacity,
+            report.display_fraction_height,
+            report.readme_formula
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("python_portal_defaults.y4m", bytes)
+        .with_counter("python_defaults_reference_background", 1)
+        .with_counter("python_defaults_reference_rate", 1)
+        .with_counter("python_defaults_brace_spans_composite", 1)
+        .with_counter("python_defaults_matrix_label_below", 1)
+        .with_counter("python_defaults_front_doors_agree", 1)
+        .with_counter("python_defaults_display_style_tex", 1)
+        .with_counter("python_defaults_readme_formula_envelope", 1))
+}
+
+fn python_portal_png_still_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_portal_png_still")?;
+    let destination = root.join("final.png");
+    let report = manimlib::run_portal_gauntlet_png_still(&destination, ctx.seed)
+        .map_err(|error| fail(format!("run Python portal PNG still scenario: {error}")))?;
+    let bytes = std::fs::read(&destination)
+        .map_err(|error| fail(format!("read {}: {error}", destination.display())))?;
+    let signature = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
+    let decoded = fmn_codec::decode_png(
+        &bytes,
+        &fmn_codec::PngLimits {
+            max_pixels: 96 * 54,
+            ..fmn_codec::PngLimits::default()
+        },
+    )
+    .map_err(|error| fail(format!("decode Python portal still PNG: {error}")))?;
+    let dimensions_match = decoded.width == 96 && decoded.height == 54;
+    let engine_journaled = {
+        let fields: Vec<_> = report.engine.split(':').collect();
+        fields.len() == 3 && fields[0] == "fast-cpu" && fields[2].parse::<u32>().is_ok()
+    };
+
+    // Planted negative: a directory at the requested file path is the wrong
+    // node kind and must survive a precise publication refusal.
+    let blocked_destination = root.join("blocked.png");
+    std::fs::create_dir(&blocked_destination).map_err(|error| {
+        fail(format!(
+            "create planted PNG destination directory {}: {error}",
+            blocked_destination.display()
+        ))
+    })?;
+    let blocked = manimlib::run_portal_gauntlet_png_still(&blocked_destination, ctx.seed);
+    let wrong_node_kind_refused = blocked.is_err() && blocked_destination.is_dir();
+    let complete = report.path == destination
+        && report.frame_count == 1
+        && report.bytes == u64::try_from(bytes.len()).unwrap_or(u64::MAX)
+        && report.digest.len() == 64
+        && report.threads == 1
+        && signature
+        && dimensions_match
+        && engine_journaled
+        && wrong_node_kind_refused;
+    ctx.event(
+        LogEvent::new("e2e.python.render")
+            .field("scene", "_GauntletPortalScene")
+            .field("format", "png")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("dimensions_match", truth(dimensions_match))
+            .field("engine_journaled", truth(engine_journaled))
+            .field("wrong_node_kind_refused", truth(wrong_node_kind_refused)),
+    );
+    if !complete {
+        return Err(fail(format!(
+            "Python portal still drifted: path={} frames={} bytes={} file_bytes={} \
+             digest_len={} engine={:?} threads={} signature={} dimensions={}x{} \
+             wrong_node_kind_refused={}",
+            report.path.display(),
+            report.frame_count,
+            report.bytes,
+            bytes.len(),
+            report.digest.len(),
+            report.engine,
+            report.threads,
+            signature,
+            decoded.width,
+            decoded.height,
+            wrong_node_kind_refused,
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("python_portal_still.png", bytes)
+        .with_counter("python_still_frames", 1)
+        .with_counter("python_still_png_signature", 1)
+        .with_counter("python_still_engine_journaled", 1)
+        .with_counter("python_still_wrong_node_kind_refused", 1))
+}
+
+/// The shipped CLI's first positive native-registration path: one program
+/// selected from `@builtin`, rendered by Lumen, converted by fmn-frame, and
+/// atomically published by Reel's ordered PNG-sequence sink.
+fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_builtin_render")?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("CLI scenario output path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let sequence = dir.join("circle_shift.v1");
+    let complete = sequence.join("FMN_COMPLETE").is_file();
+    let pngs = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list CLI PNG sequence: {error}")))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+        .count();
+    let signature = std::fs::read(sequence.join("frame_000000.png"))
+        .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .unwrap_or(false);
+    let manifest_generation = dir.join("circle_shift.v1.manifest");
+    let manifest = std::fs::read(manifest_generation.join("manifest.fmnp"))
+        .ok()
+        .and_then(|bytes| ProvenanceManifest::from_bytes(&bytes).ok());
+    let manifest_complete = manifest_generation.join("FMN_COMPLETE").is_file();
+    let manifest_valid = manifest.as_ref().is_some_and(|manifest| {
+        manifest.mode == ManifestMode::Standard
+            && manifest.outputs.len() == 1
+            && (1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id))
+    });
+    let robot_record = output.stdout.lines().count() == 1
+        && output.stdout.contains("\"kind\":\"render\"")
+        && output.stdout.contains("\"source\":\"builtin\"")
+        && output.stdout.contains("\"frames\":3")
+        && output.stdout.contains("circle_shift.v1.manifest");
+    ctx.event(
+        LogEvent::new("e2e.cli.render")
+            .field("source", "builtin")
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("manifest_complete", truth(manifest_complete))
+            .field("manifest_valid", truth(manifest_valid))
+            .field("robot_record", truth(robot_record)),
+    );
+    ctx.counter("cli_render_frames", pngs as u64);
+    ctx.counter("cli_png_signature", u64::from(signature));
+    ctx.counter(
+        "cli_manifest",
+        u64::from(manifest_complete && manifest_valid),
+    );
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !complete
+        || pngs != 3
+        || !signature
+        || !manifest_complete
+        || !manifest_valid
+        || !robot_record
+    {
+        return Err(fail(format!(
+            "native CLI render failed: code={} pngs={pngs} complete={complete} signature={signature} manifest_complete={manifest_complete} manifest_valid={manifest_valid} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_render_frames", 3)
+        .with_counter("cli_png_signature", 1)
+        .with_counter("cli_manifest", 1))
+}
+
+/// Portable audio keeps native PCM deterministic and external decode authority explicit.
+fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::exporting::soundtrack::{
+        BundleSoundtrackOptions, export_bundle_with_soundtrack_bytes,
+        export_bundle_with_soundtrack_with_fs,
+    };
+    use fmn::exporting::{BundleExportError, BundleExportOptions, export_bundle_bytes};
+    use fmn::rendering::RenderError;
+    use fmn_output::{AudioDecodeError, AudioInputFormat, MixerConfig};
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+    use std::path::Path;
+
+    struct Score(Option<&'static str>);
+    impl fmn::SceneConstruct for Score {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(fmn_library::Circle::new().radius(0.5))?;
+            if let Some(path) = self.0 {
+                stage.scene_mut().add_sound(path, 0.0, None, None)?;
+            }
+            stage.wait(0.25)?;
+            if let Some(path) = self.0 {
+                stage.scene_mut().add_sound(path, 0.0, None, None)?;
+            }
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let mut options = BundleExportOptions::new().map_err(|e| fail(e.to_string()))?;
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Standard;
+    options.config.camera.fps = 8;
+    options.config.camera.resolution = (64, 36);
+    let fs = Arc::new(VirtualFs::new());
+    let source = fmn_codec::encode_wav(1, 8, fmn_codec::SampleFormat::F32, &[0.125, -0.25]);
+    fs.insert("/tone.wav", source.clone());
+    fs.insert("/compressed.asset", b"fLaC12345678".to_vec());
+    let mut audio = BundleSoundtrackOptions {
+        mixer: MixerConfig {
+            sample_rate: 8,
+            channels: 2,
+            max_output_frames: 32,
+        },
+        ..BundleSoundtrackOptions::default()
+    };
+    let legacy =
+        export_bundle_bytes(&mut Score(None), options.clone()).map_err(|e| fail(e.to_string()))?;
+    let silent =
+        export_bundle_with_soundtrack_bytes(&mut Score(None), options.clone(), &audio, fs.as_ref())
+            .map_err(|e| fail(e.to_string()))?;
+    if silent.bundle.bytes != legacy.bundle.bytes || silent.soundtrack.is_some() {
+        return Err(fail("audio opt-in changed a no-cue recording"));
+    }
+    let expected = [0.125, 0.125, -0.25, -0.25, 0.125, 0.125, -0.25, -0.25];
+    let mut artifact = None;
+    let mut checked = 0_u64;
+    for workers in [1, 4, 16] {
+        audio.workers = workers;
+        let export = export_bundle_with_soundtrack_bytes(
+            &mut Score(Some("/tone.wav")),
+            options.clone(),
+            &audio,
+            fs.as_ref(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let receipt = export
+            .soundtrack
+            .as_ref()
+            .ok_or_else(|| fail("embedded PCM has no preparation receipt"))?;
+        let bundle = fmn_scene::TimelineBundle::from_bytes(&export.bundle.bytes)
+            .map_err(|e| fail(e.to_string()))?;
+        let pcm = bundle
+            .soundtrack()
+            .ok_or_else(|| fail("portable bundle lost its native soundtrack"))?;
+        if export.bundle.frame_count != 4
+            || pcm.samples() != expected
+            || (pcm.sample_rate(), pcm.channels(), pcm.sample_frames()) != (8, 2, 4)
+            || receipt.mix.cues_mixed != 2
+            || receipt.mix.clipped_samples != 0
+            || receipt.inputs.len() != 2
+            || !receipt.audio_decodes.is_empty()
+            || !Arc::ptr_eq(&receipt.inputs[0].bytes, &receipt.inputs[1].bytes)
+            || receipt.inputs.iter().any(|input| {
+                input.report.source_digest != sha256(&source)
+                    || input.report.invocation.is_some()
+                    || input.bytes.as_ref() != source.as_slice()
+            })
+        {
+            return Err(fail("portable PCM or immutable source receipts changed"));
+        }
+        if let Some(reference) = &artifact {
+            if reference != &export.bundle.bytes {
+                return Err(fail("native soundtrack bundle depends on mixer workers"));
+            }
+        } else {
+            artifact = Some(export.bundle.bytes);
+        }
+        checked += 1;
+    }
+    let refused = export_bundle_with_soundtrack_with_fs(
+        &mut Score(Some("/compressed.asset")),
+        "/unavailable.fmtl",
+        options.clone(),
+        &audio,
+        fs.clone(),
+    )
+    .expect_err("compressed input without a capability must refuse");
+    if !matches!(
+        refused,
+        BundleExportError::Soundtrack(RenderError::SoundDecode {
+            error: AudioDecodeError::TranscoderRequired {
+                format: AudioInputFormat::Flac
+            },
+            ..
+        })
+    ) || fs.read(Path::new("/unavailable.fmtl")).is_ok()
+    {
+        return Err(fail(
+            "compressed capability refusal was untyped or published output",
+        ));
+    }
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    let refused = export_bundle_with_soundtrack_with_fs(
+        &mut Score(Some("/compressed.asset")),
+        "/certified.fmtl",
+        options,
+        &audio,
+        fs.clone(),
+    )
+    .expect_err("external compressed decode cannot enter certified preparation");
+    if !matches!(
+        refused,
+        BundleExportError::Soundtrack(RenderError::SoundDecode {
+            error: AudioDecodeError::Capability(ref message),
+            ..
+        }) if message.contains("certified")
+    ) || fs.read(Path::new("/certified.fmtl")).is_ok()
+    {
+        return Err(fail(
+            "certified compressed refusal was untyped or published output",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.bundle.soundtrack_capabilities")
+            .field("thread_counts", checked)
+            .field("source_receipts", 2_u64)
+            .field("prepublication_refusals", 2_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            "soundtrack.fmtl",
+            artifact.ok_or_else(|| fail("no audio recording"))?,
+        )
+        .with_counter("bundle_audio_thread_counts", checked)
+        .with_counter("bundle_audio_source_receipts", 2)
+        .with_counter("bundle_audio_refusals", 2)
+        .with_counter("bundle_audio_no_cue_unchanged", 1))
+}
+
+/// The shared CLI/facade audio composer consumes real scene lifecycle events
+/// and sound requests. Native PCM is the oracle here; the CLI's process-
+/// capability tests separately exercise delivery to the two-stage video mux.
+fn scene_soundtrack_windows_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::rendering::{PreparedSceneSoundtrack, SoundtrackTimeline};
+    use fmn_output::{AudioDecodeLimits, AudioDecoder, MixerConfig, frames_to_samples};
+    struct Score;
+    impl fmn::SceneConstruct for Score {
+        fn name(&self) -> &str {
+            "scene_soundtrack_windows"
+        }
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.scene_mut().force_skipping();
+            stage
+                .scene_mut()
+                .add_sound("omitted.wav", 0.0, None, None)?;
+            stage.wait(0.125)?;
+            stage.scene_mut().revert_to_original_skipping_status();
+            stage
+                .scene_mut()
+                .add_sound("background.wav", 0.0, None, None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("overlay.wav", -2.0 / 59.0, Some(-3.0), Some(-6.0))?;
+            stage.wait(0.5)?;
+            Ok(())
+        }
+    }
+    #[derive(Default)]
+    struct ClockSink {
+        timeline: SoundtrackTimeline,
+        captured: u64,
+    }
+    impl fmn_scene::SceneSink for ClockSink {
+        fn event(
+            &mut self,
+            event: fmn_scene::LifecycleEvent,
+        ) -> Result<(), fmn_scene::IntegrationError> {
+            self.timeline
+                .observe(event.time.frames(), event.skipping)
+                .map_err(|error| fmn_scene::IntegrationError::new("soundtrack", error.to_string()))
+        }
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            _: FramePacket,
+        ) -> Result<(), fmn_scene::IntegrationError> {
+            self.captured += 1;
+            Ok(())
+        }
+    }
+    let mut sink = ClockSink::default();
+    let scene = fmn::run_scene(
+        &mut Score,
+        fmn_scene::RuntimeConfig {
+            fps: 59,
+            ..fmn_scene::RuntimeConfig::default()
+        },
+        7,
+        &mut sink,
+    )
+    .map_err(|error| fail(format!("sound scene lifecycle: {error}")))?
+    .into_scene();
+    let requests = scene.sound_requests();
+    let rebased_end = sink
+        .timeline
+        .output_frame(scene.time().frames())
+        .map_err(|error| fail(error.to_string()))?;
+    if requests.len() != 2
+        || scene.time().frames() != 53
+        || rebased_end != 45
+        || sink.captured != 45
+    {
+        return Err(fail(
+            "sound scene lost skip/no-op or rational frame semantics",
+        ));
+    }
+    let fs = fmn_platform::fs::VirtualFs::new();
+    let background: Vec<f32> = (0..16_000)
+        .map(|index| (index % 97) as f32 / 194.0 - 0.25)
+        .collect();
+    let background = fmn_codec::encode_wav(1, 44_100, fmn_codec::SampleFormat::S16, &background);
+    fs.insert("background.wav", background.clone());
+    fs.insert(
+        "overlay.wav",
+        fmn_codec::encode_wav(1, 48_000, fmn_codec::SampleFormat::S16, &vec![0.25; 8_000]),
+    );
+    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None)
+        .map_err(|error| fail(error.to_string()))?;
+    let end = frames_to_samples(53, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let prepared =
+        PreparedSceneSoundtrack::new(&fs, requests, &mut decoder, MixerConfig::default(), None)
+            .map_err(|error| fail(error.to_string()))?
+            .with_timeline_frames(end);
+    let full = prepared.mix(1).map_err(|error| fail(error.to_string()))?;
+    let start = frames_to_samples(8, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let split = frames_to_samples(23, 59, 48_000).map_err(|error| fail(error.to_string()))? as u64;
+    let left = prepared
+        .mix_window(start, split - start, 4)
+        .map_err(|error| fail(error.to_string()))?;
+    let right = prepared
+        .mix_window(split, end - split, 1)
+        .map_err(|error| fail(error.to_string()))?;
+    let mut joined = left.audio.samples;
+    joined.extend(right.audio.samples);
+    if joined != full.audio.samples[start as usize * 2..end as usize * 2]
+        || prepared.inputs()[0].report.source_digest != sha256(&background)
+        || !prepared.invocations().is_empty()
+    {
+        return Err(fail(
+            "soundtrack windows changed phase, ducking, source identity, or native decode",
+        ));
+    }
+    let rebased = PreparedSceneSoundtrack::new(
+        &fs,
+        requests,
+        &mut decoder,
+        MixerConfig::default(),
+        Some(&sink.timeline),
+    )
+    .map_err(|error| fail(error.to_string()))?
+    .mix(4)
+    .map_err(|error| fail(error.to_string()))?;
+    if full.audio.samples[..start as usize * 2]
+        .iter()
+        .any(|sample| *sample != 0.0)
+        || !rebased.audio.samples[..100]
+            .iter()
+            .any(|sample| sample.abs() > 0.01)
+    {
+        return Err(fail("skipped prefix was not removed from emitted audio"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.soundtrack.windows")
+            .field("cues", 2_u64)
+            .field("captured_frames", sink.captured)
+            .field("sample_window_equal", "true")
+            .field("skipped_prefix_removed", "true")
+            .field("source_identity", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("soundtrack_cues", 2)
+        .with_counter("soundtrack_windows_equal", 1)
+        .with_counter("soundtrack_skip_rebased", 1)
+        .with_counter("soundtrack_source_identity", 1))
+}
+
+/// One certified in-process render of the CLI's `formula_sheet.v1` builtin
+/// against `cache`, returning the render record and its frames in order.
+fn formula_sheet_render(
+    scenario: &str,
+    cache: &std::path::Path,
+    threads: &str,
+) -> Result<(String, Vec<Vec<u8>>), ScenarioError> {
+    let dir = scenario_dir(scenario)?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("typeset scenario output path is not UTF-8"))?;
+    let cache_text = cache
+        .to_str()
+        .ok_or_else(|| fail("typeset scenario cache path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--reproducible",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "160x90",
+        "--fps",
+        "8",
+        "--threads",
+        threads,
+        "--cache-dir",
+        cache_text,
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        fmn::builtins::FORMULA_SHEET_SCENE_NAME,
+    ]);
+    if output.code != 0 {
+        return Err(fail(format!(
+            "formula sheet render failed: code={} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    let record = output
+        .stdout
+        .lines()
+        .find(|line| line.contains("\"kind\":\"render\""))
+        .ok_or_else(|| fail(format!("no render record in {:?}", output.stdout)))?
+        .to_owned();
+    let sequence = dir.join(fmn::builtins::FORMULA_SHEET_SCENE_NAME);
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list {}: {error}", sequence.display())))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+        .collect();
+    paths.sort();
+    let frames = paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).map_err(|error| fail(format!("read {}: {error}", path.display())))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((record, frames))
+}
+
+/// The certified final PNGs of `render_matrix.tex_color.v1`: a formula with
+/// its own `\color` / `\textcolor`, then its colourless twin, each with its
+/// opaque pixels within 3 levels of xcolor's orange, xcolor's red and the base
+/// white.
+type TexColorRender = (Vec<u8>, [u64; 3]);
+
+fn tex_color_renders() -> Result<(TexColorRender, TexColorRender), ScenarioError> {
+    struct Formula(&'static str);
+    impl fmn::SceneConstruct for Formula {
+        fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
+            vec![fmn::tex::TypesetRequest::math(self.0)]
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let formula = fmn::prelude::Tex::new(self.0)
+                .font_size(144.0)
+                .build(stage.tex_engine()?)?;
+            stage.add(formula)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let render = |source: &'static str, path: &str| -> Result<TexColorRender, ScenarioError> {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
+            .map_err(|error| fail(format!("tex colour options: {error}")))?;
+        options.config.camera.resolution = (384, 216);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        fmn::render_with_fs(&mut Formula(source), options, fs.clone())
+            .map_err(|error| fail(format!("render {source:?}: {error}")))?;
+        let png = fs
+            .read(std::path::Path::new(path))
+            .map_err(|error| fail(format!("read {path}: {error}")))?;
+        let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+            .map_err(|error| fail(format!("decode {path}: {error}")))?;
+        let mut classes = [0_u64; 3];
+        for px in image.rgba.as_chunks::<4>().0 {
+            for (class, rgb) in [[255, 128, 0], [255, 0, 0], [255, 255, 255]]
+                .into_iter()
+                .enumerate()
+            {
+                if px[3] == 255 && px[..3].iter().zip(rgb).all(|(a, b)| a.abs_diff(b) <= 3) {
+                    classes[class] += 1;
+                }
+            }
+        }
+        Ok((png, classes))
+    };
+    Ok((
+        render(
+            r"{\color{orange} x} + \textcolor{red}{y} = z",
+            "/tex-color.png",
+        )?,
+        render(r"x + y = z", "/tex-plain.png")?,
+    ))
+}
+
+/// fm-tex-color-silent-i0p2: a formula's own `\color` and `\textcolor` reach
+/// the certified final PNG. Opaque glyph interiors carry xcolor's orange and
+/// red where the source asks and the base white elsewhere, and the same
+/// formula without the commands renders no orange or red ink at all. The
+/// coloured frame is bit-locked.
+fn tex_color_final_png_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let ((png, colored), (_, plain)) = tex_color_renders()?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.tex_color")
+            .field("orange_px", colored[0])
+            .field("red_px", colored[1])
+            .field("white_px", colored[2])
+            .field("plain_orange_px", plain[0])
+            .field("plain_red_px", plain[1])
+            .field("plain_white_px", plain[2]),
+    );
+    // Every class has opaque interior pixels. The colour moved ink off white,
+    // so the colourless twin has strictly more white, and no orange or red.
+    if colored.iter().any(|&count| count < 10) {
+        return Err(fail(format!(
+            "the coloured formula lacks a colour class (orange, red, white): {colored:?}"
+        )));
+    }
+    if plain[0] != 0 || plain[1] != 0 || plain[2] <= colored[2] {
+        return Err(fail(format!(
+            "the colourless formula has orange or red ink, or no more white than the coloured one: \
+             {plain:?} vs {colored:?}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("tex_color_classes", 3)
+        .with_artifact("render_matrix.tex_color.v1", png))
+}
+
+/// The sheet `render_matrix.tex_constructs_t2.v1` renders: common
+/// constructs outside the 3b1b corpus (fm-tex-constructs-t2-1wfq), in
+/// mathematics and in a TexText line.
+const TEX_CONSTRUCTS_T2_MATH: &str = r"\boxed{a \leqslant b} \not\subset \lvert z \rvert \quad \cfrac{1}{1+\cfrac{1}{x}} \therefore \square \mathscr{L}";
+const TEX_CONSTRUCTS_T2_TEXT: &str = r"\textit{italic} \texttt{mono}\hspace{1em}\textsf{sans}";
+
+/// The sheet `render_matrix.tex_cancel_frak.v1` renders: `\mathfrak` and
+/// the cancel package's strokes in mathematics, and `\cancel` in a TexText
+/// line (fm-tex-constructs-t2-1wfq).
+const TEX_CANCEL_FRAK_MATH: &str = r"\mathfrak{su}(2) \oplus \mathfrak{R} \quad \frac{\cancel{2}x}{\cancel{2}y} \; \bcancel{a} \; \xcancel{b+c}";
+const TEX_CANCEL_FRAK_TEXT: &str = r"\cancel{struck} text";
+
+/// The certified final PNG of the constructs sheet, its two mobjects' part
+/// counts and its opaque white pixel count.
+fn tex_constructs_t2_render() -> Result<(Vec<u8>, [u64; 2], u64), ScenarioError> {
+    tex_sheet_render(TEX_CONSTRUCTS_T2_MATH, TEX_CONSTRUCTS_T2_TEXT)
+}
+
+/// The certified final PNG of a constructs sheet: a `Tex` line above a
+/// `TexText` line at 40 pt in a 640x360 frame. Also its two mobjects' part
+/// counts and its opaque white pixel count.
+fn tex_sheet_render(
+    math: &'static str,
+    text: &'static str,
+) -> Result<(Vec<u8>, [u64; 2], u64), ScenarioError> {
+    struct Sheet {
+        math: &'static str,
+        text: &'static str,
+        parts: [u64; 2],
+    }
+    impl fmn::SceneConstruct for Sheet {
+        fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
+            vec![
+                fmn::tex::TypesetRequest::math(self.math),
+                fmn::tex::TypesetRequest::text(self.text),
+            ]
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let math = fmn::prelude::Tex::new(self.math)
+                .font_size(40.0)
+                .build(stage.tex_engine()?)?;
+            let text = fmn::prelude::TexText::new(self.text)
+                .font_size(40.0)
+                .build(stage.tex_engine()?)?;
+            self.parts = [math.vmob.children().len(), text.vmob.children().len()]
+                .map(|n| u64::try_from(n).unwrap_or(u64::MAX));
+            let math = stage.add(math)?;
+            let text = stage.add(text)?;
+            stage.shift(math, [0.0, 0.9, 0.0]);
+            stage.shift(text, [0.0, -1.3, 0.0]);
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let path = "/tex-constructs-t2.png";
+    let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
+        .map_err(|error| fail(format!("constructs sheet options: {error}")))?;
+    options.config.camera.resolution = (640, 360);
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    let mut sheet = Sheet {
+        math,
+        text,
+        parts: [0; 2],
+    };
+    fmn::render_with_fs(&mut sheet, options, fs.clone())
+        .map_err(|error| fail(format!("render the constructs sheet: {error}")))?;
+    let png = fs
+        .read(std::path::Path::new(path))
+        .map_err(|error| fail(format!("read {path}: {error}")))?;
+    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode {path}: {error}")))?;
+    let white = image
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .filter(|px| px[3] == 255 && px[..3].iter().all(|&c| c >= 252))
+        .count();
+    Ok((png, sheet.parts, u64::try_from(white).unwrap_or(u64::MAX)))
+}
+
+/// fm-tex-constructs-t2-1wfq: `\boxed`, `\leqslant`, `\not`, `\lvert`,
+/// `\cfrac`, `\therefore`, `\square`, `\mathscr`, `\textit`, `\texttt`,
+/// `\hspace` and `\textsf` build and reach the certified final PNG, which is
+/// bit-locked.
+fn tex_constructs_t2_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (png, [math_parts, text_parts], white_px) = tex_constructs_t2_render()?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.tex_constructs_t2")
+            .field("math_parts", math_parts)
+            .field("text_parts", text_parts)
+            .field("white_px", white_px),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_constructs_t2_mobjects", 2)
+        .with_artifact("render_matrix.tex_constructs_t2.v1", png))
+}
+
+/// fm-tex-constructs-t2-1wfq: `\mathfrak` (Euler Fraktur) and `\cancel`,
+/// `\bcancel` and `\xcancel`, in a fraction and in TexText, build and reach
+/// the certified final PNG, which is bit-locked.
+fn tex_cancel_frak_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (png, [math_parts, text_parts], white_px) =
+        tex_sheet_render(TEX_CANCEL_FRAK_MATH, TEX_CANCEL_FRAK_TEXT)?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.tex_cancel_frak")
+            .field("math_parts", math_parts)
+            .field("text_parts", text_parts)
+            .field("white_px", white_px),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_cancel_frak_mobjects", 2)
+        .with_artifact("render_matrix.tex_cancel_frak.v1", png))
+}
+
+/// fm-jefi: real LaTeX size declarations select optical math families through
+/// TexText, including nested scripts and script-size delimiter variants.
+fn tex_declared_math_sizes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // article[10pt] + amsmath/amssymb showbox measurements, in base ems.
+    // Declare sizes outside the math island: LaTeX ignores declarations
+    // issued after entering math. These are independent measured values.
+    let cases = [
+        (r"{\large $x^{a^b}$}", [1.547_803, 1.134_471, 0.0]),
+        (r"{\small $x^{a^b}$}", [1.345_901, 0.981_331, 0.0]),
+        (
+            r"$x^{\left(\frac{1}{3}\right)}$",
+            [1.979_59, 1.107_639, 0.0],
+        ),
+        (
+            r"{\small $x^{\left(\frac{1}{3}\right)}$}",
+            [1.874_026, 0.996_873, 0.0],
+        ),
+        (
+            r"{\large $x^{\left(\frac{1}{3}\right)}$}",
+            [2.238_243, 1.329_166, 0.0],
+        ),
+        (r"{\large ${ (a) }^2_3$}", [2.005_684, 1.098_889, 0.35]),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (index, (source, expected)) in cases.into_iter().enumerate() {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: TexText: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-5)
+        {
+            return Err(fail(format!(
+                "{source}: measured box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if index < 2 {
+            let sizes = if index == 0 {
+                [1.2, 0.8, 0.6]
+            } else {
+                [0.9, 0.6, 0.5]
+            };
+            for (ch, expected_size) in ['x', 'a', 'b'].into_iter().zip(sizes) {
+                let glyph = layout
+                    .glyphs
+                    .iter()
+                    .find(|glyph| glyph.ch == ch)
+                    .ok_or_else(|| fail(format!("{source}: missing {ch}")))?;
+                if !glyph.size.is_finite() || (glyph.size - expected_size).abs() >= 1e-9 {
+                    return Err(fail(format!(
+                        "{source}: {ch} size {}, real TeX {expected_size}",
+                        glyph.size
+                    )));
+                }
+            }
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show formula: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: produced a blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_declared_math_size")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_declared_math_size_formulas", 6))
+}
+
+/// fm-q364: T1 EC text metrics reach the library builder, primitive family
+/// and certified renderer. Dimensions are independent real LaTeX captures
+/// with and without the default template's ligature-disable font control.
+fn tex_t1_text_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let basic = fmn_library::TexEngine::new("fmd-math/pack/basic", None)
+        .map_err(|error| fail(format!("the basic text engine: {error}")))?;
+    let cases = [
+        ("AV", [1.499_634, 0.688_720, 0.0]),
+        ("Wave", [2.499_390, 0.688_720, 0.0]),
+        ("Yes", [1.588_501, 0.688_720, 0.0]),
+        (r"\text{AV}", [1.499_634, 0.688_720, 0.0]),
+        (r"\small AV", [1.386_880, 0.619_849, 0.0]),
+        (r"\scriptsize AV", [1.180_267, 0.482_104, 0.0]),
+        (r"\LARGE AV", [2.434_406, 1.189_987, 0.0]),
+        (r"\Huge AV", [3.406_796, 1.713_264, 0.0]),
+        (r"{\huge AV\normalsize AV}", [4.376_737, 1.428_217, 0.0]),
+        ("éßÆ", [1.846_771, 0.688_720, 0.0]),
+        ("ffi fl", [1.805_115, 0.688_720, 0.0]),
+        (r"$\operatorname{AV}$", [1.402_777, 0.683_331, 0.0]),
+        (r"$x^{\text{AV}}$", [1.801_794, 0.844_997, 0.0]),
+        (r"$x^{y^{\text{AV}}}$", [2.082_518, 1.009_032, 0.0]),
+    ];
+    let basic_cases = [
+        ("AV", [1.388_550, 0.688_720, 0.0]),
+        ("Wave", [2.360_535, 0.688_720, 0.0]),
+        ("Yes", [1.505_188, 0.688_720, 0.0]),
+    ];
+    let cases = cases
+        .into_iter()
+        .map(|(source, expected)| ("default", engine, source, expected))
+        .chain(
+            basic_cases
+                .into_iter()
+                .map(|(source, expected)| ("basic", &basic, source, expected)),
+        );
+    let blank = render_certified_doc(&Stage::new());
+    for (pack, engine, source, expected) in cases {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: TexText: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-5)
+        {
+            return Err(fail(format!(
+                "{source}: text box {measured:?}, real T1 TeX {expected:?}"
+            )));
+        }
+        if source == "ffi fl"
+            && layout
+                .glyphs
+                .iter()
+                .map(|glyph| glyph.ch)
+                .collect::<String>()
+                != "ffifl"
+        {
+            return Err(fail("text ligatures replaced authored glyphs".to_owned()));
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let text = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(text)
+            .map_err(|error| fail(format!("{source}: show text: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_t1_text_metrics")
+                .field("pack", pack)
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_t1_text_formulas", 17))
+}
+
+/// fm-dbinom-in-scripts-r12-x6zi: forced fraction styles reach the native
+/// library builder and certified renderer in scripts and cramped contexts.
+fn tex_forced_fraction_styles_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // Independent LaTeX/T1/amsmath showbox captures at 10 pt, in ems.
+    // The explicit style spellings must agree with the corresponding macros.
+    let cases = [
+        (
+            r"{\scriptstyle \dbinom{B}{A \sim 6 = \Omega}}",
+            [6.1111, 1.45001, 0.950012],
+        ),
+        (r"{1^{3}}^{\dbinom{m}{b}}", [3.348857, 2.507661, 0.0]),
+        (r"C_{\dbinom{7}{m = P}}", [5.22919, 0.683331, 2.05558]),
+        (
+            r"{\scriptstyle \dbinom{B}{A \sim 6 = Z}}",
+            [6.143044, 1.45001, 0.950012],
+        ),
+        (
+            r"{\scriptscriptstyle \dbinom{B}{A \sim 6 = Z}}",
+            [6.143044, 1.45001, 0.950012],
+        ),
+        (r"x_{\dbinom{a^2}{b}}", [3.070958, 0.430554, 2.09608]),
+        (r"\sqrt{\dbinom{a^2}{b}}", [3.449432, 1.904079, 1.135948]),
+        (r"x_{\dfrac{a^2}{b}}", [1.838728, 0.430554, 1.832019]),
+        (r"\sqrt{\dfrac{a^2}{b}}", [2.217203, 1.736107, 0.703914]),
+        (r"x_{\tbinom{a^2}{b}}", [2.362247, 0.430554, 1.073294]),
+        (r"\sqrt{\tbinom{a^2}{b}}", [2.740721, 1.392686, 0.447328]),
+        (r"x_{\tfrac{a^2}{b}}", [1.685574, 0.430554, 1.01813]),
+        (r"\sqrt{\tfrac{a^2}{b}}", [2.064049, 1.37027, 0.469745]),
+        (
+            r"x_{{\displaystyle\binom{a^2}{b}}}",
+            [3.070958, 0.430554, 2.09608],
+        ),
+        (
+            r"\sqrt{{\displaystyle\binom{a^2}{b}}}",
+            [3.449432, 1.904079, 1.135948],
+        ),
+        (
+            r"x_{{\displaystyle\frac{a^2}{b}}}",
+            [1.838728, 0.430554, 1.832019],
+        ),
+        (
+            r"\sqrt{{\displaystyle\frac{a^2}{b}}}",
+            [2.217203, 1.736107, 0.703914],
+        ),
+        (
+            r"x_{{\textstyle\binom{a^2}{b}}}",
+            [2.362247, 0.430554, 1.073294],
+        ),
+        (
+            r"\sqrt{{\textstyle\binom{a^2}{b}}}",
+            [2.740721, 1.392686, 0.447328],
+        ),
+        (
+            r"x_{{\textstyle\frac{a^2}{b}}}",
+            [1.685574, 0.430554, 1.01813],
+        ),
+        (
+            r"\sqrt{{\textstyle\frac{a^2}{b}}}",
+            [2.064049, 1.37027, 0.469745],
+        ),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (source, expected) in cases {
+        let built = fmn_library::Tex::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: Tex: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: measured box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show formula: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_forced_fraction_style")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_forced_fraction_formulas", 21))
+}
+
+/// fm-sup-accented-nucleus-r12-a529 and fm-7ojgl: script attachment and
+/// exact prime boxes reach the native builder and certified raster.
+fn tex_script_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // Fresh ruled-Reference TeX boxes at10pt, in ems. The compound
+    // controls retain the ordinary box-based script drops.
+    let cases = [
+        (r"{\bar{\phi}}^{y}", [1.076_509, 0.831_667, 0.194_444]),
+        (r"{\hat{x}}^{2}", [1.020_140, 0.864_003, 0.0]),
+        (r"{\bar{A}}_{1}^{2}", [1.198_615, 0.864_003, 0.247_217]),
+        (r"\bar{\phi}^{y}", [1.076_509, 0.831_667, 0.194_444]),
+        (r"\hat{x}^{2}", [1.020_140, 0.864_003, 0.0]),
+        (r"\bar{A}_{1}^{2}", [1.198_615, 0.864_003, 0.247_217]),
+        (r"\phi^{y}", [1.076_509, 0.714_280, 0.194_444]),
+        (r"{\phi}^{y}", [1.076_509, 0.714_280, 0.194_444]),
+        (r"{\hat{xy}}^2", [1.546_300, 0.898_335, 0.194_444]),
+        (r"{\bar{xy}}_1^2", [1.546_300, 0.864_003, 0.247_217]),
+        (r"\prime", [0.274_998, 0.555_557, 0.0]),
+        (r"\scriptstyle\prime", [0.230_556, 0.388_890, 0.0]),
+        (r"\scriptscriptstyle\prime", [0.220_488, 0.277_779, 0.0]),
+        ("{}'", [0.280_556, 0.801_782, 0.0]),
+        ("{}''", [0.511_111, 0.801_782, 0.0]),
+        ("x'", [0.852_083, 0.801_782, 0.0]),
+        ("f'", [0.877_782, 0.801_782, 0.194_444]),
+        ("x''", [1.082_639, 0.801_782, 0.0]),
+        ("x'''", [1.313_194, 0.801_782, 0.0]),
+        (r"f^{\prime}", [0.877_782, 0.801_782, 0.194_444]),
+        (r"{\hat{x}}'", [0.852_083, 0.801_782, 0.0]),
+        (r"{\bar{f}}'", [0.877_782, 0.831_667, 0.194_444]),
+        (r"x^{y'}", [1.322_690, 0.992_450, 0.0]),
+        (r"\scriptstyle x'", [0.723_961, 0.579_558, 0.0]),
+        (r"\scriptscriptstyle x'", [0.666_324, 0.479_555, 0.0]),
+        (r"\text{\tiny $\prime$}", [0.220_488, 0.277_779, 0.0]),
+        (r"\text{\small $\prime$}", [0.251_389, 0.500_002, 0.0]),
+        (r"\text{\Large $\prime$}", [0.395_999, 0.800_002, 0.0]),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (source, expected) in cases {
+        let built = fmn_library::Tex::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: Tex: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: measured box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if built.vmob.children().is_empty()
+            || built.vmob.children().len() != built.typeset.subs.len()
+        {
+            return Err(fail(format!("{source}: lost primitive family")));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show formula: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_script_metric")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_script_metric_formulas", 28))
+}
+
+/// fm-underline-depth-r12-gj19: exact underline boxes retain their rules
+/// through native Tex/TexText families and certified rasterization.
+fn tex_underline_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let mut visible_rules = 0;
+    // Independent ruled-Reference boxes at10pt. Text-mode constructors
+    // use the corresponding text-island oracle, including its EC metrics.
+    let cases = [
+        (
+            false,
+            r"\underline{B}",
+            [0.808_680, 0.683_331, 0.199_990],
+            1,
+        ),
+        (
+            false,
+            r"\underline{y}",
+            [0.526_160, 0.430_554, 0.394_434],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\underline{B}",
+            [0.638_300, 0.478_334, 0.169_990],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\underline{y}",
+            [0.383_220, 0.215_277, 0.218_643],
+            1,
+        ),
+        (
+            false,
+            r"\underline{\underline{B}}",
+            [0.808_680, 0.683_331, 0.399_979],
+            2,
+        ),
+        (
+            false,
+            r"\frac{\underline{B}}{\underline{y}}",
+            [1.048_680, 1.359_839, 1.080_385],
+            3,
+        ),
+        (
+            false,
+            r"\text{\underline{B}}",
+            [0.708_160, 0.688_720, 0.199_990],
+            1,
+        ),
+        (
+            false,
+            r"\text{\underline{y}}",
+            [0.527_649, 0.430_450, 0.394_386],
+            1,
+        ),
+        (true, r"\underline{B}", [0.708_160, 0.688_720, 0.199_990], 1),
+        (true, r"\underline{y}", [0.527_649, 0.430_450, 0.394_386], 1),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (text_mode, source, expected, expected_rules) in cases {
+        let built = if text_mode {
+            fmn_library::TexText::new(source).build(engine)
+        } else {
+            fmn_library::Tex::new(source).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: underline builder: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: underline box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if layout.rules.len() != expected_rules
+            || built.vmob.children().len() != built.typeset.subs.len()
+        {
+            return Err(fail(format!("{source}: underline rules or family lost")));
+        }
+        for (ordinal, sub) in built.typeset.subs.iter().enumerate() {
+            if matches!(sub.prim, Prim::Rule(_))
+                && built.vmob.children()[ordinal].points().is_empty()
+            {
+                return Err(fail(format!("{source}: rule has no native geometry")));
+            }
+        }
+        let centered = built.vmob.moved_to([0.0; 3]);
+        let mut stage = Stage::new();
+        let formula = stage.add(centered.clone());
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show underline: {error}")))?;
+        let rendered = render_certified_doc(&stage);
+        if rendered == blank {
+            return Err(fail(format!("{source}: blank certified underline frame")));
+        }
+        // Hide one rule at a time without changing any points or centering.
+        // Glyph ink alone must not satisfy the underline visibility check.
+        for (ordinal, sub) in built.typeset.subs.iter().enumerate() {
+            if !matches!(sub.prim, Prim::Rule(_)) {
+                continue;
+            }
+            let mut child_index = 0;
+            let masked = centered.clone().map_children(|child| {
+                let hide = child_index == ordinal;
+                child_index += 1;
+                if hide {
+                    child.map_style_deep(|mut style| {
+                        style.fill_opacity = 0.0;
+                        style.stroke_opacity = 0.0;
+                        style
+                    })
+                } else {
+                    child
+                }
+            });
+            let mut without_rule = Stage::new();
+            let formula = without_rule.add(masked);
+            without_rule
+                .add_to_scene(formula)
+                .map_err(|error| fail(format!("{source}: show rule control: {error}")))?;
+            if render_certified_doc(&without_rule) == rendered {
+                return Err(fail(format!(
+                    "{source}: native rule {ordinal} contributes no certified pixels"
+                )));
+            }
+            visible_rules += 1;
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_underline_metric")
+                .field("source", source)
+                .field("mode", if text_mode { "text" } else { "math" })
+                .field("box_em", format!("{measured:?}"))
+                .field("rules", expected_rules.to_string())
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("tex_underline_formulas", 10)
+        .with_counter("tex_underline_visible_rules", visible_rules))
+}
+
+/// fm-widehat-height-r12-v3jj: independently measured wide-hat boxes and
+/// every accent path survive native builders and certified rasterization.
+fn tex_widehat_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // The ruled-Reference 10pt oracle also used by the upstream regression.
+    // Cover the CMEX and AMS variants, optical sizes, nesting, an empty
+    // nucleus, a fraction and the TexText math-island front door.
+    let cases = [
+        (false, r"\widehat{P}", [0.780_904, 0.975_000, 0.0], 1),
+        (false, r"\widehat{8}", [0.500_002, 0.936_113, 0.0], 1),
+        (false, r"\widehat{AB}", [1.558_682, 1.002_777, 0.0], 1),
+        (false, r"\widehat{ABC}", [2.344_931, 1.045_372, 0.0], 1),
+        (false, r"\widehat{ABCD}", [3.200_626, 1.045_372, 0.0], 1),
+        (false, r"\widehat{}", [0.0, 0.722_223, 0.0], 1),
+        (
+            false,
+            r"\widehat{\frac{a}{b}}",
+            [0.768_588, 1.398_730, 0.685_951],
+            1,
+        ),
+        (
+            false,
+            r"\widehat{\widehat{x}}",
+            [0.571_527, 1.013_892, 0.0],
+            2,
+        ),
+        (
+            false,
+            r"\scriptstyle\widehat{P}",
+            [0.616_771, 0.682_500, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widehat{8}",
+            [0.340_283, 0.468_054, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widehat{ABCD}",
+            [2.164_229, 0.524_794, 0.0],
+            1,
+        ),
+        (true, r"$\widehat{P}$", [0.780_904, 0.975_000, 0.0], 1),
+    ];
+    tex_accent_metrics_run(ctx, &cases, "tex_widehat")
+}
+
+/// fm-ifgjb: actual optical tilde metrics and every accent path survive
+/// native builders and certified rendering, including the two-text-em branch.
+fn tex_widetilde_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // The independent ruled-Reference table predates the provider repair.
+    let cases = [
+        (false, r"\widetilde{P}", [0.780_904, 0.975_000, 0.0], 1),
+        (false, r"\widetilde{8}", [0.500_002, 0.936_113, 0.0], 1),
+        (false, r"\widetilde{AB}", [1.558_682, 1.002_777, 0.0], 1),
+        (false, r"\widetilde{ABC}", [2.344_931, 1.120_366, 0.0], 1),
+        (false, r"\widetilde{ABCD}", [3.200_626, 1.120_366, 0.0], 1),
+        (false, r"\widetilde{}", [0.0, 0.722_223, 0.0], 1),
+        (
+            false,
+            r"\widetilde{\frac{a}{b}}",
+            [0.768_588, 1.398_730, 0.685_951],
+            1,
+        ),
+        (
+            false,
+            r"\widetilde{\widetilde{x}}",
+            [0.571_527, 1.013_892, 0.0],
+            2,
+        ),
+        (
+            false,
+            r"\scriptstyle\widetilde{P}",
+            [0.616_771, 0.682_500, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widetilde{P}",
+            [0.524_484, 0.487_500, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\widetilde{ABCD}",
+            [2.164_229, 0.561_388, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\widetilde{\hspace{2em}}",
+            [1.999_512, 0.525_000, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\widetilde{\hspace{2.0001em}}",
+            [1.999_617, 0.629_999, 0.0],
+            1,
+        ),
+        (true, r"$\widetilde{P}$", [0.780_904, 0.975_000, 0.0], 1),
+        // Outer/inner alphabets distinguish the fresh text-style
+        // measurement from the actual nucleus. Keep hat controls alongside
+        // tildes because both primitives share that measurement path.
+        (
+            false,
+            r"\mathrm{\widetilde{AP\hspace{0.48em}}}",
+            [1.910_437, 1.045_372, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widetilde{\mathrm{AP\hspace{0.48em}}}",
+            [1.910_437, 1.002_777, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\mathrm{\widehat{AP\hspace{0.48em}}}",
+            [1.910_437, 1.045_372, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widehat{\mathrm{AP\hspace{0.48em}}}",
+            [1.910_437, 1.002_777, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widetilde{AP\hspace{0.48em}}",
+            [2.010_783, 1.045_372, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\widehat{AP\hspace{0.48em}}",
+            [2.010_783, 1.045_372, 0.0],
+            1,
+        ),
+    ];
+    tex_accent_metrics_run(ctx, &cases, "tex_widetilde")
+}
+
+/// fm-7xc7q: arrow minimum widths, row placement and uncramped nuclei
+/// survive both native front doors and contribute actual certified pixels.
+fn tex_over_arrow_metrics_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // Independent ruled-Reference boxes captured before the upstream fix.
+    // Short and empty nuclei expose the fill minimum, wide/deep/nested
+    // nuclei expose alignment, and x^2 distinguishes uncramped layout.
+    let cases = [
+        (false, r"\overrightarrow{P}", [1.000_023, 1.050_206, 0.0], 1),
+        (false, r"\overrightarrow{}", [1.000_023, 0.366_875, 0.0], 1),
+        (
+            false,
+            r"\overrightarrow{y}",
+            [1.000_023, 0.797_429, 0.194_444],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{ABCD}",
+            [3.200_626, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\mathrm{\overrightarrow{ABCD}}",
+            [3.200_626, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{\mathrm{ABCD}}",
+            [2.944_450, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\mathrm{\overrightarrow{ABCD}}",
+            [2.537_666, 0.747_190, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\mathrm{\overleftarrow{ABCD}}",
+            [3.200_626, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{\frac{1}{2}}",
+            [1.000_023, 1.687_827, 0.685_951],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{\overrightarrow{P}}",
+            [1.000_023, 1.417_080, 0.0],
+            2,
+        ),
+        (
+            false,
+            r"\overrightarrow{x^2}",
+            [1.020_140, 1.230_878, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{P}^{2}",
+            [1.448_636, 1.050_206, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\overrightarrow{y}_{i}",
+            [1.332_951, 0.797_429, 0.194_444],
+            1,
+        ),
+        (
+            false,
+            r"{\overrightarrow{P}}^{2}",
+            [1.448_636, 1.254_097, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"{\overrightarrow{y}}_{i}",
+            [1.332_951, 0.797_429, 0.244_443],
+            1,
+        ),
+        (
+            false,
+            r"\scriptstyle\overrightarrow{P}",
+            [0.784_882, 0.747_190, 0.0],
+            1,
+        ),
+        (
+            false,
+            r"\scriptscriptstyle\overrightarrow{P}",
+            [0.649_707, 0.539_870, 0.0],
+            1,
+        ),
+        (false, r"\overleftarrow{P}", [1.000_023, 1.050_206, 0.0], 1),
+        (
+            false,
+            r"\overleftarrow{y}",
+            [1.000_023, 0.797_429, 0.194_444],
+            1,
+        ),
+        (
+            true,
+            r"$\overrightarrow{P}$",
+            [1.000_023, 1.050_206, 0.0],
+            1,
+        ),
+    ];
+    tex_accent_metrics_run(ctx, &cases, "tex_over_arrow")
+}
+
+fn tex_accent_metrics_run(
+    ctx: &mut RunCtx,
+    cases: &[(bool, &str, [f64; 3], usize)],
+    metric: &str,
+) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let blank = render_certified_doc(&Stage::new());
+    let mut visible_paths = 0;
+    let mut formulas = 0;
+    for &(text_mode, source, expected, expected_paths) in cases {
+        let built = if text_mode {
+            fmn_library::TexText::new(source).build(engine)
+        } else {
+            fmn_library::Tex::new(source).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: {metric} builder: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: {metric} box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if layout.paths.len() != expected_paths
+            || built.vmob.children().len() != built.typeset.subs.len()
+        {
+            return Err(fail(format!("{source}: {metric} paths or family lost")));
+        }
+        let centered = built.vmob.moved_to([0.0; 3]);
+        let mut stage = Stage::new();
+        let formula = stage.add(centered.clone());
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show accent: {error}")))?;
+        let rendered = render_certified_doc(&stage);
+        if rendered == blank {
+            return Err(fail(format!("{source}: blank certified {metric} frame")));
+        }
+        let mut case_paths = 0;
+        // Preserve all geometry and centering while hiding each accent in
+        // isolation. Neither glyph ink nor another nested accent can stand in
+        // for the individual path's actual pixel contribution.
+        for (ordinal, sub) in built.typeset.subs.iter().enumerate() {
+            if !matches!(sub.prim, Prim::Path(_)) {
+                continue;
+            }
+            if centered.children()[ordinal].points().is_empty() {
+                return Err(fail(format!("{source}: accent {ordinal} has no geometry")));
+            }
+            let mut child_index = 0;
+            let masked = centered.clone().map_children(|child| {
+                let hide = child_index == ordinal;
+                child_index += 1;
+                if hide {
+                    child.map_style_deep(|mut style| {
+                        style.fill_opacity = 0.0;
+                        style.stroke_opacity = 0.0;
+                        style
+                    })
+                } else {
+                    child
+                }
+            });
+            let mut without_path = Stage::new();
+            let formula = without_path.add(masked);
+            without_path
+                .add_to_scene(formula)
+                .map_err(|error| fail(format!("{source}: show accent control: {error}")))?;
+            if render_certified_doc(&without_path) == rendered {
+                return Err(fail(format!(
+                    "{source}: accent {ordinal} contributes no certified pixels"
+                )));
+            }
+            case_paths += 1;
+        }
+        if case_paths != expected_paths {
+            return Err(fail(format!("{source}: accent primitive mapping lost")));
+        }
+        visible_paths += case_paths as u64;
+        formulas += 1;
+        ctx.event(
+            LogEvent::new(&format!("e2e.parity.{metric}_metric"))
+                .field("source", source)
+                .field("mode", if text_mode { "text" } else { "math" })
+                .field("box_em", format!("{measured:?}"))
+                .field("paths", case_paths.to_string())
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter(&format!("{metric}_formulas"), formulas)
+        .with_counter(&format!("{metric}_visible_paths"), visible_paths))
+}
+
+/// fm-j4tni: an inline cross retains its path, source colour and primitive
+/// family through both native builders and a real certified raster frame.
+fn tex_pifont_cross_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let cases = [
+        (false, r"\ding{55}"),
+        (false, r"\text{\ding{55}}"),
+        (false, r"a^{\text{\ding{55}}}"),
+        (false, r"a_{\text{\ding{55}}}"),
+        (false, r"\small\text{\ding{55}}"),
+        (false, r"\large\text{\ding{55}}"),
+        (false, r"\text{\ding{51}\ding{55}}"),
+        (true, r"\ding{55}"),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (text_mode, source) in cases {
+        let colors = [(r"\ding{55}", RED_C)];
+        let built = if text_mode {
+            fmn_library::TexText::new(source).t2c(&colors).build(engine)
+        } else {
+            fmn_library::Tex::new(source).t2c(&colors).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: native pifont cross: {error}")))?;
+        let occurrences = built.occurrences(r"\ding{55}");
+        if occurrences.len() != 1 || occurrences[0].len() != 1 {
+            return Err(fail(format!("{source}: cross source span lost")));
+        }
+        let ordinal = occurrences[0][0];
+        if built.typeset.layout.paths.len() != 1
+            || !matches!(built.typeset.subs[ordinal].prim, Prim::Path(0))
+            || built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children()[ordinal].points().is_empty()
+            || built.vmob.children()[ordinal].style().fill_color != RED_C
+            || built
+                .typeset
+                .layout
+                .glyphs
+                .iter()
+                .any(|glyph| glyph.ch == '×' || glyph.ch == '7')
+        {
+            return Err(fail(format!("{source}: cross path or colour lost")));
+        }
+        if source.contains(r"\ding{51}")
+            && !built
+                .typeset
+                .layout
+                .glyphs
+                .iter()
+                .any(|glyph| glyph.ch == '✓')
+        {
+            return Err(fail("paired pifont checkmark lost"));
+        }
+        let mut stage = Stage::new();
+        let formula = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(formula)
+            .map_err(|error| fail(format!("{source}: show cross: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_pifont_cross")
+                .field("source", source)
+                .field("text_mode", text_mode)
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_pifont_cross_formulas", 8))
+}
+
+/// fm-mathml-text-islands-ame8a: the public MathML and native library
+/// paths retain the same inline mathematics inside text arguments.
+fn tex_mathml_text_islands_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let cases = [
+        (true, r"\textbf{a $\pi$ b}", 'π', "<mi>π</mi>"),
+        (false, r"\text{a $\pi$ b}", 'π', "<mi>π</mi>"),
+        (
+            true,
+            r"\textbf{\TeX~$\pi$}",
+            'π',
+            r#"<mtext mathvariant="bold">TeX</mtext>"#,
+        ),
+        (false, r"\textbf{a $\frac{1}{2}+x^2$ b}", 'x', "<mfrac>"),
+        (false, r"x_{\textbf{a $\pi$ b}}", 'π', "<msub>"),
+        (
+            false,
+            r"\text{\underline{a $\pi$ b}}",
+            'π',
+            r#"<menclose notation="bottom">"#,
+        ),
+        (
+            false,
+            r"\textbf{a $\mathbf{x}$ \textit{b} \color{red}c}z",
+            'z',
+            r#"<mstyle mathvariant="bold">"#,
+        ),
+    ];
+    for (text_mode, source, atom, structure) in cases {
+        let node = if text_mode {
+            fmd_math::parse_text(source)
+        } else {
+            fmd_math::parse(source)
+        }
+        .map_err(|error| fail(format!("{source}: public MathML parse: {error}")))?;
+        let xml = fmd_math::to_mathml(&node, !text_mode);
+        let built = if text_mode {
+            fmn_library::TexText::new(source).build(engine)
+        } else {
+            fmn_library::Tex::new(source).build(engine)
+        }
+        .map_err(|error| fail(format!("{source}: native formula builder: {error}")))?;
+        if fmd_math::mathml_well_formed(&xml).is_err()
+            || !xml.contains(structure)
+            || !xml.contains(atom)
+            || !built
+                .typeset
+                .layout
+                .glyphs
+                .iter()
+                .any(|glyph| glyph.ch == atom)
+        {
+            return Err(fail(format!(
+                "{source}: native/MathML atom or structure lost: {xml}"
+            )));
+        }
+        if source.contains(r"\textit")
+            && (!xml.contains(r#"<mtext mathvariant="italic">b</mtext>"#)
+                || !xml.contains(r#"mathcolor="red""#)
+                || !xml.contains("<mi>x</mi>"))
+        {
+            return Err(fail(format!("{source}: text or math scope leaked: {xml}")));
+        }
+        if source.contains(r"\TeX") && !xml.contains("<mtext mathvariant=\"bold\">\u{00A0}</mtext>")
+        {
+            return Err(fail(format!(
+                "{source}: nonbreaking space face lost: {xml}"
+            )));
+        }
+        let mut rest = xml.as_str();
+        while let Some(start) = rest.find("<mtext") {
+            let token = &rest[start..];
+            let body = &token[token.find('>').ok_or_else(|| fail("unclosed mtext"))? + 1..];
+            let end = body
+                .find("</mtext>")
+                .ok_or_else(|| fail("unclosed mtext body"))?;
+            if body[..end].contains('<') {
+                return Err(fail(format!(
+                    "{source}: MathML structure inside mtext: {xml}"
+                )));
+            }
+            rest = &body[end + "</mtext>".len()..];
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_mathml_text_islands")
+                .field("source", source)
+                .field("text_mode", text_mode)
+                .field("mathml", xml)
+                .field("preserved", "true"),
+        );
+    }
+    for (command, face) in [
+        ("textbf", "bold"),
+        ("textit", "italic"),
+        ("texttt", "monospace"),
+        ("textsf", "sans-serif"),
+    ] {
+        let source = format!(r"\{command}{{\underline{{B}}}}");
+        let control = format!(r"\{command}{{B}}");
+        let node = fmd_math::parse_text(&source)
+            .map_err(|error| fail(format!("{source}: underline parse: {error}")))?;
+        let xml = fmd_math::to_mathml(&node, false);
+        let built = fmn_library::TexText::new(&source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: native underline: {error}")))?;
+        let plain = fmn_library::TexText::new(&control)
+            .build(engine)
+            .map_err(|error| fail(format!("{control}: native face control: {error}")))?;
+        let glyphs = |layout: &fmd_math::Layout| {
+            layout
+                .glyphs
+                .iter()
+                .map(|glyph| {
+                    (
+                        glyph.ch, glyph.face, glyph.gid, glyph.x, glyph.y, glyph.size,
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        if fmd_math::mathml_well_formed(&xml).is_err()
+            || !xml.contains(&format!(
+                r#"<menclose notation="bottom"><mtext mathvariant="{face}">B</mtext></menclose>"#
+            ))
+            || built.typeset.layout.glyphs.len() != 1
+            || glyphs(&built.typeset.layout) != glyphs(&plain.typeset.layout)
+            || built.typeset.layout.rules.len() != plain.typeset.layout.rules.len() + 1
+        {
+            return Err(fail(format!(
+                "{source}: native or MathML underline changed its inherited face: {xml}"
+            )));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_mathml_text_islands")
+                .field("source", source)
+                .field("mathml", xml)
+                .field("preserved", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_mathml_text_islands", 11))
+}
+
+/// fm-text-ellipsis-r11-52jw: text periods, font stretch and amsmath's
+/// distinct text dotso spacing reach the native builder and certified pixels.
+fn tex_text_ellipsis_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    // Independent default-template T1/amsmath showboxes, in ems. The math
+    // controls prevent a text correction from changing ordinary math dots.
+    let cases = [
+        (r"\dots", [1.333_008, 0.105_530, 0.0]),
+        (r"\ldots", [1.333_008, 0.105_530, 0.0]),
+        (r"\textellipsis", [1.333_008, 0.105_530, 0.0]),
+        (r"a\dots b", [2.388_306, 0.688_720, 0.0]),
+        (r"a\dots{} b", [2.832_642, 0.688_720, 0.0]),
+        (r"$\pi$\dots''", [2.494_330, 0.688_720, 0.0]),
+        (r"\texttt{\dots}", [1.574_615, 0.124_970, 0.0]),
+        (r"\small\dots", [1.233_028, 0.097_197, 0.0]),
+        (r"\Large\dots", [1.827_365, 0.128_172, 0.0]),
+        (r"\underline{\dots}", [1.333_008, 0.105_530, 0.199_990]),
+        (r"\dotso", [1.666_576, 0.105_554, 0.0]),
+        (r"{\dotso}", [1.999_828, 0.105_554, 0.0]),
+        (r"\dotso,", [2.110_948, 0.105_554, 0.194_397]),
+        (r"$\dots$", [1.333_324, 0.105_554, 0.0]),
+        (r"$a\ldots b$", [2.457_741, 0.694_444, 0.0]),
+        (r"$\textellipsis$", [1.333_214, 0.105_554, 0.0]),
+    ];
+    let blank = render_certified_doc(&Stage::new());
+    for (source, expected) in cases {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: native text ellipsis: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: text box {measured:?}, independent TeX {expected:?}"
+            )));
+        }
+        if !source.contains(r"\dotso") {
+            let command = [r"\textellipsis", r"\ldots", r"\dots"]
+                .into_iter()
+                .find(|command| source.contains(*command))
+                .ok_or_else(|| fail(format!("{source}: missing ellipsis command")))?;
+            if built.occurrences(command).iter().flatten().count() != 3
+                || layout.glyphs.iter().filter(|glyph| glyph.ch == '.').count() != 3
+            {
+                return Err(fail(format!(
+                    "{source}: three periods or command spans lost"
+                )));
+            }
+        }
+        if built.vmob.children().len() != built.typeset.subs.len()
+            || built.vmob.children().is_empty()
+        {
+            return Err(fail(format!("{source}: ellipsis primitive family lost")));
+        }
+        let mut stage = Stage::new();
+        let text = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(text)
+            .map_err(|error| fail(format!("{source}: show ellipsis: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.tex_text_ellipsis")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+    }
+    Ok(RunOutcome::ok().with_counter("tex_text_ellipsis_formulas", 16))
+}
+
+/// fm-texttext-display-math-r11-193h: display boundaries, skips, scoped
+/// declarations and boxed dollar shifts reach native geometry and pixels.
+fn textext_display_paragraphs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // Independently captured TeX paragraph boxes, in ems. The ordinary
+    // inline and boxed cases prevent a display-style/paragraph conflation.
+    let cases = [
+        (
+            r"Before $$x$$ After",
+            [2.793_762, 0.688_720, 4.400_000],
+            'x',
+        ),
+        (
+            r"Before $$\frac{a}{b}$$ After",
+            [2.793_762, 0.688_720, 4.674_673],
+            'a',
+        ),
+        (
+            r"Before \begin{equation*}x=y\end{equation*} After",
+            [2.793_762, 0.688_720, 4.400_000],
+            'x',
+        ),
+        (
+            r"Before \begin{gather*}x\\y\end{gather*} After",
+            [17.535_764, 0.688_720, 5.900_000],
+            'x',
+        ),
+        (
+            r"Before \begin{align*}x &= y\\z &= w\end{align*} After",
+            [18.573_837, 0.688_720, 5.900_000],
+            'x',
+        ),
+        (
+            r"\small Before $$x$$ After",
+            [2.584_369, 0.619_849, 3.900_000],
+            'x',
+        ),
+        (
+            r"Before {\small inner $$x$$ middle} After",
+            [5.336_545, 0.688_720, 4.000_000],
+            'x',
+        ),
+        (
+            r"Before $$x$$ $$y$$ After",
+            [2.793_762, 0.688_720, 6.200_000],
+            'x',
+        ),
+        (
+            r"\doublespacing Before $$x$$ After",
+            [2.793_762, 0.688_720, 7.334_833],
+            'x',
+        ),
+        (
+            r"\underline{Before $$x$$ After}",
+            [6.267_914, 0.688_720, 0.199_990],
+            'x',
+        ),
+        (r"Before $x$ After", [6.311_792, 0.688_720, 0.0], 'x'),
+        (
+            r"Before $\displaystyle x$ After",
+            [6.311_792, 0.688_720, 0.0],
+            'x',
+        ),
+    ];
+    let engine = &scene_goldens::corpus().tex;
+    let blank = render_certified_doc(&Stage::new());
+    let mut paragraphs = 0;
+    for (source, expected, expected_atom) in cases {
+        let built = fmn_library::TexText::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: display paragraph builder: {error}")))?;
+        let layout = &built.typeset.layout;
+        let measured = [layout.width, layout.height, layout.depth];
+        if measured
+            .into_iter()
+            .zip(expected)
+            .any(|(actual, want)| !actual.is_finite() || (actual - want).abs() >= 1e-4)
+        {
+            return Err(fail(format!(
+                "{source}: paragraph box {measured:?}, real TeX {expected:?}"
+            )));
+        }
+        if !layout.glyphs.iter().any(|glyph| glyph.ch == expected_atom)
+            || built.occurrences(&expected_atom.to_string()).is_empty()
+            || built.vmob.children().len() != built.typeset.subs.len()
+            || built
+                .vmob
+                .children()
+                .iter()
+                .any(|child| child.points().is_empty())
+        {
+            return Err(fail(format!("{source}: paragraph source or geometry lost")));
+        }
+        let mut stage = Stage::new();
+        let paragraph = stage.add(built.vmob.moved_to([0.0; 3]));
+        stage
+            .add_to_scene(paragraph)
+            .map_err(|error| fail(format!("{source}: show paragraph: {error}")))?;
+        if render_certified_doc(&stage) == blank {
+            return Err(fail(format!("{source}: blank certified paragraph frame")));
+        }
+        ctx.event(
+            LogEvent::new("e2e.parity.textext_display_paragraph")
+                .field("source", source)
+                .field("box_em", format!("{measured:?}"))
+                .field("visible", "true"),
+        );
+        paragraphs += 1;
+    }
+    // The scoped display flow must preserve the ordinary closing italic
+    // kern. Compare offsets within the final line to remove centering;
+    // the period is TeX's independent \nocorrlist negative control.
+    let source = r"\textit{B $$y$$ c}ZZZZ";
+    let built = fmn_library::TexText::new(source)
+        .build(engine)
+        .map_err(|error| fail(format!("italic display builder: {error}")))?;
+    let period = fmn_library::TexText::new(r"\textit{B $$y$$ c}.ZZZZ")
+        .build(engine)
+        .map_err(|error| fail(format!("italic punctuation control: {error}")))?;
+    let x_of = |layout: &fmd_math::Layout, ch| {
+        layout
+            .glyphs
+            .iter()
+            .find(|glyph| glyph.ch == ch)
+            .map(|glyph| glyph.x)
+            .ok_or_else(|| fail(format!("italic display lost {ch}")))
+    };
+    let layout = &built.typeset.layout;
+    let uncorrected = &period.typeset.layout;
+    let correction = (x_of(layout, 'Z')? - x_of(layout, 'c')?)
+        - (x_of(uncorrected, '.')? - x_of(uncorrected, 'c')?);
+    if !correction.is_finite()
+        || !layout.width.is_finite()
+        || (correction - 0.056_528).abs() >= 1e-5
+        || (layout.width - 2.960_246).abs() >= 1e-4
+    {
+        return Err(fail(format!(
+            "italic display correction {correction}, width {}",
+            layout.width
+        )));
+    }
+    let mut stage = Stage::new();
+    let paragraph = stage.add(built.vmob.moved_to([0.0; 3]));
+    stage
+        .add_to_scene(paragraph)
+        .map_err(|error| fail(format!("show italic paragraph: {error}")))?;
+    if render_certified_doc(&stage) == blank {
+        return Err(fail("blank certified italic paragraph frame"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.textext_display_paragraph")
+            .field("source", source)
+            .field("italic_correction", correction.to_string())
+            .field("visible", "true"),
+    );
+    paragraphs += 1;
+    let mut boxed_display_refusals = 0;
+    for environment in ["equation*", "gather*", "align*"] {
+        for command in ["underline", "text", "cancel"] {
+            let source = format!(
+                r"Before \{command}{{inside \begin{{{environment}}}x\end{{{environment}}} after}} After"
+            );
+            let reason = match fmn_library::TexText::new(&source).build(engine) {
+                Ok(_) => {
+                    return Err(fail(format!(
+                        "{source}: a display escaped its restricted text box"
+                    )));
+                }
+                Err(error) => error.to_string(),
+            };
+            if !reason.contains(&format!("env:{environment}")) || !reason.contains("boxed text") {
+                return Err(fail(format!(
+                    "{source}: imprecise boxed display error: {reason}"
+                )));
+            }
+            ctx.event(
+                LogEvent::new("e2e.parity.textext_boxed_display")
+                    .field("environment", environment)
+                    .field("command", command)
+                    .field("error", reason)
+                    .field("refused", "true"),
+            );
+            boxed_display_refusals += 1;
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("textext_display_paragraphs", paragraphs)
+        .with_counter("textext_boxed_display_refusals", boxed_display_refusals))
+}
+
+/// The paragraph `parity.textext_paragraph_lines.v1` sets. It is wider
+/// than the Reference's 345 pt line, and TeX breaks it after "of", the 63rd
+/// of its 128 glyphs. fmd-math's placement tests pin that break, the line
+/// widths and the pitch to TeX's `\showbox`.
+const TEXTEXT_PARAGRAPH: &str = "Every paragraph that is wider than its line breaks where the line breaker of TeX would break it. The lines are centred, and they stack twelve points apart.";
+
+/// fm-texttext-line-breaking-r11-bfdx: a `TexText` paragraph under the
+/// default pack (the Reference's 345 pt line) sets TeX's two lines, centred
+/// on one axis. A text box in inline math keeps its glyphs on one line.
+/// All three document packs also wrap the measured hundred-word paragraph.
+fn textext_paragraph_lines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // Each glyph's ink box, `(min, max)`, in emission order.
+    type Ink = (fmn_core::types::Vec3, fmn_core::types::Vec3);
+    let glyphs = |pack: &str, source: &str| -> Result<Vec<Ink>, ScenarioError> {
+        let mut config = fmn_config::Config::resolve(&[], None)
+            .map_err(|error| fail(format!("default config: {error}")))?
+            .config;
+        config.tex.template = pack.to_owned();
+        let engine =
+            fmn_library::TexEngine::from_config(&config, &fmn_config::PackRegistry::builtin())
+                .map_err(|error| fail(format!("the {pack} engine: {error}")))?;
+        let text = fmn_library::TexText::new(source)
+            .build(&engine)
+            .map_err(|error| fail(format!("the paragraph under {pack}: {error}")))?;
+        let mut boxes = Vec::new();
+        for glyph in text.vmob.children() {
+            let mut points = glyph.points().iter();
+            let first = *points
+                .next()
+                .ok_or_else(|| fail("a glyph without points".to_owned()))?;
+            let (mut min, mut max) = (first, first);
+            for point in points {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+            }
+            boxes.push((min, max));
+        }
+        Ok(boxes)
+    };
+    let broken = glyphs("default", TEXTEXT_PARAGRAPH)?;
+    let one_line = glyphs("basic", &format!(r"$\text{{{TEXTEXT_PARAGRAPH}}}$"))?;
+    // Ordinary basic/empty text keeps its own kerning. Test each pack's
+    // measured line count rather than demanding default-pack geometry.
+    let words = std::iter::repeat_n("a", 100).collect::<Vec<_>>().join(" ");
+    for pack in ["default", "basic", "empty"] {
+        let actual = glyphs(pack, &words)?;
+        let mut centres: Vec<_> = actual
+            .iter()
+            .map(|(min, max)| (min[1] + max[1]) / 2.0)
+            .collect();
+        centres.sort_by(f64::total_cmp);
+        centres.dedup();
+        if actual.len() != 100 || centres.len() != 3 {
+            return Err(fail(format!(
+                "the {pack} document paragraph sets {} glyphs on {} lines, expected 100/3",
+                actual.len(),
+                centres.len()
+            )));
+        }
+    }
+    if broken.len() != 128 || one_line.len() != 128 {
+        return Err(fail(format!(
+            "the paragraph sets {} and {} glyphs, not 128",
+            broken.len(),
+            one_line.len()
+        )));
+    }
+    // One line's ink height; on a line every glyph's centre lies within it,
+    // and \baselineskip puts the next line's centres further away.
+    let line_height = one_line
+        .iter()
+        .map(|(_, max)| max[1])
+        .fold(f64::MIN, f64::max)
+        - one_line
+            .iter()
+            .map(|(min, _)| min[1])
+            .fold(f64::MAX, f64::min);
+    let mut lines: Vec<Vec<Ink>> = Vec::new();
+    for glyph in &broken {
+        let centre = (glyph.0[1] + glyph.1[1]) / 2.0;
+        match lines.last_mut() {
+            Some(line)
+                if (centre - (line[0].0[1] + line[0].1[1]) / 2.0).abs() < line_height / 2.0 =>
+            {
+                line.push(*glyph);
+            }
+            _ => lines.push(vec![*glyph]),
+        }
+    }
+    // Centred lines share an axis: each line's ink centre, within a tenth
+    // of the line height (side bearings).
+    let centres: Vec<f64> = lines
+        .iter()
+        .map(|line| {
+            let left = line.iter().map(|(min, _)| min[0]).fold(f64::MAX, f64::min);
+            let right = line.iter().map(|(_, max)| max[0]).fold(f64::MIN, f64::max);
+            (left + right) / 2.0
+        })
+        .collect();
+    let centred = centres
+        .iter()
+        .all(|centre| (centre - centres[0]).abs() < line_height / 10.0);
+    let first_line = lines.first().map_or(0, Vec::len);
+    ctx.event(
+        LogEvent::new("e2e.parity.textext_paragraph_lines")
+            .field("lines", lines.len() as u64)
+            .field("first_line_glyphs", first_line as u64)
+            .field("template_packs", 3_u64)
+            .field("centred", truth(centred)),
+    );
+    if !centred {
+        return Err(fail(format!(
+            "the lines are not centred on one axis: {centres:?}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("textext_paragraph_lines", lines.len() as u64)
+        .with_counter("textext_paragraph_template_packs", 3)
+        .with_counter("textext_paragraph_first_line_glyphs", first_line as u64))
+}
+
+/// fm-cache-eviction-wired-1w05: exercise the real render-completion hook
+/// with no disk retention, ordinary retention, and memory-only typesetting.
+/// All three render teams must publish exactly the same certified PNG.
+fn typeset_cache_retention_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Formula;
+    impl fmn::SceneConstruct for Formula {
+        fn tex_preflight(&self) -> Vec<fmn::tex::TypesetRequest<'_>> {
+            vec![fmn::tex::TypesetRequest::math(r"\frac{x^2+1}{2}")]
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let formula = fmn::prelude::Tex::new(r"\frac{x^2+1}{2}").build(stage.tex_engine()?)?;
+            stage.add(formula)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut reference = None;
+    let mut evicted = 0;
+    for (index, threads) in [1, 4, 16].into_iter().enumerate() {
+        let destination = format!("/cache-retention-{threads}");
+        let mut options = fmn::RenderOptions::new(&destination)
+            .map_err(|error| fail(format!("retention render options: {error}")))?;
+        options.config.camera.resolution = (96, 54);
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.directories.cache = if cfg!(windows) {
+            r"C:\typeset-retention".to_owned()
+        } else {
+            "/typeset-retention".to_owned()
+        };
+        if index == 0 {
+            options.config.cache.max_bytes = 0;
+        }
+        options.typeset_cache = index != 2;
+        let report = fmn::render_with_fs(&mut Formula, options, fs.clone())
+            .map_err(|error| fail(format!("retention render: {error}")))?;
+        let maintenance = &report.typesetting.maintenance;
+        if index == 0 {
+            if maintenance.runs != 1
+                || maintenance.errors != 0
+                || maintenance.evicted_entries == 0
+                || maintenance.retained_bytes != Some(0)
+            {
+                return Err(fail(format!(
+                    "retention did not run after rendering: {maintenance:?}"
+                )));
+            }
+            evicted = maintenance.evicted_entries;
+        }
+        if index == 1 {
+            if report.typesetting.persistent_hits != 0 {
+                return Err(fail(
+                    "the zero-ceiling render retained a reusable disk entry",
+                ));
+            }
+            let retained = maintenance.retained_bytes.unwrap_or(0);
+            if !report.typesetting.persistent
+                || maintenance.runs != 1
+                || maintenance.errors != 0
+                || retained == 0
+                || !report
+                    .typesetting
+                    .persistent_ceiling_bytes
+                    .is_some_and(|ceiling| retained <= ceiling)
+            {
+                return Err(fail(format!(
+                    "ordinary retention did not preserve its bounded disk cache: {maintenance:?}"
+                )));
+            }
+        }
+        if index == 2 && (report.typesetting.persistent || maintenance.runs != 0) {
+            return Err(fail("memory-only rendering performed disk maintenance"));
+        }
+        let frame = fs
+            .read(&PathBuf::from(destination).join("frame_000000.png"))
+            .map_err(|error| fail(format!("read retention PNG: {error}")))?;
+        if let Some(reference) = &reference {
+            if reference != &frame {
+                return Err(fail(
+                    "cache retention or thread count changed certified PNG bytes",
+                ));
+            }
+        } else {
+            reference = Some(frame);
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.typeset.retention")
+            .field("evicted", evicted)
+            .field("retained_bytes", 0_u64)
+            .field("identical_modes", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("cache_retention_modes", 3)
+        .with_counter("cache_retention_bytes", 0)
+        .with_counter("cache_retention_evicted", evicted))
+}
+
+/// One unsigned field of a render record's `typesetting` object.
+fn typesetting_field(record: &str, field: &str) -> Result<u64, ScenarioError> {
+    let typesetting = record
+        .split_once("\"typesetting\":{")
+        .ok_or_else(|| fail(format!("render record has no typesetting object: {record}")))?
+        .1;
+    let prefix = format!("\"{field}\":");
+    let tail = typesetting
+        .split_once(&prefix)
+        .ok_or_else(|| fail(format!("typesetting.{field} missing: {typesetting}")))?
+        .1;
+    let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+    tail[..digits]
+        .parse()
+        .map_err(|_| fail(format!("typesetting.{field} is not a count: {typesetting}")))
+}
+
+/// The formula sheet's twenty formulas plus the scale-calibration probe.
+const FORMULA_SHEET_LAYOUTS: u64 = 21;
+
+/// fm-typeset-cache-preflight-wiring-1sn0: the CLI renders a Tex-heavy
+/// builtin twice against one persistent typeset cache. The first run lays out
+/// all twenty formulas and publishes them; the second, a fresh session that
+/// shares nothing but the store, serves every one from disk, lays out none,
+/// and publishes byte-identical certified frames.
+fn typeset_cache_warm_second_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cache = scenario_dir("typeset_cache_root")?.join("cache");
+    let (cold, cold_frames) = formula_sheet_render("typeset_cache_cold", &cache, "2")?;
+    let (warm, warm_frames) = formula_sheet_render("typeset_cache_warm", &cache, "2")?;
+    let mut counts = Vec::new();
+    for (run, record) in [("cold", &cold), ("warm", &warm)] {
+        let row = [
+            typesetting_field(record, "disk_hits")?,
+            typesetting_field(record, "misses")?,
+            typesetting_field(record, "bytes_read")?,
+            typesetting_field(record, "bytes_written")?,
+        ];
+        ctx.event(
+            LogEvent::new("e2e.typeset.cache")
+                .field("run", run)
+                .field("disk_hits", row[0])
+                .field("misses", row[1])
+                .field("bytes_read", row[2])
+                .field("bytes_written", row[3])
+                .field("persistent", truth(record.contains("\"persistent\":true"))),
+        );
+        counts.push(row);
+    }
+    let identical = !cold_frames.is_empty() && cold_frames == warm_frames;
+    ctx.event(
+        LogEvent::new("e2e.typeset.cache_bits")
+            .field("frames", cold_frames.len() as u64)
+            .field("hit_equals_miss", truth(identical)),
+    );
+    let [cold_hits, cold_misses, _, written] = counts[0];
+    let [warm_hits, warm_misses, read, warm_written] = counts[1];
+    if cold_hits != 0
+        || cold_misses != FORMULA_SHEET_LAYOUTS
+        || warm_hits != FORMULA_SHEET_LAYOUTS
+        || warm_misses != 0
+        || read != written
+        || warm_written != 0
+        || !identical
+    {
+        return Err(fail(format!(
+            "warm second run broke: cold={:?} warm={:?} identical={identical}",
+            counts[0], counts[1]
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("typeset_cold_misses", cold_misses)
+        .with_counter("typeset_warm_disk_hits", warm_hits)
+        .with_counter("typeset_warm_misses", warm_misses)
+        .with_counter("typeset_hit_equals_miss", 1))
+}
+
+/// fm-typeset-cache-preflight-wiring-1sn0: the formula sheet's twenty static
+/// formulas are typeset by the front door's preflight on several workers
+/// before the first frame, and no layout happens inside a play.
+fn typeset_preflight_before_first_play(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cache = scenario_dir("typeset_preflight_root")?.join("cache");
+    let (record, frames) = formula_sheet_render("typeset_preflight", &cache, "4")?;
+    let requests = typesetting_field(&record, "requests")?;
+    let workers = typesetting_field(&record, "workers")?;
+    let active = typesetting_field(&record, "active_workers")?;
+    let preflighted = typesetting_field(&record, "layouts_before_construct")?;
+    let before = typesetting_field(&record, "layouts_before_first_frame")?;
+    let inside = typesetting_field(&record, "layouts_inside_play")?;
+    let layouts = typesetting_field(&record, "misses")?;
+    let wall_ns = typesetting_field(&record, "wall_ns")?;
+    ctx.event(
+        LogEvent::new(e2e::spans::PREFLIGHT)
+            .field("requests", requests)
+            .field("workers", workers)
+            .field("active_workers", active)
+            .field("wall_ns", wall_ns)
+            .field("layouts_before_construct", preflighted)
+            .field("layouts_in_construct", before.saturating_sub(preflighted))
+            .field("layouts_before_first_frame", before)
+            .field("layouts_inside_play", inside)
+            .field("before_first_frame", truth(before == layouts)),
+    );
+    ctx.counter(e2e::counters::TYPESETS, layouts);
+    let parallel = std::thread::available_parallelism().map_or(1, usize::from) < 2
+        || (workers >= 2 && active >= 2);
+    if requests != 20
+        || layouts != FORMULA_SHEET_LAYOUTS
+        || before != layouts
+        || preflighted != layouts
+        || inside != 0
+        || !parallel
+        || frames.is_empty()
+    {
+        return Err(fail(format!(
+            "preflight contract broke: requests={requests} workers={workers} active={active} \
+             layouts={layouts} before_construct={preflighted} before_first_frame={before} \
+             inside_play={inside}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("typeset_preflight_requests", requests)
+        .with_counter("typeset_layouts_inside_play", inside)
+        .with_counter("preflight_before_first_frame", 1))
+}
+
+/// The CLI's camera builtins (fm-cli-camera-route-i1zc): a lit surface,
+/// depth-sorted dots, a sampled image, and 2D drawn over 3D, each through the
+/// fixed camera.
+const CLI_CAMERA_BUILTINS: [&str; 4] = [
+    "surface_cube.v1",
+    "dot_cloud_depth.v1",
+    "image_quad.v1",
+    "mixed_camera.v1",
+];
+
+/// One builtin through the in-process CLI: `--reproducible`, a 64x36 PNG
+/// sequence at 8 fps on `threads` threads. Returns the CLI's output and the
+/// frames in order.
+fn cli_builtin_frames(
+    name: &str,
+    threads: &str,
+) -> Result<(fmn_cli::RunOutput, Vec<Vec<u8>>), ScenarioError> {
+    let dir = scenario_dir(&format!("cli_builtin_{threads}"))?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("CLI scenario output path is not UTF-8"))?;
+    // Embedded Python configuration tests temporarily change the process cwd.
+    // Bind the locked corpus's background explicitly, like its size and clock,
+    // so an unrelated custom_config.yml cannot change this fixture's inputs.
+    let output = fmn_cli::run([
+        "--robot",
+        "--reproducible",
+        "--color",
+        "#333333",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "64x36",
+        "--fps",
+        "8",
+        "--threads",
+        threads,
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        name,
+    ]);
+    if output.code != 0 {
+        return Err(fail(format!(
+            "CLI builtin {name}: code={} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    let sequence = dir.join(name);
+    let mut paths: Vec<_> = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list {}: {error}", sequence.display())))?
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "png"))
+        .collect();
+    paths.sort();
+    let frames = paths
+        .iter()
+        .map(|path| {
+            std::fs::read(path).map_err(|error| fail(format!("read {}: {error}", path.display())))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((output, frames))
+}
+
+/// fm-cli-camera-route-i1zc: the CLI's 3D builtins render through the camera
+/// route under `--reproducible`, animate visibly, and lock their certified
+/// frames in the e2e lock. Before this scenario no lock held the CLI's 3D
+/// output, so a camera-route regression could pass every gate.
+fn cli_camera_builtins_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut outcome = RunOutcome::ok();
+    let mut frames_total = 0_u64;
+    for name in CLI_CAMERA_BUILTINS {
+        let (output, frames) = cli_builtin_frames(name, "1")?;
+        let camera_route = output.stdout.contains("\"route\":\"camera-cpu\"");
+        let animated = frames.windows(2).any(|pair| pair[0] != pair[1]);
+        ctx.event(
+            LogEvent::new("e2e.cli.camera")
+                .field("builtin", name)
+                .field("frames", frames.len() as u64)
+                .field("camera_route", truth(camera_route))
+                .field("animated", truth(animated))
+                .field(
+                    "first_frame_sha256",
+                    frames
+                        .first()
+                        .map_or_else(String::new, |frame| fmn_hash::sha256(frame).to_hex()),
+                ),
+        );
+        if output.code != 0 || !camera_route || !animated {
+            return Err(fail(format!(
+                "CLI camera builtin {name}: code={} frames={} camera_route={camera_route} \
+                 animated={animated} stdout={:?} stderr={:?}",
+                output.code,
+                frames.len(),
+                output.stdout,
+                output.stderr
+            )));
+        }
+        frames_total += frames.len() as u64;
+        let stem = name.trim_end_matches(".v1");
+        for (index, frame) in frames.into_iter().enumerate() {
+            outcome = outcome.with_artifact(
+                &format!("render_matrix.cli_camera.{stem}.v1.{index:04}"),
+                frame,
+            );
+        }
+    }
+    Ok(outcome
+        .with_counter("cli_camera_builtins", CLI_CAMERA_BUILTINS.len() as u64)
+        .with_counter("cli_camera_frames", frames_total))
+}
+
+/// fm-facade-render-api-9ewt: the CLI's 25 primitive builtins render on the
+/// retained 2D route under `--reproducible` and lock their certified frames
+/// in the e2e lock. This is the before/after proof the sink extraction needs:
+/// no other lock holds the shipping CLI's 2D output (the scene corpus and the
+/// render matrix bypass the CLI).
+fn cli_primitive_builtins_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut outcome = RunOutcome::ok();
+    let mut frames_total = 0_u64;
+    for name in fmn::builtins::PRIMITIVE_SCENE_NAMES {
+        let (output, frames) = cli_builtin_frames(name, "1")?;
+        let retained_route = output.stdout.contains("\"route\":\"retained-cpu\"");
+        ctx.event(
+            LogEvent::new("e2e.cli.primitive")
+                .field("builtin", name)
+                .field("frames", frames.len() as u64)
+                .field("retained_route", truth(retained_route))
+                .field(
+                    "first_frame_sha256",
+                    frames
+                        .first()
+                        .map_or_else(String::new, |frame| fmn_hash::sha256(frame).to_hex()),
+                ),
+        );
+        if output.code != 0 || !retained_route || frames.is_empty() {
+            return Err(fail(format!(
+                "CLI primitive builtin {name}: code={} frames={} retained_route={retained_route} \
+                 stdout={:?} stderr={:?}",
+                output.code,
+                frames.len(),
+                output.stdout,
+                output.stderr
+            )));
+        }
+        frames_total += frames.len() as u64;
+        let stem = name.trim_end_matches(".v1");
+        for (index, frame) in frames.into_iter().enumerate() {
+            outcome = outcome.with_artifact(
+                &format!("render_matrix.cli_primitive.{stem}.v1.{index:04}"),
+                frame,
+            );
+        }
+    }
+    Ok(outcome
+        .with_counter(
+            "cli_primitive_builtins",
+            fmn::builtins::PRIMITIVE_SCENE_NAMES.len() as u64,
+        )
+        .with_counter("cli_primitive_frames", frames_total))
+}
+
+/// Every builtin the CLI ships: the 25 primitive programs and the camera
+/// programs.
+fn cli_all_builtins() -> impl Iterator<Item = &'static str> {
+    fmn::builtins::PRIMITIVE_SCENE_NAMES
+        .into_iter()
+        .chain(CLI_CAMERA_BUILTINS)
+}
+
+/// The production CLI, not an alternate renderer, consumes native programs.
+fn cli_pure_dispatch_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut baseline = None;
+    for threads in ["1", "4", "16"] {
+        let (output, frames) = cli_builtin_frames("circle_shift.v1", threads)?;
+        let dispatched = output.stdout.contains("\"pure_segments\":2")
+            && output.stdout.contains("\"serial_segments\":0")
+            && output.stdout.contains("\"pure_frames\":3")
+            && output.stdout.contains("\"compiled_frames\":0")
+            && output.stdout.contains("\"outstanding_slots\":0");
+        if output.code != 0 || !dispatched || frames.len() != 3 {
+            return Err(fail(format!(
+                "CLI pure dispatch {threads}: {:?} {:?}",
+                output.stdout, output.stderr
+            )));
+        }
+        if let Some(baseline) = &baseline {
+            if &frames != baseline {
+                return Err(fail("pure CLI artifacts changed with thread count"));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+        ctx.event(
+            LogEvent::new("e2e.cli.pure_dispatch")
+                .field("threads", threads)
+                .field("pure_segments", 2_u64)
+                .field("pure_frames", 3_u64),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_pure_runs", 3)
+        .with_counter("cli_pure_frames", 9))
+}
+
+/// The CLI builtins' determinism drill (fm-cli-camera-route-i1zc,
+/// fm-facade-render-api-9ewt): every builtin's certified PNG sequence is
+/// byte-identical at 1 and 4 render threads.
+fn cli_builtins_threads_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut identical = 0_u64;
+    for name in cli_all_builtins() {
+        let (one, serial) = cli_builtin_frames(name, "1")?;
+        let (four, parallel) = cli_builtin_frames(name, "4")?;
+        let same = one.code == 0 && four.code == 0 && !serial.is_empty() && serial == parallel;
+        ctx.event(
+            LogEvent::new("e2e.cli.builtin_threads")
+                .field("builtin", name)
+                .field("frames", serial.len() as u64)
+                .field("threads_1_4_identical", truth(same)),
+        );
+        if !same {
+            return Err(fail(format!(
+                "CLI builtin {name} differs between 1 and 4 threads: codes {}/{} frames {}/{}",
+                one.code,
+                four.code,
+                serial.len(),
+                parallel.len()
+            )));
+        }
+        identical += 1;
+    }
+    Ok(RunOutcome::ok().with_counter("cli_builtins_threads_identical", identical))
+}
+
+/// Count the ordinary scene schedule without touching Reel, then drive each
+/// authored segment through its own real native sink.
+fn cli_prerun_subdivide_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_prerun_subdivide")?;
+    let dir_text = dir
+        .to_str()
+        .ok_or_else(|| fail("CLI scenario output path is not UTF-8"))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--prerun",
+        "--subdivide",
+        "--format",
+        "y4m",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--video_dir",
+        dir_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        "circle_shift.v1",
+    ]);
+    let records = output.stdout.lines().collect::<Vec<_>>();
+    let prerun_record = records.first().is_some_and(|record| {
+        record.contains("\"kind\":\"prerun\"")
+            && record.contains("\"frames\":3")
+            && record.contains("\"segments\":2")
+    });
+    let render_records = records.len() == 3
+        && records.get(1).is_some_and(|record| {
+            record.contains("\"subdivision\":0") && record.contains("\"frames\":2")
+        })
+        && records.get(2).is_some_and(|record| {
+            record.contains("\"subdivision\":1") && record.contains("\"frames\":1")
+        });
+    let root = dir.join("circle_shift.v1");
+    let mut rendered_frames = 0_usize;
+    let mut complete = true;
+    for index in 0..2 {
+        let artifact = root.join(format!("{index:05}.y4m"));
+        let bytes = std::fs::read(&artifact).unwrap_or_default();
+        rendered_frames += bytes
+            .windows(6)
+            .filter(|window| *window == b"FRAME\n")
+            .count();
+        complete &= artifact
+            .with_file_name(format!("{index:05}.y4m.manifest"))
+            .join("FMN_COMPLETE")
+            .is_file();
+    }
+    ctx.event(
+        LogEvent::new("e2e.cli.prerun_subdivide")
+            .field("prerun_record", truth(prerun_record))
+            .field("render_records", truth(render_records))
+            .field("complete", truth(complete))
+            .field("rendered_frames", rendered_frames as u64),
+    );
+    ctx.counter("cli_prerun_frames", u64::from(prerun_record) * 3);
+    ctx.counter("cli_subdivision_segments", u64::from(render_records) * 2);
+    ctx.counter("cli_subdivision_frames", rendered_frames as u64);
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !prerun_record
+        || !render_records
+        || !complete
+        || rendered_frames != 3
+    {
+        return Err(fail(format!(
+            "CLI prerun/subdivision failed: code={} rendered_frames={rendered_frames} complete={complete} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_prerun_frames", 3)
+        .with_counter("cli_subdivision_segments", 2)
+        .with_counter("cli_subdivision_frames", 3))
+}
+
+/// The batch front door over two real native registrations. Asupersync may
+/// complete scene jobs in either order; the CLI contract reports them in the
+/// request order and publishes each sequence atomically.
+fn cli_batch_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_batch_render")?;
+    let artifact_dir = dir.join("artifacts");
+    let manifest_dir = dir.join("manifests");
+    std::fs::create_dir(&artifact_dir)
+        .map_err(|error| fail(format!("create batch artifact directory: {error}")))?;
+    std::fs::create_dir(&manifest_dir)
+        .map_err(|error| fail(format!("create batch manifest directory: {error}")))?;
+    let artifact_text = artifact_dir
+        .to_str()
+        .ok_or_else(|| fail("CLI batch output path is not UTF-8"))?;
+    let manifest_text = manifest_dir
+        .to_str()
+        .ok_or_else(|| fail("CLI batch manifest path is not UTF-8"))?;
+    let scenes = ["circle_shift.v1", "rectangle_shift.v1"];
+    let output = fmn_cli::run([
+        "batch",
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--fps",
+        "8",
+        "--threads",
+        "1",
+        "--max-scenes",
+        "2",
+        "--manifest-dir",
+        manifest_text,
+        "--video_dir",
+        artifact_text,
+        fmn_cli::BUILTIN_SCENE_SOURCE,
+        scenes[0],
+        scenes[1],
+    ]);
+    let mut frames = 0_usize;
+    let mut complete = true;
+    let mut signatures = true;
+    let mut manifests = true;
+    for scene in scenes {
+        let sequence = artifact_dir.join(scene);
+        complete &= sequence.join("FMN_COMPLETE").is_file();
+        frames = frames.saturating_add(
+            std::fs::read_dir(&sequence)
+                .map_err(|error| fail(format!("list batch sequence {scene}: {error}")))?
+                .filter_map(Result::ok)
+                .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+                .count(),
+        );
+        signatures &= std::fs::read(sequence.join("frame_000000.png"))
+            .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+            .unwrap_or(false);
+        let generation = manifest_dir.join(scene);
+        manifests &= generation.join("FMN_COMPLETE").is_file()
+            && std::fs::read(generation.join("manifest.fmnp"))
+                .ok()
+                .and_then(|bytes| ProvenanceManifest::from_bytes(&bytes).ok())
+                .is_some_and(|manifest| {
+                    manifest.outputs.len() == 1
+                        && (1..=10).all(|id| manifest.items.iter().any(|item| item.item_id == id))
+                });
+    }
+    let lines: Vec<&str> = output.stdout.lines().collect();
+    let ordered_records = lines.len() == 3
+        && lines[0].contains("\"scene\":\"circle_shift.v1\"")
+        && lines[1].contains("\"scene\":\"rectangle_shift.v1\"")
+        && lines[2].contains("\"kind\":\"batch\"")
+        && lines[2].contains("\"status\":\"ok\"")
+        && lines[2].contains("\"succeeded\":2");
+    ctx.event(
+        LogEvent::new("e2e.cli.batch")
+            .field("source", "builtin")
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signatures", truth(signatures))
+            .field("manifests", truth(manifests))
+            .field("ordered_records", truth(ordered_records)),
+    );
+    ctx.counter("cli_batch_scenes", 2);
+    ctx.counter("cli_batch_frames", frames as u64);
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !complete
+        || frames != 6
+        || !signatures
+        || !manifests
+        || !ordered_records
+    {
+        return Err(fail(format!(
+            "native CLI batch failed: code={} frames={frames} complete={complete} signatures={signatures} manifests={manifests} ordered={ordered_records} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_batch_scenes", 2)
+        .with_counter("cli_batch_frames", 6))
+}
+
+/// Stock-CLI proof for the two native RGBA artifact adapters that share
+/// Lumen's final conversion but have distinct publication semantics: PNG
+/// captures exactly the completed scene state, while GIF streams the full
+/// schedule without crossing the ffmpeg boundary.
+fn cli_native_png_gif_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_native_png_gif")?;
+    let png_dir = dir.join("png");
+    let gif_dir = dir.join("gif");
+    std::fs::create_dir(&png_dir)
+        .map_err(|error| fail(format!("create CLI PNG directory: {error}")))?;
+    std::fs::create_dir(&gif_dir)
+        .map_err(|error| fail(format!("create CLI GIF directory: {error}")))?;
+    let png_dir_text = png_dir
+        .to_str()
+        .ok_or_else(|| fail("CLI PNG output path is not UTF-8"))?;
+    let gif_dir_text = gif_dir
+        .to_str()
+        .ok_or_else(|| fail("CLI GIF output path is not UTF-8"))?;
+
+    let render = |format: &str, output: &str| {
+        fmn_cli::run([
+            "--robot",
+            "--format",
+            format,
+            "--resolution",
+            "96x54",
+            "--fps",
+            "8",
+            "--threads",
+            "1",
+            "--video_dir",
+            output,
+            fmn_cli::BUILTIN_SCENE_SOURCE,
+            "circle_shift.v1",
+        ])
+    };
+    let png = render("png", png_dir_text);
+    let gif = render("gif", gif_dir_text);
+    let png_signature = std::fs::read(png_dir.join("circle_shift.png"))
+        .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .unwrap_or(false);
+    let gif_signature = std::fs::read(gif_dir.join("circle_shift.gif"))
+        .map(|bytes| bytes.starts_with(b"GIF89a") && bytes.last() == Some(&b';'))
+        .unwrap_or(false);
+    let robot_records = png.stdout.lines().count() == 1
+        && png.stdout.contains("\"format\":\"png\"")
+        && png.stdout.contains("\"frames\":1")
+        && gif.stdout.lines().count() == 1
+        && gif.stdout.contains("\"format\":\"gif\"")
+        && gif.stdout.contains("\"frames\":3");
+    ctx.event(
+        LogEvent::new("e2e.cli.native_rgba_artifacts")
+            .field("png_signature", truth(png_signature))
+            .field("gif_signature", truth(gif_signature))
+            .field("robot_records", truth(robot_records)),
+    );
+    ctx.counter("cli_png_still_frames", u64::from(png_signature));
+    ctx.counter(
+        "cli_gif_stream_frames",
+        if gif_signature && gif.stdout.contains("\"frames\":3") {
+            3
+        } else {
+            0
+        },
+    );
+    if png.code != 0
+        || gif.code != 0
+        || !png.stderr.is_empty()
+        || !gif.stderr.is_empty()
+        || !png_signature
+        || !gif_signature
+        || !robot_records
+    {
+        return Err(fail(format!(
+            "native PNG/GIF CLI path failed: png=({},{:?},{:?}) gif=({},{:?},{:?})",
+            png.code, png.stdout, png.stderr, gif.code, gif.stdout, gif.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_png_still_frames", 1)
+        .with_counter("cli_gif_stream_frames", 3))
+}
+
+/// A compiled FMTL/1 artifact crosses the stock CLI boundary, reconstructs
+/// through fmn-scene's shared reader, renders through Lumen, and publishes
+/// through Reel. This is the source-unedited native-artifact path rather than
+/// another built-in registration.
+fn cli_compiled_bundle_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_compiled_bundle_render")?;
+    let source = dir.join("compiled_wait.fmtl");
+    let output_dir = dir.join("output");
+    std::fs::create_dir(&output_dir)
+        .map_err(|error| fail(format!("create compiled output directory: {error}")))?;
+    let mut timeline =
+        Timeline::new(8).map_err(|error| fail(format!("create compiled timeline: {error}")))?;
+    timeline
+        .wait(0.25)
+        .map_err(|error| fail(format!("author compiled wait: {error}")))?;
+    let bytes =
+        fmn_scene::export_timeline_bundle(timeline, &mut Stage::new(), &RngRoot::from_seed(0))
+            .map_err(|error| fail(format!("export compiled timeline: {error}")))?;
+    std::fs::write(&source, bytes)
+        .map_err(|error| fail(format!("write compiled artifact: {error}")))?;
+    let output = fmn_cli::run([
+        "--robot",
+        "--format",
+        "png_sequence",
+        "--resolution",
+        "96x54",
+        "--threads",
+        "1",
+        "--video_dir",
+        output_dir
+            .to_str()
+            .ok_or_else(|| fail("compiled output path is not UTF-8"))?,
+        source
+            .to_str()
+            .ok_or_else(|| fail("compiled source path is not UTF-8"))?,
+        "CompiledWait",
+    ]);
+    let sequence = output_dir.join("CompiledWait");
+    let complete = sequence.join("FMN_COMPLETE").is_file();
+    let pngs = std::fs::read_dir(&sequence)
+        .map_err(|error| fail(format!("list compiled CLI PNG sequence: {error}")))?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
+        .count();
+    let signature = std::fs::read(sequence.join("frame_000000.png"))
+        .map(|bytes| bytes.starts_with(b"\x89PNG\r\n\x1a\n"))
+        .unwrap_or(false);
+    let robot_record = output.stdout.lines().count() == 1
+        && output.stdout.contains("\"kind\":\"render\"")
+        && output.stdout.contains("\"source\":\"compiled\"")
+        && output.stdout.contains("\"source_artifact\":")
+        && output.stdout.contains("\"frames\":2");
+    ctx.event(
+        LogEvent::new("e2e.cli.render")
+            .field("source", "compiled")
+            .field("format", "png_sequence")
+            .field("complete", truth(complete))
+            .field("png_signature", truth(signature))
+            .field("robot_record", truth(robot_record)),
+    );
+    ctx.counter("cli_compiled_render_frames", pngs as u64);
+    ctx.counter("cli_compiled_png_signature", u64::from(signature));
+    if output.code != 0
+        || !output.stderr.is_empty()
+        || !complete
+        || pngs != 2
+        || !signature
+        || !robot_record
+    {
+        return Err(fail(format!(
+            "compiled CLI render failed: code={} pngs={pngs} complete={complete} signature={signature} stdout={:?} stderr={:?}",
+            output.code, output.stdout, output.stderr
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("cli_compiled_render_frames", 2)
+        .with_counter("cli_compiled_png_signature", 1))
+}
+
+/// Select an interior authored segment without replaying its prefix or
+/// shifting its captured state, while rebasing the published PNG sequence.
+fn cli_compiled_range_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("cli_compiled_range_render")?;
+    let source = dir.join("compiled_range.fmtl");
+    let mut stage = Stage::new();
+    let circle = stage.add(Circle::new().radius(0.75).color(BLUE_C));
+    stage
+        .add_to_scene(circle)
+        .map_err(|error| fail(format!("add compiled range circle: {error}")))?;
+    stage
+        .add_dt_updater(
+            circle,
+            |stage, circle, dt| {
+                stage.shift(circle, [dt, dt * 0.25, 0.0]);
+            },
+            false,
+        )
+        .map_err(|error| fail(format!("add compiled range updater: {error}")))?;
+    let mut timeline =
+        Timeline::new(8).map_err(|error| fail(format!("create compiled timeline: {error}")))?;
+    for duration in [0.5, 0.25, 0.25] {
+        timeline
+            .wait(duration)
+            .map_err(|error| fail(format!("author compiled range segment: {error}")))?;
+    }
+    let bytes = fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(0))
+        .map_err(|error| fail(format!("export compiled range timeline: {error}")))?;
+    std::fs::write(&source, bytes)
+        .map_err(|error| fail(format!("write compiled range artifact: {error}")))?;
+    let full_output = dir.join("full");
+    let range_output = dir.join("selected");
+    for (output, threads, selected) in [(&full_output, "1", false), (&range_output, "4", true)] {
+        let mut args = vec![
+            "--robot",
+            "--format",
+            "png_sequence",
+            "--resolution",
+            "32x24",
+            "--threads",
+            threads,
+            "--video_dir",
+            output
+                .to_str()
+                .ok_or_else(|| fail("compiled range output path is not UTF-8"))?,
+        ];
+        if selected {
+            args.extend(["-n", "1,2", "--prerun"]);
+        }
+        args.extend([
+            source
+                .to_str()
+                .ok_or_else(|| fail("compiled range source path is not UTF-8"))?,
+            "CompiledRange",
+        ]);
+        let result = fmn_cli::run(args);
+        if result.code != 0 || !result.stderr.is_empty() {
+            return Err(fail(format!(
+                "compiled range CLI failed: code={} stdout={:?} stderr={:?}",
+                result.code, result.stdout, result.stderr
+            )));
+        }
+        if selected
+            && !(result.stdout.contains("\"frames\":2,\"segments\":1")
+                && result.stdout.contains("\"source_frames\":[4,6]")
+                && result.stdout.contains("\"source_segments\":[1,2]")
+                && result.stdout.contains("\"submitted\":2,\"emitted\":2"))
+        {
+            return Err(fail(format!(
+                "compiled range receipt lost its source interval: {:?}",
+                result.stdout
+            )));
+        }
+    }
+    let full = full_output.join("CompiledRange");
+    let selected = fmn_scene::OutputNaming {
+        output_directory: range_output,
+        start_at_play: Some(1),
+        end_at_play: Some(2),
+        ..Default::default()
+    }
+    .root("CompiledRange");
+    let read_frame = |directory: &std::path::Path, frame| {
+        std::fs::read(directory.join(format!("frame_{frame:06}.png")))
+            .map_err(|error| fail(format!("read compiled range PNG: {error}")))
+    };
+    let matches_source = read_frame(&selected, 0)? == read_frame(&full, 4)?
+        && read_frame(&selected, 1)? == read_frame(&full, 5)?
+        && read_frame(&selected, 0)? != read_frame(&full, 0)?;
+    let exact_stop =
+        selected.join("FMN_COMPLETE").is_file() && !selected.join("frame_000002.png").exists();
+    ctx.event(
+        LogEvent::new("e2e.cli.compiled_range")
+            .field("source_start", 4_u64)
+            .field("source_end", 6_u64)
+            .field("source_samples_match", truth(matches_source))
+            .field("exact_stop", truth(exact_stop)),
+    );
+    if !matches_source || !exact_stop {
+        return Err(fail(format!(
+            "compiled range changed source samples or stop boundary: source_samples_match={matches_source} exact_stop={exact_stop}"
+        )));
+    }
+    ctx.counter("cli_compiled_range_frames", 2);
+    ctx.counter("cli_compiled_range_prefix_omitted", 4);
+    Ok(RunOutcome::ok()
+        .with_counter("cli_compiled_range_frames", 2)
+        .with_counter("cli_compiled_range_prefix_omitted", 4))
+}
+
+#[test]
+fn cli_compiled_range_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.cli_compiled_fmtl_range.v1")
+        .expect("compiled CLI range scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle drill
+// ---------------------------------------------------------------------------
+
+/// The certified single-threaded frame of a stage, encoded into its
+/// canonical document — the same renderer `tests/scene_goldens.rs`
+/// injects into the corpus artifact form.
+fn render_certified_doc(stage: &Stage) -> Vec<u8> {
+    render_certified_doc_with_plan(stage, &mut RenderPlan::new())
+}
+
+fn render_certified_doc_with_plan(stage: &Stage, plan: &mut RenderPlan) -> Vec<u8> {
+    let config = scene_goldens::frame_config();
+    plan.sync(stage, 0)
+        .expect("valid certified document fixture");
+    let mono =
+        MonoTable::build(plan, config.map).expect("bounded certified document monotone table");
+    let mut binning = Binning::build(plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
+    binning
+        .prune_occluded(plan)
+        .expect("occlusion pruning matches the plan");
+    let frame = FrameJob::with_identity(plan, &mono, &binning, config, EngineIdentity::certified())
+        .expect("frame job matches the plan")
+        .render(1)
+        .expect("the engine renders the frame");
+    encode_frame(&frame).expect("the frame encodes into its canonical document")
+}
+
+/// Surface and vector geometry share the production camera-bound painter.
+/// Keep the same viewport, scene scale, and certified identity as the 2D rows.
+fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
+    use fmn_render::{
+        Camera, CameraConfig, CameraFrame, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    };
+
+    let config = scene_goldens::frame_config();
+    let mut camera_frame = CameraFrame::default();
+    camera_frame
+        .set_shape([
+            f64::from(config.viewport.width) / config.map.scale,
+            f64::from(config.viewport.height) / config.map.scale,
+        ])
+        .expect("bounded camera fixture shape");
+    let camera = Camera::new(CameraConfig {
+        resolution: (config.viewport.width, config.viewport.height),
+        background: config.background,
+        frame: camera_frame,
+        ..CameraConfig::default()
+    })
+    .expect("valid camera document fixture");
+    let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+        frame: config,
+        tiling: TILING,
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    })
+    .expect("bounded camera document renderer");
+    renderer
+        .render_with_camera(stage, &camera)
+        .expect("the camera route renders the surface and vector frame");
+    encode_frame(renderer.frame()).expect("the camera frame encodes into its canonical document")
+}
+
+/// fm-90d4: portrait defaults and subsequent frame changes pass through Atlas,
+/// the live Marionette family, and the certified renderer.
+fn control_panel_frame_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut stage = Stage::new();
+    stage
+        .set_frame_shape([4.5, 8.0])
+        .map_err(|error| fail(format!("portrait panel frame: {error}")))?;
+    let book = fmn_library::FontBook::bundled()
+        .map_err(|error| fail(format!("panel font book: {error}")))?;
+    let builder = fmn_library::ControlPanel::new([fmn_library::Checkbox::new(true).composition()]);
+    let mut panel = builder
+        .build_in(&stage, &book)
+        .map_err(|error| fail(format!("portrait control panel: {error}")))?;
+    let near = |actual: f64, expected: f64| (actual - expected).abs() < 1e-5;
+    if !near(panel.panel().length_over_dim(0), 1.125)
+        || !near(panel.opener_rect().length_over_dim(0), 0.5625)
+    {
+        return Err(fail("control panel retained landscape default dimensions"));
+    }
+    panel.open_panel();
+    let root = stage.add(panel.composition());
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("show control panel: {error}")))?;
+    let family = stage.family(root);
+    let children = stage
+        .get(root)
+        .expect("live panel root")
+        .submobjects()
+        .to_vec();
+    let rect = children[0];
+    let opener = children[1];
+    let controls = children[2];
+    let opener_x = stage.get_bounding_box(opener).mid[0];
+    let controls_x = stage.get_bounding_box(controls).mid[0];
+    if !near(stage.get_bounding_box(rect).min[0], -2.25)
+        || !near(stage.get_bounding_box(opener).min[1], -4.0)
+    {
+        return Err(fail(
+            "portrait control panel lies beyond its configured frame",
+        ));
+    }
+    let opened = render_certified_doc(&stage);
+
+    panel.close_panel();
+    let closed_source = stage.add(panel.composition());
+    stage
+        .become_mobject(root, closed_source, false)
+        .map_err(|error| fail(format!("close live panel family: {error}")))?;
+    let closed = render_certified_doc(&stage);
+    if !near(stage.get_bounding_box(opener).max[1], 4.0) || opened == closed {
+        return Err(fail("closing the panel did not move its visible geometry"));
+    }
+
+    stage
+        .set_frame_shape([10.0, 6.0])
+        .map_err(|error| fail(format!("reconfigured panel frame: {error}")))?;
+    panel.open_panel_in(&stage);
+    let reopened_source = stage.add(panel.composition());
+    stage
+        .become_mobject(root, reopened_source, false)
+        .map_err(|error| fail(format!("reopen live panel family: {error}")))?;
+    if stage.family(root) != family
+        || !near(stage.get_width(rect), 1.125)
+        || !near(stage.get_height(rect), 8.25)
+        || !near(stage.get_bounding_box(opener).min[1], -3.0)
+        || !near(stage.get_bounding_box(opener).mid[0], opener_x)
+        || !near(stage.get_bounding_box(controls).mid[0], controls_x)
+    {
+        return Err(fail(
+            "frame reconfiguration changed panel identity or authored geometry",
+        ));
+    }
+    let fresh = builder
+        .build_in(&stage, &book)
+        .map_err(|error| fail(format!("panel in the new frame: {error}")))?;
+    if !near(fresh.panel().length_over_dim(0), 2.5) {
+        return Err(fail("new panel failed to read the reconfigured frame"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.control_panel.frame")
+            .field("states", 3_u64)
+            .field("frame_shapes", 2_u64)
+            .field("family_preserved", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("control-panel-open.frame", opened)
+        .with_artifact("control-panel-closed.frame", closed)
+        .with_counter("control_panel_states", 3)
+        .with_counter("control_panel_frame_shapes", 2))
+}
+
+/// A dot can disappear at radius zero and grow again through the production
+/// scene/output pipeline. Removing and re-adding an independent dot supplies
+/// the expected PNG sequence; no frame hash is regenerated for this change.
+fn zero_radius_dot_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Dots {
+        remove_at_zero: bool,
+    }
+    impl fmn::SceneConstruct for Dots {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let dot = stage.add(
+                fmn_library::DotCloud::new([[0.0; 3]])
+                    .with_radius(0.75)
+                    .with_glow_factor(2.0)
+                    .colored(BLUE_C, 1.0),
+            )?;
+            stage.wait(0.125)?;
+            if self.remove_at_zero {
+                stage.scene_mut().remove(&[dot]);
+            } else {
+                stage
+                    .get_mut(dot)
+                    .expect("live dot")
+                    .buffer
+                    .write(0, "radius", &[0.0]);
+            }
+            stage.wait(0.125)?;
+            if self.remove_at_zero {
+                stage.scene_mut().add(&[dot])?;
+            } else {
+                stage
+                    .get_mut(dot)
+                    .expect("live dot")
+                    .buffer
+                    .write(0, "radius", &[0.75]);
+            }
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let render = |path: &str, remove_at_zero: bool, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::PngSequence)
+            .map_err(|error| fail(format!("zero-radius dot options: {error}")))?;
+        options.config.camera.resolution = (64, 40);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        // DotCloud content renders only on the camera route (RenderOptions::camera).
+        options.camera = Some(
+            options
+                .camera_config()
+                .map_err(|error| fail(format!("zero-radius dot camera: {error}")))?,
+        );
+        let report = fmn::render_with_fs(&mut Dots { remove_at_zero }, options, fs.clone())
+            .map_err(|error| fail(format!("zero-radius dot render: {error}")))?;
+        if report.artifact.frame_count != 3 {
+            return Err(fail("zero-radius lifecycle must emit exactly three frames"));
+        }
+        (0..3)
+            .map(|index| {
+                fs.read(&PathBuf::from(format!("{path}/frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("read zero-radius lifecycle PNG: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let expected = render("/dot-removed", true, 1)?;
+    if expected[0] == expected[1] || expected[0] != expected[2] {
+        return Err(fail(
+            "independent lifecycle must visibly disappear and return",
+        ));
+    }
+    for threads in [1, 4, 16] {
+        let actual = render(&format!("/dot-zero-{threads}"), false, threads)?;
+        let equal = actual == expected;
+        ctx.event(
+            LogEvent::new("e2e.dot.zero_radius")
+                .field("threads", u64::from(threads))
+                .field("frames", actual.len() as u64)
+                .field("matches_removed", truth(equal))
+                .field("invisible_sha256", sha256(&actual[1]).to_hex()),
+        );
+        if !equal {
+            return Err(fail("zero-radius lifecycle differs from removing the dot"));
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("dot-visible.png", expected[0].clone())
+        .with_artifact("dot-invisible.png", expected[1].clone())
+        .with_counter("zero_radius_lifecycle_frames", 9))
+}
+
+/// Generic point transforms preserve DotCloud radius records, including when
+/// the deferred placement is baked for readback. Explicit world coordinates
+/// supply the independent expected scene at each lifecycle boundary.
+fn dot_cloud_affine_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Dots {
+        explicit: bool,
+    }
+    impl fmn::SceneConstruct for Dots {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let dot = stage.add(
+                fmn_library::DotCloud::new([[-0.5, 0.25, 0.0], [0.5, -0.25, 0.0]])
+                    .with_radius(0.25)
+                    .colored(BLUE_C, 1.0),
+            )?;
+            stage.wait(0.125)?;
+            if self.explicit {
+                stage.set_points(dot, &[[-0.75, 0.375, 0.0], [0.75, -0.375, 0.0]])?;
+            } else {
+                stage.scale_about(dot, 1.5, Some([0.0; 3]), None);
+            }
+            stage.wait(0.125)?;
+            if self.explicit {
+                stage.set_points(dot, &[[-1.5, 0.375, 0.0], [1.5, -0.375, 0.0]])?;
+            } else {
+                stage.stretch_about(dot, 2.0, 0, Some([0.0; 3]), None);
+            }
+            stage.wait(0.125)?;
+            if self.explicit {
+                stage.set_points(dot, &[[-1.3125, 0.375, 0.0], [1.3125, -0.375, 0.0]])?;
+            } else {
+                stage.apply_affine(
+                    dot,
+                    fmn_mobject::Placement::new(
+                        [[1.0, 0.5, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+                        [0.0; 3],
+                    ),
+                );
+            }
+            stage.wait(0.125)?;
+            stage.bake_placement(dot)?;
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let render = |path: &str, explicit: bool, threads| {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::PngSequence)
+            .map_err(|error| fail(format!("affine dot options: {error}")))?;
+        options.config.camera.resolution = (64, 40);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        // DotCloud content renders only on the camera route (RenderOptions::camera).
+        options.camera = Some(
+            options
+                .camera_config()
+                .map_err(|error| fail(format!("affine dot camera: {error}")))?,
+        );
+        let report = fmn::render_with_fs(&mut Dots { explicit }, options, fs.clone())
+            .map_err(|error| fail(format!("affine dot render: {error}")))?;
+        if report.artifact.frame_count != 5 {
+            return Err(fail("affine dot lifecycle must emit exactly five frames"));
+        }
+        (0..5)
+            .map(|index| {
+                fs.read(&PathBuf::from(format!("{path}/frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("read affine dot PNG: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()
+    };
+    let expected = render("/dot-explicit", true, 1)?;
+    if expected[..4].windows(2).any(|pair| pair[0] == pair[1]) || expected[3] != expected[4] {
+        return Err(fail(
+            "explicit dot fixture must visibly move and remain unchanged on readback",
+        ));
+    }
+    for threads in [1, 4, 16] {
+        let actual = render(&format!("/dot-affine-{threads}"), false, threads)?;
+        let equal = actual == expected;
+        ctx.event(
+            LogEvent::new("e2e.dot.affine_placement")
+                .field("threads", u64::from(threads))
+                .field("frames", actual.len() as u64)
+                .field("matches_explicit", truth(equal))
+                .field("baked_sha256", sha256(&actual[4]).to_hex()),
+        );
+        if !equal {
+            return Err(fail(
+                "retained dot placement differs from explicit centers and radii",
+            ));
+        }
+    }
+    Ok(RunOutcome::ok()
+        .with_artifact("dot-sheared.png", expected[3].clone())
+        .with_counter("dot_affine_lifecycle_frames", 15))
+}
+
+/// Retained camera captures stay immutable while later poses and overlay
+/// edits reuse the same renderer. A fresh serial renderer supplies each
+/// expected frame; replay then reverses capture order on 1, 4, and 16 threads.
+fn obj_concave_faces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use fmn_library::{ObjAssetLimits, ObjDocument, parse_mtl};
+    use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler, Snapshot};
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
+
+    // A U with a collinear left-edge corner whose UV is deliberately not
+    // the interpolation of its neighbours. The repeated closing corner must
+    // not add a triangle or shift the following material's face interval.
+    let geometry = concat!(
+        "v -2 -2 0\nv 2 -2 0\nv 2 2 0\nv 1 2 0\nv 1 -1 0\n",
+        "v -1 -1 0\nv -1 2 0\nv -2 2 0\nv -2 0 0\n",
+        "vt 0 0\nvt 1 0\nvt 1 1\nvt .75 1\nvt .75 .25\n",
+        "vt .25 .25\nvt .25 1\nvt 0 1\nvt .125 .5\nvn 0 0 1\n",
+    );
+    let materials = parse_mtl(
+        b"newmtl A\nmap_Kd -s 1.5 -o .125 -clamp off tiles.png\n\
+          newmtl B\nKd .15 .65 .9\n",
+        &ObjAssetLimits::default(),
+    )
+    .map_err(|error| fail(format!("parse concave materials: {error}")))?;
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![255, 80, 40, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .map_err(|error| fail(format!("construct concave texture: {error}")))?;
+    let background = fmn_core::color::LinearRgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+    let viewport = Viewport {
+        width: 96,
+        height: 96,
+    };
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            viewport,
+            ScreenMap {
+                scale: 12.0,
+                origin: [48.0, 48.0],
+                y_up: true,
+            },
+            background,
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut outcome = RunOutcome::ok();
+    let mut frames = 0_u64;
+    for reversed in [false, true] {
+        let mut order: Vec<usize> = (1..=9).collect();
+        if reversed {
+            order.reverse();
+        }
+        order.push(order[0]);
+        let corners = order
+            .iter()
+            .map(|index| format!("{index}/{index}/1"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let source = format!("{geometry}usemtl A\nf {corners}\nusemtl B\nf 2/2/1 3/3/1 4/4/1\n");
+        let document = ObjDocument::parse(source.as_bytes())
+            .map_err(|error| fail(format!("parse concave OBJ: {error}")))?;
+        if document.mesh().triangles.len() != 8
+            || document.runs().len() != 2
+            || document.runs()[0].triangles != (0..7)
+            || document.runs()[1].triangles != (7..8)
+        {
+            return Err(fail(
+                "concave triangulation shifted a material face interval",
+            ));
+        }
+        let mut retained_corners = BTreeSet::new();
+        let mut area = 0.0;
+        for triangle in &document.mesh().triangles[..7] {
+            let [a, b, c] = triangle.map(|corner| document.mesh().vertices[corner.vertex]);
+            let signed = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+            if signed == 0.0 || (signed < 0.0) != reversed {
+                return Err(fail("concave triangles lost the original face winding"));
+            }
+            area += signed.abs() * 0.5;
+            for corner in triangle {
+                retained_corners.insert((corner.vertex, corner.tex_coord, corner.normal));
+            }
+        }
+        let expected_corners: BTreeSet<_> =
+            (0..9).map(|index| (index, Some(index), Some(0))).collect();
+        if area != 10.0 || retained_corners != expected_corners {
+            return Err(fail("concave face area or per-corner attributes changed"));
+        }
+        let model = document
+            .to_mobject(
+                4.0,
+                &materials,
+                &BTreeMap::from([("A".to_owned(), image.clone())]),
+            )
+            .map_err(|error| fail(format!("build concave material model: {error}")))?;
+        let mut stage = Stage::new();
+        let root = stage.add(model);
+        stage
+            .add_to_scene(root)
+            .map_err(|error| fail(format!("admit concave model: {error}")))?;
+        let saved = stage
+            .snapshot_bytes()
+            .map_err(|error| fail(format!("serialize concave model: {error}")))?;
+        let mut restored = Stage::new();
+        let decoded = Snapshot::from_bytes(&saved, &restored)
+            .map_err(|error| fail(format!("decode concave model: {error}")))?;
+        restored.restore(&decoded.snapshot);
+        if restored
+            .snapshot_bytes()
+            .map_err(|error| fail(error.to_string()))?
+            != saved
+        {
+            return Err(fail("concave model snapshot changed bytes"));
+        }
+        for pose in 0..2 {
+            let mut camera_config = CameraConfig {
+                resolution: (96, 96),
+                background,
+                ..CameraConfig::default()
+            };
+            camera_config
+                .frame
+                .set_shape([8.0, 8.0])
+                .map_err(|error| fail(error.to_string()))?;
+            camera_config
+                .frame
+                .set_euler_angles(
+                    Some(f64::from(pose) * 0.35),
+                    Some(f64::from(pose) * 0.3),
+                    None,
+                )
+                .map_err(|error| fail(error.to_string()))?;
+            let camera = Camera::new(camera_config)
+                .map_err(|error| fail(format!("construct concave camera: {error}")))?;
+            let mut fresh =
+                RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+            let reference = fresh
+                .prepare_with_camera(&stage, &camera)
+                .map_err(|error| fail(error.to_string()))?
+                .render(1)
+                .map_err(|error| fail(error.to_string()))?;
+            // Independent interior/exterior probes, safely away from edges.
+            for (point, filled) in [
+                ([-1.5, 1.0, 0.0], true),
+                ([1.5, 1.0, 0.0], true),
+                ([0.0, -1.5, 0.0], true),
+                ([0.0, 1.0, 0.0], false),
+                ([0.0, 0.0, 0.0], false),
+            ] {
+                let pixel = camera
+                    .project(point, 0.0)
+                    .pixel((96, 96))
+                    .ok_or_else(|| fail("concave probe did not project"))?;
+                if !(0.0..96.0).contains(&pixel[0]) || !(0.0..96.0).contains(&pixel[1]) {
+                    return Err(fail("concave probe left the viewport"));
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                let (x, y) = (pixel[0] as usize, pixel[1] as usize);
+                let offset = y * reference.layout().stride(0) + x * 8 + 6;
+                let bytes = reference.plane(0);
+                let alpha = u16::from_le_bytes([bytes[offset], bytes[offset + 1]]);
+                if (alpha != 0) != filled {
+                    return Err(fail("concave cutout or interior has incorrect coverage"));
+                }
+            }
+            for threads in [1, 4, 16] {
+                let mut renderer =
+                    RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                        .map_err(|error| fail(error.to_string()))?;
+                for state in [&stage, &restored] {
+                    renderer
+                        .render_with_camera(state, &camera)
+                        .map_err(|error| fail(error.to_string()))?;
+                    if renderer.frame().as_bytes() != reference.as_bytes() {
+                        return Err(fail("concave frame changed across threads or restoration"));
+                    }
+                    frames += 1;
+                }
+            }
+            if pose == 1 {
+                outcome = outcome.with_artifact(
+                    if reversed {
+                        "obj-concave-cw.frame"
+                    } else {
+                        "obj-concave-ccw.frame"
+                    },
+                    encode_frame(&reference).map_err(|error| fail(error.to_string()))?,
+                );
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.obj.concave_faces")
+            .field("frames", frames)
+            .field("face_area", 10_u64)
+            .field("corners_preserved", 9_u64)
+            .field("cutout_preserved", "true"),
+    );
+    Ok(outcome.with_counter("obj_concave_frames", frames))
+}
+
+fn camera_projection_resources_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::Sphere;
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
+
+    let background = fmn_core::color::LinearRgba {
+        r: 0.04,
+        g: 0.06,
+        b: 0.08,
+        a: 1.0,
+    };
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 96,
+                height: 64,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [48.0, 32.0],
+                y_up: true,
+            },
+            background,
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut settings = CameraConfig {
+        resolution: (96, 64),
+        background,
+        ..CameraConfig::default()
+    };
+    settings
+        .frame
+        .set_shape([12.0, 8.0])
+        .map_err(|error| fail(error.to_string()))?;
+    let original_camera = Camera::new(settings).map_err(|error| fail(error.to_string()))?;
+    let mut frames = 0_u64;
+    let mut compiled_draws = 0_u64;
+    let mut reused_draws = 0_u64;
+    let mut partial_frames = 0_u64;
+    let mut artifact = Vec::new();
+    for budget in [0, 1, 4 * 1024 * 1024] {
+        let mut stage = Stage::new();
+        let fixed = stage.add(Sphere::new(0.9).resolution(17, 9));
+        let moving = stage.add(Sphere::new(0.7).resolution(13, 9));
+        let overlay = stage.add(Circle::new().radius(0.3));
+        stage
+            .add_many_to_scene(&[fixed, moving, overlay])
+            .map_err(|error| fail(error.to_string()))?;
+        stage.shift(fixed, [-2.0, 0.0, 0.0]);
+        stage.shift(moving, [1.0, 0.0, 0.0]);
+        stage.shift(overlay, [0.0, -1.6, 0.0]);
+        let checkpoint = stage.snapshot();
+        let mut camera = original_camera.clone();
+        let mut compiler =
+            RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+        compiler.set_camera_projection_cache_budget_bytes(budget);
+        let mut captures = Vec::new();
+        for step in 0..8 {
+            match step {
+                1 => {
+                    stage.shift(overlay, [0.5, 0.0, 0.0]);
+                }
+                2 => {
+                    stage.shift(moving, [0.5, 0.0, 0.0]);
+                }
+                3 => {
+                    camera
+                        .frame_mut()
+                        .set_center([0.25, 0.0, 0.0])
+                        .map_err(|error| fail(error.to_string()))?;
+                }
+                4 => {
+                    camera
+                        .set_light_source_position([5.0, -5.0, 10.0])
+                        .map_err(|error| fail(error.to_string()))?;
+                }
+                5 => {
+                    stage.shift(fixed, [0.0, 0.35, 0.0]);
+                }
+                6 => {
+                    stage.restore(&checkpoint);
+                    camera = original_camera.clone();
+                }
+                _ => {}
+            }
+            let capture = compiler
+                .prepare_with_camera(&stage, &camera)
+                .map_err(|error| fail(format!("capture projected camera resources: {error}")))?;
+            if step != 7 && capture.projection_preparation_stats().is_some() {
+                return Err(fail(
+                    "a changed camera capture projected on the stage owner",
+                ));
+            }
+            // A separate zero-budget compiler uses the unchanged cold projection
+            // constructor, without reusing the candidate's world or projected rows.
+            let mut fresh =
+                RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+            fresh.set_camera_projection_cache_budget_bytes(0);
+            let reference = fresh
+                .prepare_with_camera(&stage, &camera)
+                .map_err(|error| fail(error.to_string()))?
+                .render(1)
+                .map_err(|error| fail(error.to_string()))?;
+            let actual = capture
+                .render(1)
+                .map_err(|error| fail(format!("prepare retained projection: {error}")))?;
+            if actual.as_bytes() != reference.as_bytes() {
+                return Err(fail("retained projection changed cold camera pixels"));
+            }
+            let stats = capture
+                .projection_preparation_stats()
+                .ok_or_else(|| fail("successful raster did not publish projection counters"))?;
+            if stats.compiled_draws + stats.reused_draws != 3 {
+                return Err(fail("projection accounting lost a mixed-scene draw"));
+            }
+            if budget <= 1 || matches!(step, 0 | 3 | 4 | 6) {
+                if stats.reused_draws != 0 {
+                    return Err(fail(
+                        "projection rows survived an incompatible camera or disabled budget",
+                    ));
+                }
+            } else if matches!(step, 1 | 2 | 5) {
+                if stats.compiled_draws != 1 || stats.reused_draws != 2 {
+                    return Err(fail(
+                        "a local edit failed to reuse the two unaffected projected draws",
+                    ));
+                }
+                partial_frames += 1;
+            }
+            if step != 7 {
+                compiled_draws += u64::try_from(stats.compiled_draws)
+                    .map_err(|_| fail("compiled draw count exceeds u64"))?;
+                reused_draws += u64::try_from(stats.reused_draws)
+                    .map_err(|_| fail("reused draw count exceeds u64"))?;
+            }
+            let retained_bytes = compiler.retained_camera_projection_bytes();
+            if retained_bytes > budget || (budget <= 1 && retained_bytes != 0) {
+                return Err(fail(
+                    "camera projection cache exceeded its admitted allowance",
+                ));
+            }
+            if budget > 1 && step == 0 && retained_bytes == 0 {
+                return Err(fail(
+                    "the positive-budget control did not retain projected resources",
+                ));
+            }
+            if budget > 1 && step == 1 {
+                artifact = encode_frame(&actual).map_err(|error| fail(error.to_string()))?;
+            }
+            captures.push((capture, reference.as_bytes().to_vec()));
+            frames += 1;
+        }
+        for index in 1..6 {
+            if captures[index - 1].1 == captures[index].1 {
+                return Err(fail(format!(
+                    "projection edit {index} did not change visible pixels"
+                )));
+            }
+        }
+        if captures[6].1 != captures[0].1 || captures[7].1 != captures[6].1 {
+            return Err(fail("retained projections did not restore snapshot pixels"));
+        }
+        drop(stage);
+        drop(compiler);
+        drop(checkpoint);
+        for threads in [1, 4, 16] {
+            for index in [7, 2, 5, 0] {
+                let actual = captures[index]
+                    .0
+                    .render(threads)
+                    .map_err(|error| fail(format!("replay frozen projection: {error}")))?;
+                if actual.as_bytes() != captures[index].1 {
+                    return Err(fail(
+                        "frozen projection replay changed after scene teardown",
+                    ));
+                }
+                frames += 1;
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.projection_resources")
+            .field("frames", frames)
+            .field("compiled_draws", compiled_draws)
+            .field("reused_draws", reused_draws)
+            .field("partial_frames", partial_frames)
+            .field("cold_pixels_match", "true")
+            .field("cache_bounded", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("retained-camera-projection.frame", artifact)
+        .with_counter("camera_projection_frames", frames)
+        .with_counter("camera_projection_reused_draws", reused_draws)
+        .with_counter("camera_projection_partial_frames", partial_frames))
+}
+
+fn camera_world_resources_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::Sphere;
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
+
+    let mut stage = Stage::new();
+    let fixed = stage.add(Sphere::new(0.9).resolution(17, 9));
+    let moving = stage.add(Sphere::new(0.7).resolution(13, 9));
+    let overlay = stage.add(Circle::new().radius(0.3));
+    stage
+        .add_many_to_scene(&[fixed, moving, overlay])
+        .map_err(|error| fail(error.to_string()))?;
+    stage.shift(fixed, [-2.0, 0.0, 0.0]);
+    stage.shift(moving, [1.0, 0.0, 0.0]);
+    stage.shift(overlay, [0.0, -1.6, 0.0]);
+    let checkpoint = stage.snapshot();
+    let background = fmn_core::color::LinearRgba {
+        r: 0.04,
+        g: 0.06,
+        b: 0.08,
+        a: 1.0,
+    };
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 96,
+                height: 64,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [48.0, 32.0],
+                y_up: true,
+            },
+            background,
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut settings = CameraConfig {
+        resolution: (96, 64),
+        background,
+        ..CameraConfig::default()
+    };
+    settings
+        .frame
+        .set_shape([12.0, 8.0])
+        .map_err(|error| fail(error.to_string()))?;
+    let original_camera = Camera::new(settings).map_err(|error| fail(error.to_string()))?;
+    let mut camera = original_camera.clone();
+    let mut compiler =
+        RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+    let mut captures = Vec::new();
+    let mut mesh_builds = 0_u64;
+    let mut mesh_reuses = 0_u64;
+    let mut unchanged_captures = 0_u64;
+    for step in 0..8 {
+        match step {
+            1 => {
+                stage.shift(overlay, [0.5, 0.0, 0.0]);
+            }
+            2 => {
+                stage.shift(moving, [0.5, 0.0, 0.0]);
+            }
+            3 => {
+                camera
+                    .frame_mut()
+                    .set_center([0.25, 0.0, 0.0])
+                    .map_err(|error| fail(error.to_string()))?;
+            }
+            4 => {
+                camera
+                    .set_light_source_position([5.0, -5.0, 10.0])
+                    .map_err(|error| fail(error.to_string()))?;
+            }
+            5 => {
+                stage.shift(fixed, [0.0, 0.35, 0.0]);
+            }
+            6 => {
+                stage.restore(&checkpoint);
+                camera = original_camera.clone();
+            }
+            _ => {}
+        }
+        let capture = compiler
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(format!("prepare retained world resources: {error}")))?;
+        let stats = compiler.camera_preparation_stats();
+        if stats.meshes_built + stats.meshes_reused != 2 {
+            return Err(fail("camera resource accounting lost a surface"));
+        }
+        if step == 0 && (stats.meshes_built != 2 || stats.meshes_reused != 0) {
+            return Err(fail("cold camera preparation did not build both surfaces"));
+        }
+        if matches!(step, 1 | 3 | 4 | 7) {
+            if stats.meshes_built != 0 || stats.meshes_reused != 2 {
+                return Err(fail(
+                    "an overlay, camera, light or identical capture rebuilt world meshes",
+                ));
+            }
+            unchanged_captures += 1;
+        }
+        if matches!(step, 2 | 5) && (stats.meshes_built != 1 || stats.meshes_reused != 1) {
+            return Err(fail(
+                "a local mesh edit rebuilt an unaffected world resource",
+            ));
+        }
+        mesh_builds +=
+            u64::try_from(stats.meshes_built).map_err(|_| fail("mesh build count exceeds u64"))?;
+        mesh_reuses +=
+            u64::try_from(stats.meshes_reused).map_err(|_| fail("mesh reuse count exceeds u64"))?;
+
+        // A new compiler and direct raster provide a cold control for each
+        // capture. Neither retained world resources nor tile pixels are shared.
+        let mut fresh =
+            RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+        fresh.set_camera_projection_cache_budget_bytes(0);
+        let reference = fresh
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(error.to_string()))?
+            .render(1)
+            .map_err(|error| fail(error.to_string()))?;
+        captures.push((capture, reference.as_bytes().to_vec()));
+    }
+    for index in 1..6 {
+        if captures[index - 1].1 == captures[index].1 {
+            return Err(fail(format!(
+                "camera resource edit {index} did not change visible pixels"
+            )));
+        }
+    }
+    if captures[6].1 != captures[0].1 || captures[7].1 != captures[6].1 {
+        return Err(fail(
+            "camera world resources did not restore snapshot pixels",
+        ));
+    }
+    drop(stage);
+    drop(compiler);
+    drop(checkpoint);
+    let mut frames = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in [1, 4, 16] {
+        for index in [0, 1, 2, 3, 4, 5, 6, 7, 2, 0] {
+            let actual = captures[index]
+                .0
+                .render(threads)
+                .map_err(|error| fail(format!("replay retained world resources: {error}")))?;
+            if actual.as_bytes() != captures[index].1 {
+                return Err(fail(
+                    "retained camera world resources changed cold-render pixels",
+                ));
+            }
+            if threads == 1 && frames == 0 {
+                artifact = encode_frame(&actual).map_err(|error| fail(error.to_string()))?;
+            }
+            frames += 1;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.world_resources")
+            .field("frames", frames)
+            .field("mesh_builds", mesh_builds)
+            .field("mesh_reuses", mesh_reuses)
+            .field("unchanged_captures", unchanged_captures)
+            .field("cold_pixels_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("retained-camera-world.frame", artifact)
+        .with_counter("camera_world_frames", frames)
+        .with_counter("camera_world_mesh_reuses", mesh_reuses)
+        .with_counter("camera_world_unchanged_captures", unchanged_captures))
+}
+
+fn camera_tile_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::Cube;
+    use fmn_render::{
+        Camera, CameraConfig, PixelTileCache, RasterTeam, RetainedFrameRenderer,
+        RetainedFrameRendererConfig, Tiling,
+    };
+
+    let mut stage = Stage::new();
+    let cube = stage.add(Cube::new(2.0));
+    stage
+        .add_to_scene(cube)
+        .map_err(|error| fail(error.to_string()))?;
+    stage.shift(cube, [-2.5, 0.0, 0.0]);
+    let moving = stage.add(Circle::new().radius(0.45));
+    stage
+        .add_to_scene(moving)
+        .map_err(|error| fail(error.to_string()))?;
+    stage.shift(moving, [1.5, 0.0, 0.0]);
+    let background = fmn_core::color::LinearRgba {
+        r: 0.04,
+        g: 0.06,
+        b: 0.08,
+        a: 1.0,
+    };
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 96,
+                height: 64,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [48.0, 32.0],
+                y_up: true,
+            },
+            background,
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut camera_config = CameraConfig {
+        resolution: (96, 64),
+        background,
+        ..CameraConfig::default()
+    };
+    camera_config
+        .frame
+        .set_shape([12.0, 8.0])
+        .map_err(|error| fail(error.to_string()))?;
+    let original_camera = Camera::new(camera_config).map_err(|error| fail(error.to_string()))?;
+    let mut camera = original_camera.clone();
+    let mut compiler =
+        RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+    let mut captures = Vec::new();
+    for step in 0..6 {
+        match step {
+            1 => {
+                stage.shift(moving, [0.75, 0.0, 0.0]);
+            }
+            2 => {
+                stage.shift(moving, [0.0, 0.4, 0.0]);
+            }
+            3 => {
+                camera
+                    .set_light_source_position([8.0, -4.0, 6.0])
+                    .map_err(|error| fail(error.to_string()))?;
+            }
+            4 => camera = original_camera.clone(),
+            5 => {
+                stage.shift(cube, [0.5, 0.0, 0.0]);
+            }
+            _ => {}
+        }
+        let capture = compiler
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(format!("prepare camera tile fixture: {error}")))?;
+        let mut fresh =
+            RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+        let reference = fresh
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(error.to_string()))?
+            .render(1)
+            .map_err(|error| fail(error.to_string()))?;
+        captures.push((capture, reference.as_bytes().to_vec()));
+    }
+    if captures[0].1 == captures[1].1
+        || captures[2].1 == captures[3].1
+        || captures[3].1 == captures[4].1
+        || captures[4].1 == captures[5].1
+    {
+        return Err(fail(
+            "camera tile fixture lost object or lighting sensitivity",
+        ));
+    }
+    let mut frames = 0_u64;
+    let mut hits = 0_u64;
+    let mut partial_frames = 0_u64;
+    let budget = 1024 * 1024;
+    for threads in [1, 4, 16] {
+        let mut team = RasterTeam::new(threads).map_err(|error| fail(error.to_string()))?;
+        let mut cache = PixelTileCache::with_budgets(budget, 0);
+        cache.set_camera_budget_bytes(budget);
+        let layout = captures[0]
+            .0
+            .layout()
+            .map_err(|error| fail(error.to_string()))?;
+        let mut output = FrameBuffer::new(layout);
+        for (position, index) in [0, 1, 2, 2, 1, 3, 4, 5].into_iter().enumerate() {
+            // Every call receives overwritten destination bytes: tile hits
+            // must restore their saved pixels, not depend on the old surface.
+            output.plane_mut(0).fill(0xA5);
+            let stats = captures[index]
+                .0
+                .render_cached_into_with_team(&mut team, &mut cache, &mut output)
+                .map_err(|error| fail(format!("render retained camera tiles: {error}")))?;
+            if output.as_bytes() != captures[index].1 {
+                return Err(fail("camera tile replay differs from its uncached oracle"));
+            }
+            if cache.retained_camera_bytes() > budget {
+                return Err(fail("camera tile cache exceeded its admitted storage"));
+            }
+            if position == 1 {
+                if stats.cache.hits == 0 || stats.cache.misses == 0 {
+                    return Err(fail("local camera edit did not reuse unchanged tiles"));
+                }
+                partial_frames += 1;
+            }
+            if threads == 1 && team.stats().band_buffer_bytes != 0 {
+                return Err(fail("inline camera tiles allocated a band surface"));
+            }
+            hits += u64::try_from(stats.cache.hits)
+                .map_err(|_| fail("camera tile hit count exceeds u64"))?;
+            frames += 1;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.tiles")
+            .field("frames", frames)
+            .field("hits", hits)
+            .field("partial_frames", partial_frames)
+            .field("uncached_pixels_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("camera_tile_frames", frames)
+        .with_counter("camera_tile_hits", hits)
+        .with_counter("camera_partial_reuse_frames", partial_frames))
+}
+
+fn retained_camera_frames_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{Cube, RuntimeConfig, Scene};
+    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig};
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 0)
+        .map_err(|error| fail(format!("retained camera scene: {error}")))?;
+    scene
+        .add_mobject(Cube::new(1.4))
+        .map_err(|error| fail(format!("retained camera cube: {error}")))?;
+    let overlay = scene
+        .add_mobject(Circle::new().radius(0.25))
+        .map_err(|error| fail(format!("retained camera overlay: {error}")))?;
+    scene.stage_mut().shift(overlay, [-1.2, 0.0, 0.0]);
+    let viewport = fmn_render::Viewport {
+        width: 64,
+        height: 36,
+    };
+    let frame_config = FrameConfig::new(
+        viewport,
+        fmn_render::ScreenMap {
+            scale: 9.0,
+            origin: [32.0, 18.0],
+            y_up: true,
+        },
+        fmn_core::color::LinearRgba {
+            r: 0.0,
+            g: 0.0,
+            b: 0.0,
+            a: 1.0,
+        },
+    );
+    let config = RetainedFrameRendererConfig {
+        frame: frame_config,
+        tiling: TILING,
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut renderer = RetainedFrameRenderer::new(config)
+        .map_err(|error| fail(format!("retained camera renderer: {error}")))?;
+    let mut frames = Vec::new();
+    for index in 0..4 {
+        let mut camera = CameraConfig {
+            resolution: (viewport.width, viewport.height),
+            background: frame_config.background,
+            ..CameraConfig::default()
+        };
+        camera
+            .frame
+            .set_shape([64.0 / 9.0, 4.0])
+            .map_err(|error| fail(format!("retained camera shape: {error}")))?;
+        camera
+            .frame
+            .set_euler_angles(Some(f64::from(index.min(2)) * 0.3), Some(0.5), None)
+            .map_err(|error| fail(format!("retained camera orbit: {error}")))?;
+        if index == 3 {
+            scene.stage_mut().shift(overlay, [1.0, 0.5, 0.0]);
+        }
+        let camera =
+            Camera::new(camera).map_err(|error| fail(format!("retained camera pose: {error}")))?;
+        let captured = renderer
+            .prepare_with_camera(scene.stage(), &camera)
+            .map_err(|error| fail(format!("retained camera capture: {error}")))?;
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("serial camera renderer: {error}")))?;
+        fresh
+            .render_with_camera(scene.stage(), &camera)
+            .map_err(|error| fail(format!("serial camera frame: {error}")))?;
+        frames.push((captured, fresh.frame().as_bytes().to_vec()));
+    }
+    if frames[0].1 == frames[1].1 || frames[1].1 == frames[2].1 {
+        return Err(fail("camera orbit did not produce distinct visible frames"));
+    }
+    if frames[2].1 == frames[3].1 {
+        return Err(fail(
+            "overlay edit did not invalidate the retained camera frame",
+        ));
+    }
+    let layout = frames[0]
+        .0
+        .layout()
+        .map_err(|error| fail(error.to_string()))?;
+    let mut raster = FrameBuffer::new(layout);
+    let address = raster.as_bytes().as_ptr();
+    for threads in [1, 4, 16] {
+        for (frame, expected) in frames.iter().rev() {
+            frame
+                .render_into(threads, &mut raster)
+                .map_err(|error| fail(format!("retained camera replay: {error}")))?;
+            if raster.as_bytes() != expected || raster.as_bytes().as_ptr() != address {
+                return Err(fail(
+                    "frozen camera replay changed pixels or replaced the reusable raster",
+                ));
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.camera.retained")
+            .field("captures", 4_u64)
+            .field("replays", 12_u64)
+            .field("raster_reused", "true"),
+    );
+    Ok(RunOutcome::ok().with_counter("retained_camera_replays", 12))
+}
+
+/// Dirty foreground tiles reuse exact static-prefix accumulators through the
+/// production persistent renderer; a fresh renderer supplies every pixel oracle.
+fn retained_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    retained_prefix_run(ctx, EngineIdentity::certified())
+}
+
+fn adaptive_static_prefix_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    retained_prefix_run(ctx, EngineIdentity::fast())
+}
+
+fn retained_prefix_run(
+    ctx: &mut RunCtx,
+    engine: EngineIdentity,
+) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    let adaptive = engine == EngineIdentity::fast();
+    let rectangle = |width: f64, height: f64| {
+        let x = width / 2.0;
+        let y = height / 2.0;
+        Mobject::vector_from_points(&[
+            [-x, -y, 0.0],
+            [0.0, -y, 0.0],
+            [x, -y, 0.0],
+            [x, 0.0, 0.0],
+            [x, y, 0.0],
+            [0.0, y, 0.0],
+            [-x, y, 0.0],
+            [-x, 0.0, 0.0],
+            [-x, -y, 0.0],
+        ])
+    };
+    let mut stage = Stage::new();
+    let mut background = Vec::new();
+    for index in 0..4 {
+        let inset = f64::from(index) * 0.125;
+        let mob = stage.add(rectangle(6.0 - inset, 4.0 - inset));
+        stage.set_fill(mob, Some(BLUE_C), Some(0.25), Some(0.0), true);
+        stage.set_stroke(mob, None, Some(0.0), None, None, true);
+        background.push(mob);
+    }
+    if adaptive {
+        // Coincident diagonal boundaries cross the moving foreground's tiles.
+        // The checkpoint must retain their AA complexity as well as color:
+        // otherwise reuse would silently stop refining these edge pixels.
+        for index in 0..4 {
+            let mob = stage.add(Mobject::vector_from_points(&[
+                [-2.0, -1.5, 0.0],
+                [0.0, 0.0, 0.0],
+                [2.0, 1.5, 0.0],
+                [0.0, 1.5, 0.0],
+                [-2.0, 1.5, 0.0],
+                [-2.0, 0.0, 0.0],
+                [-2.0, -1.5, 0.0],
+            ]));
+            stage.shift(mob, [f64::from(index) * 0.02, 0.0, 0.0]);
+            stage.set_fill(mob, Some(BLUE_C), Some(0.25), Some(0.0), true);
+            stage.set_stroke(mob, None, Some(0.0), None, None, true);
+            background.push(mob);
+        }
+    }
+    let mover = stage.add(rectangle(1.5, 1.25));
+    stage.set_fill(mover, Some(RED_C), Some(0.6), Some(0.0), true);
+    stage.set_stroke(mover, None, Some(0.0), None, None, true);
+    stage
+        .add_many_to_scene(&background)
+        .and_then(|()| stage.add_to_scene(mover))
+        .map_err(|error| fail(format!("admit static-prefix scene: {error}")))?;
+
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 64,
+                height: 48,
+            },
+            ScreenMap {
+                scale: 8.0,
+                origin: [32.0, 24.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.02,
+                g: 0.03,
+                b: 0.04,
+                a: 0.8,
+            },
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine,
+        threads: 1,
+    };
+    let mut captures = Vec::new();
+    for index in 0..6 {
+        if index != 0 {
+            stage.shift(mover, [0.125, 0.0, 0.0]);
+        }
+        if index == 4 {
+            stage.set_fill(background[0], Some(YELLOW), Some(0.375), None, true);
+        }
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("fresh prefix control renderer: {error}")))?;
+        fresh
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("fresh prefix control frame: {error}")))?;
+        captures.push((stage.snapshot(), fresh.frame().as_bytes().to_vec()));
+    }
+    if captures.windows(2).any(|pair| pair[0].1 == pair[1].1) {
+        return Err(fail(
+            "static-prefix scene did not visibly change every frame",
+        ));
+    }
+
+    let mut hits = 0_u64;
+    let mut skipped = 0_u64;
+    let mut refined = 0_u64;
+    let mut artifact = Vec::new();
+    for threads in [1, 4, 16] {
+        let mut renderer =
+            RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                .map_err(|error| fail(format!("persistent prefix renderer: {error}")))?;
+        let mut schedule_hits = 0_u64;
+        let mut schedule_skipped = 0_u64;
+        let mut schedule_refined = 0_u64;
+        for (snapshot, expected) in &captures {
+            let stats = renderer
+                .render(&snapshot.materialize(), 0)
+                .map_err(|error| fail(format!("persistent prefix frame: {error}")))?;
+            if renderer.frame().as_bytes() != expected {
+                return Err(fail(format!(
+                    "static-prefix reuse changed fresh-render pixels at {threads} threads"
+                )));
+            }
+            schedule_hits += stats.prefix.hits as u64;
+            schedule_skipped += stats.prefix.commands_skipped as u64;
+            if stats.prefix.hits != 0 {
+                schedule_refined += stats.raster.ssaa2x_cells + stats.raster.ssaa4x_cells;
+            }
+        }
+        if schedule_hits == 0 || schedule_skipped == 0 {
+            return Err(fail(format!(
+                "static-prefix raster work was not bypassed at {threads} threads"
+            )));
+        }
+        if adaptive && schedule_refined == 0 {
+            return Err(fail(format!(
+                "adaptive prefix fixture did not refine a resumed frame at {threads} threads"
+            )));
+        }
+        hits += schedule_hits;
+        skipped += schedule_skipped;
+        refined += schedule_refined;
+        if threads == 1 {
+            artifact = encode_frame(renderer.frame())
+                .map_err(|error| fail(format!("encode static-prefix frame: {error}")))?;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render.static_prefix")
+            .field("frames", 18_u64)
+            .field("prefix_hits", hits)
+            .field("commands_skipped", skipped)
+            .field("adaptive_refined_cells", refined)
+            .field("mode", if adaptive { "adaptive" } else { "certified" })
+            .field("fresh_pixels_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact(
+            if adaptive {
+                "adaptive-static-prefix.frame"
+            } else {
+                "retained-static-prefix.frame"
+            },
+            artifact,
+        )
+        .with_counter("static_prefix_frames", 18)
+        .with_counter("static_prefix_hits", hits)
+        .with_counter("static_prefix_commands_skipped", skipped)
+        .with_counter("static_prefix_adaptive_cells", refined))
+}
+
+fn obj_smoothing_groups_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let witness = obj_smoothing::verify().map_err(fail)?;
+    ctx.event(
+        LogEvent::new("e2e.obj.smoothing_groups")
+            .field("frames", witness.frames)
+            .field("thread_counts", 3_u64)
+            .field("material_partitions", "preserved")
+            .field("explicit_normals_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("obj-smooth-first.png", witness.first)
+        .with_artifact("obj-smooth-last.png", witness.last)
+        .with_counter("obj_smoothing_frames", witness.frames))
+}
+
+fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::collections::BTreeMap;
+
+    use fmn_library::{MODEL_SHADING, ObjAssetLimits, ObjDocument, parse_mtl};
+    use fmn_mobject::uniforms::Uniforms;
+    use fmn_mobject::{
+        ImageColorSpace, ImageResource, ImageSampler, ImageWrap, RecordBuffer, RenderPrimitive,
+        Snapshot,
+    };
+    use fmn_render::{
+        Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling,
+    };
+
+    let document = ObjDocument::parse(
+        b"v -2 -1 0\nv 2 -1 0\nv 2 1 0\nv -2 1 0\n\
+          vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\n\
+          usemtl A\nf 1/1/1 2/2/1 3/3/1 4/4/1\n",
+    )
+    .map_err(|error| fail(format!("parse textured OBJ: {error}")))?;
+    let image = ImageResource::rgba8(
+        2,
+        2,
+        vec![
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 0, 128,
+        ],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .map_err(|error| fail(format!("construct OBJ texture: {error}")))?;
+    let background = fmn_core::color::LinearRgba {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 0.0,
+    };
+    let camera = Camera::new(CameraConfig {
+        resolution: (64, 48),
+        background,
+        ..CameraConfig::default()
+    })
+    .map_err(|error| fail(format!("construct OBJ camera: {error}")))?;
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 64,
+                height: 48,
+            },
+            ScreenMap {
+                scale: 6.0,
+                origin: [32.0, 24.0],
+                y_up: false,
+            },
+            background,
+        ),
+        tiling: Tiling {
+            macro_tile: 32,
+            fine_tile: 8,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut outcomes = RunOutcome::ok();
+    let mut policy_pixels = Vec::new();
+    let mut frames = 0_u64;
+    for (policy, wrap) in [("off", ImageWrap::Repeat), ("on", ImageWrap::ClampToEdge)] {
+        let materials = parse_mtl(
+            format!("newmtl A\nmap_Kd -s 2 .5 1 -o -.25 .125 0 -clamp {policy} tiles.png\n")
+                .as_bytes(),
+            &ObjAssetLimits::default(),
+        )
+        .map_err(|error| fail(format!("parse OBJ map options: {error}")))?;
+        let model = document
+            .to_mobject(
+                2.0,
+                &materials,
+                &BTreeMap::from([("A".to_owned(), image.clone())]),
+            )
+            .map_err(|error| fail(format!("bind OBJ material: {error}")))?;
+        let mut stage = Stage::new();
+        let root = stage.add(model);
+        stage
+            .add_to_scene(root)
+            .map_err(|error| fail(format!("admit OBJ model: {error}")))?;
+
+        // This reference bypasses the OBJ/MTL parser and importer. Its records
+        // state the final triangle coordinates, UVs and sampler explicitly.
+        let corners: [([f32; 3], [f32; 2]); 6] = [
+            ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+            ([2.0, -1.0, 0.0], [1.75, 0.875]),
+            ([2.0, 1.0, 0.0], [1.75, 0.375]),
+            ([-2.0, -1.0, 0.0], [-0.25, 0.875]),
+            ([2.0, 1.0, 0.0], [1.75, 0.375]),
+            ([-2.0, 1.0, 0.0], [-0.25, 0.375]),
+        ];
+        let mut buffer =
+            RecordBuffer::new(fmn_library::textured_surface_schema(), corners.len())
+                .map_err(|error| fail(format!("allocate reference texture records: {error}")))?;
+        for (row, (point, uv)) in corners.iter().enumerate() {
+            buffer.write(row, "point", point);
+            buffer.write(row, "d_normal_point", &[point[0], point[1], 1.0]);
+            buffer.write(row, "im_coords", uv);
+            buffer.write(row, "opacity", &[1.0]);
+        }
+        let reference = Mobject::from_buffer(buffer)
+            .with_uniforms(Uniforms {
+                shading: MODEL_SHADING,
+                depth_test: true,
+                ..Uniforms::default()
+            })
+            .with_image_resource(image.clone().with_sampler(ImageSampler {
+                wrap_u: wrap,
+                wrap_v: wrap,
+            }))
+            .with_render_primitive(RenderPrimitive::TriangleMesh);
+        let mut oracle = Stage::new();
+        let root = oracle.add(reference);
+        oracle
+            .add_to_scene(root)
+            .map_err(|error| fail(format!("admit OBJ reference: {error}")))?;
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("construct OBJ reference renderer: {error}")))?;
+        fresh
+            .render_with_camera(&oracle, &camera)
+            .map_err(|error| fail(format!("render OBJ reference: {error}")))?;
+        let expected = fresh.frame().as_bytes().to_vec();
+        if !expected.iter().any(|&byte| byte != 0) {
+            return Err(fail("OBJ texture reference is invisible"));
+        }
+
+        let saved = stage
+            .snapshot_bytes()
+            .map_err(|error| fail(format!("serialize OBJ material: {error}")))?;
+        let mut restored = Stage::new();
+        let decoded = Snapshot::from_bytes(&saved, &restored)
+            .map_err(|error| fail(format!("decode OBJ material: {error}")))?;
+        restored.restore(&decoded.snapshot);
+        if restored
+            .snapshot_bytes()
+            .map_err(|error| fail(error.to_string()))?
+            != saved
+        {
+            return Err(fail("OBJ UV/sampler snapshot bytes did not round-trip"));
+        }
+        for threads in [1, 4, 16] {
+            let mut renderer =
+                RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                    .map_err(|error| fail(format!("construct OBJ renderer: {error}")))?;
+            for state in [&stage, &restored] {
+                renderer
+                    .render_with_camera(state, &camera)
+                    .map_err(|error| fail(format!("render OBJ map options: {error}")))?;
+                if renderer.frame().as_bytes() != expected {
+                    return Err(fail(format!(
+                        "OBJ map {policy} differs from literal geometry at {threads} threads"
+                    )));
+                }
+                frames += 1;
+            }
+        }
+        outcomes = outcomes.with_artifact(
+            if policy == "on" {
+                "obj-map-clamp.frame"
+            } else {
+                "obj-map-repeat.frame"
+            },
+            encode_frame(fresh.frame()).map_err(|error| fail(error.to_string()))?,
+        );
+        policy_pixels.push(expected);
+    }
+    if policy_pixels[0] == policy_pixels[1] {
+        return Err(fail("OBJ repeat/clamp fixture lost addressing sensitivity"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.obj.texture_options")
+            .field("frames", frames)
+            .field("snapshots", 2_u64)
+            .field("literal_pixels_match", "true")
+            .field("addressing_changes_pixels", "true"),
+    );
+    Ok(outcomes
+        .with_counter("obj_texture_frames", frames)
+        .with_counter("obj_texture_snapshots", 2))
+}
+
+/// A graph generated after native plane placement must occupy that plane's
+/// chart. The independent drawing oracle translates the original geometry;
+/// the negative witness leaves the graph at the old origin.
+fn coordinate_placement_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::CoordinateSystem;
+
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("coordinate fonts: {error}")))?;
+    let base = NumberPlane::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .faded_line_ratio(1)
+        .build(&book)
+        .map_err(|error| fail(format!("construct coordinate plane: {error}")))?;
+    let offset = [-2.0, 1.0, 0.0];
+    let placed = base.clone().shifted(offset);
+    let function = |x: f64| 0.5 * x;
+    let original_graph = base
+        .get_graph(function, None)
+        .build()
+        .map_err(|error| fail(format!("construct original graph: {error}")))?;
+    let graph = placed
+        .get_graph(function, None)
+        .build()
+        .map_err(|error| fail(format!("construct placed graph: {error}")))?;
+    let near = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-9);
+    let endpoints = graph
+        .points()
+        .first()
+        .is_some_and(|&point| near(point, [-3.0, 0.5, 0.0]))
+        && graph
+            .points()
+            .last()
+            .is_some_and(|&point| near(point, [-1.0, 1.5, 0.0]));
+    let inverse = [[-1.0, 0.5], [0.0, 0.0], [2.0, -3.0]]
+        .into_iter()
+        .all(|point| near(placed.p2c(placed.c2p(&point)), [point[0], point[1], 0.0]));
+    let drawing = |plane: VMobject, curve: VMobject| -> Result<Stage, ScenarioError> {
+        let mut stage = Stage::new();
+        let plane = stage.add(plane);
+        let curve = stage.add(curve);
+        stage
+            .add_to_scene(plane)
+            .map_err(|error| fail(error.to_string()))?;
+        stage
+            .add_to_scene(curve)
+            .map_err(|error| fail(error.to_string()))?;
+        Ok(stage)
+    };
+    let actual = drawing(placed.vmob().clone(), graph)?;
+    let expected = drawing(
+        base.vmob().clone().shifted(offset),
+        original_graph.clone().shifted(offset),
+    )?;
+    let wrong = drawing(placed.vmob().clone(), original_graph)?;
+    let pixels = render_certified_doc(&actual);
+    let rendered_match = pixels == render_certified_doc(&expected);
+    let rejects_unmoved_graph = pixels != render_certified_doc(&wrong);
+    let visible = pixels != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.coordinate_placement")
+            .field("endpoints", truth(endpoints))
+            .field("inverse", truth(inverse))
+            .field("rendered_match", truth(rendered_match))
+            .field("rejects_unmoved_graph", truth(rejects_unmoved_graph))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&pixels).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("coordinate_endpoints", u64::from(endpoints))
+        .with_counter("coordinate_inverse", u64::from(inverse))
+        .with_counter("coordinate_rendered_match", u64::from(rendered_match))
+        .with_counter(
+            "coordinate_rejects_unmoved_graph",
+            u64::from(rejects_unmoved_graph),
+        )
+        .with_counter("coordinate_visible", u64::from(visible)))
+}
+
+/// A live chart follows the real native Transform samples; graphs created
+/// afterward use that moved map while a previously captured map stays frozen.
+fn live_coordinate_animation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, Transform};
+    use fmn_library::CoordinateSystem;
+
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("live coordinate fonts: {error}")))?;
+    let plane = NumberPlane::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .faded_line_ratio(1)
+        .build(&book)
+        .map_err(|error| fail(format!("build live plane: {error}")))?;
+    let mut stage = Stage::new();
+    let root = stage.add(plane.vmob().clone());
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("adopt live plane: {error}")))?;
+    let live = plane
+        .bind(&stage, root)
+        .map_err(|error| fail(format!("bind live plane: {error}")))?;
+    let frozen = live
+        .snapshot(&stage)
+        .map_err(|error| fail(format!("freeze initial chart: {error}")))?;
+    let target = stage
+        .copy_family(root)
+        .map_err(|error| fail(format!("copy chart animation target: {error}")))?;
+    let offset = [-2.0, 1.0, 0.0];
+    stage.shift(target, offset);
+    let mut timeline =
+        Timeline::new(4).map_err(|error| fail(format!("chart animation clock: {error}")))?;
+    timeline
+        .play(vec![Box::new(Transform::new(root, target).with_config(
+            AnimConfig {
+                run_time: 0.5,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            },
+        ))])
+        .map_err(|error| fail(format!("schedule chart movement: {error}")))?;
+    let mut sampled_origins = Vec::new();
+    timeline
+        .render(&mut stage, &RngRoot::from_seed(53), &mut |packet| {
+            sampled_origins.push(live.c2p(&packet.materialize_stage(), &[0.0, 0.0]));
+        })
+        .map_err(|error| fail(format!("animate live chart: {error}")))?;
+    let origins = sampled_origins
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| fail(format!("read chart animation sample: {error}")))?;
+    let near = |a: [f64; 3], b: [f64; 3]| a.into_iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-6);
+    let follows_frames =
+        origins.len() == 2 && near(origins[0], [-1.0, 0.5, 0.0]) && near(origins[1], offset);
+    let moved = live
+        .snapshot(&stage)
+        .map_err(|error| fail(format!("read moved chart: {error}")))?;
+    let frozen_unchanged =
+        near(frozen.c2p(&[0.0, 0.0]), [0.0; 3]) && near(moved.c2p(&[0.0, 0.0]), offset);
+    let inverse = [[-1.0, 0.5], [0.0, 0.0], [2.0, -3.0]]
+        .into_iter()
+        .all(|coords| near(moved.p2c(moved.c2p(&coords)), [coords[0], coords[1], 0.0]));
+    let graph = moved
+        .get_graph(|x| 0.5 * x)
+        .build()
+        .map_err(|error| fail(format!("build graph after chart movement: {error}")))?;
+    let endpoint = graph
+        .points()
+        .last()
+        .is_some_and(|&point| near(point, [-1.0, 1.5, 0.0]));
+    let graph = stage.add(graph);
+    stage
+        .add_to_scene(graph)
+        .map_err(|error| fail(format!("adopt live graph: {error}")))?;
+
+    let mut expected = Stage::new();
+    let expected_plane = expected.add(plane.vmob().clone().shifted(offset));
+    expected
+        .add_to_scene(expected_plane)
+        .map_err(|error| fail(format!("adopt expected plane: {error}")))?;
+    let original_graph = plane
+        .get_graph(|x| 0.5 * x, None)
+        .build()
+        .map_err(|error| fail(format!("build independent expected graph: {error}")))?;
+    let expected_graph = expected.add(original_graph.shifted(offset));
+    expected
+        .add_to_scene(expected_graph)
+        .map_err(|error| fail(format!("adopt expected graph: {error}")))?;
+    let rendered = render_certified_doc(&stage);
+    let rendered_match = rendered == render_certified_doc(&expected);
+    let visible = rendered != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.live_coordinate_animation")
+            .field("frames", origins.len() as u64)
+            .field("follows_frames", truth(follows_frames))
+            .field("frozen_unchanged", truth(frozen_unchanged))
+            .field("inverse", truth(inverse))
+            .field("endpoint", truth(endpoint))
+            .field("rendered_match", truth(rendered_match))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_coordinate_frames", origins.len() as u64)
+        .with_counter("live_coordinate_follows_frames", u64::from(follows_frames))
+        .with_counter(
+            "live_coordinate_frozen_unchanged",
+            u64::from(frozen_unchanged),
+        )
+        .with_counter("live_coordinate_inverse", u64::from(inverse))
+        .with_counter("live_coordinate_endpoint", u64::from(endpoint))
+        .with_counter("live_coordinate_rendered_match", u64::from(rendered_match))
+        .with_counter("live_coordinate_visible", u64::from(visible)))
+}
+
+/// Native positional authoring crosses the deferred target, animation, frame
+/// placement, and snapshot boundaries without losing family state.
+fn native_positional_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let mut stage = Stage::new();
+    stage
+        .set_frame_shape([4.5, 8.0])
+        .map_err(|error| fail(format!("configure portrait frame: {error}")))?;
+    let original = [[0.0, -1.0, 0.0], [0.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    let root = stage.add(Mobject::group(vec![Mobject::vector_from_points(&original)]));
+    let child = stage.get(root).expect("fresh group").submobjects()[0];
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("admit positional family: {error}")))?;
+    let initial = stage.snapshot();
+    let builder = root
+        .animate()
+        .set_anim_args(AnimateArgs {
+            rate_func: Some(fmn_core::rate::linear),
+            ..AnimateArgs::default()
+        })
+        .and_then(|builder| builder.fix_in_frame(true))
+        .and_then(|builder| builder.wag([2.0, 0.0, 0.0], [0.0, -3.0, 0.0], 2.0))
+        .map_err(|error| fail(format!("record positional animation: {error}")))?;
+    let mut animation = fmn_anim::prepare_animation(builder, &mut stage)
+        .map_err(|error| fail(format!("prepare positional animation: {error}")))?;
+    if stage.get_points(child).as_deref() != Some(original.as_slice())
+        || stage.is_fixed_in_frame(root)
+        || stage.is_fixed_in_frame(child)
+    {
+        return Err(fail("preparing wag mutated its live source family"));
+    }
+    animation
+        .begin(&mut stage)
+        .map_err(|error| fail(format!("begin positional animation: {error}")))?;
+    // An out-of-order seek must still reconstruct the frozen starting points.
+    for alpha in [1.0, 0.5] {
+        animation.interpolate(&mut stage, alpha);
+        let expected = [
+            [2.0 * alpha, -1.0, 0.0],
+            [0.5 * alpha, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        if stage.get_points(child).as_deref() != Some(expected.as_slice())
+            || !stage.is_fixed_in_frame(root)
+            || !stage.is_fixed_in_frame(child)
+        {
+            return Err(fail(format!(
+                "wag seek at {alpha} lost normalized deformation or recursive frame flags"
+            )));
+        }
+    }
+    animation.finish(&mut stage);
+    let deformed = [[2.0, -1.0, 0.0], [0.5, 0.0, 0.0], [0.0, 1.0, 0.0]];
+    if stage.get_points(child).as_deref() != Some(deformed.as_slice()) {
+        return Err(fail("wag finish did not publish its complete target"));
+    }
+    stage.shift(root, [2.25, 0.0, 0.0]);
+    if stage.is_off_screen(root) {
+        return Err(fail(
+            "family touching the portrait frame edge became off-screen",
+        ));
+    }
+    stage.shift(root, [0.25, 0.0, 0.0]);
+    if !stage.is_off_screen(root) {
+        return Err(fail(
+            "family outside the configured portrait frame stayed visible",
+        ));
+    }
+    stage.unfix_from_frame(root, true);
+    stage
+        .set_frame_shape([12.0, 8.0])
+        .map_err(|error| fail(format!("widen live frame: {error}")))?;
+    if stage.is_off_screen(root) || stage.is_fixed_in_frame(root) || stage.is_fixed_in_frame(child)
+    {
+        return Err(fail(
+            "frame reconfiguration or recursive unfix was not live",
+        ));
+    }
+    stage.restore(&initial);
+    // Arena rollback preserves the receiver's live scene configuration.
+    // A separately materialized snapshot keeps its captured frame (BN-25).
+    let snapshot_frame = initial.materialize().frame_shape();
+    if stage.frame_shape() != [12.0, 8.0]
+        || snapshot_frame != [4.5, 8.0]
+        || stage.get_points(child).as_deref() != Some(original.as_slice())
+        || stage.is_fixed_in_frame(root)
+        || stage.is_fixed_in_frame(child)
+        || stage.is_off_screen(root)
+    {
+        return Err(fail(
+            "snapshot restore lost geometry, flags, or configured frame semantics",
+        ));
+    }
+    let border_probe = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    stage.to_edge(border_probe, [1.0, 0.0, 0.0], 0.0);
+    if stage.get_right(border_probe)[0] != 6.0 {
+        return Err(fail(
+            "restored positional operations ignored the live configured frame",
+        ));
+    }
+    stage
+        .wag(root, [2.0, 0.0, 0.0], [0.0, -3.0, 0.0], 2.0)
+        .map_err(|error| fail(format!("deform restored family: {error}")))?;
+    if stage.get_points(child).as_deref() != Some(deformed.as_slice()) {
+        return Err(fail("direct wag disagreed with its animation endpoint"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.native_positional")
+            .field("portrait_width_milli", 4_500_u64)
+            .field("seek_samples", 2_u64)
+            .field(
+                "live_frame_width_milli",
+                (stage.frame_shape()[0] * 1_000.0) as u64,
+            )
+            .field(
+                "snapshot_frame_width_milli",
+                (snapshot_frame[0] * 1_000.0) as u64,
+            )
+            .field("frame_restored", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("native_positional_samples", 2)
+        .with_counter("native_positional_restores", 1))
+}
+
+/// Rollback retires discarded identities without changing explicitly frozen branches.
+fn snapshot_handle_safety_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let keeper = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    stage
+        .add_to_scene(keeper)
+        .map_err(|error| fail(format!("admit rollback survivor: {error}")))?;
+    let removed = stage.add(Mobject::new());
+    stage
+        .delete(removed)
+        .map_err(|error| fail(format!("prepare recycled rollback slot: {error}")))?;
+    let checkpoint = stage.snapshot();
+    let calls = Rc::new(Cell::new(0_u64));
+    let mut retired = vec![removed];
+    let mut retired_updaters = Vec::new();
+    let mut branches = Vec::new();
+
+    for cycle in 0..4_u64 {
+        stage.restore(&checkpoint);
+        let recycled = stage.add(Mobject::from_points(&[[cycle as f64 + 1.0, 0.0, 0.0]]));
+        let appended = stage.add(Mobject::from_points(&[[0.0, cycle as f64 + 1.0, 0.0]]));
+        stage
+            .add_many_to_scene(&[recycled, appended])
+            .map_err(|error| fail(format!("admit restored branch objects: {error}")))?;
+        for &old in &retired {
+            if stage.contains(old)
+                || stage.pin(old) != Err(fmn_mobject::StageError::StaleHandle)
+                || stage.delete(old) != Err(fmn_mobject::StageError::StaleHandle)
+            {
+                return Err(fail(
+                    "discarded handle resolved after rollback and allocation",
+                ));
+            }
+        }
+
+        let observed_calls = Rc::clone(&calls);
+        let updater = stage
+            .add_updater(
+                keeper,
+                move |_, _| observed_calls.set(observed_calls.get() + 1),
+                false,
+            )
+            .map_err(|error| fail(format!("register restored branch updater: {error}")))?;
+        for &old in &retired_updaters {
+            if old == updater {
+                return Err(fail("rollback reused a discarded updater identity"));
+            }
+            stage.remove_updater(keeper, old);
+        }
+        stage.update(1.0 / f64::from(FPS));
+        if calls.get() != cycle + 1 || stage.get_points(keeper) != Some(vec![[0.0; 3]]) {
+            return Err(fail(
+                "a stale updater identity changed the restored live object",
+            ));
+        }
+        branches.push((stage.snapshot(), [recycled, appended]));
+        retired.extend([recycled, appended]);
+        retired_updaters.push(updater);
+    }
+
+    stage.restore(&checkpoint);
+    if retired.iter().any(|&mob| stage.contains(mob)) || !stage.contains(keeper) {
+        return Err(fail(
+            "rollback did not preserve exactly its surviving identities",
+        ));
+    }
+    for (branch, members) in &branches {
+        let frozen = branch.materialize();
+        if !frozen.contains(keeper) || members.iter().any(|&mob| !frozen.contains(mob)) {
+            return Err(fail(
+                "later rollback invalidated an explicitly frozen branch",
+            ));
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.snapshot_handles")
+            .field("restores", 5_u64)
+            .field("discarded_objects", 8_u64)
+            .field("updater_calls", calls.get())
+            .field("frozen_branches", branches.len() as u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("snapshot_handle_restores", 5)
+        .with_counter("snapshot_handle_updater_calls", calls.get())
+        .with_counter("snapshot_handle_frozen_branches", branches.len() as u64))
+}
+
+/// Construct → snapshot → transform → snapshot: the scene_goldens
+/// lifecycle form with geometry assertions (member/point counts move with
+/// the lifecycle points, never silently empty).
+fn lifecycle_construct_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let corpus = scene_goldens::corpus();
+    let case = scene_goldens::scene_named("circle_tex_label.v1")
+        .ok_or_else(|| fail("circle_tex_label.v1 is missing from the corpus"))?;
+    let built = (case.build)(corpus);
+
+    let count_geometry = |stage: &Stage| -> (u64, u64) {
+        let mut members = 0_u64;
+        let mut points = 0_u64;
+        for &root in &built.roots {
+            for member in stage.family(root) {
+                members += 1;
+                points += stage.get_points(member).unwrap_or_default().len() as u64;
+            }
+        }
+        (members, points)
+    };
+
+    let (members_pre, points_pre) = count_geometry(&built.stage);
+    let members: Vec<_> = built
+        .roots
+        .iter()
+        .flat_map(|&root| built.stage.family(root))
+        .collect();
+    let before = built.stage.snapshot();
+    let before_bytes = before
+        .to_bytes()
+        .map_err(|error| fail(format!("initial lifecycle snapshot: {error}")))?;
+    let repeated = built.stage.snapshot();
+    let shared_entries = members
+        .iter()
+        .filter(|&&member| before.shares_entry_with(&repeated, member))
+        .count() as u64;
+    if shared_entries != members_pre {
+        return Err(fail(
+            "unchanged lifecycle entries did not share snapshot payloads",
+        ));
+    }
+    let original_frame = render_certified_doc(&built.stage);
+    let mut stage = built.stage;
+    scene_goldens::apply_lifecycle_transform(&mut stage, &built.roots, 0);
+    let (members_post, points_post) = count_geometry(&stage);
+    let after = stage.snapshot();
+    let detached_entries = members
+        .iter()
+        .filter(|&&member| !before.shares_entry_with(&after, member))
+        .count() as u64;
+    let borrowed = before.render_state(0.0).materialize();
+    let consumed = repeated.into_render_state(0.0).materialize();
+    if detached_entries == 0
+        || before
+            .to_bytes()
+            .map_err(|error| fail(format!("retained lifecycle snapshot: {error}")))?
+            != before_bytes
+        || render_certified_doc(&borrowed) != original_frame
+        || render_certified_doc(&consumed) != original_frame
+        || render_certified_doc(&stage) == original_frame
+    {
+        return Err(fail(
+            "lifecycle snapshot sharing changed a retained frame or failed to detach",
+        ));
+    }
+
+    ctx.event(
+        LogEvent::new(e2e::spans::SCENE_CONSTRUCT)
+            .field("scene", case.name)
+            .field("members", members_pre)
+            .field("points", points_pre),
+    );
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.transform")
+            .field("members", members_post)
+            .field("points", points_post),
+    );
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.snapshot_sharing")
+            .field("shared_entries", shared_entries)
+            .field("detached_entries", detached_entries)
+            .field("frozen_frames_equal", 2_u64),
+    );
+    ctx.counter("lifecycle_members", members_pre);
+    ctx.counter("lifecycle_points_pre", points_pre);
+    ctx.counter("lifecycle_points_post", points_post);
+    ctx.counter("lifecycle_shared_entries", shared_entries);
+    ctx.counter("lifecycle_detached_entries", detached_entries);
+    ctx.counter("lifecycle_frozen_frames_equal", 2);
+
+    if members_pre == 0 || points_pre == 0 || points_post == 0 {
+        return Err(fail(
+            "lifecycle geometry went empty — the snapshot would lock nothing",
+        ));
+    }
+
+    // The locked artifact is the corpus lifecycle form: geometry
+    // snapshots plus certified frames at both lifecycle points.
+    let bytes = scene_goldens::artifact(case, corpus, 0, &render_certified_doc);
+    Ok(RunOutcome::ok()
+        .with_artifact("lifecycle.circle_tex_label.construct_transform.v1", bytes)
+        .with_counter("lifecycle_members", members_pre)
+        .with_counter("lifecycle_points_pre", points_pre)
+        .with_counter("lifecycle_points_post", points_post)
+        .with_counter("lifecycle_shared_entries", shared_entries)
+        .with_counter("lifecycle_detached_entries", detached_entries)
+        .with_counter("lifecycle_frozen_frames_equal", 2))
+}
+
+/// Installing a rebuilt value preserves shared placements and retires private history.
+fn lifecycle_install_shared_family_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let owner = stage.add(Mobject::from_points(&[[0.0; 3]]));
+    let private = stage.add(Mobject::new());
+    let private_leaf = stage.add(Mobject::from_points(&[[-2.0, -1.0, 0.0]]));
+    let shared = stage.add(Mobject::new());
+    let shared_leaf = stage.add(Mobject::from_points(&[[2.0, 1.0, 0.0]]));
+    let rooted = stage.add(Mobject::from_points(&[[3.0, -1.0, 0.0]]));
+    let outside = stage.add(Mobject::new());
+    for (parent, child) in [
+        (owner, private),
+        (private, private_leaf),
+        (private, rooted),
+        (owner, shared),
+        (shared, shared_leaf),
+        (outside, shared),
+    ] {
+        stage
+            .attach(parent, child)
+            .map_err(|error| fail(format!("install source family attaches: {error}")))?;
+    }
+    // One admission preserves both shared and independently rooted placements.
+    stage
+        .add_many_to_scene(&[owner, outside, rooted])
+        .map_err(|error| fail(format!("install source family enters scene: {error}")))?;
+    let calls = Rc::new(Cell::new(0_u64));
+    let updater_calls = Rc::clone(&calls);
+    stage
+        .add_updater(
+            owner,
+            move |_, _| updater_calls.set(updater_calls.get() + 1),
+            false,
+        )
+        .map_err(|error| fail(format!("install owner updater registers: {error}")))?;
+
+    let mut replacement = Mobject::from_points(&[[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]]);
+    replacement
+        .submobjects
+        .push(Mobject::from_points(&[[7.0, 1.0, 0.0]]));
+    stage
+        .install(owner, replacement)
+        .map_err(|error| fail(format!("value installs over its existing handle: {error}")))?;
+    stage.update(0.125);
+
+    let private_reclaimed = !stage.contains(private) && !stage.contains(private_leaf);
+    let shared_preserved = stage.family(shared) == vec![shared, shared_leaf]
+        && stage.get_points(shared_leaf) == Some(vec![[2.0, 1.0, 0.0]])
+        && stage
+            .get(outside)
+            .is_some_and(|entry| entry.submobjects() == [shared]);
+    let rooted_preserved = stage.get_points(rooted) == Some(vec![[3.0, -1.0, 0.0]]);
+    let roots_preserved = stage.roots() == [owner, outside, rooted];
+    let installed = stage.family(owner);
+    let replacement_geometry = stage.get_points(owner)
+        == Some(vec![[5.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
+        && installed.len() == 2
+        && stage.get_points(installed[1]) == Some(vec![[7.0, 1.0, 0.0]]);
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.install_shared_family")
+            .field("private_reclaimed", truth(private_reclaimed))
+            .field("shared_preserved", truth(shared_preserved))
+            .field("rooted_preserved", truth(rooted_preserved))
+            .field("roots_preserved", truth(roots_preserved))
+            .field("replacement_geometry", truth(replacement_geometry))
+            .field("updater_calls", calls.get()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("install_private_reclaimed", u64::from(private_reclaimed))
+        .with_counter("install_shared_preserved", u64::from(shared_preserved))
+        .with_counter("install_rooted_preserved", u64::from(rooted_preserved))
+        .with_counter("install_roots_preserved", u64::from(roots_preserved))
+        .with_counter(
+            "install_replacement_geometry",
+            u64::from(replacement_geometry),
+        )
+        .with_counter("install_updater_calls", calls.get()))
+}
+
+/// A redraw may reuse a live source that another scene placement also owns.
+fn lifecycle_always_redraw_shared_source_run(
+    ctx: &mut RunCtx,
+) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let mut stage = Stage::new();
+    let source = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+    let other_parent = stage.add(Mobject::new());
+    stage
+        .attach(other_parent, source)
+        .map_err(|error| fail(format!("shared source attaches: {error}")))?;
+    let calls = Rc::new(Cell::new(0_u64));
+    let factory_calls = Rc::clone(&calls);
+    let redraw = stage.always_redraw(move |_| {
+        factory_calls.set(factory_calls.get() + 1);
+        source
+    });
+    // Batch admission preserves both placements of their shared child.
+    stage
+        .add_many_to_scene(&[other_parent, redraw])
+        .map_err(|error| fail(format!("shared redraw enters scene: {error}")))?;
+
+    let mut shared_links = true;
+    let mut current_geometry = true;
+    for point in [[1.0, -1.0, 0.0], [2.0, 1.0, 0.0], [-3.0, 2.0, 0.0]] {
+        stage
+            .set_points(source, &[point])
+            .map_err(|error| fail(format!("shared redraw source moves: {error}")))?;
+        stage.update(0.125);
+        shared_links &= stage
+            .get(redraw)
+            .is_some_and(|entry| entry.submobjects() == [source])
+            && stage
+                .get(other_parent)
+                .is_some_and(|entry| entry.submobjects() == [source]);
+        current_geometry &= stage.get_points(source) == Some(vec![point]);
+    }
+    let source_alive = stage.contains(source);
+    let other_parent_alive = stage.contains(other_parent);
+    let roots_preserved = stage.roots() == [other_parent, redraw];
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.always_redraw_shared_source")
+            .field("factory_calls", calls.get())
+            .field("source_alive", truth(source_alive))
+            .field("other_parent_alive", truth(other_parent_alive))
+            .field("shared_links", truth(shared_links))
+            .field("current_geometry", truth(current_geometry))
+            .field("roots_preserved", truth(roots_preserved)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("redraw_factory_calls", calls.get())
+        .with_counter("redraw_source_alive", u64::from(source_alive))
+        .with_counter("redraw_other_parent_alive", u64::from(other_parent_alive))
+        .with_counter("redraw_shared_links", u64::from(shared_links))
+        .with_counter("redraw_current_geometry", u64::from(current_geometry))
+        .with_counter("redraw_roots_preserved", u64::from(roots_preserved)))
+}
+
+/// Pure execution alone does not prove that the FMTL record-lerp law can
+/// reconstruct a frame. Discrete draw state must survive ordinary and shared
+/// random-access replay, even when the endpoints have identical values.
+fn lifecycle_bundle_render_state_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn bundle_failure(error: impl std::fmt::Display) -> ScenarioError {
+        fail(error.to_string())
+    }
+    struct DepthSwitch {
+        state: fmn_anim::AnimState,
+    }
+    impl fmn_anim::Animation for DepthSwitch {
+        fn state(&self) -> &fmn_anim::AnimState {
+            &self.state
+        }
+        fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+            &mut self.state
+        }
+        fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
+            stage
+                .get_mut(self.state.mobject())
+                .expect("the scene retains its animated drawable")
+                .uniforms_mut()
+                .depth_test = (0.5..1.0).contains(&alpha);
+        }
+        fn interpolate_submobject(&mut self, _: &mut Stage, _: &[Mob], _: f64) {}
+        fn effect_signature(&self) -> fmn_anim::AnimationSignature {
+            fmn_anim::AnimationSignature::Pure
+        }
+    }
+    let make = || -> Result<(Stage, Timeline), ScenarioError> {
+        let mut stage = Stage::new();
+        let mob = stage.add(VMobject::from_points(vec![
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        stage.add_to_scene(mob).map_err(bundle_failure)?;
+        let mut timeline = Timeline::new(4).map_err(bundle_failure)?;
+        timeline
+            .play(vec![Box::new(DepthSwitch {
+                state: fmn_anim::AnimState::new(
+                    mob,
+                    fmn_anim::AnimConfig {
+                        rate_func: RateFunc::linear(),
+                        ..fmn_anim::AnimConfig::default()
+                    },
+                ),
+            })])
+            .map_err(bundle_failure)?;
+        Ok((stage, timeline))
+    };
+    let rng = RngRoot::from_seed(31);
+    let (mut stage, mut timeline) = make()?;
+    let mut observed = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng, &mut |packet| {
+            observed.push(packet.materialize_stage())
+        })
+        .map_err(bundle_failure)?;
+    let nominated_pure = reports.len() == 1 && reports[0].purity.is_pure();
+    let (mut stage, timeline) = make()?;
+    let bytes =
+        fmn_scene::export_timeline_bundle(timeline, &mut stage, &rng).map_err(bundle_failure)?;
+    let bundle = fmn_scene::TimelineBundle::from_bytes(&bytes).map_err(bundle_failure)?;
+    let recorded = bundle.segment_kind(0) == Some(fmn_scene::BundleSegmentKind::Stateful);
+    let shared = fmn_scene::TimelineBundle::from_bytes(&bytes)
+        .map_err(bundle_failure)?
+        .into_shared()
+        .map_err(bundle_failure)?;
+    let mut cache = fmn_scene::timeline_bundle::TimelineFrameCache::default();
+    let mut matches = 0_u64;
+    for index in [3, 1, 0, 2] {
+        let expected = observed
+            .get(index as usize)
+            .ok_or_else(|| fail("native timeline omitted a scheduled capture"))?;
+        let expected_bytes = expected
+            .snapshot()
+            .to_render_bytes()
+            .map_err(bundle_failure)?;
+        let ordinary = bundle.stage_at(index).map_err(bundle_failure)?;
+        let random_access = cache
+            .materialize(&shared.frame_job(index).map_err(bundle_failure)?)
+            .map_err(bundle_failure)?;
+        let wanted_depth = index == 1 || index == 2;
+        let ordinary_depth = ordinary
+            .roots()
+            .first()
+            .and_then(|mob| ordinary.get(*mob))
+            .is_some_and(|entry| entry.uniforms().depth_test);
+        let equal = ordinary
+            .snapshot()
+            .to_render_bytes()
+            .map_err(bundle_failure)?
+            == expected_bytes
+            && random_access
+                .snapshot()
+                .to_render_bytes()
+                .map_err(bundle_failure)?
+                == expected_bytes
+            && ordinary_depth == wanted_depth;
+        matches += u64::from(equal);
+        ctx.event(
+            LogEvent::new("e2e.lifecycle.bundle_render_state")
+                .field("frame", u64::from(index))
+                .field("nominated_pure", truth(nominated_pure))
+                .field("recorded", truth(recorded))
+                .field("depth_test", truth(ordinary_depth))
+                .field("equal", truth(equal))
+                .field("sha256", sha256(&expected_bytes).to_hex()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter(
+            "bundle_render_state_frames",
+            u64::from(bundle.frame_count()),
+        )
+        .with_counter("bundle_render_state_pure", u64::from(nominated_pure))
+        .with_counter("bundle_render_state_recorded", u64::from(recorded))
+        .with_counter("bundle_render_state_matches", matches))
+}
+
+/// Compact storage preserves actual imperative captures, including transient
+/// updater state, across block boundaries and detached worker ownership.
+fn lifecycle_compact_scene_bundle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::exporting::{BundleExportOptions, BundleStorage, export_bundle_bytes};
+    use fmn_scene::timeline_bundle::{
+        BundleReadError, BundleSoundtrack, TimelineFrameCache, attach_bundle_soundtrack,
+    };
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    fn bundle_failure(error: impl std::fmt::Display) -> ScenarioError {
+        fail(error.to_string())
+    }
+    struct MovingWait(Rc<Cell<u32>>);
+    impl fmn::SceneConstruct for MovingWait {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let mob = stage.add(fmn_library::Circle::new().radius(0.5))?;
+            // The native entry point retains full snapshots, including arena
+            // entries that a render-only projection would intentionally omit.
+            stage
+                .arena_mut()
+                .add(fmn_mobject::Mobject::from_points(&[[7.0, 8.0, 9.0]]));
+            let calls = self.0.clone();
+            stage.add_updater(
+                mob,
+                move |stage, mob| {
+                    let tick = calls.get() + 1;
+                    calls.set(tick);
+                    stage.set_x(mob, f64::from(tick % 11) / 8.0);
+                    stage
+                        .get_mut(mob)
+                        .expect("the scene retains its updated circle")
+                        .uniforms_mut()
+                        .depth_test = tick % 3 == 1;
+                },
+                false,
+            )?;
+            stage.wait_frames(67)?;
+            stage.wait_frames(3)?;
+            Ok(())
+        }
+    }
+    let mut options = BundleExportOptions::compact().map_err(bundle_failure)?;
+    options.config.camera.fps = 8;
+    options.config.determinism.seed = ctx.seed;
+    ctx.set_fps((8, 1));
+    let oracle_calls = Rc::new(Cell::new(0));
+    let mut sink = PacketSink::default();
+    fmn::run_scene(
+        &mut MovingWait(oracle_calls.clone()),
+        RuntimeConfig::from_config(&options.config),
+        ctx.seed,
+        &mut sink,
+    )
+    .map_err(bundle_failure)?;
+    let binding = Stage::new();
+    let oracle = sink
+        .packets
+        .iter()
+        .map(|packet| {
+            let bytes = packet.state().to_bytes().map_err(bundle_failure)?;
+            let observed =
+                fmn_mobject::Snapshot::from_bytes(&bytes, &binding).map_err(bundle_failure)?;
+            if observed.updaters.entries.len() != 1 || observed.updaters.entries[0].1.len() != 1 {
+                return Err(fail("the serial oracle lost its live updater binding"));
+            }
+            // Snapshot persistence records updater identities but never their
+            // callables. Normalize that existing decode/materialize contract
+            // while retaining all arena state, including detached entries.
+            observed
+                .snapshot
+                .materialize()
+                .snapshot()
+                .to_bytes()
+                .map_err(bundle_failure)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let source_calls = Rc::new(Cell::new(0));
+    let exported = export_bundle_bytes(&mut MovingWait(source_calls.clone()), options.clone())
+        .map_err(bundle_failure)?;
+    let calls_at_export = source_calls.get();
+    let repeated = export_bundle_bytes(&mut MovingWait(Rc::new(Cell::new(0))), options.clone())
+        .map_err(bundle_failure)?;
+    let mut recorded_options = options;
+    recorded_options.storage = BundleStorage::Recorded;
+    let recorded = export_bundle_bytes(&mut MovingWait(Rc::new(Cell::new(0))), recorded_options)
+        .map_err(bundle_failure)?;
+    let bundle =
+        fmn_scene::TimelineBundle::from_bytes(&exported.bundle.bytes).map_err(bundle_failure)?;
+    let recorded_bundle =
+        fmn_scene::TimelineBundle::from_bytes(&recorded.bundle.bytes).map_err(bundle_failure)?;
+    let compact = bundle.segment_count() == 2
+        && (0..2).all(|index| {
+            bundle.segment_kind(index) == Some(fmn_scene::BundleSegmentKind::CompactRecorded)
+                && recorded_bundle.segment_kind(index)
+                    == Some(fmn_scene::BundleSegmentKind::Stateful)
+        });
+    if oracle.len() != 70 || bundle.frame_count() != 70 {
+        return Err(fail(
+            "compact export changed the imperative wait frame grid",
+        ));
+    }
+    let mut ordinary_matches = 0_u64;
+    for index in (0..70).rev().chain((0..70).map(|index| (index * 37) % 70)) {
+        let bytes = bundle
+            .stage_at(index)
+            .map_err(bundle_failure)?
+            .snapshot()
+            .to_bytes()
+            .map_err(bundle_failure)?;
+        ordinary_matches += u64::from(bytes == oracle[index as usize]);
+    }
+
+    let soundtrack =
+        BundleSoundtrack::new(11, 2, vec![0.0, -0.25, 0.5, -0.5]).map_err(bundle_failure)?;
+    let audible = attach_bundle_soundtrack(
+        &exported.bundle.bytes,
+        &soundtrack,
+        fmn_scene::DEFAULT_MAX_BUNDLE_BYTES,
+    )
+    .map_err(bundle_failure)?;
+    let mut audible = fmn_scene::TimelineBundle::from_bytes(&audible).map_err(bundle_failure)?;
+    let explicit_audio = audible.soundtrack() == Some(&soundtrack)
+        && matches!(
+            audible.stage_at(0),
+            Err(BundleReadError::SoundtrackRequired)
+        )
+        && audible.take_soundtrack() == Some(soundtrack);
+    let shared = audible.into_shared().map_err(bundle_failure)?;
+    let jobs = (0..70)
+        .rev()
+        .map(|index| shared.frame_job(index).map_err(bundle_failure))
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(shared);
+    drop(bundle);
+    let mut worker_matches = 0_u64;
+    for workers in [1, 4, 16] {
+        worker_matches += std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for worker in 0..workers {
+                let jobs = &jobs;
+                let oracle = &oracle;
+                handles.push(scope.spawn(move || -> Result<u64, String> {
+                    let mut cache = TimelineFrameCache::default();
+                    let mut matches = 0;
+                    for job in jobs.iter().skip(worker).step_by(workers) {
+                        let bytes = cache
+                            .materialize(job)
+                            .map_err(|error| error.to_string())?
+                            .snapshot()
+                            .to_bytes()
+                            .map_err(|error| error.to_string())?;
+                        matches += u64::from(bytes == oracle[job.index() as usize]);
+                    }
+                    Ok(matches)
+                }));
+            }
+            handles.into_iter().try_fold(0_u64, |matches, handle| {
+                let worker_matches = handle
+                    .join()
+                    .map_err(|_| fail("compact frame worker panicked"))?
+                    .map_err(fail)?;
+                Ok::<_, ScenarioError>(matches + worker_matches)
+            })
+        })?;
+    }
+    let deterministic = repeated.bundle.bytes == exported.bundle.bytes;
+    let smaller = exported.bundle.bytes.len() < recorded.bundle.bytes.len();
+    let callbacks_preserved = calls_at_export > 0
+        && calls_at_export == oracle_calls.get()
+        && source_calls.get() == calls_at_export;
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.compact_scene_bundle")
+            .field("compact", truth(compact))
+            .field("deterministic", truth(deterministic))
+            .field("smaller", truth(smaller))
+            .field("explicit_audio", truth(explicit_audio))
+            .field("callbacks_preserved", truth(callbacks_preserved))
+            .field("compact_bytes", exported.bundle.bytes.len() as u64)
+            .field("recorded_bytes", recorded.bundle.bytes.len() as u64)
+            .field("sha256", exported.bundle.digest.to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("compact_bundle_frames", oracle.len() as u64)
+        .with_counter("compact_bundle_kinds", u64::from(compact))
+        .with_counter("compact_bundle_ordinary_matches", ordinary_matches)
+        .with_counter("compact_bundle_worker_matches", worker_matches)
+        .with_counter("compact_bundle_deterministic", u64::from(deterministic))
+        .with_counter("compact_bundle_smaller", u64::from(smaller))
+        .with_counter("compact_bundle_audio", u64::from(explicit_audio))
+        .with_counter("compact_bundle_callbacks", u64::from(callbacks_preserved))
+        .with_artifact("compact-scene.fmtl", exported.bundle.bytes))
+}
+
+/// Native pole sampling reaches the renderer as absent triangles, including
+/// through a morph to a complete surface. The oracle contains only the one
+/// surviving triangle and is built from an independently sampled finite grid.
+fn native_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let spec = fmn_library::SurfaceSpec {
+        u_range: (-1.0, 1.0),
+        v_range: (-1.0, 1.0),
+        resolution: (2, 2),
+        shading: [0.0; 3],
+        ..fmn_library::SurfaceSpec::default()
+    };
+    let surface = spec
+        .try_sample_with_holes(|u, v| {
+            Ok::<_, std::convert::Infallible>([
+                u,
+                v,
+                if u == -1.0 && v == -1.0 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                },
+            ])
+        })
+        .map_err(|error| fail(format!("native surface pole: {error}")))?;
+    if surface.sample_validity() != [false, true, true, true]
+        || surface.triangle_indices() != [1, 2, 3]
+    {
+        return Err(fail(
+            "native pole did not remove exactly its incident triangle",
+        ));
+    }
+    let complete = fmn_mobject::Mobject::from(spec.sample(|u, v| [u, v, 0.0]));
+    let mut triangle = fmn_mobject::RecordBuffer::new(complete.buffer.schema().clone(), 3)
+        .map_err(|error| fail(format!("native triangle oracle: {error}")))?;
+    for field in complete.buffer.schema().fields() {
+        for (row, source) in [1, 2, 3].into_iter().enumerate() {
+            let values = complete
+                .buffer
+                .read(source, &field.name)
+                .ok_or_else(|| fail("finite triangle oracle lost a record field"))?;
+            triangle.write(row, &field.name, &values);
+        }
+    }
+    let mut oracle = Stage::new();
+    let one_face = oracle.add(
+        fmn_mobject::Mobject::from_buffer(triangle)
+            .with_uniforms(complete.uniforms)
+            .with_render_primitive(fmn_mobject::RenderPrimitive::TriangleMesh),
+    );
+    oracle
+        .add_to_scene(one_face)
+        .map_err(|error| fail(error.to_string()))?;
+    let mut stage = Stage::new();
+    let source = stage.add(surface);
+    stage
+        .add_to_scene(source)
+        .map_err(|error| fail(error.to_string()))?;
+    let hole_frame = render_certified_camera_doc(&stage);
+    let empty = render_certified_camera_doc(&Stage::new());
+    let matches_triangle = hole_frame == render_certified_camera_doc(&oracle);
+    let visible = hole_frame != empty;
+    let target = stage.add(spec.sample(|u, v| [u, v, 0.0]));
+    let mut morph = fmn_anim::Transform::new(source, target).with_config(fmn_anim::AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..fmn_anim::AnimConfig::default()
+    });
+    morph
+        .begin(&mut stage)
+        .map_err(|error| fail(error.to_string()))?;
+    morph.interpolate(&mut stage, 0.5);
+    let interior_absent = render_certified_camera_doc(&stage) == hole_frame;
+    morph.finish(&mut stage);
+    let filled = render_certified_camera_doc(&stage);
+    let mut finite = Stage::new();
+    let whole = finite.add(complete);
+    finite
+        .add_to_scene(whole)
+        .map_err(|error| fail(error.to_string()))?;
+    let endpoint_exact = filled == render_certified_camera_doc(&finite) && filled != hole_frame;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_surface_holes")
+            .field("matches_triangle", truth(matches_triangle))
+            .field("visible", truth(visible))
+            .field("interior_absent", truth(interior_absent))
+            .field("endpoint_exact", truth(endpoint_exact))
+            .field("sha256", sha256(&hole_frame).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("native_surface_hole_triangle", u64::from(matches_triangle))
+        .with_counter("native_surface_hole_visible", u64::from(visible))
+        .with_counter("native_surface_hole_morph", u64::from(interior_absent))
+        .with_counter("native_surface_hole_endpoint", u64::from(endpoint_exact)))
+}
+
+/// Live 3D helpers feed ordinary native surface and curve primitives through
+/// the same renderer as independently translated owning-chart constructions.
+fn live_coordinate_surface_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let book = fmn_text::FontBook::bundled()
+        .map_err(|error| fail(format!("live surface fonts: {error}")))?;
+    let axes = fmn_library::ThreeDAxes::new()
+        .x_range([-1.0, 1.0, 1.0])
+        .y_range([-1.0, 1.0, 1.0])
+        .z_range([-1.0, 1.0, 1.0])
+        .build(&book)
+        .map_err(|error| fail(format!("build live surface chart: {error}")))?;
+    let mut stage = Stage::new();
+    let chart = stage.add(axes.clone());
+    let live = axes
+        .bind(&stage, chart)
+        .map_err(|error| fail(format!("bind live surface chart: {error}")))?;
+    let offset = [0.5, -0.25, 0.25];
+    stage.shift(chart, offset);
+    let height = |x: f64, y: f64| 0.25 * x + 0.5 * y;
+    let path = |t: f64| [t, 0.0, 0.5];
+    let surface = live
+        .get_surface(&stage, height)
+        .map_err(|error| fail(format!("map live surface: {error}")))?
+        .resolution(5, 5)
+        .color(TEAL_B)
+        .shading([0.0; 3])
+        .build();
+    let vertices = surface.points().len() as u64;
+    let curve = live
+        .get_parametric_curve(&stage, path)
+        .map_err(|error| fail(format!("map live 3D curve: {error}")))?
+        .t_range([-0.75, 0.75, 0.25])
+        .build()
+        .map_err(|error| fail(format!("sample live 3D curve: {error}")))?;
+    let surface = stage.add(surface);
+    let curve = stage.add(curve);
+    stage
+        .add_many_to_scene(&[surface, curve])
+        .map_err(|error| fail(format!("adopt live 3D geometry: {error}")))?;
+
+    let mut expected = Stage::new();
+    let surface = expected.add(
+        axes.get_graph(height)
+            .resolution(5, 5)
+            .color(TEAL_B)
+            .shading([0.0; 3])
+            .build(),
+    );
+    let curve = expected.add(
+        axes.get_parametric_curve(path)
+            .t_range([-0.75, 0.75, 0.25])
+            .build()
+            .map_err(|error| fail(format!("sample independent 3D curve: {error}")))?,
+    );
+    expected
+        .add_many_to_scene(&[surface, curve])
+        .map_err(|error| fail(format!("adopt independent 3D geometry: {error}")))?;
+    let unmoved = render_certified_camera_doc(&expected);
+    expected.shift(surface, offset);
+    expected.shift(curve, offset);
+    let rendered = render_certified_camera_doc(&stage);
+    let matches = rendered == render_certified_camera_doc(&expected);
+    let rejects_unmoved = rendered != unmoved;
+    let visible = rendered != render_certified_camera_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.live_coordinate_surface")
+            .field("vertices", vertices)
+            .field("matches", truth(matches))
+            .field("rejects_unmoved", truth(rejects_unmoved))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("live_surface_vertices", vertices)
+        .with_counter("live_surface_matches", u64::from(matches))
+        .with_counter("live_surface_rejects_unmoved", u64::from(rejects_unmoved))
+        .with_counter("live_surface_visible", u64::from(visible)))
+}
+
+/// A native timeline must capture the configured temporal detail and duration
+/// of a trace, with a visible tapered stroke and no construction-time sample.
+fn lifecycle_traced_path_cadence_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::{StrokeProfile, TracedPath};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    let calls = Rc::new(Cell::new(0_u64));
+    let mut stage = Stage::new();
+    let trace = TracedPath::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.25)
+        .with_stroke_width(StrokeProfile::Taper(vec![0.0, 4.0]))
+        .with_stroke_opacity(StrokeProfile::Taper(vec![0.0, 1.0]))
+        .add_to_stage(&mut stage, {
+            let calls = Rc::clone(&calls);
+            move |stage| {
+                calls.set(calls.get() + 1);
+                [stage.time(), 0.5 * stage.time(), 0.0]
+            }
+        })
+        .map_err(|error| fail(format!("construct native trace: {error}")))?;
+    stage
+        .add_to_scene(trace)
+        .map_err(|error| fail(format!("adopt native trace: {error}")))?;
+    stage.update(0.0);
+    let starts_empty = stage
+        .get_points(trace)
+        .is_some_and(|points| points.is_empty())
+        && calls.get() == 0;
+    let mut timeline =
+        Timeline::new(8).map_err(|error| fail(format!("create native trace clock: {error}")))?;
+    timeline
+        .wait(1.0)
+        .map_err(|error| fail(format!("schedule native trace: {error}")))?;
+    let mut captures = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &RngRoot::from_seed(41), &mut |packet| {
+            captures.push(packet.materialize_stage());
+        })
+        .map_err(|error| fail(format!("capture native trace: {error}")))?;
+    let first = captures
+        .first()
+        .ok_or_else(|| fail("trace omitted its first capture"))?;
+    let last = captures
+        .last()
+        .ok_or_else(|| fail("trace omitted its final capture"))?;
+    let first_observation = first.get_points(trace) == Some(vec![[0.125, 0.0625, 0.0]]);
+    let points = last
+        .get_points(trace)
+        .ok_or_else(|| fail("trace capture lost its drawable"))?;
+    let anchors: Vec<_> = points.iter().copied().step_by(2).collect();
+    let cadence_and_window = anchors
+        == vec![
+            [0.5, 0.25, 0.0],
+            [0.625, 0.3125, 0.0],
+            [0.875, 0.4375, 0.0],
+            [1.0, 0.5, 0.0],
+        ];
+    let entry = last
+        .get(trace)
+        .ok_or_else(|| fail("trace capture lost its style"))?;
+    let widths = entry
+        .buffer
+        .read_column("stroke_width")
+        .ok_or_else(|| fail("trace has no widths"))?;
+    let rgba = entry
+        .buffer
+        .read_column("stroke_rgba")
+        .ok_or_else(|| fail("trace has no stroke color"))?;
+    let tapers = widths.first() == Some(&0.0)
+        && widths.last() == Some(&4.0)
+        && rgba.get(3) == Some(&0.0)
+        && rgba.last() == Some(&1.0);
+    let stateful = reports.len() == 1 && !reports[0].purity.is_pure();
+    let rendered = render_certified_doc(last);
+    let visible = rendered != render_certified_doc(&Stage::new());
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.traced_path_cadence")
+            .field("frames", captures.len() as u64)
+            .field("source_calls", calls.get())
+            .field("starts_empty", truth(starts_empty))
+            .field("first_observation", truth(first_observation))
+            .field("cadence_and_window", truth(cadence_and_window))
+            .field("tapers", truth(tapers))
+            .field("stateful", truth(stateful))
+            .field("visible", truth(visible))
+            .field("sha256", sha256(&rendered).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("traced_path_frames", captures.len() as u64)
+        .with_counter("traced_path_source_calls", calls.get())
+        .with_counter("traced_path_starts_empty", u64::from(starts_empty))
+        .with_counter(
+            "traced_path_first_observation",
+            u64::from(first_observation),
+        )
+        .with_counter(
+            "traced_path_cadence_and_window",
+            u64::from(cadence_and_window),
+        )
+        .with_counter("traced_path_tapers", u64::from(tapers))
+        .with_counter("traced_path_stateful", u64::from(stateful))
+        .with_counter("traced_path_visible", u64::from(visible)))
+}
+
+/// Native updater attributes must branch with a copied family and remain
+/// frozen in frame snapshots, including their references to the traced source.
+fn lifecycle_owned_tail_branches_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let tail_failure = |error| fail(format!("native tail branch: {error}"));
+    let mut original = Stage::new();
+    let source = original.add(VMobject::from_points(vec![[0.0; 3]]));
+    let tail = fmn_library::TracingTail::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.25)
+        .and_then(|tail| tail.add_to_stage(&mut original, source))
+        .map_err(|error| fail(format!("construct owned tail: {error}")))?;
+    let family = original.add(fmn_library::vmobject::v_group(Vec::new()));
+    original.attach(family, source).map_err(tail_failure)?;
+    original.attach(family, tail).map_err(tail_failure)?;
+    original.add_to_scene(family).map_err(tail_failure)?;
+    original
+        .set_points(source, &[[1.0, 0.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let frozen = original.snapshot();
+    let early_frame = render_certified_doc(&original);
+    let early_points = original.get_points(tail);
+
+    let mut copied = Stage::new();
+    let copied_family = original
+        .copy_into(family, &mut copied)
+        .map_err(tail_failure)?;
+    copied.add_to_scene(copied_family).map_err(tail_failure)?;
+    let children = copied
+        .get(copied_family)
+        .ok_or_else(|| fail("copied tail family is missing"))?
+        .submobjects()
+        .to_vec();
+    let [copied_source, copied_tail] = children.as_slice() else {
+        return Err(fail("copied tail family lost its source or trail"));
+    };
+    copied
+        .set_points(*copied_source, &[[2.0, -1.0, 0.0]])
+        .map_err(tail_failure)?;
+    copied.update(0.25);
+    let independent_history = original.get_points(tail) == early_points;
+    let anchors = |stage: &Stage, mob| {
+        stage
+            .get_points(mob)
+            .unwrap_or_default()
+            .into_iter()
+            .step_by(2)
+            .collect::<Vec<_>>()
+    };
+    let copied_source_remapped =
+        anchors(&copied, *copied_tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, -1.0, 0.0]];
+    original
+        .set_points(source, &[[2.0, 1.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let original_history =
+        anchors(&original, tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 1.0, 0.0]];
+    let original_frame = render_certified_doc(&original);
+    let copied_frame = render_certified_doc(&copied);
+    let snapshot_frozen = frozen.materialize().get_points(tail) == early_points
+        && render_certified_doc(&frozen.materialize()) == early_frame;
+
+    // Replaying from the captured frame must restore the internal history as
+    // well as the already drawn points, after both live branches have advanced.
+    original.restore(&frozen);
+    original
+        .set_points(source, &[[2.0, 1.0, 0.0]])
+        .map_err(tail_failure)?;
+    original.update(0.25);
+    let snapshot_replay = render_certified_doc(&original) == original_frame
+        && anchors(&original, tail) == vec![[0.0; 3], [1.0, 0.0, 0.0], [2.0, 1.0, 0.0]];
+    let empty_frame = render_certified_doc(&Stage::new());
+    let visible = original_frame != empty_frame && copied_frame != empty_frame;
+    let distinct_frames = original_frame != copied_frame;
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.owned_tail_branches")
+            .field("source_remapped", truth(copied_source_remapped))
+            .field("independent_history", truth(independent_history))
+            .field("original_history", truth(original_history))
+            .field("snapshot_frozen", truth(snapshot_frozen))
+            .field("snapshot_replay", truth(snapshot_replay))
+            .field("visible", truth(visible))
+            .field("distinct_frames", truth(distinct_frames))
+            .field("original_sha256", sha256(&original_frame).to_hex())
+            .field("copied_sha256", sha256(&copied_frame).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter(
+            "owned_tail_source_remapped",
+            u64::from(copied_source_remapped),
+        )
+        .with_counter(
+            "owned_tail_independent_history",
+            u64::from(independent_history),
+        )
+        .with_counter("owned_tail_original_history", u64::from(original_history))
+        .with_counter("owned_tail_snapshot_frozen", u64::from(snapshot_frozen))
+        .with_counter("owned_tail_snapshot_replay", u64::from(snapshot_replay))
+        .with_counter("owned_tail_visible", u64::from(visible))
+        .with_counter("owned_tail_distinct_frames", u64::from(distinct_frames)))
+}
+
+/// A succession's reverse rate curve must revisit the correct member, and
+/// native timeline seeking must reproduce those same certified pixels in any
+/// request order even though later members begin just in time.
+fn lifecycle_succession_reverse_seek_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, Succession, Transform};
+
+    let mut stage = Stage::new();
+    let mob = stage.add(fmn_library::Square::new().side_length(1.0).color(TEAL_B));
+    stage
+        .add_to_scene(mob)
+        .map_err(|error| fail(format!("adopt succession square: {error}")))?;
+    let initial_frame = render_certified_doc(&stage);
+    let mut members: Vec<Box<dyn fmn_anim::Animation>> = Vec::new();
+    // Keep the entire one-unit square inside the certified viewport at peak.
+    for x in [1.0, 2.0] {
+        let target = stage
+            .copy_family(mob)
+            .map_err(|error| fail(format!("copy succession target: {error}")))?;
+        stage.shift(target, [x, 0.0, 0.0]);
+        members.push(Box::new(Transform::new(mob, target).with_config(
+            AnimConfig {
+                run_time: 1.0,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            },
+        )));
+    }
+    let succession = Succession::new(&mut stage, members)
+        .map_err(|error| fail(format!("construct succession: {error}")))?
+        .with_rate_func(RateFunc::Base(fmn_core::rate::there_and_back));
+    let mut timeline =
+        Timeline::new(4).map_err(|error| fail(format!("succession clock: {error}")))?;
+    timeline
+        .play(vec![Box::new(succession)])
+        .map_err(|error| fail(format!("schedule succession: {error}")))?;
+    let rng = RngRoot::from_seed(47);
+    let mut serial_frames = Vec::new();
+    let mut centers = Vec::new();
+    let reports = timeline
+        .render(&mut stage, &rng, &mut |packet| {
+            let captured = packet.materialize_stage();
+            centers.push(captured.get_center(mob));
+            serial_frames.push(render_certified_doc(&captured));
+        })
+        .map_err(|error| fail(format!("render reverse succession: {error}")))?;
+    let checkpoint_replay = reports.len() == 1 && !reports[0].purity.is_pure();
+    let returns_to_start = serial_frames.last() == Some(&initial_frame)
+        && centers.last().is_some_and(|point| point[0].abs() < 1e-9);
+    let moves = centers
+        .get(3)
+        .is_some_and(|point| (point[0] - 2.0).abs() < 1e-6)
+        && serial_frames
+            .get(3)
+            .is_some_and(|frame| *frame != initial_frame);
+    let empty_frame = render_certified_doc(&Stage::new());
+    let visible = serial_frames.iter().all(|frame| *frame != empty_frame);
+    let mut seek_matches = 0_u64;
+    for frame in [8, 1, 4, 2, 7, 3, 6, 5] {
+        let packet = timeline
+            .seek(&mut stage, &rng, frame)
+            .map_err(|error| fail(format!("seek reverse succession frame {frame}: {error}")))?;
+        let rendered = render_certified_doc(&packet.materialize_stage());
+        let expected = serial_frames
+            .get((frame - 1) as usize)
+            .ok_or_else(|| fail("succession omitted a scheduled frame"))?;
+        let equal = rendered == *expected;
+        seek_matches += u64::from(equal);
+        ctx.event(
+            LogEvent::new("e2e.lifecycle.succession_reverse_seek")
+                .field("frame", frame as u64)
+                .field("checkpoint_replay", truth(checkpoint_replay))
+                .field("returns_to_start", truth(returns_to_start))
+                .field("equal", truth(equal))
+                .field("sha256", sha256(&rendered).to_hex()),
+        );
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("succession_frames", serial_frames.len() as u64)
+        .with_counter("succession_checkpoint_replay", u64::from(checkpoint_replay))
+        .with_counter("succession_returns_to_start", u64::from(returns_to_start))
+        .with_counter("succession_moves", u64::from(moves))
+        .with_counter("succession_visible", u64::from(visible))
+        .with_counter("succession_seek_matches", seek_matches))
+}
+
+/// fm-c1up: TracingTail seeds its updater history while its public geometry
+/// stays empty until the first positive-dt observation is published.
+fn lifecycle_tracing_tail_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let initial = [2.0, 1.0, 0.0];
+    let current = [3.0, 2.0, 0.0];
+    let mut stage = Stage::new();
+    let source = stage.add(VMobject::from_points(vec![initial]));
+    let tail = fmn_library::TracingTail::new()
+        .with_time_traced(0.5)
+        .with_time_per_anchor(0.125)
+        .and_then(|tail| tail.add_to_stage(&mut stage, source))
+        .map_err(|error| fail(format!("tracing tail constructs: {error}")))?;
+    stage
+        .add_to_scene(tail)
+        .map_err(|error| fail(format!("tracing tail enters scene: {error}")))?;
+    let initial_points = stage
+        .get_points(tail)
+        .ok_or_else(|| fail("tracing tail handle is stale after construction"))?
+        .len() as u64;
+    stage
+        .set_points(source, &[current])
+        .map_err(|error| fail(format!("traced source moves: {error}")))?;
+    stage.update(0.0);
+    let zero_dt_points = stage
+        .get_points(tail)
+        .ok_or_else(|| fail("tracing tail handle is stale after zero dt"))?
+        .len() as u64;
+    stage.update(0.125);
+    let points = stage
+        .get_points(tail)
+        .ok_or_else(|| fail("tracing tail handle is stale after positive dt"))?;
+    let seed_preserved = points.first() == Some(&initial);
+    let endpoint_matches = points.last() == Some(&current);
+    let entry = stage
+        .get(tail)
+        .ok_or_else(|| fail("tracing tail style handle is stale"))?;
+    let widths = entry
+        .buffer
+        .read_column("stroke_width")
+        .ok_or_else(|| fail("tracing tail has no stroke width field"))?;
+    let rgba = entry
+        .buffer
+        .read_column("stroke_rgba")
+        .ok_or_else(|| fail("tracing tail has no stroke color field"))?;
+    let tapers_preserved = widths.first() == Some(&0.0)
+        && widths.last() == Some(&3.0)
+        && rgba.get(3) == Some(&0.0)
+        && rgba.last() == Some(&1.0);
+    let stateful = !fmn_anim::purity::classify_wait(&stage, false).is_pure();
+
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.tracing_tail")
+            .field("initial_points", initial_points)
+            .field("zero_dt_points", zero_dt_points)
+            .field("updated_points", points.len() as u64)
+            .field("seed_preserved", truth(seed_preserved))
+            .field("endpoint_matches", truth(endpoint_matches))
+            .field("tapers_preserved", truth(tapers_preserved))
+            .field("stateful", truth(stateful)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("trace_initial_points", initial_points)
+        .with_counter("trace_zero_dt_points", zero_dt_points)
+        .with_counter("trace_updated_points", points.len() as u64)
+        .with_counter("trace_seed_preserved", u64::from(seed_preserved))
+        .with_counter("trace_endpoint_matches", u64::from(endpoint_matches))
+        .with_counter("trace_tapers_preserved", u64::from(tapers_preserved))
+        .with_counter("trace_stateful", u64::from(stateful)))
+}
+
+/// Journal round-trip: the scene's command record (add, pure play,
+/// stateful wait) serializes, deserializes, hashes identically, and
+/// `plan_replay` reuses exactly the non-barrier prefix — and stops with
+/// the named reason when the incoming stream diverges.
+fn lifecycle_journal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut journal = Journal::new();
+    let commands = [
+        (CommandKind::Add, EffectClass::Pure, "add circle+label"),
+        (CommandKind::Play, EffectClass::Pure, "play shift(circle)"),
+        (
+            CommandKind::Wait,
+            EffectClass::Stateful(vec![fmn_scene::journal::ImpureEffectTag::StopCondition]),
+            "wait(0.125)",
+        ),
+    ];
+    let mut records = Vec::new();
+    for (index, (kind, effect, label)) in commands.iter().enumerate() {
+        let identity = sha256(label.as_bytes());
+        let state_hash = sha256(format!("e2e-state-{index}").as_bytes());
+        let record = CommandRecord {
+            kind: *kind,
+            identity,
+            label: (*label).to_string(),
+        };
+        let entry = Entry {
+            command: record.clone(),
+            effect: effect.clone(),
+            reads: Vec::new(),
+            subprocesses: Vec::new(),
+            checkpoint: (index == 0).then(|| format!("checkpoint-{index}").into_bytes()),
+            state_hash,
+        };
+        journal
+            .record(entry.clone())
+            .map_err(|error| fail(format!("journal records: {error}")))?;
+        // The same entries ride the run's repro bundle (the §18 closure).
+        ctx.record_journal(entry);
+        records.push(record);
+    }
+
+    let bytes = journal
+        .to_bytes()
+        .map_err(|error| fail(format!("journal encodes: {error}")))?;
+    let restored =
+        Journal::from_bytes(&bytes).map_err(|error| fail(format!("journal decodes: {error}")))?;
+    let hash_before = journal
+        .content_hash()
+        .map_err(|error| fail(format!("journal hashes: {error}")))?;
+    let hash_after = restored
+        .content_hash()
+        .map_err(|error| fail(format!("restored journal hashes: {error}")))?;
+    let roundtrip_equal = hash_before == hash_after && restored.entries().len() == records.len();
+
+    // Full replay: the incoming stream matches the record.
+    let plan = plan_replay(&restored, &records, &|_read| true);
+    let full_reuse = plan.reuse == records.len() && plan.reason.is_none();
+    let resumes_at_checkpoint = plan.resume_checkpoint == Some(0);
+
+    // Diverged replay: a different third command stops the walk with the
+    // named reason at exactly that index.
+    let mut divergent = records.clone();
+    divergent[2] = CommandRecord {
+        kind: CommandKind::Wait,
+        identity: sha256(b"wait(0.5)"),
+        label: "wait(0.5)".to_string(),
+    };
+    let divergent_plan = plan_replay(&restored, &divergent, &|_read| true);
+    let mismatch_detected = divergent_plan.reuse == 2
+        && matches!(
+            divergent_plan.reason,
+            Some(fmn_scene::journal::InvalidationReason::CommandMismatch { index: 2 })
+        );
+
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.journal")
+            .field("entries", records.len() as u64)
+            .field("roundtrip_equal", truth(roundtrip_equal))
+            .field("replay_reuse", plan.reuse as u64)
+            .field("mismatch_detected", truth(mismatch_detected)),
+    );
+    ctx.counter("journal_roundtrip_equal", u64::from(roundtrip_equal));
+    ctx.counter("journal_replay_reuse", plan.reuse as u64);
+    ctx.counter("journal_mismatch_detected", u64::from(mismatch_detected));
+
+    if !(roundtrip_equal && full_reuse && resumes_at_checkpoint && mismatch_detected) {
+        return Err(fail(format!(
+            "journal round-trip broke: equal={roundtrip_equal} reuse={} checkpoint={:?} \
+             mismatch={mismatch_detected}",
+            plan.reuse, plan.resume_checkpoint
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("journal_roundtrip_equal", 1)
+        .with_counter("journal_replay_reuse", plan.reuse as u64)
+        .with_counter("journal_mismatch_detected", 1))
+}
+
+// ---------------------------------------------------------------------------
+// fm-3kr / fm-n64 enhanced-surface lifecycle drills
+// ---------------------------------------------------------------------------
+
+/// fm-c1up: an 88-key keyboard keeps its musical layout and proportions
+/// through native stage adoption and real frame rendering.
+fn piano_keyboard_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let keyboard = fmn_library::drawings::piano()
+        .map_err(|error| fail(format!("native piano construction: {error}")))?;
+    let keys = keyboard.children().len() as u64;
+    let black = keyboard
+        .children()
+        .iter()
+        .filter(|key| key.style().fill_color == fmn_core::constants::GREY_E)
+        .count() as u64;
+    let expected_height = 13.0 / (52.0 * 0.15 + 51.0 * 0.02);
+    let centered = keyboard
+        .center_point()
+        .iter()
+        .all(|value| value.abs() < 1e-9);
+    let proportions = (keyboard.length_over_dim(0) - 13.0).abs() < 1e-9
+        && (keyboard.length_over_dim(1) - expected_height).abs() < 1e-9;
+    let mut stage = Stage::new();
+    let root = stage.add(keyboard);
+    stage
+        .add_to_scene(root)
+        .map_err(|error| fail(format!("piano stage adoption: {error}")))?;
+    let initial = render_certified_doc(&stage);
+    stage.shift(root, UP);
+    let moved = render_certified_doc(&stage);
+    let blank = render_certified_doc(&Stage::new());
+    let visible_motion = initial != blank && moved != blank && initial != moved;
+    ctx.event(
+        LogEvent::new("e2e.drawings.piano")
+            .field("keys", keys)
+            .field("black_keys", black)
+            .field("centered", truth(centered))
+            .field("proportions", truth(proportions))
+            .field("visible_motion", truth(visible_motion)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("piano_keys", keys)
+        .with_counter("piano_black_keys", black)
+        .with_counter("piano_centered", u64::from(centered))
+        .with_counter("piano_proportions", u64::from(proportions))
+        .with_counter("piano_visible_motion", u64::from(visible_motion)))
+}
+
+/// The drawings shelf's asset-backed families refuse by name (ADR-0020):
+/// every default constructor surfaces `AssetNotShipped` naming its class
+/// and file — never a placeholder build.
+fn drawings_asset_refusals_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::drawings::{
+        DrawingsAssetError, double_speech_bubble, lightbulb, old_speech_bubble, vectorized_earth,
+        video_icon,
+    };
+
+    let refusals = [
+        (
+            "Lightbulb",
+            lightbulb(None).err().map(|error| (error, "lightbulb")),
+        ),
+        (
+            "VideoIcon",
+            video_icon(None).err().map(|error| (error, "video_icon")),
+        ),
+        (
+            "OldSpeechBubble",
+            old_speech_bubble(None, None, fmn_core::constants::LEFT, 1.0)
+                .err()
+                .map(|error| (error, "Bubbles_speech.svg")),
+        ),
+        (
+            "DoubleSpeechBubble",
+            double_speech_bubble(None, None, fmn_core::constants::LEFT, 1.0)
+                .err()
+                .map(|error| (error, "Bubbles_double_speech.svg")),
+        ),
+        (
+            "VectorizedEarth",
+            vectorized_earth(None).err().map(|error| (error, "earth")),
+        ),
+    ];
+    let mut named = 0_u64;
+    for (class, outcome) in &refusals {
+        match outcome {
+            Some((
+                DrawingsAssetError::AssetNotShipped {
+                    class: named_class,
+                    asset: named_asset,
+                },
+                asset,
+            )) => {
+                if named_class != class || named_asset != asset {
+                    return Err(fail(format!(
+                        "{class} refused but named {named_class}/{named_asset}"
+                    )));
+                }
+                named += 1;
+            }
+            other => {
+                return Err(fail(format!(
+                    "{class} must refuse by policy, got {other:?}"
+                )));
+            }
+        }
+    }
+    ctx.event(LogEvent::new("e2e.drawings.asset_refusal").field("named", named));
+    ctx.counter("asset_refusals_named", named);
+    Ok(RunOutcome::ok().with_counter("asset_refusals_named", named))
+}
+
+/// NetworkGraph determinism drill: the same graph + seed replays a
+/// bit-identical position digest twice, and a different seed diverges —
+/// the OQ-5 kernel rules exercised through the public surface.
+fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::network_graph::{GraphLayout, NetworkGraph};
+
+    let nodes: Vec<&str> = (0..7)
+        .map(|i| match i {
+            0 => "a",
+            1 => "b",
+            2 => "c",
+            3 => "d",
+            4 => "e",
+            5 => "f",
+            _ => "g",
+        })
+        .collect();
+    let edges = [
+        ("a", "b"),
+        ("b", "c"),
+        ("c", "d"),
+        ("d", "e"),
+        ("e", "f"),
+        ("f", "g"),
+        ("g", "a"),
+        ("b", "f"),
+    ];
+    let build = |seed: u64| -> Result<String, ScenarioError> {
+        let network = NetworkGraph::from_edge_list(&nodes, &edges)
+            .laid_out(&GraphLayout::Spring {
+                seed,
+                iterations: 40,
+                ideal_edge: 1.0,
+            })
+            .map_err(|error| fail(format!("spring layout: {error}")))?;
+        let mut bytes = Vec::new();
+        for label in network.nodes() {
+            let point = network
+                .position(label)
+                .ok_or_else(|| fail(format!("unpositioned {label}")))?;
+            bytes.extend_from_slice(label.as_bytes());
+            bytes.extend_from_slice(&point[0].to_bits().to_le_bytes());
+            bytes.extend_from_slice(&point[1].to_bits().to_le_bytes());
+        }
+        Ok(sha256(&bytes).to_hex())
+    };
+
+    let first = build(0x5f3759df)?;
+    let second = build(0x5f3759df)?;
+    let divergent = build(0x5f3759de)?;
+    let replay_equal = u64::from(first == second);
+    let seeds_diverge = u64::from(first != divergent);
+    if replay_equal != 1 || seeds_diverge != 1 {
+        return Err(fail(format!(
+            "spring determinism broke: replay_equal={replay_equal} seeds_diverge={seeds_diverge}"
+        )));
+    }
+    ctx.event(
+        LogEvent::new("e2e.network_graph.spring_determinism").field("seed", 0x005f_3759df_u64),
+    );
+    ctx.counter("spring_replay_equal", replay_equal);
+    ctx.counter("spring_seeds_diverge", seeds_diverge);
+    Ok(RunOutcome::ok()
+        .with_counter("spring_replay_equal", replay_equal)
+        .with_counter("spring_seeds_diverge", seeds_diverge))
+}
+
+/// A native method override reaches the actual scene owner once, reads its
+/// current geometry, and produces the same certified frames as an explicit
+/// method animation under serial and parallel render schedules.
+fn native_method_override_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{MethodOverride, Transform};
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct OverrideScene {
+        overridden: bool,
+        calls: Rc<Cell<u64>>,
+    }
+    impl fmn::SceneConstruct for OverrideScene {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.35).color(BLUE_C))?;
+            stage.set_fill(circle, Some(BLUE_C), Some(1.0), None, true);
+            let builder = circle.animate().set_anim_args(AnimateArgs {
+                run_time_frames: Some(4),
+                rate_func: Some(fmn_core::rate::linear),
+                ..AnimateArgs::default()
+            })?;
+            if self.overridden {
+                let calls = Rc::clone(&self.calls);
+                let animation =
+                    MethodOverride::new(builder, "native-shift", move |arena, source, _args| {
+                        calls.set(calls.get() + 1);
+                        let target = arena.copy_family(source)?;
+                        arena.shift(target, [2.0, 0.5, 0.0]);
+                        Ok(Transform::new(source, target))
+                    })?;
+                // Preparation must read this later placement, rather than
+                // the position at which the override was recorded.
+                assert_eq!(self.calls.get(), 0);
+                stage.shift(circle, [-1.0, -0.25, 0.0]);
+                stage.play(animation)?;
+                assert_eq!(self.calls.get(), 1);
+            } else {
+                stage.shift(circle, [-1.0, -0.25, 0.0]);
+                stage.play(builder.shift([2.0, 0.5, 0.0])?)?;
+            }
+            let center = stage.get_center(circle);
+            assert!((center[0] - 1.0).abs() < 1e-6);
+            assert!((center[1] - 0.25).abs() < 1e-6);
+            Ok(())
+        }
+    }
+
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut rendered_frames = 0;
+    let mut factory_calls = 0;
+    for threads in [1, 4, 16] {
+        for overridden in [false, true] {
+            let calls = Rc::new(Cell::new(0));
+            let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+            let mut options = fmn::RenderOptions::new("/method-override")
+                .map_err(|error| fail(format!("method override options: {error}")))?;
+            options.config.camera.resolution = (64, 48);
+            options.config.camera.fps = 8;
+            options.config.sizes.frame_height = 3.0;
+            options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+            options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+            options.frames_in_flight = 2;
+            let report = fmn::render_with_fs(
+                &mut OverrideScene {
+                    overridden,
+                    calls: Rc::clone(&calls),
+                },
+                options,
+                fs.clone(),
+            )
+            .map_err(|error| fail(format!("native method override render: {error}")))?;
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("method override omitted the native frame pipeline"))?;
+            if report.scene.play_count != 1
+                || report.artifact.frame_count != 4
+                || pipeline.submitted != 4
+                || pipeline.emitted != 4
+                || pipeline.outstanding_slots != 0
+                || calls.get() != u64::from(overridden)
+            {
+                return Err(fail(
+                    "method override changed factory count, timing or publication",
+                ));
+            }
+            let mut frames = Vec::new();
+            for frame in 0..4 {
+                frames.push(
+                    fs.read(
+                        &PathBuf::from("/method-override").join(format!("frame_{frame:06}.png")),
+                    )
+                    .map_err(|error| fail(format!("method override PNG: {error}")))?,
+                );
+            }
+            if frames[0] == frames[3] {
+                return Err(fail("method override failed to animate visible geometry"));
+            }
+            if let Some(expected) = &baseline {
+                if &frames != expected {
+                    return Err(fail(format!(
+                        "method override differs from explicit animation at {threads} threads"
+                    )));
+                }
+            } else {
+                baseline = Some(frames);
+            }
+            factory_calls += calls.get();
+            rendered_frames += report.artifact.frame_count;
+        }
+    }
+    let frames = baseline.ok_or_else(|| fail("no method override frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.native.method_override")
+            .field("factory_calls", factory_calls)
+            .field("rendered_frames", rendered_frames)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("method-override-first.png", frames[0].clone())
+        .with_artifact("method-override-last.png", frames[3].clone())
+        .with_counter("method_override_factory_calls", factory_calls)
+        .with_counter("method_override_frames", rendered_frames)
+        .with_counter("method_override_thread_counts", 3))
+}
+
+/// Camera and geometry share each reconstructed frame, including a pure wait
+/// after motion. An owner-thread updater supplies an independent serial route.
+fn native_pure_camera_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::rendering::{CameraConfig, render_camera_with_fs};
+    use fmn_scene::CameraRig;
+
+    struct CameraScene {
+        rig: CameraRig,
+        target: CameraConfig,
+    }
+    impl fmn::SceneConstruct for CameraScene {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(fmn::prelude::Cube::new(1.2).color(BLUE_C))?;
+            let circle = stage.add(Circle::new().radius(0.25).color(WHITE))?;
+            stage.set_fill(circle, Some(WHITE), Some(1.0), None, true);
+            stage.shift(circle, [-1.5, 0.0, 0.0]);
+            let animation = self.rig.animate_to(stage.scene_mut(), &self.target)?;
+            stage.play_prepared_with(
+                vec![Box::new(animation)],
+                PlayOverrides {
+                    run_time_frames: Some(4),
+                    rate_func: Some(RateFunc::linear()),
+                    ..PlayOverrides::default()
+                },
+            )?;
+            stage.wait_frames(2)?;
+            Ok(())
+        }
+    }
+
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut rendered_frames = 0;
+    for threads in [1, 4, 16] {
+        for stateful in [false, true] {
+            let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+            let mut options = fmn::RenderOptions::new("/pure-camera")
+                .map_err(|error| fail(format!("pure camera options: {error}")))?;
+            options.config.camera.resolution = (48, 32);
+            options.config.camera.fps = FPS;
+            options.config.sizes.frame_height = 4.0;
+            options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+            options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+            options.frames_in_flight = 3;
+            let report = render_camera_with_fs(
+                |scene, base| {
+                    let rig = CameraRig::new(scene, base)?;
+                    if stateful {
+                        scene
+                            .stage_mut()
+                            .add_dt_updater(rig.light()[0], |_, _, _| {}, false)?;
+                    }
+                    let mut target = base.clone();
+                    target.frame.set_euler_angles(Some(0.6), Some(0.8), None)?;
+                    target.frame.set_center([0.2, -0.1, 0.0])?;
+                    target.frame.set_width(base.frame.width() * 0.85)?;
+                    target.frame.set_field_of_view(0.9)?;
+                    target.light_source_position = [5.0, 4.0, 8.0];
+                    Ok((CameraScene { rig, target }, rig))
+                },
+                options,
+                fs.clone(),
+            )
+            .map_err(|error| fail(format!("pure camera render: {error}")))?;
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("pure camera omitted its frame pipeline"))?;
+            if report.scene.time.frames() != 6
+                || report.artifact.frame_count != 6
+                || pipeline.submitted != 6
+                || pipeline.emitted != 6
+                || pipeline.outstanding_slots != 0
+            {
+                return Err(fail("pure camera changed timing or publication"));
+            }
+            let mut frames = Vec::new();
+            for frame in 0..6 {
+                frames.push(
+                    fs.read(&PathBuf::from("/pure-camera").join(format!("frame_{frame:06}.png")))
+                        .map_err(|error| fail(format!("pure camera PNG: {error}")))?,
+                );
+            }
+            if frames[0] == frames[3] || frames[3] != frames[4] || frames[4] != frames[5] {
+                return Err(fail("camera motion or final-pose wait was lost"));
+            }
+            if let Some(expected) = &baseline {
+                if &frames != expected {
+                    return Err(fail(format!(
+                        "camera frames differ at threads={threads}, stateful={stateful}"
+                    )));
+                }
+            } else {
+                baseline = Some(frames);
+            }
+            rendered_frames += report.artifact.frame_count;
+        }
+    }
+    let frames = baseline.ok_or_else(|| fail("no camera frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.native.pure_camera")
+            .field("rendered_frames", rendered_frames)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("pure-camera-first.png", frames[0].clone())
+        .with_artifact("pure-camera-last.png", frames[5].clone())
+        .with_counter("pure_camera_frames", rendered_frames)
+        .with_counter("pure_camera_thread_counts", 3))
+}
+
+/// Graph authoring through the public native facade, including layout motion,
+/// ordered traversal and weighted directed flow (including a self-loop), at
+/// three worker counts.
+fn graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{
+        AnimConfig, FlowAlongEdges, GraphFlowConfig, GraphLayout, GraphTraversal,
+        GraphTraversalConfig, LayoutTransition, NetworkGraph, TraverseGraph,
+    };
+
+    struct GraphScene;
+    impl fmn::SceneConstruct for GraphScene {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let graph = NetworkGraph::from_edge_list(
+                &["a", "b", "c", "d"],
+                &[("a", "b"), ("a", "c"), ("b", "d"), ("c", "d"), ("d", "d")],
+            )
+            .laid_out(&GraphLayout::Circular)?;
+            let raw = stage.scene_mut().stage_mut();
+            let binding = graph.add_to(raw)?;
+            raw.add_to_scene(binding.mobject())?;
+            let self_loop = binding.edge("d", "d").expect("authored self-loop");
+            assert!(raw.length_over_dim(self_loop, 0) > 0.5);
+            let layout = LayoutTransition::new(
+                raw,
+                &binding,
+                &GraphLayout::Shell {
+                    shells: vec![vec!["a".into(), "b".into(), "c".into()], vec!["d".into()]],
+                },
+            )?
+            .with_config(AnimConfig {
+                run_time: 0.5,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            });
+            stage.play_prepared(vec![Box::new(layout)])?;
+            assert!(stage.scene_mut().stage_mut().length_over_dim(self_loop, 0) > 0.5);
+            let traversal = TraverseGraph::with_config(
+                stage.scene_mut().stage_mut(),
+                &binding,
+                "a",
+                GraphTraversal::BreadthFirst,
+                GraphTraversalConfig {
+                    run_time: 1.0,
+                    color: YELLOW,
+                },
+            )?;
+            assert_eq!(traversal.order(), ["a", "b", "c", "d"]);
+            stage.play_prepared(vec![Box::new(traversal)])?;
+            let flow = FlowAlongEdges::with_config(
+                stage.scene_mut().stage_mut(),
+                &binding,
+                &[("b", "a", 1.0), ("d", "d", 3.0)],
+                GraphFlowConfig {
+                    run_time: 1.0,
+                    color: RED_C,
+                    ..GraphFlowConfig::default()
+                },
+            )?;
+            stage.play_prepared(vec![Box::new(flow)])?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut rendered_frames = 0;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/graph-animations")
+            .map_err(|error| fail(format!("graph render options: {error}")))?;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 3.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        let report = fmn::render_with_fs(&mut GraphScene, options, fs.clone())
+            .map_err(|error| fail(format!("graph animation render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("graph animation render omitted the frame pipeline"))?;
+        if report.artifact.frame_count != 22
+            || pipeline.submitted != 22
+            || pipeline.emitted != 22
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail(
+                "graph animations lost bounded ordered frame publication",
+            ));
+        }
+        let mut frames = Vec::new();
+        for index in 0..22 {
+            let path = PathBuf::from("/graph-animations").join(format!("frame_{index:06}.png"));
+            frames.push(
+                fs.read(&path)
+                    .map_err(|error| fail(format!("graph PNG: {error}")))?,
+            );
+        }
+        if frames[0] == frames[3] || frames[4] == frames[11] || frames[12] == frames[19] {
+            return Err(fail(
+                "layout, traversal or directed flow did not change rendered pixels",
+            ));
+        }
+        if frames[14] == frames[17] || frames[16] == frames[19] {
+            return Err(fail(
+                "self-loop flow did not travel around the visible loop",
+            ));
+        }
+        if frames[11] != frames[19] || frames[19] != frames[20] || frames[20] != frames[21] {
+            return Err(fail(
+                "flow changed its underlying graph or leaked a visible pulse",
+            ));
+        }
+        if let Some(expected) = &baseline {
+            if expected != &frames {
+                return Err(fail(format!(
+                    "graph PNG bytes changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = baseline.ok_or_else(|| fail("no graph frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.network_graph.animations")
+            .field("thread_counts", 3_u64)
+            .field("rendered_frames", rendered_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("graph-layout.png", frames[3].clone())
+        .with_artifact("graph-flow.png", frames[12].clone())
+        .with_artifact("graph-loop-flow.png", frames[16].clone())
+        .with_counter("graph_animation_thread_counts", 3)
+        .with_counter("graph_animation_frames", rendered_frames))
+}
+
+/// Native image preparation retains the consumed bytes' receipt and immutable
+/// pixels while the source changes, then reaches the real camera renderer.
+fn native_prepared_images_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::{ImageLoadOptions, ImageLoader};
+    use fmn_library::ImageMobject;
+
+    struct Picture(ImageMobject);
+    impl fmn::SceneConstruct for Picture {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            // A 50px quad puts all 2x2 texel centers on pixel centers under
+            // the 96x64 camera with a 4-unit frame height below.
+            stage.add(self.0.clone().with_height(25.0 / 8.0))?;
+            Ok(())
+        }
+    }
+
+    let pixels = [
+        255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 255, 255, 255, 0, 0,
+    ];
+    let source = fmn_codec::encode_rgba8(2, 2, &pixels, fmn_codec::CompressionLevel::Fast);
+    ctx.record_asset("images/source.png", &source);
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    fs.insert("/source.image", source.clone());
+    let mut loader = ImageLoader::new(ImageLoadOptions {
+        determinism: fmn_config::config::DeterminismMode::Certified,
+        ..ImageLoadOptions::default()
+    })
+    .map_err(|error| fail(format!("image loader: {error}")))?;
+    let prepared = loader
+        .load_with_fs("/source.image", fs.as_ref())
+        .map_err(|error| fail(format!("prepare native image: {error}")))?;
+    let receipt = prepared.report();
+    if receipt.decode().source_digest != sha256(&source)
+        || receipt.source_bytes() != source.len() as u64
+        || receipt.decode().invocation.is_some()
+        || prepared.mobject().pixels() != pixels
+    {
+        return Err(fail(
+            "prepared image receipt does not identify its native input",
+        ));
+    }
+    let replacement = fmn_codec::encode_rgba8(2, 2, &[255; 16], fmn_codec::CompressionLevel::Fast);
+    fs.insert("/source.image", replacement);
+    let changed = loader
+        .load_with_fs("/source.image", fs.as_ref())
+        .map_err(|error| fail(format!("prepare changed image: {error}")))?;
+    if changed.report().decode().source_digest == receipt.decode().source_digest
+        || changed.report().decode().pixel_digest == receipt.decode().pixel_digest
+    {
+        return Err(fail(
+            "image receipts failed to distinguish replacement source content",
+        ));
+    }
+    let render = |image: ImageMobject, threads, path: &str| -> Result<Vec<u8>, ScenarioError> {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Png)
+            .map_err(|error| fail(format!("image render options: {error}")))?;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.background_color = "#000000".into();
+        options.config.sizes.frame_height = 4.0;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.typeset_cache = false;
+        options.camera = Some(
+            options
+                .camera_config()
+                .map_err(|error| fail(format!("image camera: {error}")))?,
+        );
+        let report = fmn::render_with_fs(&mut Picture(image), options, fs.clone())
+            .map_err(|error| fail(format!("prepared image render: {error}")))?;
+        if report.artifact.frame_count != 1 {
+            return Err(fail("prepared still image did not emit exactly one frame"));
+        }
+        fs.read(Path::new(path))
+            .map_err(|error| fail(error.to_string()))
+    };
+    let mut baseline = None;
+    for threads in [1, 4, 16] {
+        let bytes = render(
+            prepared.mobject(),
+            threads,
+            &format!("/prepared-{threads}.png"),
+        )?;
+        if let Some(expected) = &baseline {
+            if &bytes != expected {
+                return Err(fail(format!(
+                    "prepared image pixels changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(bytes);
+        }
+    }
+    let first = baseline.ok_or_else(|| fail("prepared image rendered no frames"))?;
+    let new = render(changed.mobject(), 1, "/replacement.png")?;
+    let decoded = fmn_codec::decode_png(&first, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode image output: {error}")))?;
+    if (decoded.width, decoded.height) != (96, 64) {
+        return Err(fail("prepared image output dimensions changed"));
+    }
+    // Default Repeat+bilinear sampling mixes opposite edges. At the four
+    // exact texel centers, the color/alpha oracle is independent of filtering.
+    let pixel = |x, y| &decoded.rgba[(y * 96 + x) * 4..(y * 96 + x + 1) * 4];
+    let translucent = pixel(60, 19);
+    if first == new
+        || pixel(35, 19) != [255, 0, 0, 255]
+        || pixel(35, 44) != [0, 0, 255, 255]
+        || (translucent[0], translucent[2], translucent[3]) != (0, 0, 255)
+        || !(187..=189).contains(&translucent[1])
+        || pixel(60, 44) != [0, 0, 0, 255]
+        || prepared.mobject().pixels() != pixels
+    {
+        return Err(fail(
+            "source replacement altered prepared pixels or the native image did not render",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.native.prepared_images")
+            .field("thread_counts", 3_u64)
+            .field("frames", 4_u64)
+            .field("immutable_input", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("prepared_image.png", first)
+        .with_artifact("replacement_image.png", new)
+        .with_counter("prepared_image_thread_counts", 3)
+        .with_counter("prepared_image_frames", 4)
+        .with_counter("prepared_image_receipts", 2))
+}
+
+/// The enhanced Python graph front door uses Atlas schedules and the ordinary
+/// animation lifecycle, including exact-frame groups and authored callbacks.
+fn python_graph_animations_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_graph_animations")?;
+    ctx.record_asset(
+        "python/network_graph.py",
+        include_bytes!("../../fmn-python/python/fmn_python/network_graph.py"),
+    );
+    ctx.record_asset(
+        "python/network_graph_acceptance.py",
+        include_bytes!("../../fmn-python/tests/network_graph.py"),
+    );
+    let (cases, frames, thread_replays) =
+        manimlib::run_portal_gauntlet_network_animations(&root)
+            .map_err(|error| fail(format!("Python graph animations: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.graph_animations")
+            .field("cases", cases)
+            .field("frames", frames)
+            .field("thread_replays", thread_replays)
+            .field("mode", "standard"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_graph_animation_cases", cases)
+        .with_counter("python_graph_animation_frames", frames)
+        .with_counter("python_graph_animation_thread_replays", thread_replays))
+}
+
+/// Partial reveals must never rasterize the move between separate contours.
+fn partial_reveal_contours_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_library::style::Style;
+
+    let style = Style::default().stroke(WHITE, 8.0, 1.0);
+    let source = [
+        [-1.5, -0.5, 0.0],
+        [-1.0, -0.5, 0.0],
+        [-0.5, -0.5, 0.0],
+        [-0.5, -0.5, 0.0],
+        [0.5, 0.5, 0.0],
+        [1.0, 0.5, 0.0],
+        [1.5, 0.5, 0.0],
+    ];
+    let mut stage = Stage::new();
+    let mob = stage.add(VMobject::from_points(source.to_vec()).with_style(style));
+    stage.add_to_scene(mob).map_err(|e| fail(e.to_string()))?;
+    let mut flash = fmn_anim::show_passing_flash(mob, 0.25);
+    flash.state_mut().config.rate_func = RateFunc::linear();
+    flash.begin(&mut stage).map_err(|e| fail(e.to_string()))?;
+
+    let render = |stage: &Stage, threads| -> Result<Vec<u8>, ScenarioError> {
+        let config = scene_goldens::frame_config();
+        let mut plan = RenderPlan::new();
+        plan.sync(stage, 0).map_err(|e| fail(e.to_string()))?;
+        let mono = MonoTable::build(&plan, config.map).map_err(|e| fail(e.to_string()))?;
+        let binning = Binning::build(&plan, config.viewport, TILING, config.map)
+            .map_err(|e| fail(e.to_string()))?;
+        let frame =
+            FrameJob::with_identity(&plan, &mono, &binning, config, EngineIdentity::certified())
+                .map_err(|e| fail(e.to_string()))?
+                .render(threads)
+                .map_err(|e| fail(e.to_string()))?;
+        encode_frame(&frame).map_err(|e| fail(e.to_string()))
+    };
+    let blank = render(&Stage::new(), 1)?;
+    // At alpha=5/8, the window starts inside the move and reveals 11/32
+    // of the right-hand straight contour. The oracle is authored directly,
+    // without calling any partial-path operation.
+    let mut oracle = Stage::new();
+    let expected = oracle.add(
+        VMobject::from_points(vec![
+            [0.5, 0.5, 0.0],
+            [0.671875, 0.5, 0.0],
+            [0.84375, 0.5, 0.0],
+        ])
+        .with_style(style),
+    );
+    oracle
+        .add_to_scene(expected)
+        .map_err(|e| fail(e.to_string()))?;
+    let visible = render(&oracle, 1)?;
+    if visible == blank {
+        return Err(fail("the partial-reveal oracle must draw visible ink"));
+    }
+    let mut cases = 0;
+    for alpha in [0.5, 0.625, 0.5] {
+        flash.interpolate(&mut stage, alpha);
+        if let Some(error) = flash.deferred_error() {
+            return Err(fail(format!("partial-reveal interpolation: {error}")));
+        }
+        let expected = if alpha == 0.5 { &blank } else { &visible };
+        for threads in [1, 4, 16] {
+            let actual = render(&stage, threads)?;
+            if &actual != expected {
+                return Err(fail(format!(
+                    "partial reveal bridged a contour or changed pixels at alpha={alpha}, threads={threads}"
+                )));
+            }
+            cases += 1;
+        }
+    }
+    flash.finish(&mut stage);
+    if stage.get_points(mob).as_deref() != Some(source.as_slice()) {
+        return Err(fail(
+            "partial flash failed to restore the full compound path",
+        ));
+    }
+    flash.clean_up_from_scene(&mut stage);
+    if !stage.roots().is_empty() {
+        return Err(fail("partial flash leaked its scene root"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.partial_reveal_contours")
+            .field("thread_counts", 3_u64)
+            .field("frame_comparisons", cases),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("partial_reveal_frame_comparisons", cases)
+        .with_artifact("partial-reveal-visible.frame", visible)
+        .with_artifact("partial-reveal-gap.frame", blank))
+}
+
+/// NeuralNetworkMobject end-to-end drill (fm-74z): introspects an MLP with
+/// explicit weights and biases, executes forward pass activation, attaches
+/// live training updaters on stage, and proves segment purity classification
+/// demoting to stateful under W4PURITY.
+fn neural_network_live_training_and_purity_run(
+    ctx: &mut RunCtx,
+) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::purity::{ImpureEffect, Purity, classify_wait};
+    use fmn_library::neural_network::NeuralNetworkMobject;
+    use fmn_mobject::Stage;
+
+    let layer_sizes = [2, 3, 1];
+    let weights = vec![
+        vec![vec![0.5, -0.5, 1.0], vec![-1.0, 1.0, 0.0]],
+        vec![vec![1.5], vec![-0.5], vec![0.5]],
+    ];
+    let biases = vec![vec![0.1, -0.1, 0.0], vec![0.2]];
+
+    let mut net = NeuralNetworkMobject::introspect_mlp(&layer_sizes, &weights, &biases)
+        .map_err(|error| fail(format!("mlp introspection: {error}")))?;
+
+    let out = net
+        .feed_forward(&[0.5, 0.8])
+        .map_err(|error| fail(format!("feed forward: {error}")))?;
+    let feed_forward_matches = u64::from(!out.is_empty() && out[0] > 0.0 && out[0] < 1.0);
+
+    let mut stage = Stage::new();
+    let mut binding = net
+        .add_to(&mut stage)
+        .map_err(|error| fail(format!("net binding: {error}")))?;
+    let handle = binding.mobject();
+    stage
+        .add_to_scene(handle)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    let initial_purity = classify_wait(&stage, false);
+    let initially_pure = u64::from(initial_purity.is_pure());
+    let initial_geometry = stage
+        .family(handle)
+        .into_iter()
+        .map(|mob| (mob, stage.get_points(mob).expect("neural family is live")))
+        .collect::<Vec<_>>();
+    let mut live_plan = RenderPlan::new();
+    let before = render_certified_doc_with_plan(&stage, &mut live_plan);
+
+    // Independent detached construction supplies the expected final picture.
+    // The live route must reach it using the same installed family, through
+    // an actual updater and the production renderer.
+    let mut expected = net.clone();
+    expected
+        .set_neuron_activation(2, 0, 1.0)
+        .map_err(|error| fail(format!("expected activation: {error}")))?;
+    expected
+        .set_synapse_weight(1, 2, 0, -0.9)
+        .map_err(|error| fail(format!("expected weight: {error}")))?;
+    let mut expected_stage = Stage::new();
+    let expected_root = expected_stage.add(
+        expected
+            .build()
+            .map_err(|error| fail(format!("expected geometry: {error}")))?,
+    );
+    expected_stage
+        .add_to_scene(expected_root)
+        .map_err(|error| fail(format!("expected scene: {error}")))?;
+    let expected_pixels = render_certified_doc(&expected_stage);
+
+    stage
+        .add_try_updater(
+            handle,
+            move |stage, _mob| {
+                let mut update = || -> Result<(), fmn_library::NeuralNetworkError> {
+                    net.set_neuron_activation(2, 0, 1.0)?;
+                    net.set_synapse_weight(1, 2, 0, -0.9)?;
+                    binding.sync_values(stage, &net)
+                };
+                update()
+                    .map_err(|error| fmn_mobject::UpdaterError::callback("neural values", error))
+            },
+            false,
+        )
+        .map_err(|error| fail(format!("add updater: {error}")))?;
+
+    let post_purity = classify_wait(&stage, false);
+    let purity_is_stateful = u64::from(matches!(
+        post_purity,
+        Purity::Stateful(ref effs) if effs.contains(&ImpureEffect::SceneUpdater)
+    ));
+    stage.update(1.0 / 30.0);
+    if let Some(error) = stage.updater_error() {
+        return Err(fail(format!("neural updater: {error}")));
+    }
+    let after = render_certified_doc_with_plan(&stage, &mut live_plan);
+    let live_pixels_match = u64::from(after != before && after == expected_pixels);
+    let stable_geometry = u64::from(
+        initial_geometry
+            .iter()
+            .all(|(mob, points)| stage.get_points(*mob).as_ref() == Some(points))
+            && stage.family(handle)
+                == initial_geometry
+                    .iter()
+                    .map(|(mob, _)| *mob)
+                    .collect::<Vec<_>>(),
+    );
+
+    if feed_forward_matches != 1
+        || initially_pure != 1
+        || purity_is_stateful != 1
+        || live_pixels_match != 1
+        || stable_geometry != 1
+    {
+        return Err(fail(format!(
+            "neural network e2e broken: feed_forward={feed_forward_matches} pure_init={initially_pure} stateful={purity_is_stateful} pixels={live_pixels_match} stable_geometry={stable_geometry}"
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.neural_network.live_training")
+            .field("layers", 3_u64)
+            .field("live_pixels_match", live_pixels_match)
+            .field("stateful", 1_u64),
+    );
+    ctx.counter("feed_forward_matches", feed_forward_matches);
+    ctx.counter("purity_is_stateful", purity_is_stateful);
+    ctx.counter("live_pixels_match", live_pixels_match);
+    ctx.counter("stable_geometry", stable_geometry);
+
+    Ok(RunOutcome::ok()
+        .with_counter("feed_forward_matches", feed_forward_matches)
+        .with_counter("purity_is_stateful", purity_is_stateful)
+        .with_counter("live_pixels_match", live_pixels_match)
+        .with_counter("stable_geometry", stable_geometry)
+        .with_artifact("neural-before.frame", before)
+        .with_artifact("neural-after.frame", after))
+}
+
+/// Execute the public native example through bounded ordered PNG publication.
+fn live_bar_chart_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_platform::fs::FileSystem as _;
+
+    let mut baseline = None;
+    let mut rendered_frames = 0;
+    for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/live-bars")
+            .map_err(|error| fail(format!("bar chart options: {error}")))?;
+        options.config.camera.resolution = (96, 64);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 6.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        options.typeset_cache = false;
+        let report = fmn::render_with_fs(
+            &mut live_bar_chart_example::LiveBarChart,
+            options,
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("bar chart render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("bar chart omitted the native frame pipeline"))?;
+        if report.artifact.frame_count != 14
+            || pipeline.submitted != 14
+            || pipeline.emitted != 14
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail("bar chart lost bounded ordered publication"));
+        }
+        let frames = (0..14)
+            .map(|index| {
+                fs.read(&PathBuf::from("/live-bars").join(format!("frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("bar chart PNG: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if frames[1] == frames[5] || frames[7] == frames[11] || frames[11] == frames[12] {
+            return Err(fail(
+                "signed animation or the live prefix update drew no change",
+            ));
+        }
+        if frames[12] != frames[13] {
+            return Err(fail("the completed chart changed during its final hold"));
+        }
+        if let Some(expected) = &baseline {
+            if expected != &frames {
+                return Err(fail(format!(
+                    "bar chart PNG bytes changed at {threads} threads"
+                )));
+            }
+        } else {
+            baseline = Some(frames);
+        }
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = baseline.ok_or_else(|| fail("no bar chart frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.data.live_bar_chart")
+            .field("thread_counts", 3_u64)
+            .field("rendered_frames", rendered_frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("bars-initial.png", frames[0].clone())
+        .with_artifact("bars-negative.png", frames[5].clone())
+        .with_artifact("bars-updated.png", frames[13].clone())
+        .with_counter("bar_chart_thread_counts", 3)
+        .with_counter("bar_chart_frames", rendered_frames))
+}
+
+/// CSV → TableMobject end-to-end through the suite's frame parser and
+/// Scribe: insertion-order headers survive, the null cell renders empty,
+/// and two builds of the same table hash identically.
+fn data_table_csv_roundtrip_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    const CSV: &str = "region,score,active\nwest,3.5,true\neast,,false\nnorth,7,true\n";
+    let table = fmn_library::data_mobjects::TableMobject::from_csv(CSV, ',')
+        .map_err(|error| fail(format!("csv ingest: {error}")))?;
+
+    let header_count = table.headers().len() as u64;
+    let row_count = table.rows().len() as u64;
+    let order_preserved = u64::from(table.headers() == ["region", "score", "active"]);
+    let null_cell_empty = u64::from(table.rows()[1][1].is_empty());
+    if header_count != 3 || row_count != 3 || order_preserved != 1 || null_cell_empty != 1 {
+        return Err(fail(format!(
+            "csv round-trip broke: headers={header_count} rows={row_count}              order={order_preserved} null={null_cell_empty}"
+        )));
+    }
+
+    let book =
+        fmn_text::FontBook::bundled().map_err(|error| fail(format!("bundled fonts: {error}")))?;
+    let first = table
+        .build(&book)
+        .map_err(|error| fail(format!("table build: {error}")))?;
+    let second = table
+        .build(&book)
+        .map_err(|error| fail(format!("table rebuild: {error}")))?;
+    let digest_of = |root: &VMobject| {
+        let mut bytes = Vec::new();
+        let mut stack = vec![root];
+        while let Some(current) = stack.pop() {
+            for point in current.points() {
+                bytes.extend_from_slice(&point[0].to_bits().to_le_bytes());
+                bytes.extend_from_slice(&point[1].to_bits().to_le_bytes());
+                bytes.extend_from_slice(&point[2].to_bits().to_le_bytes());
+            }
+            for child in current.children() {
+                stack.push(child);
+            }
+        }
+        sha256(&bytes).to_hex()
+    };
+    let builds_identical = u64::from(digest_of(&first) == digest_of(&second));
+    if builds_identical != 1 {
+        return Err(fail("two builds of one table diverged"));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.data_table.roundtrip")
+            .field("headers", header_count)
+            .field("rows", row_count),
+    );
+    ctx.counter("data_table_headers", header_count);
+    ctx.counter("data_table_rows", row_count);
+    Ok(RunOutcome::ok()
+        .with_counter("data_table_headers", header_count)
+        .with_counter("data_table_rows", row_count)
+        .with_counter("data_table_builds_identical", builds_identical))
+}
+
+/// Bounded E2E registration for PG-5's user-visible definition surface.
+///
+/// The release-perf producer remains the authoritative complete-corpus proof
+/// for direct, frame-parallel, and ordered-pipeline scheduling. This fast
+/// scenario binds that definition to one real committed scene rendered at the
+/// permanent per-commit direct thread counts, so a CLI/definition landing
+/// cannot silently lose its executable certified-render anchor.
+fn pg5_direct_schedule_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let definition =
+        Pg5Definition::new().map_err(|error| fail(format!("PG-5 definition identity: {error}")))?;
+    definition
+        .validate_corpus_lock()
+        .map_err(|error| fail(format!("PG-5 corpus identity: {error}")))?;
+    let case = scene_goldens::scene_named("circle_tex_label.v1")
+        .ok_or_else(|| fail("PG-5 registered scene is missing"))?;
+    let built = (case.build)(scene_goldens::corpus());
+    let config = scene_goldens::frame_config();
+    let mut plan = RenderPlan::new();
+    plan.sync(&built.stage, 0)
+        .map_err(|error| fail(format!("{} render plan: {error}", case.name)))?;
+    let mono = MonoTable::build(&plan, config.map)
+        .map_err(|error| fail(format!("PG-5 monotone table: {error}")))?;
+    let mut binning = Binning::build(&plan, config.viewport, TILING, config.map)
+        .expect("bounded conformance binning");
+    binning
+        .prune_occluded(&plan)
+        .map_err(|error| fail(format!("PG-5 binning: {error}")))?;
+
+    let mut digests = Vec::with_capacity(PG5_DIRECT_THREADS.len());
+    for threads in PG5_DIRECT_THREADS {
+        let job = FrameJob::with_identity(&plan, &mono, &binning, config, pg5_identity())
+            .map_err(|error| fail(format!("PG-5 {threads}-thread job: {error}")))?;
+        let frame = job
+            .render(threads)
+            .map_err(|error| fail(format!("PG-5 {threads}-thread render: {error}")))?;
+        digests.push(
+            frame_digest(&frame)
+                .map_err(|error| fail(format!("PG-5 {threads}-thread digest: {error}")))?,
+        );
+    }
+    let reference = digests
+        .first()
+        .copied()
+        .ok_or_else(|| fail("PG-5 direct thread profile is empty"))?;
+    let direct_mismatches = u64::try_from(
+        digests
+            .iter()
+            .skip(1)
+            // ubs:ignore — public frame self-goldens, not authentication material.
+            .filter(|&&digest| digest != reference)
+            .count(),
+    )
+    .map_err(|_| fail("PG-5 mismatch count exceeds u64"))?;
+
+    ctx.record_asset(
+        "pg5.certified-thread-matrix.definition",
+        definition.to_tsv().as_bytes(),
+    );
+    ctx.event(
+        LogEvent::new("performance.pg5.direct_schedule")
+            .field("scene", case.name)
+            .field("direct_threads", "1,4,16")
+            .field("direct_mismatches", direct_mismatches)
+            .field("reference_digest", reference.to_string())
+            .field("benchmark_definition", definition.digest().to_string()),
+    );
+    ctx.counter("pg5_direct_threads", PG5_DIRECT_THREADS.len() as u64);
+    ctx.counter("pg5_direct_mismatches", direct_mismatches);
+    if direct_mismatches != 0 {
+        return Err(fail(format!(
+            "PG-5 representative certified render drifted at {direct_mismatches} thread counts"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("pg5_direct_threads", PG5_DIRECT_THREADS.len() as u64)
+        .with_counter("pg5_direct_mismatches", 0))
+}
+
+/// PG-6's user-visible evidence surface, registered end to end: a committed
+/// corpus scene passes through the same warm/reuse arena lifecycle as the
+/// release-perf producer, and the scenario log retains the observable proof.
+fn pg6_allocation_reuse_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let definition = Pg6Definition::new();
+    definition
+        .validate_corpus_lock()
+        .map_err(|error| fail(format!("PG-6 corpus identity: {error}")))?;
+    let case = scene_goldens::scene_named("circle_tex_label.v1")
+        .ok_or_else(|| fail("PG-6 registered scene is missing"))?;
+    let built = (case.build)(scene_goldens::corpus());
+    let config = scene_goldens::frame_config();
+    let mut plan = RenderPlan::new();
+    let mut mono = MonoTable::default();
+    let mut binning = Binning::default();
+    let mut arena = FrameArena::new();
+    let (mut frame, warm_digest, warm_allocations) = {
+        plan.sync(&built.stage, 0)
+            .map_err(|error| fail(format!("{} warm render plan: {error}", case.name)))?;
+        mono.rebuild_in_place(&plan, config.map)
+            .map_err(|error| fail(format!("PG-6 warm monotone table: {error}")))?;
+        binning
+            .rebuild_in_place(&plan, config.viewport, TILING, config.map)
+            .expect("bounded conformance binning");
+        binning
+            .prune_occluded(&plan)
+            .map_err(|error| fail(format!("PG-6 warm binning: {error}")))?;
+        let job =
+            FrameJob::with_identity_in(&mut arena, &plan, &mono, &binning, config, pg6_identity())
+                .map_err(|error| fail(format!("PG-6 warm job: {error}")))?;
+        let frame = job
+            .render(PG6_THREADS)
+            .map_err(|error| fail(format!("PG-6 warm render: {error}")))?;
+        let digest =
+            frame_digest(&frame).map_err(|error| fail(format!("PG-6 warm digest: {error}")))?;
+        (frame, digest, job.allocation_stats().heap_allocs_this_frame)
+    };
+    let (measured_digest, measured, sync_stats) = {
+        let sync_stats = plan
+            .sync(&built.stage, 1)
+            .map_err(|error| fail(format!("{} measured render plan: {error}", case.name)))?;
+        mono.rebuild_in_place(&plan, config.map)
+            .map_err(|error| fail(format!("PG-6 measured monotone table: {error}")))?;
+        binning
+            .rebuild_in_place(&plan, config.viewport, TILING, config.map)
+            .expect("bounded conformance binning");
+        binning
+            .prune_occluded(&plan)
+            .map_err(|error| fail(format!("PG-6 measured binning: {error}")))?;
+        let job =
+            FrameJob::with_identity_in(&mut arena, &plan, &mono, &binning, config, pg6_identity())
+                .map_err(|error| fail(format!("PG-6 measured job: {error}")))?;
+        job.render_into(PG6_THREADS, &mut frame)
+            .map_err(|error| fail(format!("PG-6 measured render: {error}")))?;
+        let digest =
+            frame_digest(&frame).map_err(|error| fail(format!("PG-6 measured digest: {error}")))?;
+        (digest, job.allocation_stats(), sync_stats)
+    };
+    // ubs:ignore — public deterministic artifact identity, not authentication material.
+    let digest_equal = warm_digest == measured_digest;
+    let allocation_free = measured.heap_allocs_this_frame == 0
+        && sync_stats.shapes_compiled == 0
+        && sync_stats.styles_rebuilt == 0;
+    ctx.record_asset(
+        "pg6.primitive-steady-allocations.definition",
+        definition.to_tsv().as_bytes(),
+    );
+    ctx.event(
+        LogEvent::new("performance.pg6.allocations")
+            .field("scene", case.name)
+            .field("warm_digest", warm_digest.to_string())
+            .field("measured_digest", measured_digest.to_string())
+            .field("warm_allocations", warm_allocations)
+            .field("measured_allocations", measured.heap_allocs_this_frame)
+            .field("arena_bytes", measured.arena_buffer_bytes)
+            .field("pool_slots", measured.pool_slots),
+    );
+    ctx.counter("pg6_digest_equal", u64::from(digest_equal));
+    ctx.counter("pg6_measured_allocations", measured.heap_allocs_this_frame);
+    if !digest_equal || !allocation_free {
+        return Err(fail(format!(
+            "PG-6 arena reuse drifted: digest_equal={digest_equal}, measured_allocations={}, sync_stats={sync_stats:?}",
+            measured.heap_allocs_this_frame
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("pg6_digest_equal", 1)
+        .with_counter("pg6_measured_allocations", 0))
+}
+
+/// PG-6's scheduled full-tier corpus proof. This is the same three-frame UHD
+/// production function the peak-RSS sampler runs during every repetition; the
+/// e2e row validates real rendering and lock identity, not a reduced proxy.
+fn pg6_peak_gallery_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let definition = Pg6PeakDefinition::new();
+    definition
+        .validate_corpus_lock()
+        .map_err(|error| fail(format!("PG-6 peak corpus identity: {error}")))?;
+    let cases = render_locked_gallery_once()
+        .map_err(|error| fail(format!("PG-6 peak gallery render: {error}")))?;
+    let complete = cases.len() == PG6_PEAK_CASE_COUNT;
+    let distinct = complete
+        && cases[0].frame_digest != cases[1].frame_digest
+        && cases[0].frame_digest != cases[2].frame_digest
+        && cases[1].frame_digest != cases[2].frame_digest;
+    let preparation_bytes = cases
+        .iter()
+        .map(|case| case.preparation_bytes)
+        .max()
+        .unwrap_or(0);
+
+    ctx.record_asset(
+        "pg6.gallery-4k-3d-peak.definition",
+        definition.to_tsv().as_bytes(),
+    );
+    ctx.event(
+        LogEvent::new("performance.pg6.peak_gallery")
+            .field("frames", cases.len())
+            .field("width", u64::from(PG6_PEAK_WIDTH))
+            .field("height", u64::from(PG6_PEAK_HEIGHT))
+            .field("distinct_digests", distinct)
+            .field("max_preparation_bytes", preparation_bytes)
+            .field("benchmark_definition", definition.digest().to_string()),
+    );
+    ctx.counter("pg6_peak_frames", cases.len() as u64);
+    ctx.counter("pg6_peak_distinct_digests", u64::from(distinct));
+    if !complete || !distinct || preparation_bytes == 0 {
+        return Err(fail(format!(
+            "PG-6 peak gallery proof incomplete: frames={}, distinct={distinct}, max_preparation_bytes={preparation_bytes}",
+            cases.len(),
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("pg6_peak_frames", PG6_PEAK_CASE_COUNT as u64)
+        .with_counter("pg6_peak_distinct_digests", 1))
+}
+
+// ---------------------------------------------------------------------------
+// Log-machinery scenarios
+// ---------------------------------------------------------------------------
+
+/// Preflight: a Tex-bearing scene's constructed-scene preflight typesets
+/// every registered string **before frame zero** — the assertion the
+/// harness exists to make, because nothing in the pixels shows it.
+fn logs_preflight_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    // The real event order, recorded in-run: (ordinal, kind, payload).
+    #[derive(Clone)]
+    enum Trace {
+        Preflight { typesets: u64 },
+        FirstCapture { frame: i64 },
+    }
+    let trace: Arc<Mutex<Vec<Trace>>> = Arc::new(Mutex::new(Vec::new()));
+
+    let sources: [&'static str; 2] = [r"\odot", r"\frac{1}{2}"];
+    let label = tex_label(sources[0], 40.0)?;
+
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: FPS,
+            ..RuntimeConfig::default()
+        },
+        ctx.seed,
+    )
+    .map_err(|error| fail(format!("scene constructs: {error}")))?;
+
+    let hook_trace = Arc::clone(&trace);
+    scene
+        .set_preflight_hook(move |_stage, _anchors| {
+            let mut typesets = 0_u64;
+            for source in sources {
+                scene_goldens::corpus()
+                    .tex
+                    .typeset(fmn_tex::Mode::Math(fmd_math::Style::Text), source)
+                    .map_err(|error| {
+                        IntegrationError::new("preflight", format!("typeset {source:?}: {error}"))
+                    })?;
+                typesets += 1;
+            }
+            hook_trace
+                .lock()
+                .map_err(|_| IntegrationError::new("preflight", "trace lock poisoned"))?
+                .push(Trace::Preflight { typesets });
+            Ok(())
+        })
+        .map_err(|error| fail(format!("preflight hook installs: {error}")))?;
+
+    struct TraceSink {
+        trace: Arc<Mutex<Vec<Trace>>>,
+    }
+    impl SceneSink for TraceSink {
+        fn capture(
+            &mut self,
+            _reason: CaptureReason,
+            packet: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            let mut guard = self
+                .trace
+                .lock()
+                .map_err(|_| IntegrationError::new("sink", "trace lock poisoned"))?;
+            if !guard
+                .iter()
+                .any(|event| matches!(event, Trace::FirstCapture { .. }))
+            {
+                guard.push(Trace::FirstCapture {
+                    frame: packet.frame_index(),
+                });
+            }
+            Ok(())
+        }
+    }
+
+    let mut program = MatrixProgram {
+        label: Some(label),
+        wait_only: false,
+    };
+    let mut sink = TraceSink {
+        trace: Arc::clone(&trace),
+    };
+    scene
+        .run(&mut program, &mut sink)
+        .map_err(|error| fail(format!("scene runs: {error}")))?;
+
+    let events = trace
+        .lock()
+        .map_err(|_| fail("trace lock poisoned"))?
+        .clone();
+    let mut typesets = 0_u64;
+    let mut preflight_ordinal = None;
+    let mut first_capture_ordinal = None;
+    let mut first_frame = 0_i64;
+    for (ordinal, event) in events.iter().enumerate() {
+        match event {
+            Trace::Preflight { typesets: n } => {
+                typesets = *n;
+                preflight_ordinal = Some(ordinal);
+            }
+            Trace::FirstCapture { frame } => {
+                first_capture_ordinal = Some(ordinal);
+                first_frame = *frame;
+            }
+        }
+    }
+    // The contract (§17.1): the constructed-scene preflight — and with it
+    // every typeset — completes before the first frame is emitted. (The
+    // first *emitted* frame of an animated play is index 1: frame 0 is the
+    // segment's begin state, never re-emitted.)
+    let ordered = matches!(
+        (preflight_ordinal, first_capture_ordinal),
+        (Some(before), Some(after)) if before < after
+    );
+
+    ctx.event(
+        LogEvent::new(e2e::spans::PREFLIGHT)
+            .field("typesets", typesets)
+            .field("before_first_frame", truth(ordered)),
+    );
+    ctx.event(
+        LogEvent::new(e2e::spans::RENDER_FRAME)
+            .field("frame", first_frame.max(0) as u64)
+            .field("first_capture", "true"),
+    );
+    ctx.counter(e2e::counters::TYPESETS, typesets);
+
+    if !ordered || typesets != 2 {
+        return Err(fail(format!(
+            "preflight contract broke: typesets={typesets} ordered={ordered} \
+             first_frame={first_frame}"
+        )));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("typesets", typesets)
+        .with_counter("preflight_before_first_frame", 1))
+}
+
+/// Purity: the segment classification is recorded for both classes — the
+/// play (pure: frame-parallel eligible) and the wait (stateful: serial
+/// front-end with its recorded reason).
+fn logs_purity_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let label = tex_label(r"\odot", 40.0)?;
+    let reports: Arc<Mutex<Vec<(String, String, i64)>>> = Arc::new(Mutex::new(Vec::new()));
+
+    struct PurityProgram {
+        label: Option<VMobject>,
+        reports: Arc<Mutex<Vec<(String, String, i64)>>>,
+    }
+    impl SceneProgram for PurityProgram {
+        fn name(&self) -> &str {
+            "e2e_purity"
+        }
+        fn construct(
+            &mut self,
+            scene: &mut Scene,
+            sink: &mut dyn SceneSink,
+        ) -> Result<(), SceneError> {
+            let circle = scene.add_mobject(Circle::new().radius(0.9))?;
+            scene
+                .stage_mut()
+                .set_fill(circle, Some(BLUE_C), Some(0.35), Some(0.0), true);
+            let label = self.label.take().ok_or(SceneError::InvalidLifecycle(
+                "purity program constructed twice",
+            ))?;
+            scene.add_mobject(label)?;
+            let builder = circle
+                .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time: Some(0.25),
+                    rate_func: Some(fmn_core::rate::linear),
+                    ..AnimateArgs::default()
+                })
+                .map_err(|error| SceneError::Animation(error.into()))?
+                .shift([0.6, 0.2, 0.0])
+                .map_err(|error| SceneError::Animation(error.into()))?;
+            let animation = fmn_anim::prepare_animation(builder, scene.stage_mut())?;
+            if let Some(report) = scene.play(vec![animation], PlayOverrides::default(), sink)? {
+                let purity = if report.purity.is_pure() {
+                    "pure"
+                } else {
+                    "stateful"
+                };
+                self.reports
+                    .lock()
+                    .map_err(|_| SceneError::InvalidLifecycle("report lock poisoned"))?
+                    .push(("play".to_string(), purity.to_string(), report.n_frames));
+            }
+            let report = scene.wait_until(0.125, &mut |_stage| false, sink)?;
+            let purity = if report.purity.is_pure() {
+                "pure"
+            } else {
+                "stateful"
+            };
+            self.reports
+                .lock()
+                .map_err(|_| SceneError::InvalidLifecycle("report lock poisoned"))?
+                .push(("wait".to_string(), purity.to_string(), report.n_frames));
+            Ok(())
+        }
+    }
+
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: FPS,
+            ..RuntimeConfig::default()
+        },
+        ctx.seed,
+    )
+    .map_err(|error| fail(format!("scene constructs: {error}")))?;
+    let mut program = PurityProgram {
+        label: Some(label),
+        reports: Arc::clone(&reports),
+    };
+    let mut sink = PacketSink::default();
+    scene
+        .run(&mut program, &mut sink)
+        .map_err(|error| fail(format!("scene runs: {error}")))?;
+
+    let reports = reports
+        .lock()
+        .map_err(|_| fail("report lock poisoned"))?
+        .clone();
+    let mut saw_pure_play = false;
+    let mut saw_stateful_wait = false;
+    for (kind, purity, frames) in &reports {
+        ctx.event(
+            LogEvent::new(e2e::spans::PURITY)
+                .field("segment", kind.as_str())
+                .field("purity", purity.as_str())
+                .field("frames", (*frames).max(0) as u64),
+        );
+        saw_pure_play |= kind == "play" && purity == "pure";
+        saw_stateful_wait |= kind == "wait" && purity == "stateful";
+    }
+    ctx.counter("segments_classified", reports.len() as u64);
+    if !(saw_pure_play && saw_stateful_wait) {
+        return Err(fail(format!("purity classifications drifted: {reports:?}")));
+    }
+    Ok(RunOutcome::ok()
+        .with_counter("segments_classified", reports.len() as u64)
+        .with_counter("pure_segments", 1))
+}
+
+/// Engine identity and plan decision on a reproducible-class run: the
+/// certified identity is recorded with its tuning provenance pinned.
+fn logs_engine_identity_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let preset = PRESETS[0];
+    let topology = HardwareTopology::fallback(8);
+    let plan = ExecutionPlan::derive(
+        PlanRequest::certified(
+            RenderIntent::Offline,
+            SurfaceSpec::lumen(preset.width, preset.height),
+            OutputPixelFormat::Rgba8,
+        ),
+        &topology,
+        None,
+    )
+    .map_err(|error| fail(format!("certified plan derives: {error}")))?;
+    ctx.event(
+        LogEvent::new(e2e::spans::EXECUTION_PLAN)
+            .field("determinism", "certified")
+            .field("tuning_source", tuning_source_name(plan.tuning_source))
+            .field("fine_tile", u64::from(plan.fine_tile))
+            .field("macro_tile", u64::from(plan.macro_tile)),
+    );
+
+    let identity = EngineIdentity::certified();
+    ctx.event(
+        LogEvent::new(e2e::spans::ENGINE)
+            .field("engine", engine_kind_name(identity.engine))
+            .field("reproducible", "true")
+            .field("renderer_version", u64::from(identity.renderer_version)),
+    );
+
+    // Render one certified frame so the identity event is attached to real
+    // engine work, not a bare declaration.
+    let packets = run_matrix_scene(ctx.seed, true)?;
+    let terminal = packets
+        .last()
+        .ok_or_else(|| fail("scene produced no terminal packet"))?;
+    let frame = render_packet(terminal, identity, preset_frame_config(&preset), 1)?;
+    let doc = encode_frame(&frame).map_err(|error| fail(format!("encode: {error}")))?;
+    ctx.event(
+        LogEvent::new(e2e::spans::RENDER_FRAME)
+            .field("frame", 0_u64)
+            .field("engine", engine_kind_name(identity.engine)),
+    );
+    ctx.counter("engine_certified_frames", 1);
+    Ok(RunOutcome::ok()
+        .with_counter("engine_certified_frames", 1)
+        .with_counter("certified_doc_bytes", doc.len() as u64))
+}
+
+/// §15.1's product-facing proof: compile and execute a primitive scene using
+/// only the `fmn` facade. The facade delegates to the same Scene runtime that
+/// the rest of this catalog exercises; the capture count is the observable
+/// proof that the public entry point crossed the real frame boundary.
+fn public_facade_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::*;
+
+    #[derive(Default)]
+    struct FacadeProgram;
+
+    impl SceneConstruct for FacadeProgram {
+        fn name(&self) -> &str {
+            "public_facade_circle_shift"
+        }
+
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let circle = stage.add(Circle::new().radius(0.75).color(BLUE_C))?;
+            let square = stage.add(Square::new().side_length(1.25).color(YELLOW))?;
+            let movement = circle
+                .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time: Some(0.25),
+                    rate_func: Some(fmn::core::rate::linear),
+                    ..AnimateArgs::default()
+                })?
+                .shift([0.5, 0.25, 0.0])?;
+            let square_movement = square
+                .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time: Some(0.25),
+                    rate_func: Some(fmn::core::rate::linear),
+                    ..AnimateArgs::default()
+                })?
+                .shift([-0.25, 0.0, 0.0])?
+                .rotate(PI / 4.0)?
+                .set_opacity(0.5)?;
+            stage.play((movement, square_movement))?;
+            stage.wait(0.125)?;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct FacadeSink {
+        captures: u64,
+    }
+
+    impl SceneSink for FacadeSink {
+        fn capture(
+            &mut self,
+            _reason: CaptureReason,
+            _packet: fmn::animation::FramePacket,
+        ) -> std::result::Result<(), IntegrationError> {
+            self.captures += 1;
+            Ok(())
+        }
+    }
+
+    let mut sink = FacadeSink::default();
+    let completed = run_scene(
+        &mut FacadeProgram,
+        RuntimeConfig {
+            fps: FPS,
+            ..RuntimeConfig::default()
+        },
+        0xFACADE,
+        &mut sink,
+    )
+    .map_err(|error| fail(format!("public facade: {error}")))?;
+    if completed.report().play_count != 2 || sink.captures != 3 {
+        return Err(fail(format!(
+            "public facade produced {} plays and {} captures, expected 2 and 3",
+            completed.report().play_count,
+            sink.captures
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new(e2e::spans::SCENE_CONSTRUCT)
+            .field("scene", "public_facade_circle_shift")
+            .field("captures", sink.captures),
+    );
+    ctx.counter("public_facade_captures", sink.captures);
+    Ok(RunOutcome::ok()
+        .with_counter("public_facade_plays", completed.report().play_count)
+        .with_counter("public_facade_captures", sink.captures))
+}
+
+// ---------------------------------------------------------------------------
+// Parity drills (fm-parity-drill-scenarios-hzng): one fast-tier drill per
+// Parity Ledger ruling family. Each scenario drives the real Rust API
+// surface and asserts the CORRECTED behavior, so reintroducing the
+// Reference-buggy expectation turns the drill red — a drill that cannot
+// fail is not a drill.
+// ---------------------------------------------------------------------------
+
+/// A bare vmobject in `stage` carrying `points` as its point records (the
+/// fmn-anim movement-suite construction: shared-anchor quad runs).
+fn parity_vmob(stage: &mut Stage, points: &[[f64; 3]]) -> Mob {
+    let mob = stage.add(Mobject::new());
+    let entry = stage.get_mut(mob).expect("a fresh handle has an entry");
+    entry.buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len())
+        .expect("a bounded point record buffer");
+    #[allow(clippy::cast_possible_truncation)]
+    let flat: Vec<f32> = points
+        .iter()
+        .flat_map(|point| point.iter().map(|value| *value as f32))
+        .collect();
+    entry.buffer.write_range("point", 0, &flat);
+    mob
+}
+
+/// C-5 / BN-07 — `add_updater(call = True)` runs the registration update
+/// exactly ONCE. The Reference's registration path calls `update(dt = 0)`
+/// and then unconditionally calls `update()` again, so every `call=True`
+/// attach double-fires its callable; the corrected engine fires one
+/// registration pass per updater and ordinary ticks continue from there.
+fn parity_updater_call_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    ctx.set_fps((FPS, 1));
+    let mut stage = Stage::new();
+    let mob = parity_vmob(&mut stage, &[[0.0; 3]]);
+    stage
+        .add_to_scene(mob)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+    let dt_mob = parity_vmob(&mut stage, &[[0.0; 3]]);
+    stage
+        .add_to_scene(dt_mob)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    let attach_calls = Rc::new(Cell::new(0_u64));
+    let dt_attach_calls = Rc::new(Cell::new(0_u64));
+    {
+        let attach_calls = Rc::clone(&attach_calls);
+        stage
+            .add_updater(
+                mob,
+                move |_stage, _target| {
+                    attach_calls.set(attach_calls.get() + 1);
+                },
+                true,
+            )
+            .map_err(|error| fail(format!("register call updater: {error}")))?;
+    }
+    {
+        let dt_attach_calls = Rc::clone(&dt_attach_calls);
+        stage
+            .add_dt_updater(
+                dt_mob,
+                move |_stage, _target, _dt| {
+                    dt_attach_calls.set(dt_attach_calls.get() + 1);
+                },
+                true,
+            )
+            .map_err(|error| fail(format!("register dt updater: {error}")))?;
+    }
+
+    // Each call = true registration has fired its own callable exactly
+    // once; the Reference's double-call would read 2 here.
+    let calls_after_attach = attach_calls.get();
+    let dt_after_attach = dt_attach_calls.get();
+    stage.update(0.25);
+    stage.update(0.25);
+    let calls_after_two_ticks = attach_calls.get();
+    let dt_after_two_ticks = dt_attach_calls.get();
+
+    // Each call = true registration has fired its own callable exactly
+    // once; the Reference's double-call would read 2 here.
+    let corrected = calls_after_attach == 1
+        && dt_after_attach == 1
+        && calls_after_two_ticks == 3
+        && dt_after_two_ticks == 3;
+    if !corrected {
+        return Err(fail(format!(
+            "C-5: add_updater(call=true) attach fired call={calls_after_attach} \
+             dt={dt_after_attach} (corrected: exactly one each); after two ticks \
+             call={calls_after_two_ticks} dt={dt_after_two_ticks} (corrected: 3 each)"
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.updater_call_once")
+            .field("call_attach_calls", calls_after_attach)
+            .field("dt_attach_calls", dt_after_attach)
+            .field("call_after_two_ticks", calls_after_two_ticks)
+            .field("dt_after_two_ticks", dt_after_two_ticks),
+    );
+    ctx.counter("parity_updater_attach_calls", calls_after_attach);
+    Ok(RunOutcome::ok().with_counter("parity_updater_attach_calls", calls_after_attach))
+}
+
+/// C-17 / BN-07 — `NumberPlane.get_y_unit_size()` measures the Y axis. The
+/// Reference's body answers `get_x_axis().get_unit_size()`, invisible on
+/// the default square-aspect plane; this plane is deliberately
+/// non-square-aspect (equal 8-unit edge lengths over a 16-unit x span and
+/// a 4-unit y span), so the correct y answer and the pinned x answer
+/// differ by 4×.
+fn parity_plane_y_unit_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let corpus = scene_goldens::corpus();
+    let plane = NumberPlane::new()
+        .x_range([-8.0, 8.0, 1.0])
+        .y_range([-2.0, 2.0, 1.0])
+        .width(8.0)
+        .height(8.0)
+        .build(&corpus.book)
+        .map_err(|error| fail(format!("plane builds: {error}")))?;
+    let x_unit = plane.x_unit_size();
+    let y_unit = plane.y_unit_size();
+
+    // Corrected answers: 8.0 units of width over 16 x-units → 0.5 scene
+    // units per x unit; 8.0 of height over 4 y-units → 2.0 per y unit.
+    if (x_unit - 0.5).abs() > 1e-9 || (y_unit - 2.0).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-17: y_unit_size() answered {y_unit} while x_unit_size() answered \
+             {x_unit}; the corrected plane measures the axis the name names (2.0, x 0.5)"
+        )));
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (x_milli, y_milli) = ((x_unit * 1000.0) as u64, (y_unit * 1000.0) as u64);
+    ctx.event(
+        LogEvent::new("e2e.parity.plane_y_unit_size")
+            .field("x_unit_milli", x_milli)
+            .field("y_unit_milli", y_milli),
+    );
+    ctx.counter("parity_plane_y_unit_is_own_axis", 1);
+    Ok(RunOutcome::ok().with_counter("parity_plane_y_unit_is_own_axis", 1))
+}
+
+/// C-15 / BN-07 — `FunctionGraph(..., color = …)` styles the graph. The
+/// Reference declares `color=YELLOW` but never forwards it, so every
+/// explicit color request was silently ignored; the corrected builder
+/// strokes the graph in the requested color and the no-color default stays
+/// YELLOW.
+fn parity_function_graph_color_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let default_graph = FunctionGraph::new(|x: f64| x * x)
+        .build()
+        .map_err(|error| fail(format!("default graph builds: {error}")))?;
+    let requested_graph = FunctionGraph::new(|x: f64| x * x)
+        .x_range([-2.0, 2.0, 0.05])
+        .color(TEAL_B)
+        .build()
+        .map_err(|error| fail(format!("styled graph builds: {error}")))?;
+    let default_color = default_graph.style().stroke_color;
+    let requested_color = requested_graph.style().stroke_color;
+
+    let default_stays_yellow = default_color == YELLOW;
+    let requested_honored = requested_color == TEAL_B && requested_color != default_color;
+    if !default_stays_yellow || !requested_honored {
+        return Err(fail(format!(
+            "C-15: FunctionGraph color — default strokes {default_color:?} (want YELLOW), \
+             requested strokes {requested_color:?} (want TEAL_B, distinct from the default)"
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.function_graph_color")
+            .field("default_yellow", truth(default_stays_yellow))
+            .field("requested_honored", truth(requested_honored)),
+    );
+    ctx.counter("parity_function_graph_color_honored", 1);
+    Ok(RunOutcome::ok().with_counter("parity_function_graph_color_honored", 1))
+}
+
+/// C-16 / BN-07 — the frame-marker constants work as unit directions for
+/// `to_edge`/`to_corner`. The pinned markers are frame-radius-scaled while
+/// `align_on_border` subtracts `direction * buff` unnormalized, so the
+/// markers' only realistic use misplaces by a frame-radius factor; the
+/// ruling resolves each marker to its unit direction, and this drill pins
+/// the exact flush placements the names promise through the real
+/// positional engine.
+fn parity_frame_markers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    // The C-16 resolution: marker → the unit direction it names.
+    const MARKERS: [(&str, [f64; 3], [f64; 3]); 4] = [
+        ("TOP", TOP, UP),
+        ("BOTTOM", BOTTOM, DOWN),
+        ("LEFT_SIDE", LEFT_SIDE, LEFT),
+        ("RIGHT_SIDE", RIGHT_SIDE, RIGHT),
+    ];
+    let sign = |value: f64| {
+        if value > 0.0 {
+            1.0
+        } else if value < 0.0 {
+            -1.0
+        } else {
+            0.0
+        }
+    };
+    for (name, marker, direction) in MARKERS {
+        for axis in 0..3 {
+            if sign(marker[axis]) != sign(direction[axis]) {
+                return Err(fail(format!(
+                    "C-16: frame marker {name} does not carry the sign of its \
+                     resolved direction on axis {axis}"
+                )));
+            }
+        }
+    }
+
+    let mut stage = Stage::new();
+    // A 2×2 box: bounding box exactly [-1, 1]².
+    let mob = parity_vmob(
+        &mut stage,
+        &[
+            [-1.0, -1.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+        ],
+    );
+    stage
+        .add_to_scene(mob)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    // Each resolved direction lands the box exactly `buff` inside the
+    // named frame edge; a frame-radius-scaled direction argument would
+    // multiply the buffer by the frame radius instead.
+    stage.to_edge(mob, UP, 0.5);
+    let top = stage.get_bounding_box_point(mob, UP);
+    if (top[1] - (FRAME_Y_RADIUS - 0.5)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the top-edge marker direction placed the top at y = {}, want {}",
+            top[1],
+            FRAME_Y_RADIUS - 0.5
+        )));
+    }
+    stage.to_edge(mob, DOWN, 0.5);
+    let bottom = stage.get_bounding_box_point(mob, DOWN);
+    if (bottom[1] + (FRAME_Y_RADIUS - 0.5)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the bottom-edge marker direction placed the bottom at y = {}, want {}",
+            bottom[1],
+            -(FRAME_Y_RADIUS - 0.5)
+        )));
+    }
+    stage.to_edge(mob, LEFT, 0.25);
+    let left = stage.get_bounding_box_point(mob, LEFT);
+    if (left[0] + (FRAME_X_RADIUS - 0.25)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the left-side marker direction placed the left at x = {}, want {}",
+            left[0],
+            -(FRAME_X_RADIUS - 0.25)
+        )));
+    }
+    stage.to_edge(mob, RIGHT, 0.75);
+    let right = stage.get_bounding_box_point(mob, RIGHT);
+    if (right[0] - (FRAME_X_RADIUS - 0.75)).abs() > 1e-9 {
+        return Err(fail(format!(
+            "C-16: the right-side marker direction placed the right at x = {}, want {}",
+            right[0],
+            FRAME_X_RADIUS - 0.75
+        )));
+    }
+    stage.to_corner(mob, UL, 0.5);
+    let corner_top = stage.get_bounding_box_point(mob, UP);
+    let corner_left = stage.get_bounding_box_point(mob, LEFT);
+    if (corner_top[1] - (FRAME_Y_RADIUS - 0.5)).abs() > 1e-9
+        || (corner_left[0] + (FRAME_X_RADIUS - 0.5)).abs() > 1e-9
+    {
+        return Err(fail(format!(
+            "C-16: the UL corner direction placed the corner at ({}, {}), want ({}, {})",
+            corner_left[0],
+            corner_top[1],
+            -(FRAME_X_RADIUS - 0.5),
+            FRAME_Y_RADIUS - 0.5
+        )));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.frame_markers")
+            .field("marker_directions", MARKERS.len() as u64)
+            .field("exact_placements", 5_u64),
+    );
+    ctx.counter("parity_frame_marker_placements", 5);
+    Ok(RunOutcome::ok().with_counter("parity_frame_marker_placements", 5))
+}
+
+/// BN-03 — `point_from_proportion`/`MoveAlongPath` place by TRUE arc
+/// length. Metamorphic: uniform α steps visit equal arc-length increments
+/// on an uneven curved path (built corner-free, so equal chords are a
+/// faithful stand-in for equal arcs), `MoveAlongPath` rides the same
+/// corrected layer end-to-end, and the shipped layer provably disagrees
+/// with the Reference's chord heuristic at α = 0.5.
+fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let mut stage = Stage::new();
+    // Two very unequal curved quads sharing one tangent-continuous anchor:
+    // a short arch (≈1.8 units of arc) then a long shallow one (≈4.5). The
+    // join carries no corner, so chord steps track arc steps to well under
+    // the 1% band below.
+    let path = parity_vmob(
+        &mut stage,
+        &[
+            [0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 1.5, 0.0],
+            [1.5, 2.0, 0.0],
+            [5.0, 0.0, 0.0],
+        ],
+    );
+    stage
+        .add_to_scene(path)
+        .map_err(|error| fail(format!("add to scene: {error}")))?;
+
+    // A fresh Chisel query supplies an independent uncached answer at each
+    // alpha; the public Stage path keeps its table across these observations.
+    let quad = fmn_geom::QuadPath::from_points(
+        stage
+            .get_points(path)
+            .ok_or_else(|| fail("the path lost its points"))?,
+    )
+    .map_err(|error| fail(format!("{error:?}")))?;
+    // Metamorphic relation: uniform α steps visit equal arc lengths.
+    const STEPS: u32 = 64;
+    let mut prev = stage
+        .point_from_proportion(path, 0.0)
+        .map_err(|error| fail(format!("proportion(0): {error}")))?;
+    #[allow(clippy::cast_possible_truncation)]
+    let mut chords = Vec::with_capacity(STEPS as usize);
+    for i in 1..=STEPS {
+        let alpha = f64::from(i) / f64::from(STEPS);
+        let point = stage
+            .point_from_proportion(path, alpha)
+            .map_err(|error| fail(format!("proportion({alpha}): {error}")))?;
+        let fresh = quad
+            .point_from_proportion(alpha)
+            .ok_or_else(|| fail("fresh true-arclength query failed"))?;
+        if point.map(f64::to_bits) != fresh.map(f64::to_bits) {
+            return Err(fail(format!(
+                "retained true-arclength query changed bits at alpha {alpha}"
+            )));
+        }
+        chords.push(((point[0] - prev[0]).powi(2) + (point[1] - prev[1]).powi(2)).sqrt());
+        prev = point;
+    }
+    let mean_step = chords.iter().sum::<f64>() / f64::from(STEPS);
+    let worst_deviation = chords
+        .iter()
+        .fold(0.0_f64, |w, c| w.max((c - mean_step).abs()));
+    if mean_step <= 0.0 || worst_deviation / mean_step > 0.01 {
+        return Err(fail(format!(
+            "BN-03: uniform α steps are not equal arc length — mean step {mean_step}, \
+             worst deviation {worst_deviation} ({:.3}%, allowed 1%)",
+            100.0 * worst_deviation / mean_step
+        )));
+    }
+
+    // The Reference's equal-curve-length heuristic would land α = 0.5
+    // exactly at the shared anchor (x = 1): two curves, equal shares. True
+    // arc length sits deep in the long second curve, while α = 0.25 is
+    // still inside the short first curve.
+    let quarter = stage
+        .point_from_proportion(path, 0.25)
+        .map_err(|error| fail(format!("proportion(0.25): {error}")))?;
+    if quarter[0] >= 1.0 {
+        return Err(fail(format!(
+            "BN-03: α = 0.25 landed at x = {} — outside the short first curve, \
+             whose arc is well under a quarter of the path",
+            quarter[0]
+        )));
+    }
+    let half = stage
+        .point_from_proportion(path, 0.5)
+        .map_err(|error| fail(format!("proportion(0.5): {error}")))?;
+    if half[0] <= 1.25 {
+        return Err(fail(format!(
+            "BN-03: α = 0.5 landed at x = {} — the chord-length boundary answer, \
+             not true arc length",
+            half[0]
+        )));
+    }
+    // Direct discriminator against the labeled heuristic on the same
+    // records: the shipped layer and `quick_point_from_proportion` must
+    // disagree decisively at α = 0.5.
+    let quick = quad
+        .quick_point_from_proportion(0.5)
+        .ok_or_else(|| fail("quick proportion(0.5)"))?;
+    let heuristic_gap = ((half[0] - quick[0]).powi(2) + (half[1] - quick[1]).powi(2)).sqrt();
+    if heuristic_gap <= 0.5 {
+        return Err(fail(format!(
+            "BN-03: true arc length and the chord heuristic agree at α = 0.5 \
+             (gap {heuristic_gap}) — the drill no longer discriminates"
+        )));
+    }
+
+    // MoveAlongPath rides the corrected layer end-to-end: its interpolated
+    // positions match the proportion layer at every α.
+    let dot = parity_vmob(&mut stage, &[[9.0, 9.0, 0.0]]);
+    let mut animation = MoveAlongPath::new(dot, path);
+    animation.state_mut().config.rate_func = RateFunc::linear();
+    animation
+        .begin(&mut stage)
+        .map_err(|error| fail(format!("MoveAlongPath begin: {error}")))?;
+    let mut animation_matches = 0_u64;
+    for &alpha in &[0.25_f64, 0.5, 0.75] {
+        animation.interpolate(&mut stage, alpha);
+        let at = *stage
+            .get_points(dot)
+            .ok_or_else(|| fail("the dot lost its points"))?
+            .first()
+            .ok_or_else(|| fail("the dot lost its point"))?;
+        let want = stage
+            .point_from_proportion(path, alpha)
+            .map_err(|error| fail(format!("proportion({alpha}): {error}")))?;
+        if (at[0] - want[0]).abs() > 1e-3 || (at[1] - want[1]).abs() > 1e-3 {
+            return Err(fail(format!(
+                "BN-03: MoveAlongPath at α={alpha} sat at ({}, {}), want ({}, {})",
+                at[0], at[1], want[0], want[1]
+            )));
+        }
+        animation_matches += 1;
+    }
+
+    let materializations = stage.path_query_stats().materializations;
+    if materializations != 1 {
+        return Err(fail(format!(
+            "unchanged path rebuilt its world-space table {materializations} times"
+        )));
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.move_along_path_arclength")
+            .field("equal_steps", truth(worst_deviation / mean_step <= 0.01))
+            .field("animation_matches", animation_matches)
+            .field("path_materializations", materializations),
+    );
+    ctx.counter("parity_arclength_animation_matches", animation_matches);
+    Ok(RunOutcome::ok()
+        .with_counter("parity_arclength_animation_matches", animation_matches)
+        .with_counter("parity_arclength_path_materializations", materializations))
+}
+
+/// A real Scene updater removes an active motion path after the first frame.
+/// Both playback and skip must return the path's error before the next frame
+/// advances or reaches the sink; a cached last position is not success.
+fn failure_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((4, 1));
+    let mut emitted_frames = 0_u64;
+    for skip in [false, true] {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: 4,
+                skip_animations: skip,
+                preview_while_skipping: false,
+                ..RuntimeConfig::default()
+            },
+            123,
+        )
+        .map_err(|error| fail(format!("motion failure scene: {error}")))?;
+        let path = parity_vmob(
+            scene.stage_mut(),
+            &[[-2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [2.0, 0.0, 0.0]],
+        );
+        let moving = parity_vmob(scene.stage_mut(), &[[0.0; 3]]);
+        let controller = scene.stage_mut().add(Mobject::new());
+        scene
+            .add(&[moving, controller])
+            .map_err(|error| fail(format!("add motion actors: {error}")))?;
+        scene
+            .stage_mut()
+            .add_updater(
+                controller,
+                move |stage, _| {
+                    if stage.time() > 0.0 && stage.contains(path) {
+                        assert!(stage.is_updating_suspended(moving));
+                        stage.delete(path).expect("the updater owns its live path");
+                    }
+                },
+                false,
+            )
+            .map_err(|error| fail(format!("attach path removal: {error}")))?;
+        let mut motion = MoveAlongPath::new(moving, path);
+        motion.state_mut().config.rate_func = RateFunc::linear();
+        motion.state_mut().config.suspend_mobject_updating = true;
+        let mut sink = PacketSink::default();
+        let result = scene.play(vec![Box::new(motion)], PlayOverrides::default(), &mut sink);
+        if !matches!(
+            result,
+            Err(SceneError::Animation(fmn_anim::AnimError::StaleHandle(mob))) if mob == path
+        ) {
+            return Err(fail(format!(
+                "removed MoveAlongPath input did not reach Scene.play (skip={skip}): {result:?}"
+            )));
+        }
+        if scene.time().frames() != 1 || sink.packets.len() != usize::from(!skip) {
+            return Err(fail(format!(
+                "failed motion advanced or emitted another frame (skip={skip}, time={}, captures={})",
+                scene.time().frames(),
+                sink.packets.len()
+            )));
+        }
+        if scene.stage().is_updating_suspended(moving) {
+            return Err(fail("failed motion left the animated object suspended"));
+        }
+        emitted_frames += sink.packets.len() as u64;
+    }
+    ctx.event(
+        LogEvent::new("e2e.failure.move_along_path")
+            .field("modes_checked", 2_u64)
+            .field("emitted_frames", emitted_frames)
+            .field("refused_before_advance", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("motion_failure_modes", 2)
+        .with_counter("motion_failure_emitted_frames", emitted_frames))
+}
+
+/// §11.3 span map — `tex_to_color_map` colors by SOURCE identity. The
+/// constructor map rides `Typeset::occurrences`: two source occurrences of
+/// one substring get independent fates, the longer overlapping entry wins
+/// exactly its own span, unmapped glyphs keep the default white, and each
+/// mapped ordinal is the glyph of the matched source span (the
+/// two-render-and-align hack stays dead).
+fn parity_tex_span_map_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((FPS, 1));
+    let corpus = scene_goldens::corpus();
+    let t2c = [("x", RED_C), ("x^2", TEAL_B), ("y", BLUE_C)];
+    let built = fmn_library::Tex::new("x + x^2 + y")
+        .t2c(&t2c)
+        .build(&corpus.tex)
+        .map_err(|error| fail(format!("tex builds: {error}")))?;
+
+    let fill_of = |ord: usize| built.vmob.children()[ord].style().fill_color;
+    let all_fill = |ords: &[usize], color: Srgb| ords.iter().all(|&ord| fill_of(ord) == color);
+
+    // Two distinct source occurrences of "x" with independent fates: the
+    // standalone x is RED, the x inside the later "x^2" span is TEAL_B.
+    let x_occurrences = built.occurrences("x");
+    if x_occurrences.len() != 2 {
+        return Err(fail(format!(
+            "the span map found {} occurrences of \"x\", want 2",
+            x_occurrences.len()
+        )));
+    }
+    if !all_fill(&x_occurrences[0], RED_C) || !all_fill(&x_occurrences[1], TEAL_B) {
+        return Err(fail(
+            "t2c did not give the two \"x\" occurrences their independent mapped fills",
+        ));
+    }
+    // The longer overlapping entry wins exactly its own span: both glyphs
+    // of the second term, and nothing else.
+    let x_squared = built.occurrences("x^2");
+    if x_squared.len() != 1 || x_squared[0].len() != 2 || !all_fill(&x_squared[0], TEAL_B) {
+        return Err(fail(format!(
+            "the \"x^2\" span mapped {} occurrence(s) with coverage {:?}",
+            x_squared.len(),
+            x_squared.first()
+        )));
+    }
+    // "y" maps by identity; unmapped glyphs keep the default white.
+    let y = built.occurrences("y");
+    let plus = built.occurrences("+");
+    if y.len() != 1 || !all_fill(&y[0], BLUE_C) {
+        return Err(fail("the mapped \"y\" glyph is not BLUE_C"));
+    }
+    if plus.len() != 2 || !plus.iter().all(|ords| all_fill(ords, WHITE)) {
+        return Err(fail(
+            "unmapped \"+\" glyphs must keep the default white fill",
+        ));
+    }
+    // The mapped ordinal is the glyph of the matched source span — the
+    // span map, not a render-and-align assignment.
+    let first_x = x_occurrences[0][0];
+    let is_x_glyph = matches!(
+        built.typeset.subs[first_x].prim,
+        Prim::Glyph(glyph) if built.typeset.layout.glyphs[glyph].ch == 'x'
+    );
+    if !is_x_glyph {
+        return Err(fail(
+            "the ordinal selected by the span map is not the glyph of the matched source span",
+        ));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_span_map_t2c")
+            .field("x_occurrences", x_occurrences.len() as u64)
+            .field("plus_occurrences", plus.len() as u64),
+    );
+    ctx.counter("parity_t2c_source_identity", 1);
+    Ok(RunOutcome::ok().with_counter("parity_t2c_source_identity", 1))
+}
+
+/// fm-zxxy: native CM recipes survive Tex construction, source-based colour
+/// selection, Stage adoption and a real certified raster frame.
+fn parity_tex_cm_recipes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let engine = &scene_goldens::corpus().tex;
+    let radical = r"\sqrt{\dfrac{\dfrac{a}{b}}{\dfrac{c}{d}}}";
+    let mut members = Vec::new();
+    for (source, selection, integral, count) in [
+        (r"\iint_D f\,dA", r"\iint", true, 1),
+        (r"\iiint_V f\,dV", r"\iiint", true, 1),
+        (radical, radical, false, 5),
+    ] {
+        let built = fmn_library::Tex::new(source)
+            .t2c(&[(selection, RED_C)])
+            .build(engine)
+            .map_err(|error| fail(format!("CM recipe {source:?}: {error}")))?;
+        let occurrences = built.occurrences(selection);
+        if occurrences.len() != 1 {
+            return Err(fail(format!(
+                "{selection:?} lost its single source occurrence"
+            )));
+        }
+        let ordinals = &occurrences[0];
+        let signs = built
+            .typeset
+            .subs
+            .iter()
+            .enumerate()
+            .filter(|(_, sub)| {
+                if integral {
+                    matches!(sub.prim, Prim::Path(_))
+                } else {
+                    matches!(sub.prim, Prim::Glyph(i) if built.typeset.layout.glyphs[i].ch == '√')
+                }
+            })
+            .collect::<Vec<_>>();
+        if signs.len() != count || !signs.iter().all(|(i, _)| ordinals.contains(i)) {
+            return Err(fail(format!(
+                "{source:?}: expected {count} source-selected CM pieces, got {}",
+                signs.len()
+            )));
+        }
+        if integral && ordinals.len() != 1 {
+            return Err(fail(format!(
+                "{selection:?}: an integral command must be one source part"
+            )));
+        }
+        if !ordinals
+            .iter()
+            .all(|&i| built.vmob.children()[i].style().fill_color == RED_C)
+        {
+            return Err(fail(format!(
+                "{selection:?}: colour did not reach every selected primitive"
+            )));
+        }
+        members.push(built.vmob);
+    }
+    let mut stage = Stage::new();
+    let group = stage.add(VMobject::arranged(members, RIGHT, 0.4, [0.0; 3]).moved_to([0.0; 3]));
+    stage
+        .add_to_scene(group)
+        .map_err(|error| fail(format!("show CM recipes: {error}")))?;
+    let rendered = render_certified_doc(&stage);
+    if rendered == render_certified_doc(&Stage::new()) {
+        return Err(fail("CM recipes produced a blank certified frame"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_cm_recipes")
+            .field("formulas", 3_u64)
+            .field("integral_source_parts", 2_u64)
+            .field("radical_pieces", 5_u64)
+            .field("visible", "true"),
+    );
+    Ok(RunOutcome::ok().with_counter("tex_cm_recipe_formulas", 3))
+}
+
+/// fm-w1c0 proposal: family reversal preserves a filled contour, with an
+/// independently constructed raw-reversal negative drawn by the real renderer.
+fn lifecycle_family_reversal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_core::constants::WHITE;
+    use fmn_geom::QuadPath;
+    use fmn_library::style::Style;
+
+    let points = vec![
+        [-1.0, -1.0, 0.0],
+        [-1.0, 0.0, 0.0],
+        [-1.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [1.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [-1.0, -1.0, 0.0],
+    ];
+    let path = QuadPath::from_points(points.clone()).map_err(|e| fail(e.to_string()))?;
+    let style = Style::default().fill(WHITE, 1.0).stroke(WHITE, 0.0, 0.0);
+    let mut stage = Stage::new();
+    let mob = stage.add(VMobject::from_path(&path).with_style(style));
+    stage.add_to_scene(mob).map_err(|e| fail(e.to_string()))?;
+    let before = render_certified_doc(&stage);
+    if before == render_certified_doc(&Stage::new()) {
+        return Err(fail("the reversal fixture must draw visible ink"));
+    }
+    stage
+        .reverse_family_points(mob)
+        .map_err(|e| fail(e.to_string()))?;
+    let points_after = stage
+        .get_object_points(mob)
+        .ok_or_else(|| fail("lost points"))?;
+    let reversed_path = QuadPath::from_points(points_after).map_err(|e| fail(e.to_string()))?;
+    let contours = reversed_path.subpaths().len();
+    let pixels_equal = before == render_certified_doc(&stage);
+    if contours != 1 || !pixels_equal {
+        return Err(fail(format!(
+            "reversal contours={contours}, pixels_equal={pixels_equal}"
+        )));
+    }
+
+    let mut raw = points;
+    raw.reverse();
+    let raw_path = QuadPath::from_points(raw).map_err(|e| fail(e.to_string()))?;
+    let mut broken = Stage::new();
+    let bad = broken.add(VMobject::from_path(&raw_path).with_style(style));
+    broken.add_to_scene(bad).map_err(|e| fail(e.to_string()))?;
+    if render_certified_doc(&broken) == before {
+        return Err(fail("the real frame oracle missed the raw-reversal defect"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.family_reversal")
+            .field("contours", 1_u64)
+            .field("pixels_equal", 1_u64)
+            .field("planted_pixels_differ", 1_u64),
+    );
+    Ok(RunOutcome::ok().with_counter("family_reversal_pixels_equal", 1))
+}
+
+/// fm-j3ve: a native Prismify cap keeps disconnected contours disconnected,
+/// through the shipping PNG route, with an independently authored point oracle.
+fn prismify_compound_cap_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_geom::QuadPath;
+    use fmn_library::{Prismify, style::Style};
+
+    struct Cap(VMobject);
+    impl fmn::SceneConstruct for Cap {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(self.0.clone())?;
+            Ok(())
+        }
+    }
+    let mut source = QuadPath::new();
+    let mut expected = QuadPath::new();
+    for x in [-2.0, 1.0] {
+        source.start_new_path([x, -0.75, 0.0]);
+        for point in [
+            [x + 1.0, -0.75, 0.0],
+            [x + 1.0, 0.75, 0.0],
+            [x, 0.75, 0.0],
+            [x, -0.75, 0.0],
+        ] {
+            source
+                .add_line_to(point, true)
+                .map_err(|e| fail(e.to_string()))?;
+        }
+    }
+    // Author the two reversed contours independently, without using either
+    // VMobject::reversed_points or QuadPath::reverse_points for the oracle.
+    for x in [1.0, -2.0] {
+        expected.start_new_path([x, -0.75, -1.0]);
+        for point in [
+            [x, 0.75, -1.0],
+            [x + 1.0, 0.75, -1.0],
+            [x + 1.0, -0.75, -1.0],
+            [x, -0.75, -1.0],
+        ] {
+            expected
+                .add_line_to(point, true)
+                .map_err(|e| fail(e.to_string()))?;
+        }
+    }
+    let style = Style::default().fill(WHITE, 1.0).stroke(WHITE, 12.0, 1.0);
+    let shell = Prismify::new(VMobject::from_path(&source).with_style(style)).build();
+    // Sidewalls have their own Reference behavior; this regression renders
+    // the actual far cap rather than allowing a sidewall to hide its seam.
+    let cap = shell
+        .children()
+        .last()
+        .ok_or_else(|| fail("missing Prismify far cap"))?;
+    let contours = cap
+        .path()
+        .map_err(|e| fail(e.to_string()))?
+        .subpaths()
+        .len();
+    let oracle = VMobject::from_path(&expected)
+        .with_style(style)
+        .with_uniforms(cap.uniforms());
+    let mut broken_points = source
+        .points()
+        .iter()
+        .map(|p| [p[0], p[1], -1.0])
+        .collect::<Vec<_>>();
+    broken_points.reverse();
+    let broken = cap.clone().with_points(broken_points);
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let render = |name: &str, mob: VMobject, threads| -> Result<Vec<u8>, ScenarioError> {
+        let path = format!("/{name}.png");
+        let mut options = fmn::RenderOptions::with_format(&path, fmn::RenderFormat::Png)
+            .map_err(|e| fail(e.to_string()))?;
+        options.config.camera.resolution = (128, 64);
+        options.config.camera.background_opacity = 0.0;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        let mut camera = options.camera_config().map_err(|e| fail(e.to_string()))?;
+        camera
+            .frame
+            .set_center([0.0, 0.0, -1.0])
+            .map_err(|e| fail(e.to_string()))?;
+        options.camera = Some(camera);
+        fmn::render_with_fs(&mut Cap(mob), options, fs.clone())
+            .map_err(|e| fail(format!("compound cap render: {e}")))?;
+        fs.read(&PathBuf::from(path))
+            .map_err(|e| fail(e.to_string()))
+    };
+    let expected_png = render("cap-oracle", oracle, 1)?;
+    let broken_png = render("cap-raw-reversal", broken, 1)?;
+    for threads in [1, 4, 16] {
+        let actual = render(&format!("cap-{threads}"), cap.clone(), threads)?;
+        if contours != 2 || actual != expected_png || actual == broken_png {
+            return Err(fail(format!(
+                "compound cap lost a contour or disagrees with independent pixels at {threads} threads"
+            )));
+        }
+    }
+    let image = fmn_codec::decode_png(&expected_png, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    let planted = fmn_codec::decode_png(&broken_png, &fmn_codec::PngLimits::default())
+        .map_err(|e| fail(e.to_string()))?;
+    if (image.width, image.height) != (128, 64) || (planted.width, planted.height) != (128, 64) {
+        return Err(fail("compound cap PNG dimensions changed"));
+    }
+    let alpha = |x: usize, y: usize| image.rgba[(y * 128 + x) * 4 + 3];
+    if alpha(40, 32) != 255 || alpha(88, 32) != 255 || alpha(64, 44) != 0 {
+        return Err(fail(
+            "compound cap must show both islands with a transparent gap",
+        ));
+    }
+    if planted.rgba[(44 * 128 + 64) * 4 + 3] == 0 {
+        return Err(fail("planted raw reversal must visibly bridge the gap"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.prismify_compound_cap")
+            .field("contours", contours as u64)
+            .field("thread_counts", 3_u64)
+            .field("gap_alpha", u64::from(alpha(64, 44)))
+            .field("planted_pixels_differ", 1_u64)
+            .field("sha256", sha256(&expected_png).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("prismify_cap_thread_counts", 3)
+        .with_artifact("compound-cap.png", expected_png)
+        .with_artifact("compound-cap-raw-reversal.png", broken_png))
+}
+
+/// fm-0byq: authored AMS glyphs survive native Tex construction, source
+/// colouring and the shipping PNG renderer at every certified worker count.
+fn parity_tex_ams_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{DeterminismMode, ThreadPolicy};
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+
+    struct Strip(VMobject);
+    impl fmn::SceneConstruct for Strip {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(self.0.clone())?;
+            Ok(())
+        }
+    }
+    let engine = &scene_goldens::corpus().tex;
+    // Stable face slots and authored codes come from the font encodings
+    // and Reference DVI traces, rather than being inferred from layout.
+    let cases = [
+        (r"\checkmark", '✓', 17, 0x58),
+        (r"\minus", '−', 17, 0x39),
+        (r"\circlearrowright", '↻', 17, 0x08),
+        (r"\circlearrowleft", '↺', 17, 0x09),
+        (r"\hbar", 'ℏ', 20, 0x7E),
+        (r"\nmid", '∤', 20, 0x2D),
+        (r"\mathbb{R}", 'ℝ', 20, 0x52),
+    ];
+    let faces =
+        fmd_math::faces::FaceSet::bundled().map_err(|error| fail(format!("AMS faces: {error}")))?;
+    let mut members = Vec::new();
+    for (source, semantic, face, code) in cases {
+        let built = fmn_library::Tex::new(source)
+            .t2c(&[(source, RED_C)])
+            .build(engine)
+            .map_err(|error| fail(format!("{source}: native Tex: {error}")))?;
+        let glyphs = &built.typeset.layout.glyphs;
+        let wanted = fmd_math::FaceId(face);
+        if glyphs.len() != 1
+            || glyphs[0].face != wanted
+            || glyphs[0].ch != semantic
+            || Some(glyphs[0].gid) != faces.tex_glyph(wanted, code)
+            || built.vmob.children().is_empty()
+            || !built
+                .vmob
+                .children()
+                .iter()
+                .all(|child| child.style().fill_color == RED_C)
+        {
+            return Err(fail(format!(
+                "{source}: lost authored AMS identity or source colour"
+            )));
+        }
+        members.push(built.vmob);
+    }
+    let strip = VMobject::arranged(members, RIGHT, 0.4, [0.0; 3]).moved_to([0.0; 3]);
+    let fs = Arc::new(VirtualFs::new());
+    let mut expected = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/ams-{threads}.png");
+        let mut options = fmn::RenderOptions::with_format(&path, fmn::RenderFormat::Png)
+            .map_err(|error| fail(error.to_string()))?;
+        options.config.camera.resolution = (480, 270);
+        options.config.camera.background_color = "#000000".to_owned();
+        options.config.camera.background_opacity = 1.0;
+        options.config.determinism.mode = DeterminismMode::Certified;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        let report = fmn::render_with_fs(&mut Strip(strip.clone()), options, fs.clone())
+            .map_err(|error| fail(format!("AMS PNG: {error}")))?;
+        let png = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|error| fail(error.to_string()))?;
+        let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+            .map_err(|error| fail(error.to_string()))?;
+        if report.artifact.frame_count != 1
+            || !image
+                .rgba
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[..3].iter().any(|&v| v > 0))
+            || expected.as_ref().is_some_and(|bytes| bytes != &png)
+        {
+            return Err(fail("AMS strip is blank or differs by worker count"));
+        }
+        expected = Some(png);
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_ams")
+            .field("formulas", 7_u64)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tex_ams_formulas", 7)
+        .with_counter("tex_ams_thread_counts", 3)
+        .with_artifact(
+            "ams-strip.png",
+            expected.ok_or_else(|| fail("no AMS frame"))?,
+        ))
+}
+
+/// fm-tex-metrics-glyphs-ru72: the ten formulas the bead first measured,
+/// set as one strip and rendered certified. Each formula's width holds the
+/// pinned Reference's (`fixtures/tex_reference_widths.v1.tsv`) within its
+/// row's tolerance, 3% when TeX set it only in Computer Modern and 6%
+/// otherwise. The frame's ink spans the strip's geometric width to within
+/// three pixels, so the frame draws what the layout measures.
+fn parity_tex_formula_strip_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    struct Strip(VMobject);
+    impl fmn::SceneConstruct for Strip {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(self.0.clone())?;
+            Ok(())
+        }
+    }
+    let engine = &scene_goldens::corpus().tex;
+    let mut members = Vec::new();
+    let mut worst_permille = 0_u64;
+    for line in include_str!("../fixtures/tex_reference_widths.v1.tsv")
+        .lines()
+        .filter(|line| line.starts_with("authored\t"))
+    {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let (source, class) = (fields[1], fields[5]);
+        let reference: f64 = fields[3]
+            .parse()
+            .map_err(|error| fail(format!("{source:?}: Reference width: {error}")))?;
+        let tolerance = if class == "fallback" { 0.06 } else { 0.03 };
+        let tex = fmn_library::Tex::new(source)
+            .build(engine)
+            .map_err(|error| fail(format!("{source:?} typesets: {error}")))?;
+        let (min, max) = tex
+            .vmob
+            .extent()
+            .ok_or_else(|| fail(format!("{source:?} has no extent")))?;
+        let error = (max[0] - min[0]) / reference - 1.0;
+        if error.abs() > tolerance {
+            return Err(fail(format!(
+                "{source:?}: native width {:+.2}% off the Reference's {reference} (tolerance {:.0}%)",
+                error * 100.0,
+                tolerance * 100.0
+            )));
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let permille = (error.abs() * 1000.0).round() as u64;
+        worst_permille = worst_permille.max(permille);
+        members.push(tex.vmob);
+    }
+    if members.len() != 10 {
+        return Err(fail(format!(
+            "{} authored formulas, expected 10",
+            members.len()
+        )));
+    }
+    let strip = VMobject::arranged(members, RIGHT, 0.25, [0.0; 3])
+        .scaled_about(0.75, [0.0; 3])
+        .moved_to([0.0; 3]);
+    let (min, max) = strip
+        .extent()
+        .ok_or_else(|| fail("the strip has no extent"))?;
+    let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+    let mut options = fmn::RenderOptions::with_format("/tex-strip.png", fmn::RenderFormat::Png)
+        .map_err(|error| fail(format!("strip options: {error}")))?;
+    options.config.camera.resolution = (960, 540);
+    options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+    fmn::render_with_fs(&mut Strip(strip), options, fs.clone())
+        .map_err(|error| fail(format!("render the strip: {error}")))?;
+    let png = fs
+        .read(std::path::Path::new("/tex-strip.png"))
+        .map_err(|error| fail(format!("read the strip: {error}")))?;
+    let image = fmn_codec::decode_png(&png, &fmn_codec::PngLimits::default())
+        .map_err(|error| fail(format!("decode the strip: {error}")))?;
+    let (width, height) = (image.width as usize, image.height as usize);
+    let inked = |column: usize| {
+        (0..height).any(|row| {
+            let px = &image.rgba[(row * width + column) * 4..][..3];
+            px.iter().map(|&c| u32::from(c)).sum::<u32>() > 3 * 128
+        })
+    };
+    let first = (0..width).find(|&column| inked(column));
+    let last = (0..width).rev().find(|&column| inked(column));
+    let (Some(first), Some(last)) = (first, last) else {
+        return Err(fail("the strip frame has no ink"));
+    };
+    let px_per_unit = width as f64 / (2.0 * FRAME_X_RADIUS);
+    let ink_px = (last - first + 1) as f64;
+    let geometric_px = (max[0] - min[0]) * px_per_unit;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let (ink, geometric) = (ink_px.round() as u64, geometric_px.round() as u64);
+    ctx.event(
+        LogEvent::new("e2e.parity.tex_formula_strip")
+            .field("formulas", 10_u64)
+            .field("worst_width_error_permille", worst_permille)
+            .field("ink_px", ink)
+            .field("geometric_px", geometric),
+    );
+    if (ink_px - geometric_px).abs() > 3.0 {
+        return Err(fail(format!(
+            "the strip's ink spans {ink_px} px against its geometric {geometric_px:.1} px"
+        )));
+    }
+    Ok(RunOutcome::ok().with_counter("tex_strip_formulas", 10))
+}
+
+/// §11.7 — Markdown composes `$…$` through fmd-math under fmd's own
+/// delimiter rule. An inline island is exactly the text-style `Tex` of its
+/// source, and prose dollars (`$5 and $10`) lay out as their escaped spelling
+/// rather than as italic mathematics.
+fn parity_markdown_inline_math_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    fn relative(v: &VMobject, points: &mut Vec<[f64; 3]>) {
+        points.extend_from_slice(v.points());
+        for child in v.children() {
+            relative(child, points);
+        }
+    }
+    // Shapes compare up to translation; placing a formula inside a line
+    // shifts it, and re-relativizing rounds below 1e-10 scene units.
+    let same_shape = |a: &VMobject, b: &VMobject| {
+        let (mut a_points, mut b_points) = (Vec::new(), Vec::new());
+        relative(a, &mut a_points);
+        relative(b, &mut b_points);
+        let (Some(a0), Some(b0)) = (a_points.first().copied(), b_points.first().copied()) else {
+            return a_points.is_empty() && b_points.is_empty();
+        };
+        a_points.len() == b_points.len()
+            && a_points
+                .iter()
+                .zip(&b_points)
+                .all(|(p, q)| (0..3).all(|i| ((p[i] - a0[i]) - (q[i] - b0[i])).abs() < 1e-10))
+    };
+    let corpus = scene_goldens::corpus();
+    let build = |source: &str| {
+        fmn_library::markdown::Markdown::new(source)
+            .build_with_math(&corpus.book, &corpus.tex)
+            .map_err(|error| fail(format!("Markdown {source:?} builds: {error}")))
+    };
+
+    let doc = build("area $x_i+y_j$ here")?;
+    let words = doc.blocks[0].vmob.children();
+    let formula = fmn_library::Tex::new("x_i+y_j")
+        .math_style(fmn_tex::Style::Text)
+        .build(&corpus.tex)
+        .map_err(|error| fail(format!("tex builds: {error}")))?;
+    let island = words.len() == 3 && same_shape(&words[1], &formula.vmob);
+    let prose = ["It costs $5 and $10 today.", "a $ x$ b", "a $x $ b"];
+    let mut literal = 0u64;
+    for source in prose {
+        if same_shape(
+            &build(source)?.vmob,
+            &build(&source.replace('$', r"\$"))?.vmob,
+        ) {
+            literal += 1;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.markdown_inline_math")
+            .field("island_is_text_style_tex", island)
+            .field("prose_sources", prose.len() as u64)
+            .field("prose_sources_literal", literal),
+    );
+    if !island {
+        return Err(fail(
+            "the inline island is not the text-style Tex of its source between two words",
+        ));
+    }
+    if literal != prose.len() as u64 {
+        return Err(fail(format!(
+            "{literal} of {} prose-dollar sources laid out as their escaped spelling",
+            prose.len()
+        )));
+    }
+    ctx.counter("parity_markdown_prose_dollars", literal);
+    Ok(RunOutcome::ok().with_counter("parity_markdown_prose_dollars", literal))
+}
+
+// ---------------------------------------------------------------------------
+// The long-form regime: the Hoeffding's D explainer
+// ---------------------------------------------------------------------------
+
+/// The explainer's background as RGB8 (`kit::BACKGROUND`, `#RRGGBB`).
+fn hoeffding_background() -> Result<[u8; 3], ScenarioError> {
+    let hex = kit::BACKGROUND.trim_start_matches('#');
+    let channel = |at: usize| {
+        hex.get(at..at + 2)
+            .and_then(|digits| u8::from_str_radix(digits, 16).ok())
+            .ok_or_else(|| fail(format!("background {:?} is not #RRGGBB", kit::BACKGROUND)))
+    };
+    Ok([channel(0)?, channel(2)?, channel(4)?])
+}
+
+/// The worked example's statistics, pinned before any chapter renders: the
+/// article's Q, D1/D2/D3 and D = 0.4107142857.
+fn hoeffding_self_check(ctx: &mut RunCtx) -> Result<(), ScenarioError> {
+    let worked = stats::hoeffding(&stats::HEIGHTS, &stats::WEIGHTS);
+    let pinned = worked.q == [1.0, 2.0, 4.0, 4.0, 7.0, 3.0, 4.0, 8.5, 8.5, 8.5]
+        && (worked.d1, worked.d2, worked.d3) == (196.25, 10696.0, 1329.5)
+        && (worked.d - 0.410_714_285_714_285_7).abs() < 1e-15;
+    ctx.event(
+        LogEvent::new("e2e.hoeffding.self_check")
+            .field("d", format!("{:.10}", worked.d))
+            .field("pinned", truth(pinned)),
+    );
+    if !pinned {
+        return Err(fail(format!(
+            "Hoeffding's D left the worked example: {worked:?}"
+        )));
+    }
+    ctx.counter("hoeffding_self_check", 1);
+    Ok(())
+}
+
+/// Peak resident set size of this process in KiB (Linux `VmHWM`; 0 where
+/// unavailable). Calibration data only, never a gate.
+fn peak_rss_kib() -> u64 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|status| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix("VmHWM:"))
+                .and_then(|rest| rest.trim().trim_end_matches("kB").trim().parse().ok())
+        })
+        .unwrap_or(0)
+}
+
+/// Fast-tier geometry: 160x90 at 2 fps (566 frames, 84 s unoptimized). Every
+/// play and updater still runs; at 10 fps the unoptimized test profile took
+/// 327 s for 2,572 frames, too much for the per-commit tier.
+const HOEFFDING_FAST: (u32, u32, u32) = (160, 90, 2);
+
+/// fm-longform-native-e2e-hoeffding-l59d, fast tier: the long-form regime.
+/// All eight chapters of the Hoeffding's D explainer (dozens of plays each,
+/// `always_redraw` readouts recomputing D from live dot positions every
+/// frame, `TransformMatchingTex`, 150-dot `Transform` morphs) render silently
+/// through `fmn::render` to PNG sequences. Each chapter publishes one frame
+/// per clock frame; its last frame is the bare background, because every
+/// chapter closes by fading everything out; and nine in ten of its frames
+/// carry ink, so no chapter plays to an empty screen.
+fn hoeffding_d_chapters_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    hoeffding_self_check(ctx)?;
+    let (width, height, fps) = HOEFFDING_FAST;
+    let background = hoeffding_background()?;
+    let mut total_frames = 0;
+    let mut chapters_clean = 0;
+    for entry in chapters::registry() {
+        let started = std::time::Instant::now();
+        let kit = kit::Kit::new().map_err(|error| fail(format!("kit: {error}")))?;
+        let mut scene = (entry.make)(kit);
+        let root = format!("/hoeffding/{}", entry.key);
+        let mut options = fmn::RenderOptions::with_format(&root, fmn::RenderFormat::PngSequence)
+            .map_err(|error| fail(format!("bundled config: {error}")))?;
+        options.config.camera.resolution = (width, height);
+        options.config.camera.fps = fps;
+        options.config.camera.background_color = kit::BACKGROUND.to_owned();
+        options.typeset_cache = false;
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let report = fmn::render_with_fs(scene.as_mut(), options, fs.clone())
+            .map_err(|error| fail(format!("{}: {error}", entry.key)))?;
+        let frames = report.artifact.frame_count;
+        let clock_frames = u64::try_from(report.scene.time.frames()).unwrap_or(u64::MAX);
+        let mut inked = 0_u64;
+        let mut last_inked = true;
+        for index in 0..frames {
+            let path = PathBuf::from(format!("{root}/frame_{index:06}.png"));
+            let bytes = fs
+                .read(&path)
+                .map_err(|error| fail(format!("read {}: {error}", path.display())))?;
+            let image = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(format!("decode {}: {error}", path.display())))?;
+            let ink = image.rgba.as_chunks::<4>().0.iter().any(|pixel| {
+                pixel[..3]
+                    .iter()
+                    .zip(background)
+                    .any(|(&channel, ground)| channel.abs_diff(ground) > 8)
+            });
+            inked += u64::from(ink);
+            last_inked = ink;
+        }
+        let clean = frames > 0 && frames == clock_frames && !last_inked && inked * 10 >= frames * 9;
+        ctx.event(
+            LogEvent::new("e2e.hoeffding.chapter")
+                .field("chapter", entry.key)
+                .field("frames", frames)
+                .field("clock_frames", clock_frames)
+                .field("plays", report.scene.play_count)
+                .field("inked_frames", inked)
+                .field("last_frame_blank", truth(!last_inked))
+                .field("wall_ms", started.elapsed().as_millis().to_string())
+                .field("clean", truth(clean)),
+        );
+        if !clean {
+            return Err(fail(format!(
+                "{}: {frames} frames for {clock_frames} clock frames, {inked} inked, last inked: {last_inked}",
+                entry.key
+            )));
+        }
+        total_frames += frames;
+        chapters_clean += 1;
+    }
+    ctx.counter("hoeffding_chapters", chapters_clean);
+    ctx.counter("hoeffding_frames", total_frames);
+    Ok(RunOutcome::ok()
+        .with_counter("hoeffding_self_check", 1)
+        .with_counter("hoeffding_chapters", chapters_clean)
+        .with_counter("hoeffding_frames", total_frames))
+}
+
+/// fm-longform-native-e2e-hoeffding-l59d, the second front door: two of the
+/// explainer's segments written as ordinary `manimlib` scene code
+/// (crates/fmn-python/tests/hoeffding_portal.py, executed unedited: NumPy
+/// data, `always_redraw` readouts recomputing D from live dot centres,
+/// `ValueTracker.animate`, `LaggedStartMap`, `ShowPassingFlash`, `Axes.c2p`)
+/// render through the portal's production route at 160x90, 4 fps. Each
+/// publishes one PNG per reported frame, nine in ten of them show more than
+/// the background, and the last does (both scenes end on a full picture).
+fn hoeffding_d_portal_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("hoeffding_d_portal")?;
+    let scenes = manimlib::run_portal_gauntlet_hoeffding(&root, (160, 90), 4)
+        .map_err(|error| fail(format!("Hoeffding portal segments: {error}")))?;
+    let mut total_frames = 0;
+    let mut scenes_clean = 0;
+    for (scene, frames) in &scenes {
+        let directory = root.join(scene);
+        let mut paths: Vec<PathBuf> = std::fs::read_dir(&directory)
+            .map_err(|error| fail(format!("read {}: {error}", directory.display())))?
+            .map(|entry| {
+                entry
+                    .map(|entry| entry.path())
+                    .map_err(|error| fail(format!("read {scene} directory entry: {error}")))
+            })
+            .collect::<Result<_, _>>()?;
+        paths.retain(|path| path.extension().is_some_and(|extension| extension == "png"));
+        paths.sort();
+        let mut drawn = 0_u64;
+        let mut last_drawn = false;
+        for path in &paths {
+            let bytes = std::fs::read(path)
+                .map_err(|error| fail(format!("read {}: {error}", path.display())))?;
+            let image = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+                .map_err(|error| fail(format!("decode {}: {error}", path.display())))?;
+            // Drawn: some pixel departs from the frame's corner (background).
+            let pixels = image.rgba.as_chunks::<4>().0;
+            let corner = pixels.first().copied().unwrap_or_default();
+            last_drawn = pixels.iter().any(|pixel| {
+                pixel[..3]
+                    .iter()
+                    .zip(&corner[..3])
+                    .any(|(a, b)| a.abs_diff(*b) > 8)
+            });
+            drawn += u64::from(last_drawn);
+        }
+        let published = paths.len() as u64;
+        let clean = *frames > 0 && published == *frames && last_drawn && drawn * 10 >= frames * 9;
+        ctx.event(
+            LogEvent::new("e2e.hoeffding.portal_scene")
+                .field("scene", scene.as_str())
+                .field("frames", *frames)
+                .field("published", published)
+                .field("drawn_frames", drawn)
+                .field("last_frame_drawn", truth(last_drawn))
+                .field("clean", truth(clean)),
+        );
+        if !clean {
+            return Err(fail(format!(
+                "{scene}: {frames} frames reported, {published} published, {drawn} drawn, last drawn: {last_drawn}"
+            )));
+        }
+        total_frames += frames;
+        scenes_clean += 1;
+    }
+    ctx.counter("hoeffding_portal_scenes", scenes_clean);
+    ctx.counter("hoeffding_portal_frames", total_frames);
+    Ok(RunOutcome::ok()
+        .with_counter("hoeffding_portal_scenes", scenes_clean)
+        .with_counter("hoeffding_portal_frames", total_frames))
+}
+
+/// fm-longform-native-e2e-hoeffding-l59d, full tier (`FMN_E2E_FULL=1`; run it
+/// under `--release`): the whole explainer at 1920x1080, 60 fps, through the
+/// host's ffmpeg to one MP4 per chapter with the procedural score mixed
+/// natively. Each chapter's video and soundtrack agree to within one frame,
+/// its score cues mix without clipping, and the encode names the hashed
+/// ffmpeg it ran. Wall time and peak RSS are logged as calibration data,
+/// never gated. The MP4s stay in the scenario directory the log names.
+fn hoeffding_d_full_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    hoeffding_self_check(ctx)?;
+    let dir = scenario_dir("hoeffding_d_full")?;
+    let audio = dir.join("audio");
+    std::fs::create_dir_all(&audio)
+        .map_err(|error| fail(format!("create {}: {error}", audio.display())))?;
+    let started = std::time::Instant::now();
+    let mut total_frames = 0;
+    let mut chapters_clean = 0;
+    for entry in chapters::registry() {
+        let chapter_started = std::time::Instant::now();
+        let mut kit = kit::Kit::new().map_err(|error| fail(format!("kit: {error}")))?;
+        kit.score = Some(sound::Score {
+            dir: audio.clone(),
+            under_voice: false,
+        });
+        let mut scene = (entry.make)(kit);
+        let mut options = fmn::RenderOptions::with_format(
+            dir.join(format!("{}.mp4", entry.key)),
+            fmn::RenderFormat::Mp4,
+        )
+        .map_err(|error| fail(format!("bundled config: {error}")))?;
+        options.config.camera.resolution = (1920, 1080);
+        options.config.camera.fps = 60;
+        options.config.camera.background_color = kit::BACKGROUND.to_owned();
+        options.typeset_cache = false;
+        options.ffmpeg = Some(fmn::FfmpegCapability {
+            runner: Arc::new(fmn_platform::process::StdProcessRunner),
+            locator: Arc::new(fmn_platform::process::StdFfmpegLocator::from_host_path()),
+            // The boundary refuses a workdir under a group-writable ancestor,
+            // so its private jobs stay in the system temp dir.
+            workdir_root: std::env::temp_dir(),
+        });
+        let report =
+            fmn::render_with_fs(scene.as_mut(), options, Arc::new(fmn_platform::fs::StdFs))
+                .map_err(|error| fail(format!("{}: {error}", entry.key)))?;
+        let frames = report.artifact.frame_count;
+        let clock_frames = u64::try_from(report.scene.time.frames()).unwrap_or(u64::MAX);
+        let soundtrack = report.artifact.soundtrack.as_ref();
+        // Durations as exact rationals: |samples/rate - frames/fps| <= 1/fps.
+        let drift_within_a_frame = soundtrack.is_some_and(|track| {
+            let audio = u128::from(track.sample_frames) * 60;
+            let video = u128::from(frames) * u128::from(track.sample_rate);
+            audio.abs_diff(video) <= u128::from(track.sample_rate)
+        });
+        let cues = soundtrack.map_or(0, |track| track.cues_mixed);
+        let clipped = soundtrack.map_or(0, |track| track.clipped_samples);
+        let fingerprint = report
+            .artifact
+            .ffmpeg
+            .first()
+            .map(|invocation| invocation.provenance.tool_sha256_hex.clone())
+            .unwrap_or_default();
+        let clean = frames > 0
+            && frames == clock_frames
+            && drift_within_a_frame
+            && cues > 0
+            && clipped == 0
+            && fingerprint.len() == 64;
+        ctx.event(
+            LogEvent::new("e2e.hoeffding.full_chapter")
+                .field("chapter", entry.key)
+                .field("frames", frames)
+                .field("clock_frames", clock_frames)
+                .field("bytes", report.artifact.bytes)
+                .field("cues_mixed", cues as u64)
+                .field("clipped_samples", clipped)
+                .field("av_within_one_frame", truth(drift_within_a_frame))
+                .field("ffmpeg_sha256", fingerprint.as_str())
+                .field("path", report.artifact.path.display().to_string())
+                .field("wall_ms", chapter_started.elapsed().as_millis().to_string())
+                .field("clean", truth(clean)),
+        );
+        if !clean {
+            return Err(fail(format!(
+                "{}: {frames} frames ({clock_frames} on the clock), soundtrack {soundtrack:?}, ffmpeg {fingerprint:?}",
+                entry.key
+            )));
+        }
+        total_frames += frames;
+        chapters_clean += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.hoeffding.full_calibration")
+            .field("frames", total_frames)
+            .field("wall_ms", started.elapsed().as_millis().to_string())
+            .field("peak_rss_kib", peak_rss_kib())
+            .field("dir", dir.display().to_string()),
+    );
+    ctx.counter("hoeffding_full_chapters", chapters_clean);
+    Ok(RunOutcome::ok()
+        .with_counter("hoeffding_self_check", 1)
+        .with_counter("hoeffding_full_chapters", chapters_clean))
+}
+
+/// fm-portal-batch-schema-e2e-alignment-d2zo: parallel batch console checkpoint.
+fn python_parallel_batch_checkpoint_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let dir = scenario_dir("python_parallel_batch_checkpoint")?;
+    let (cli_checks, resume_checks) = manimlib::run_portal_gauntlet_parallel_batch_checkpoint(&dir)
+        .map_err(|error| fail(format!("Python parallel batch checkpoint: {error}")))?;
+    let total = cli_checks + resume_checks;
+    ctx.event(
+        LogEvent::new("e2e.python.parallel_batch_checkpoint")
+            .field("checks", total)
+            .field("clean", "true"),
+    );
+    ctx.counter("parallel_batch_checks", total);
+    Ok(RunOutcome::ok().with_counter("parallel_batch_checks", total))
+}
+
+/// fm-restore-green-ci-tqsr.23: actual process transport, no fake clip recovery.
+fn python_worker_receipt_shutdown_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.record_asset(
+        "python/process-batch.py",
+        include_bytes!("../../fmn-python/python/fmn_python/_process_batch.py"),
+    );
+    ctx.record_asset(
+        "python/process-receipt.py",
+        include_bytes!("../../fmn-python/python/fmn_python/_process_receipt.py"),
+    );
+    ctx.record_asset(
+        "python/worker-receipt-tests.py",
+        include_bytes!("../../fmn-python/tests/test_process_batch.py"),
+    );
+    let checks = manimlib::run_portal_gauntlet_worker_receipt_shutdown()
+        .map_err(|error| fail(format!("Python worker receipt shutdown: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.worker_receipt_shutdown").field("checks", checks));
+    ctx.counter("worker_receipt_checks", checks);
+    Ok(RunOutcome::ok().with_counter("worker_receipt_checks", checks))
+}
+
+/// fm-sq8.5, fm-sq8.7, fm-soa-mirrors-dead-p0gc: Send+Sync FrozenRenderState
+/// compilation and zero-allocation RetainedFrameRenderer reuse.
+fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{
+        EngineIdentity, RetainedFrameRenderer, RetainedFrameRendererConfig, VectorFrameCompiler,
+    };
+    let case = scene_goldens::scene_named("circle_tex_label.v1")
+        .ok_or_else(|| fail("circle_tex_label.v1 scene is missing"))?;
+    let built = (case.build)(scene_goldens::corpus());
+    let config = scene_goldens::frame_config();
+    let rcfg = RetainedFrameRendererConfig {
+        frame: config,
+        tiling: TILING,
+        threads: 1,
+        engine: EngineIdentity::certified(),
+    };
+    let frozen = built.stage.freeze_render_state();
+    let mut compiler_a =
+        VectorFrameCompiler::new(rcfg).map_err(|error| fail(format!("compiler_a new: {error}")))?;
+    let _via_stage = compiler_a
+        .capture(&built.stage, 0)
+        .map_err(|error| fail(format!("capture stage: {error}")))?;
+    let worker_stats = std::thread::spawn(move || {
+        let worker_stage = frozen.materialize();
+        let mut compiler_b = VectorFrameCompiler::new(rcfg).expect("compiler_b new");
+        let _via_frozen = compiler_b
+            .capture(&worker_stage, 0)
+            .expect("capture frozen");
+        compiler_b.stats()
+    })
+    .join()
+    .map_err(|_| fail("worker materialize panicked"))?;
+    let frozen_equal = compiler_a.stats() == worker_stats;
+
+    let mut renderer = RetainedFrameRenderer::new(rcfg)
+        .map_err(|error| fail(format!("retained renderer new: {error}")))?;
+    renderer
+        .render(&built.stage, 0)
+        .map_err(|error| fail(format!("warm retained render: {error}")))?;
+    let warm_sync = renderer.plan().stats();
+    renderer
+        .render(&built.stage, 0)
+        .map_err(|error| fail(format!("measured retained render: {error}")))?;
+    let measured_sync = renderer.plan().stats();
+    let allocs = renderer.allocation_stats().heap_allocs_this_frame;
+    let steady_clean = warm_sync.shapes_compiled > 0
+        && measured_sync.shapes_compiled == 0
+        && measured_sync.styles_rebuilt == 0
+        && allocs == 0;
+    ctx.event(
+        LogEvent::new("e2e.render.frozen_retained_pipeline")
+            .field("frozen_equal", truth(frozen_equal))
+            .field("steady_clean", truth(steady_clean))
+            .field("allocs", allocs),
+    );
+    if !frozen_equal || !steady_clean {
+        return Err(fail(format!(
+            "frozen/retained pipeline failed: frozen_equal={frozen_equal}, steady_clean={steady_clean}, allocs={allocs}"
+        )));
+    }
+    ctx.counter("frozen_equal", u64::from(frozen_equal));
+    ctx.counter("steady_clean", u64::from(steady_clean));
+    Ok(RunOutcome::ok()
+        .with_counter("frozen_equal", 1)
+        .with_counter("steady_clean", 1))
+}
+
+/// Actual Atlas constructors reach conservative circular stroke saturation;
+/// all sampling policies preserve worker-independent bytes after live edits.
+fn circular_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{AaPolicy, Tiling};
+
+    let mut stage = Stage::new();
+    let circle = stage.add(
+        Circle::new()
+            .radius(0.9)
+            .arc_center([-0.6, 0.0, 0.0])
+            .build()
+            .into(),
+    );
+    let arc = stage.add(
+        fmn_library::Arc::new()
+            .start_angle(5.7)
+            .angle(-4.8)
+            .radius(0.9)
+            .arc_center([0.6, 0.1, 0.0])
+            .build()
+            .map_err(|error| fail(format!("circular stroke constructor: {error}")))?
+            .into(),
+    );
+    stage
+        .add_many_to_scene(&[circle, arc])
+        .map_err(|error| fail(error.to_string()))?;
+    let points = stage
+        .get_mut(circle)
+        .ok_or_else(|| fail("missing circular stroke"))?
+        .buffer
+        .export_field_view("point", true)
+        .ok_or_else(|| fail("missing circle points"))?;
+    let revision = stage
+        .get(circle)
+        .ok_or_else(|| fail("missing circle"))?
+        .buffer
+        .field_revision("point");
+    let base = FrameConfig::new(
+        Viewport {
+            width: 144,
+            height: 112,
+        },
+        ScreenMap {
+            scale: 36.0,
+            origin: [72.125, 56.375],
+            y_up: true,
+        },
+        fmn_core::color::LinearRgba {
+            r: 0.02,
+            g: 0.03,
+            b: 0.05,
+            a: 1.0,
+        },
+    );
+    let tiling = Tiling {
+        macro_tile: 32,
+        fine_tile: 16,
+    };
+    let mut previous: [Vec<u8>; 3] = std::array::from_fn(|_| Vec::new());
+    let mut frames = 0_u64;
+    let mut admitted_frames = 0_u64;
+    let mut last_digest = None;
+    for edit in 0..3 {
+        if edit > 0 {
+            for index in 0..points.len() {
+                let mut point = points
+                    .read(index, "point")
+                    .ok_or_else(|| fail("circle point missing"))?;
+                if edit == 1 {
+                    point[0] += 0.125;
+                } else if index == 1 {
+                    point[1] += 0.3;
+                }
+                if !points.write_foreign(index, "point", &point) {
+                    return Err(fail("circle foreign write refused"));
+                }
+            }
+        }
+        if stage
+            .get(circle)
+            .ok_or_else(|| fail("circle removed"))?
+            .buffer
+            .field_revision("point")
+            != revision
+        {
+            return Err(fail(
+                "foreign-write witness unexpectedly advanced its revision",
+            ));
+        }
+        for (aa_index, aa) in [AaPolicy::Adaptive, AaPolicy::Ssaa2x, AaPolicy::Ssaa4x]
+            .into_iter()
+            .enumerate()
+        {
+            let config = base.with_aa_policy(aa);
+            let mut plan = RenderPlan::new();
+            plan.sync(&stage, 0)
+                .map_err(|error| fail(error.to_string()))?;
+            let mono =
+                MonoTable::build(&plan, config.map).map_err(|error| fail(error.to_string()))?;
+            let bins = Binning::build(&plan, config.viewport, tiling, config.map)
+                .map_err(|error| fail(error.to_string()))?;
+            let job = FrameJob::with_identity(&plan, &mono, &bins, config, EngineIdentity::fast())
+                .map_err(|error| fail(error.to_string()))?;
+            if edit < 2 {
+                if job.circular_stroke_count() != 2 {
+                    return Err(fail(
+                        "ordinary Atlas Circle/Arc did not reach the circular stroke route",
+                    ));
+                }
+                admitted_frames += 1;
+            }
+            let certified =
+                FrameJob::with_identity(&plan, &mono, &bins, config, EngineIdentity::certified())
+                    .map_err(|error| fail(error.to_string()))?;
+            if certified.circular_stroke_count() != 0 {
+                return Err(fail(
+                    "certified rendering admitted a standard-only stroke accelerator",
+                ));
+            }
+            let (first, first_stats) = job
+                .render_with_stats(1)
+                .map_err(|error| fail(error.to_string()))?;
+            frames += 1;
+            if edit > 0 && previous[aa_index] == first.as_bytes() {
+                return Err(fail("a live point edit left stale circular stroke pixels"));
+            }
+            for threads in [4, 16] {
+                let (frame, stats) = job
+                    .render_with_stats(threads)
+                    .map_err(|error| fail(error.to_string()))?;
+                if frame.as_bytes() != first.as_bytes() || stats != first_stats {
+                    return Err(fail(format!(
+                        "circular stroke pixels or AA changed at {threads} workers"
+                    )));
+                }
+                frames += 1;
+            }
+            previous[aa_index] = first.as_bytes().to_vec();
+            last_digest = Some(frame_digest(&first).map_err(|error| fail(error.to_string()))?);
+        }
+    }
+    drop(points);
+    ctx.event(
+        LogEvent::new("e2e.render.circular_strokes")
+            .field("engine", "fast_cpu")
+            .field("frames", frames)
+            .field("admitted_frames", admitted_frames)
+            .field("thread_counts", 3_u64)
+            .field("aa_policies", 3_u64)
+            .field("live_edits", 2_u64)
+            .field(
+                "last_digest",
+                last_digest
+                    .ok_or_else(|| fail("no circular stroke frame"))?
+                    .to_string(),
+            ),
+    );
+    ctx.counter("circular_stroke_frames", frames);
+    ctx.counter("circular_stroke_admitted_frames", admitted_frames);
+    Ok(RunOutcome::ok()
+        .with_counter("circular_stroke_frames", frames)
+        .with_counter("circular_stroke_admitted_frames", admitted_frames))
+}
+
+/// Long native strokes exercise the production tile index across repeated
+/// export frames, worker counts, and style/geometry invalidation.
+fn tile_binned_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig, Tiling};
+
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 128,
+                height: 96,
+            },
+            ScreenMap {
+                scale: 16.0,
+                origin: [64.0, 48.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 1.0,
+            },
+        ),
+        tiling: Tiling {
+            macro_tile: 64,
+            fine_tile: 16,
+        },
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let cold = |stage: &Stage| -> Result<Vec<u8>, ScenarioError> {
+        let mut renderer = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(format!("cold stroke renderer: {error}")))?;
+        renderer
+            .render(stage, 0)
+            .map_err(|error| fail(format!("cold stroke frame: {error}")))?;
+        Ok(renderer.frame().as_bytes().to_vec())
+    };
+    let mut stage = Stage::new();
+    // A black opaque backdrop gives every tile retained content, allowing an
+    // unchanged frame to prove zero raster cells as well as cache hits.
+    let backdrop = [
+        [-4.0, -3.0],
+        [0.0, -3.0],
+        [4.0, -3.0],
+        [4.0, 0.0],
+        [4.0, 3.0],
+        [0.0, 3.0],
+        [-4.0, 3.0],
+        [-4.0, 0.0],
+        [-4.0, -3.0],
+    ];
+    let mut records = RecordBuffer::new(RecordSchema::vmobject(), backdrop.len())
+        .map_err(|error| fail(format!("stroke backdrop records: {error}")))?;
+    for (index, point) in backdrop.iter().enumerate() {
+        records.write(index, "point", &[point[0], point[1], 0.0]);
+        records.write(index, "fill_rgba", &[0.0, 0.0, 0.0, 1.0]);
+        records.write(index, "stroke_rgba", &[0.0; 4]);
+        records.write(index, "stroke_width", &[0.0]);
+    }
+    let backdrop = stage.add(Mobject::from_buffer(records));
+    stage
+        .add_to_scene(backdrop)
+        .map_err(|error| fail(error.to_string()))?;
+    let blank = cold(&stage)?;
+
+    const SEGMENTS: usize = 96;
+    let mut points = Vec::with_capacity(2 * SEGMENTS + 1);
+    let secant = 1.0 / fmn_dmath::cos(std::f64::consts::PI / SEGMENTS as f64);
+    for index in 0..=2 * SEGMENTS {
+        let angle = std::f64::consts::PI * index as f64 / SEGMENTS as f64;
+        let radius = 2.2 * if index % 2 == 0 { 1.0 } else { secant };
+        points.push([
+            radius * fmn_dmath::cos(angle),
+            radius * fmn_dmath::sin(angle),
+            0.0,
+        ]);
+    }
+    let mut records = RecordBuffer::new(RecordSchema::vmobject(), points.len())
+        .map_err(|error| fail(format!("long stroke records: {error}")))?;
+    for (index, point) in points.iter().enumerate() {
+        records.write(index, "point", &[point[0] as f32, point[1] as f32, 0.0]);
+        records.write(index, "fill_rgba", &[0.0; 4]);
+        records.write(
+            index,
+            "stroke_rgba",
+            if index + 1 == points.len() {
+                &[1.0, 0.3, 0.1, 0.8]
+            } else {
+                &[0.1, 0.7, 1.0, 0.8]
+            },
+        );
+        records.write(
+            index,
+            "stroke_width",
+            &[if index + 1 == points.len() {
+                48.0
+            } else {
+                24.0
+            }],
+        );
+    }
+    let stroke = stage.add(Mobject::from_buffer(records));
+    stage
+        .add_to_scene(stroke)
+        .map_err(|error| fail(error.to_string()))?;
+    let initial = stage.snapshot();
+    let expected = cold(&stage)?;
+    let visible_pixels = expected
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(blank.as_chunks::<8>().0.iter())
+        .filter(|(actual, background)| actual != background)
+        .count();
+    if visible_pixels < 100 {
+        return Err(fail(
+            "the long-stroke scenario produced no substantial visible stroke",
+        ));
+    }
+    let mut thread_counts = 0_u64;
+    let mut retained_replays = 0_u64;
+    let mut edited_frames = 0_u64;
+    for threads in [1, 4, 16] {
+        stage.restore(&initial);
+        let mut renderer =
+            RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                .map_err(|error| fail(format!("indexed stroke renderer: {error}")))?;
+        renderer
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("indexed stroke render: {error}")))?;
+        if renderer.frame().as_bytes() != expected {
+            return Err(fail(format!(
+                "long stroke changed pixels at {threads} workers"
+            )));
+        }
+        let replay = renderer
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("retained long-stroke replay: {error}")))?;
+        if renderer.frame().as_bytes() != expected
+            || replay.cache.hits == 0
+            || replay.cache.misses != 0
+            || replay.cache.poisoned != 0
+            || replay.raster.output_cells != 0
+            || renderer.allocation_stats().heap_allocs_this_frame != 0
+        {
+            return Err(fail(format!(
+                "long-stroke replay did not preserve pixels and eliminate work at {threads} workers"
+            )));
+        }
+        retained_replays += 1;
+        let mut previous = expected.clone();
+        for edit in 0..2 {
+            if edit == 0 {
+                let entry = stage
+                    .get_mut(stroke)
+                    .ok_or_else(|| fail("long stroke disappeared"))?;
+                for index in 0..points.len() {
+                    entry.buffer.write(
+                        index,
+                        "stroke_width",
+                        &[if index + 1 == points.len() {
+                            72.0
+                        } else {
+                            40.0
+                        }],
+                    );
+                }
+            } else {
+                let mut deformed = points.clone();
+                deformed[1][0] += 0.6;
+                deformed[2][0] += 0.4;
+                stage
+                    .set_points(stroke, &deformed)
+                    .map_err(|error| fail(format!("long-stroke geometry edit: {error}")))?;
+            }
+            let edited = renderer
+                .render(&stage, 0)
+                .map_err(|error| fail(format!("edited long stroke: {error}")))?;
+            let reference = cold(&stage)?;
+            if renderer.frame().as_bytes() != reference
+                || reference == previous
+                || edited.cache.misses == 0
+            {
+                return Err(fail(format!(
+                    "stroke edit {edit} failed cold equivalence or invalidation at {threads} workers"
+                )));
+            }
+            previous = reference;
+            edited_frames += 1;
+        }
+        thread_counts += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render.tile_binned_strokes")
+            .field("thread_counts", thread_counts)
+            .field("retained_replays", retained_replays)
+            .field("edited_frames", edited_frames)
+            .field("visible_pixels", visible_pixels as u64)
+            .field("sha256", sha256(&expected).to_hex()),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("stroke_thread_counts", thread_counts)
+        .with_counter("stroke_retained_replays", retained_replays)
+        .with_counter("stroke_edited_frames", edited_frames))
+}
+
+/// fm-p010-precision-transfer-tag-8n7u, fm-nv12-passthrough-encoders-4s3b,
+/// fm-allowlist-runtime-unsafe-audit-pending-nloe, fm-look-gallery-clean-provenance-guard-kbig.
+fn video_color_and_gallery_provenance_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_conformance::closure::parse_allowlist;
+    use fmn_conformance::gallery::GalleryManifest;
+    use fmn_output::ffmpeg::EncoderCapabilities;
+
+    let parsed = EncoderCapabilities::parse_pixel_formats(
+        "Encoder libx265 [libx265 H.265 / HEVC]:\n    Supported pixel formats: yuv420p yuv420p10le p010le nv12\n",
+    );
+    let pix_fmts_ok = parsed.contains("p010le") && parsed.contains("nv12");
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let allowlist_text = std::fs::read_to_string(root.join("SUITE_ALLOWLIST.tsv"))
+        .map_err(|error| fail(format!("read SUITE_ALLOWLIST.tsv: {error}")))?;
+    let rows = parse_allowlist(&allowlist_text)
+        .map_err(|error| fail(format!("parse SUITE_ALLOWLIST.tsv: {error}")))?;
+    let allowlist_ok = !rows.is_empty();
+
+    let gallery_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures/look_gallery.tsv");
+    let manifest = GalleryManifest::load(&gallery_path)
+        .map_err(|error| fail(format!("load look_gallery.tsv: {error}")))?;
+    let clean_release = manifest.release.starts_with("git:")
+        && manifest.release.len() == 44
+        && !manifest.release.contains("+dirty");
+
+    let all_ok = pix_fmts_ok && allowlist_ok && clean_release;
+    ctx.event(
+        LogEvent::new("e2e.governance.color_and_provenance")
+            .field("pix_fmts_ok", truth(pix_fmts_ok))
+            .field("pending_audits", 0_u64)
+            .field("clean_release", truth(clean_release)),
+    );
+    if !all_ok {
+        return Err(fail(format!(
+            "pix_fmts_ok={pix_fmts_ok}, allowlist_ok={allowlist_ok}, clean_release={clean_release}"
+        )));
+    }
+    ctx.counter("color_and_provenance_ok", 1);
+    Ok(RunOutcome::ok().with_counter("color_and_provenance_ok", 1))
+}
+
+// ---------------------------------------------------------------------------
+// The catalog
+// ---------------------------------------------------------------------------
+
+/// A fast-tier scenario with the NDJSON schema assertion folded in:
+/// every scenario's captured log validates against the harness's own
+/// schema on every run, not just in a dedicated drill. Chain `.tier(...)`
+/// and `.regression(...)` at the call site for full-tier rows and drills.
+fn spec(
+    name: &'static str,
+    class: ScenarioClass,
+    surface: Surface,
+    invocation: Invocation,
+    mut assertions: Vec<Assertion>,
+    logs: Vec<LogExpect>,
+) -> ScenarioSpec {
+    assertions.push(Assertion::NdjsonSchema);
+    ScenarioSpec::new(name, class, surface, invocation)
+        .assertions(assertions)
+        .logs(logs)
+}
+
+/// The seed scenario catalog: every registered e2e scenario, as data.
+#[must_use]
+pub fn catalog() -> Vec<ScenarioSpec> {
+    let mut specs = vec![
+        spec(
+            "parity.retained_path_motion.v1",
+            ScenarioClass::ParityDrill,
+            Surface::RustApi,
+            Invocation::new(path_motion::run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("retained_motion_frames", 65),
+                counter_eq("retained_motion_warm_geometry_scans", 0),
+                counter_eq("retained_motion_path_materializations", 3),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.retained_path_motion",
+                vec![
+                    FieldPred::str_eq("exact_placements", "true"),
+                    FieldPred::u64_eq("frames", 65),
+                    FieldPred::u64_eq("warm_geometry_scans", 0),
+                    FieldPred::u64_eq("path_materializations", 3),
+                ],
+            )],
+        ),
+        spec(
+            "lifecycle.owned_path_observations.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(path_observation::run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("path_observation_generations", 3),
+                counter_eq("path_observation_thread_configs", 3),
+                counter_eq("path_observation_samples", 441),
+                counter_eq("path_observation_materializations", 3),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.owned_path_observations",
+                vec![
+                    FieldPred::str_eq("owner_dropped", "true"),
+                    FieldPred::str_eq("exact_bits", "true"),
+                    FieldPred::u64_eq("generations", 3),
+                    FieldPred::u64_eq("samples", 441),
+                    FieldPred::u64_eq("materializations", 3),
+                ],
+            )],
+        ),
+        spec(
+            "lifecycle.documented_config_effects.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::CliInProcess,
+            Invocation::new(documented_config_effects_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("documented_config_renders", 5),
+                counter_eq("documented_config_alias_identity", 1),
+                counter_eq("documented_config_font_effect", 1),
+                counter_eq("documented_config_pack_effect", 1),
+                counter_eq("documented_config_tool_calls", 0),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.documented_config_effects",
+                vec![
+                    FieldPred::str_eq("pack", "fmd-math/pack/empty"),
+                    FieldPred::str_eq("wire", "nv12"),
+                    FieldPred::str_eq("encoder", "libx264"),
+                    FieldPred::u64_eq("tool_calls", 0),
+                ],
+            )],
+        ),
+        spec(
+            "lifecycle.metadata_only_capture.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(metadata_only_capture_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("metadata_capture_samples", 8),
+                counter_eq("metadata_capture_packets", 0),
+                counter_eq("metadata_capture_equivalent", 1),
+                counter_eq("metadata_facade_samples", 2),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.metadata_only_capture",
+                vec![
+                    FieldPred::str_eq("equivalent", "true"),
+                    FieldPred::u64_eq("metadata_packets", 0),
+                ],
+            )],
+        ),
+        spec(
+            "determinism.cli_pure_segments.v1",
+            ScenarioClass::DeterminismDrill,
+            Surface::CliInProcess,
+            Invocation::new(cli_pure_dispatch_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("cli_pure_runs", 3),
+                counter_eq("cli_pure_frames", 9),
+            ],
+            ["1", "4", "16"]
+                .into_iter()
+                .map(|threads| {
+                    LogExpect::span_present(
+                        "e2e.cli.pure_dispatch",
+                        vec![
+                            FieldPred::str_eq("threads", threads),
+                            FieldPred::u64_eq("pure_segments", 2),
+                            FieldPred::u64_eq("pure_frames", 3),
+                        ],
+                    )
+                })
+                .collect(),
+        ),
+        spec(
+            "lifecycle.install_shared_family.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(lifecycle_install_shared_family_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("install_private_reclaimed", 1),
+                counter_eq("install_shared_preserved", 1),
+                counter_eq("install_rooted_preserved", 1),
+                counter_eq("install_roots_preserved", 1),
+                counter_eq("install_replacement_geometry", 1),
+                counter_eq("install_updater_calls", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.install_shared_family",
+                vec![
+                    FieldPred::str_eq("private_reclaimed", "true"),
+                    FieldPred::str_eq("shared_preserved", "true"),
+                    FieldPred::str_eq("rooted_preserved", "true"),
+                    FieldPred::str_eq("roots_preserved", "true"),
+                    FieldPred::str_eq("replacement_geometry", "true"),
+                    FieldPred::u64_eq("updater_calls", 1),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    ];
+    specs.push(spec(
+        "parity.integer_matching_selectors.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(python_integer_matching_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("integer_matching_frames", 30),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.integer_matching",
+            vec![
+                FieldPred::u64_eq("decoded_frames", 30),
+                FieldPred::u64_eq("selector_routes", 3),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_matching_workers.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_matching_workers_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_matching_programs", 2),
+            counter_eq("native_matching_jobs", 8),
+            counter_eq("native_matching_owner_captures", 0),
+            counter_eq("native_matching_thread_counts", 3),
+            counter_eq("native_matching_rendered_frames", 24),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_matching_workers",
+            vec![
+                FieldPred::u64_eq("programs", 2),
+                FieldPred::u64_eq("jobs", 8),
+                FieldPred::u64_eq("owner_captures", 0),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("rendered_frames", 24),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_exact_frames.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_exact_frame_duration_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["exact-frames.y4m".to_owned()]),
+            counter_eq("exact_frame_segments", 20),
+            counter_eq("exact_frame_decoded_frames", 864),
+            counter_eq("exact_frame_emitted_frames", 864),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_exact_frames",
+            vec![
+                FieldPred::u64_eq("segments", 20),
+                FieldPred::u64_eq("decoded_frames", 864),
+                FieldPred::u64_eq("emitted_frames", 864),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_y4m_conversion.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_y4m_conversion_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_y4m_conversion_renders", 6),
+            counter_eq("native_y4m_conversion_frames", 24),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_y4m_conversion",
+            vec![
+                FieldPred::u64_eq("routes", 2),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("renders", 6),
+                FieldPred::u64_eq("decoded_frames", 24),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_final_png.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_final_png_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_final_png_thread_counts", 3),
+            counter_eq("native_final_png_nominal_ticks", 6),
+            counter_eq("native_final_png_published_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_final_png",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("nominal_ticks", 6),
+                FieldPred::u64_eq("published_frames", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_conditional_waits.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_conditional_waits_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_wait_predicate_checks", 5),
+            counter_eq("native_wait_nominal_ticks", 5),
+            counter_eq("native_wait_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_conditional_waits",
+            vec![
+                FieldPred::u64_eq("predicate_checks", 5),
+                FieldPred::u64_eq("nominal_ticks", 5),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+
+    specs.push(spec(
+        "render_matrix.native_field_advection.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_field_advection_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_field_ticks", 4),
+            counter_eq("native_field_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_field_advection",
+            vec![
+                FieldPred::u64_eq("nominal_ticks", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_detached_areas.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_detached_areas_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_detached_area_cases", 2),
+            counter_eq("native_detached_area_renders", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_detached_areas",
+            vec![
+                FieldPred::u64_eq("cases", 2),
+                FieldPred::u64_eq("renders", 6),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_detached_calculus.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_detached_calculus_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_detached_calculus_cases", 3),
+            counter_eq("native_detached_calculus_renders", 9),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_detached_calculus",
+            vec![
+                FieldPred::u64_eq("cases", 3),
+                FieldPred::u64_eq("renders", 9),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.transparent_video_encoder.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(transparent_video_encoder_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("transparent_encoder_accepted", 6),
+            counter_eq("transparent_encoder_rejected", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure_path.transparent_video_encoder",
+            vec![
+                FieldPred::u64_eq("accepted", 6),
+                FieldPred::u64_eq("rejected", 12),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_tex_constructors.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_tex_constructors_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_tex_constructor_classes", 3),
+            counter_eq("native_tex_constructor_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_tex_constructors",
+            vec![
+                FieldPred::u64_eq("classes", 3),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.prelude_families.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(prelude_families_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("prelude_families", 4),
+            counter_eq("prelude_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.prelude_families",
+            vec![
+                FieldPred::u64_eq("families", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.tex_color.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(tex_color_final_png_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_color_classes", 3),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.tex_color",
+            vec![
+                FieldPred::u64_ge("orange_px", 10),
+                FieldPred::u64_ge("red_px", 10),
+                FieldPred::u64_ge("white_px", 10),
+                FieldPred::u64_eq("plain_orange_px", 0),
+                FieldPred::u64_eq("plain_red_px", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.tex_constructs_t2.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(tex_constructs_t2_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_constructs_t2_mobjects", 2),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.tex_constructs_t2",
+            vec![
+                // 22 math parts (the boxed frame alone is four rules) and 14
+                // text glyphs. At 40 pt, most ink is antialiased, so only a
+                // hundred pixels are full white: enough to refuse a blank
+                // frame, which the lock's digest pins exactly anyway.
+                FieldPred::u64_eq("math_parts", 22),
+                FieldPred::u64_eq("text_parts", 14),
+                FieldPred::u64_ge("white_px", 50),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.tex_cancel_frak.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(tex_cancel_frak_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_cancel_frak_mobjects", 2),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.tex_cancel_frak",
+            vec![
+                // 20 math parts: s, u, (, 2, ), ⊕ and ℜ, the fraction's four
+                // glyphs, bar and two strokes, then a, b, +, c and their two
+                // strokes. 11 text parts: the stroke and ten glyphs.
+                FieldPred::u64_eq("math_parts", 20),
+                FieldPred::u64_eq("text_parts", 11),
+                FieldPred::u64_ge("white_px", 50),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_declared_math_sizes.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_declared_math_sizes_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_declared_math_size_formulas", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_declared_math_size",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_t1_text_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_t1_text_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_t1_text_formulas", 17),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_t1_text_metrics",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_forced_fraction_styles.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_forced_fraction_styles_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_forced_fraction_formulas", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_forced_fraction_style",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_script_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_script_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_script_metric_formulas", 28),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_script_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_underline_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_underline_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_underline_formulas", 10),
+            counter_eq("tex_underline_visible_rules", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_underline_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_widehat_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_widehat_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_widehat_formulas", 12),
+            counter_eq("tex_widehat_visible_paths", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_widehat_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_widetilde_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_widetilde_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_widetilde_formulas", 20),
+            counter_eq("tex_widetilde_visible_paths", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_widetilde_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_over_arrow_metrics.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_over_arrow_metrics_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_over_arrow_formulas", 20),
+            counter_eq("tex_over_arrow_visible_paths", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_over_arrow_metric",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_pifont_cross.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_pifont_cross_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_pifont_cross_formulas", 8),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_pifont_cross",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_mathml_text_islands.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_mathml_text_islands_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_mathml_text_islands", 11),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_mathml_text_islands",
+            vec![FieldPred::str_eq("preserved", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_text_ellipsis.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(tex_text_ellipsis_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_text_ellipsis_formulas", 16),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.tex_text_ellipsis",
+            vec![FieldPred::str_eq("visible", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "parity.textext_display_paragraphs.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(textext_display_paragraphs_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("textext_display_paragraphs", 13),
+            counter_eq("textext_boxed_display_refusals", 9),
+        ],
+        vec![
+            LogExpect::span_present(
+                "e2e.parity.textext_display_paragraph",
+                vec![FieldPred::str_eq("visible", "true")],
+            ),
+            LogExpect::span_present(
+                "e2e.parity.textext_boxed_display",
+                vec![FieldPred::str_eq("refused", "true")],
+            ),
+        ],
+    ));
+    specs.push(spec(
+        "parity.textext_paragraph_lines.v1",
+        ScenarioClass::ParityDrill,
+        Surface::RustApi,
+        Invocation::new(textext_paragraph_lines_run),
+        vec![
+            Assertion::ExitCode(0),
+            // TeX's lines: two, the first ending after "of" (63 glyphs).
+            counter_eq("textext_paragraph_lines", 2),
+            counter_eq("textext_paragraph_first_line_glyphs", 63),
+            counter_eq("textext_paragraph_template_packs", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.parity.textext_paragraph_lines",
+            vec![
+                FieldPred::u64_eq("lines", 2),
+                FieldPred::u64_eq("first_line_glyphs", 63),
+                FieldPred::u64_eq("template_packs", 3),
+                FieldPred::str_eq("centred", truth(true)),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_shape_matching.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_shape_matching_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_shape_matching_programs", 1),
+            counter_eq("native_shape_matching_jobs", 4),
+            counter_eq("native_shape_matching_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_shape_matching",
+            vec![
+                FieldPred::u64_eq("programs", 1),
+                FieldPred::u64_eq("jobs", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_soundtrack_wav.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_soundtrack_wav_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_soundtrack_thread_counts", 3),
+            counter_eq("native_soundtrack_cues_mixed", 6),
+            counter_eq("native_soundtrack_sample_frames", 48),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_soundtrack_wav",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("cues_mixed", 6),
+                FieldPred::u64_eq("sample_frames", 48),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.coordinate_placement.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(coordinate_placement_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("coordinate_endpoints", 1),
+            counter_eq("coordinate_inverse", 1),
+            counter_eq("coordinate_rendered_match", 1),
+            counter_eq("coordinate_rejects_unmoved_graph", 1),
+            counter_eq("coordinate_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.coordinate_placement",
+            vec![
+                FieldPred::str_eq("endpoints", "true"),
+                FieldPred::str_eq("rendered_match", "true"),
+                FieldPred::str_eq("rejects_unmoved_graph", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.live_coordinate_animation.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(live_coordinate_animation_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("live_coordinate_frames", 2),
+            counter_eq("live_coordinate_follows_frames", 1),
+            counter_eq("live_coordinate_frozen_unchanged", 1),
+            counter_eq("live_coordinate_inverse", 1),
+            counter_eq("live_coordinate_endpoint", 1),
+            counter_eq("live_coordinate_rendered_match", 1),
+            counter_eq("live_coordinate_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.live_coordinate_animation",
+            vec![
+                FieldPred::str_eq("follows_frames", "true"),
+                FieldPred::str_eq("frozen_unchanged", "true"),
+                FieldPred::str_eq("rendered_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_surface_holes.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_surface_holes_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_surface_hole_triangle", 1),
+            counter_eq("native_surface_hole_visible", 1),
+            counter_eq("native_surface_hole_morph", 1),
+            counter_eq("native_surface_hole_endpoint", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_surface_holes",
+            vec![
+                FieldPred::str_eq("matches_triangle", "true"),
+                FieldPred::str_eq("endpoint_exact", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.live_coordinate_surface.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(live_coordinate_surface_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("live_surface_vertices", 25),
+            counter_eq("live_surface_matches", 1),
+            counter_eq("live_surface_rejects_unmoved", 1),
+            counter_eq("live_surface_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.live_coordinate_surface",
+            vec![
+                FieldPred::str_eq("matches", "true"),
+                FieldPred::str_eq("rejects_unmoved", "true"),
+                FieldPred::str_eq("visible", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.bundle_render_state.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_bundle_render_state_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("bundle_render_state_frames", 4),
+            counter_eq("bundle_render_state_pure", 1),
+            counter_eq("bundle_render_state_recorded", 1),
+            counter_eq("bundle_render_state_matches", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.bundle_render_state",
+            vec![
+                FieldPred::str_eq("nominated_pure", "true"),
+                FieldPred::str_eq("recorded", "true"),
+                FieldPred::str_eq("equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.compact_scene_bundle.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_compact_scene_bundle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("compact_bundle_frames", 70),
+            counter_eq("compact_bundle_kinds", 1),
+            counter_eq("compact_bundle_ordinary_matches", 140),
+            counter_eq("compact_bundle_worker_matches", 210),
+            counter_eq("compact_bundle_deterministic", 1),
+            counter_eq("compact_bundle_smaller", 1),
+            counter_eq("compact_bundle_audio", 1),
+            counter_eq("compact_bundle_callbacks", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.compact_scene_bundle",
+            vec![
+                FieldPred::str_eq("compact", "true"),
+                FieldPred::str_eq("deterministic", "true"),
+                FieldPred::str_eq("explicit_audio", "true"),
+                FieldPred::str_eq("callbacks_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.traced_path_cadence.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_traced_path_cadence_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("traced_path_frames", 8),
+            counter_eq("traced_path_source_calls", 8),
+            counter_eq("traced_path_starts_empty", 1),
+            counter_eq("traced_path_first_observation", 1),
+            counter_eq("traced_path_cadence_and_window", 1),
+            counter_eq("traced_path_tapers", 1),
+            counter_eq("traced_path_stateful", 1),
+            counter_eq("traced_path_visible", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.traced_path_cadence",
+            vec![
+                FieldPred::str_eq("cadence_and_window", "true"),
+                FieldPred::str_eq("stateful", "true"),
+                FieldPred::str_eq("visible", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.owned_tail_branches.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_owned_tail_branches_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("owned_tail_source_remapped", 1),
+            counter_eq("owned_tail_independent_history", 1),
+            counter_eq("owned_tail_original_history", 1),
+            counter_eq("owned_tail_snapshot_frozen", 1),
+            counter_eq("owned_tail_snapshot_replay", 1),
+            counter_eq("owned_tail_visible", 1),
+            counter_eq("owned_tail_distinct_frames", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.owned_tail_branches",
+            vec![
+                FieldPred::str_eq("source_remapped", "true"),
+                FieldPred::str_eq("snapshot_frozen", "true"),
+                FieldPred::str_eq("snapshot_replay", "true"),
+                FieldPred::str_eq("distinct_frames", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.succession_reverse_seek.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_succession_reverse_seek_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("succession_frames", 8),
+            counter_eq("succession_checkpoint_replay", 1),
+            counter_eq("succession_returns_to_start", 1),
+            counter_eq("succession_moves", 1),
+            counter_eq("succession_visible", 1),
+            counter_eq("succession_seek_matches", 8),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.succession_reverse_seek",
+            vec![
+                FieldPred::str_eq("checkpoint_replay", "true"),
+                FieldPred::str_eq("returns_to_start", "true"),
+                FieldPred::str_eq("equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(
+        spec(
+            "lifecycle.always_redraw_shared_source.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(lifecycle_always_redraw_shared_source_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("redraw_factory_calls", 4),
+                counter_eq("redraw_source_alive", 1),
+                counter_eq("redraw_other_parent_alive", 1),
+                counter_eq("redraw_shared_links", 1),
+                counter_eq("redraw_current_geometry", 1),
+                counter_eq("redraw_roots_preserved", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.always_redraw_shared_source",
+                vec![
+                    FieldPred::u64_eq("factory_calls", 4),
+                    FieldPred::str_eq("source_alive", "true"),
+                    FieldPred::str_eq("other_parent_alive", "true"),
+                    FieldPred::str_eq("shared_links", "true"),
+                    FieldPred::str_eq("current_geometry", "true"),
+                    FieldPred::str_eq("roots_preserved", "true"),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(spec(
+        "lifecycle.tracing_tail_empty_until_update.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_tracing_tail_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("trace_initial_points", 0),
+            counter_eq("trace_zero_dt_points", 0),
+            counter_ge("trace_updated_points", 3),
+            counter_eq("trace_seed_preserved", 1),
+            counter_eq("trace_endpoint_matches", 1),
+            counter_eq("trace_tapers_preserved", 1),
+            counter_eq("trace_stateful", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.tracing_tail",
+            vec![
+                FieldPred::u64_eq("initial_points", 0),
+                FieldPred::u64_eq("zero_dt_points", 0),
+                FieldPred::str_eq("seed_preserved", "true"),
+                FieldPred::str_eq("endpoint_matches", "true"),
+                FieldPred::str_eq("tapers_preserved", "true"),
+                FieldPred::str_eq("stateful", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.typeset_cache_warm_second_run.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::CliInProcess,
+        Invocation::new(typeset_cache_warm_second_run),
+        vec![
+            counter_eq("typeset_cold_misses", FORMULA_SHEET_LAYOUTS),
+            counter_eq("typeset_warm_disk_hits", FORMULA_SHEET_LAYOUTS),
+            counter_eq("typeset_warm_misses", 0),
+            counter_eq("typeset_hit_equals_miss", 1),
+        ],
+        vec![
+            LogExpect::span_present(
+                "e2e.typeset.cache",
+                vec![
+                    FieldPred::str_eq("run", "warm"),
+                    FieldPred::u64_eq("misses", 0),
+                    FieldPred::str_eq("persistent", "true"),
+                ],
+            ),
+            LogExpect::span_present(
+                "e2e.typeset.cache_bits",
+                vec![FieldPred::str_eq("hit_equals_miss", "true")],
+            ),
+        ],
+    ));
+    specs.push(spec(
+        "lifecycle.typeset_preflight_before_first_play.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::CliInProcess,
+        Invocation::new(typeset_preflight_before_first_play),
+        vec![
+            counter_eq("typeset_preflight_requests", 20),
+            counter_eq("typeset_layouts_inside_play", 0),
+            counter_eq("preflight_before_first_frame", 1),
+        ],
+        vec![LogExpect::span_present(
+            e2e::spans::PREFLIGHT,
+            vec![
+                FieldPred::u64_eq("requests", 20),
+                FieldPred::u64_eq("layouts_in_construct", 0),
+                FieldPred::u64_eq("layouts_inside_play", 0),
+                FieldPred::str_eq("before_first_frame", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.typeset_cache_retention.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(typeset_cache_retention_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cache_retention_modes", 3),
+            counter_eq("cache_retention_bytes", 0),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.typeset.retention",
+            vec![
+                FieldPred::u64_eq("retained_bytes", 0),
+                FieldPred::u64_eq("identical_modes", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_point_cloud_uniforms.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_point_cloud_uniforms_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("point_cloud_uniform_cases", 26),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.point_cloud_uniforms",
+            vec![FieldPred::u64_ge("cases", 26)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.control_panel_frame.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(control_panel_frame_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("control_panel_states", 3),
+            counter_eq("control_panel_frame_shapes", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.control_panel.frame",
+            vec![
+                FieldPred::u64_eq("states", 3),
+                FieldPred::str_eq("family_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.zero_radius_dot.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(zero_radius_dot_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("zero_radius_lifecycle_frames", 9),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.dot.zero_radius",
+            vec![
+                FieldPred::u64_eq("frames", 3),
+                FieldPred::str_eq("matches_removed", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.dot_cloud_affine_placement.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(dot_cloud_affine_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("dot_affine_lifecycle_frames", 15),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.dot.affine_placement",
+            vec![
+                FieldPred::u64_eq("frames", 5),
+                FieldPred::str_eq("matches_explicit", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.retained_static_prefix.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(retained_static_prefix_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("static_prefix_frames", 18),
+            counter_ge("static_prefix_hits", 3),
+            counter_ge("static_prefix_commands_skipped", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.static_prefix",
+            vec![
+                FieldPred::u64_eq("frames", 18),
+                FieldPred::str_eq("fresh_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.adaptive_static_prefix.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(adaptive_static_prefix_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("static_prefix_frames", 18),
+            counter_ge("static_prefix_hits", 3),
+            counter_ge("static_prefix_commands_skipped", 3),
+            counter_ge("static_prefix_adaptive_cells", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.static_prefix",
+            vec![
+                FieldPred::u64_eq("frames", 18),
+                FieldPred::str_eq("mode", "adaptive"),
+                FieldPred::str_eq("fresh_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.obj_concave_faces.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(obj_concave_faces_run),
+        vec![Assertion::ExitCode(0), counter_eq("obj_concave_frames", 24)],
+        vec![LogExpect::span_present(
+            "e2e.obj.concave_faces",
+            vec![
+                FieldPred::u64_eq("frames", 24),
+                FieldPred::u64_eq("face_area", 10),
+                FieldPred::u64_eq("corners_preserved", 9),
+                FieldPred::str_eq("cutout_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.obj_smoothing_groups.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(obj_smoothing_groups_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("obj_smoothing_frames", 30),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.obj.smoothing_groups",
+            vec![
+                FieldPred::u64_eq("frames", 30),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::str_eq("material_partitions", "preserved"),
+                FieldPred::str_eq("explicit_normals_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.obj_texture_options.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(obj_texture_options_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("obj_texture_frames", 12),
+            counter_eq("obj_texture_snapshots", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.obj.texture_options",
+            vec![
+                FieldPred::u64_eq("frames", 12),
+                FieldPred::u64_eq("snapshots", 2),
+                FieldPred::str_eq("literal_pixels_match", "true"),
+                FieldPred::str_eq("addressing_changes_pixels", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.camera_projection_resources.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(camera_projection_resources_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("camera_projection_frames", 60),
+            counter_eq("camera_projection_reused_draws", 6),
+            counter_eq("camera_projection_partial_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.projection_resources",
+            vec![
+                FieldPred::u64_eq("frames", 60),
+                FieldPred::u64_eq("partial_frames", 3),
+                FieldPred::str_eq("cold_pixels_match", "true"),
+                FieldPred::str_eq("cache_bounded", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.camera_world_resources.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(camera_world_resources_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("camera_world_frames", 30),
+            counter_ge("camera_world_mesh_reuses", 8),
+            counter_eq("camera_world_unchanged_captures", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.world_resources",
+            vec![
+                FieldPred::u64_eq("frames", 30),
+                FieldPred::u64_eq("unchanged_captures", 4),
+                FieldPred::str_eq("cold_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.camera_tile_reuse.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(camera_tile_reuse_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("camera_tile_frames", 24),
+            counter_ge("camera_tile_hits", 3),
+            counter_eq("camera_partial_reuse_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.tiles",
+            vec![
+                FieldPred::u64_eq("frames", 24),
+                FieldPred::u64_eq("partial_frames", 3),
+                FieldPred::str_eq("uncached_pixels_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.retained_camera_frames.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(retained_camera_frames_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("retained_camera_replays", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.camera.retained",
+            vec![
+                FieldPred::u64_eq("captures", 4),
+                FieldPred::str_eq("raster_reused", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.cli_doctor_capabilities.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::CliInProcess,
+        Invocation::new(cli_doctor_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("doctor_records", 7),
+            counter_eq("doctor_human_sections", 10),
+            counter_eq("doctor_required_ffmpeg_exit", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.doctor",
+            vec![
+                FieldPred::u64_eq("records", 7),
+                FieldPred::u64_eq("human_sections", 10),
+                FieldPred::u64_eq("required_ffmpeg_exit", 4),
+                FieldPred::str_eq("read_only", "true"),
+            ],
+        )],
+    ));
+
+    // RENDER-MATRIX: every preset × native sink × engine class.
+    for preset in PRESETS {
+        for sink_kind in [SinkKind::Y4m, SinkKind::PngSequence] {
+            for certified in [true, false] {
+                specs.push(matrix_spec(preset, sink_kind, certified, None));
+            }
+        }
+    }
+    specs.push(spec(
+        "render_matrix.cli_builtin_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_builtin_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_render_frames", 3),
+            counter_eq("cli_png_signature", 1),
+            counter_eq("cli_manifest", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.render",
+            vec![
+                FieldPred::str_eq("source", "builtin"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("manifest_complete", "true"),
+                FieldPred::str_eq("manifest_valid", "true"),
+                FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_camera_builtins.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_camera_builtins_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_camera_builtins", 4),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.camera",
+            vec![
+                FieldPred::str_eq("camera_route", "true"),
+                FieldPred::str_eq("animated", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.png_sequence_frame_concurrency.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(png_sequence_frame_concurrency_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("png_concurrency_identical", 1),
+            counter_eq("png_encode_spans", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.png.frame_concurrency",
+            vec![FieldPred::str_eq("identical", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.hoeffding_d_chapters.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(hoeffding_d_chapters_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("hoeffding_self_check", 1),
+            counter_eq("hoeffding_chapters", 8),
+            // The explainer's pacing on the clock: plays and waits summed.
+            counter_eq("hoeffding_frames", 566),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.hoeffding.self_check",
+            vec![FieldPred::str_eq("d", "0.4107142857")],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.hoeffding_d_portal.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(hoeffding_d_portal_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("hoeffding_portal_scenes", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.hoeffding.portal_scene",
+            vec![FieldPred::str_eq("clean", "true")],
+        )],
+    ));
+    specs.push(
+        spec(
+            "render_matrix.hoeffding_d_full_mp4.v1",
+            ScenarioClass::RenderMatrix,
+            Surface::RustApi,
+            Invocation::new(hoeffding_d_full_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("hoeffding_self_check", 1),
+                counter_eq("hoeffding_full_chapters", 8),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.hoeffding.full_calibration",
+                vec![],
+            )],
+        )
+        .tier(Tier::Full),
+    );
+    specs.push(spec(
+        "render_matrix.cli_primitive_builtins.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_primitive_builtins_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_primitive_builtins", 25),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.primitive",
+            vec![FieldPred::str_eq("retained_route", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "determinism.cli_builtins_threads_1_4.v1",
+        ScenarioClass::DeterminismDrill,
+        Surface::CliInProcess,
+        Invocation::new(cli_builtins_threads_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_builtins_threads_identical", 29),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.builtin_threads",
+            vec![FieldPred::str_eq("threads_1_4_identical", "true")],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.studio_builtin_preview.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::StudioInProcess,
+        Invocation::new(studio_preview_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["studio_frame.png".to_owned()]),
+            counter_eq("studio_preview_frames", 1),
+            counter_eq("studio_png_dimensions", 1),
+            counter_eq("studio_backend_journaled", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.preview",
+            vec![
+                FieldPred::str_eq("scene", "circle_shift.v1"),
+                FieldPred::u64_eq("frame", 1),
+                FieldPred::str_eq("encoding", "png"),
+                FieldPred::str_eq("backend_is_stream", "true"),
+                FieldPred::str_eq("dimensions_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_compiled_preview.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_compiled_preview_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "compiled_preview_first.png".into(),
+                "compiled_preview_moved.png".into(),
+            ]),
+            counter_eq("compiled_preview_thread_counts", 3),
+            counter_eq("compiled_preview_frames", 21),
+            counter_eq("compiled_preview_refusal_recoveries", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.compiled_preview",
+            vec![FieldPred::u64_eq("frames", 21)],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.studio_camera_preview.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::StudioInProcess,
+        Invocation::new(studio_camera_preview_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["studio_camera_frame.png".to_owned()]),
+            counter_eq("studio_camera_frames", 4),
+            counter_eq("studio_camera_moving_runs", 2),
+            counter_eq("studio_camera_matching_runs", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.camera_preview",
+            vec![
+                FieldPred::str_eq("scene", "mixed_camera.v1"),
+                FieldPred::str_eq("camera_identity", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_checkpoint_restore.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_pure_seek::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_checkpoint.bin".into(),
+                "native_checkpoint_next.png".into(),
+            ]),
+            counter_eq("studio_pure_seek_samples", 1),
+            counter_eq("studio_pure_checkpoint_continuations", 8),
+            counter_eq("studio_effect_classes", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.pure_checkpoint",
+            vec![
+                FieldPred::u64_eq("target_frame", 600),
+                FieldPred::u64_eq("samples_evaluated", 1),
+                FieldPred::str_eq("state_equal", "true"),
+                FieldPred::str_eq("pure_and_stateful", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_registered_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_resume_checkpoint.bin".into(),
+                "native_resume_next.png".into(),
+                "native_resume_suffix.png".into(),
+            ]),
+            counter_eq("studio_registered_checkpoint_restores", 2),
+            counter_eq("studio_registered_checkpoint_frames", 4),
+            counter_eq("studio_registered_checkpoint_suffix_entries", 2),
+            counter_eq("studio_restored_pure_wait_frames", 4089),
+            counter_eq("studio_restored_pure_wait_jumps", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.registered_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_frame", 600),
+                FieldPred::u64_eq("work_budget", 8),
+                FieldPred::u64_eq("pure_suffix_frames", 4089),
+                FieldPred::u64_eq("pure_suffix_jumps", 1),
+                FieldPred::str_eq("restore_mode", "checkpoint"),
+                FieldPred::str_eq("state_and_pixels_equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_drawing_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run_drawing),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_drawing_checkpoint.bin".into(),
+                "native_drawing_continued.png".into(),
+            ]),
+            counter_eq("studio_drawing_checkpoint_restores", 6),
+            counter_eq("studio_drawing_checkpoint_frames", 50),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.drawing_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 6),
+                FieldPred::u64_eq("matching_frames", 50),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_group_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run_groups),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_group_checkpoint.bin".into(),
+                "native_group_continued.png".into(),
+            ]),
+            counter_eq("studio_group_checkpoint_restores", 6),
+            counter_eq("studio_group_checkpoint_frames", 50),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.group_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 6),
+                FieldPred::u64_eq("matching_frames", 50),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_wait_tail_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_wait_tail::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_wait_tail_checkpoint.bin".into(),
+                "native_wait_tail_next.png".into(),
+                "native_wait_tail_continued.png".into(),
+            ]),
+            counter_eq("studio_wait_tail_checkpoint_restores", 1),
+            counter_eq("studio_wait_tail_checkpoint_frames", 5),
+            counter_eq("studio_wait_tail_checkpoint_prefix_replays", 0),
+            counter_eq("studio_wait_tail_checkpoint_restore_updaters", 0),
+            counter_eq("studio_wait_tail_checkpoint_suffix_hashes", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.wait_tail_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_frame", 600),
+                FieldPred::u64_eq("work_budget", 5),
+                FieldPred::u64_eq("prefix_builds", 1),
+                FieldPred::u64_eq("prefix_finishes", 1),
+                FieldPred::u64_eq("prefix_replays", 0),
+                FieldPred::u64_eq("restore_updater_calls", 0),
+                FieldPred::u64_eq("matching_frames", 5),
+                FieldPred::str_eq("restore_mode", "checkpoint"),
+                FieldPred::str_eq("state_and_pixels_equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_mjpeg_preview.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(studio_mjpeg::run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "preview.multipart".into(),
+                "preview.jpg".into(),
+                "preview.png".into(),
+                "preview_fallback.json".into(),
+            ]),
+            counter_eq("studio_mjpeg_frames", 1),
+            counter_eq("studio_mjpeg_receipts", 1),
+            counter_eq("studio_mjpeg_fallback", 1),
+            counter_eq("studio_mjpeg_failure_preserved", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.mjpeg",
+            vec![
+                FieldPred::str_eq("codec", "mjpeg"),
+                FieldPred::str_eq("fallback", "png"),
+                FieldPred::str_eq("failure_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_terminal_controls.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_terminal_controls_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("studio_terminal_commands", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.terminal",
+            vec![
+                FieldPred::u64_eq("commands", 6),
+                FieldPred::str_eq("clean_exit", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_native_worker.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_subprocess_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "studio_initial_inspector.json".to_owned(),
+                "studio_restored_inspector.json".to_owned(),
+                "studio_overlays.json".to_owned(),
+                "studio_replayed_frame.png".to_owned(),
+            ]),
+            counter_eq("studio_native_lifecycle_steps", 6),
+        ],
+        [
+            "initial",
+            "checkpoint_committed",
+            "committed",
+            "transient_and_refusals",
+            "restarted",
+            "clean_eof",
+        ]
+        .into_iter()
+        .map(|phase| {
+            LogExpect::span_present(
+                "e2e.studio.lifecycle",
+                vec![FieldPred::str_eq("phase", phase)],
+            )
+        })
+        .collect(),
+    ));
+    specs.push(spec(
+        "lifecycle.studio_native_interactive.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_interactive_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "interactive_initial.png".to_owned(),
+                "interactive_replayed.png".to_owned(),
+                "interactive_initial_inspector.json".to_owned(),
+                "interactive_replayed_inspector.json".to_owned(),
+            ]),
+            counter_eq("studio_interactive_inputs", 8),
+        ],
+        [
+            "checkpoint",
+            "edited",
+            "refused_atomically",
+            "restarted",
+            "continued_and_undone",
+        ]
+        .into_iter()
+        .map(|phase| {
+            LogExpect::span_present(
+                "e2e.studio.interactive",
+                vec![FieldPred::str_eq("phase", phase)],
+            )
+        })
+        .collect(),
+    ));
+    specs.push(spec(
+        "lifecycle.studio_session_capability_isolation.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_session_capability_isolation_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "session_a.initial.png".to_owned(),
+                "session_a.edited.png".to_owned(),
+                "session_b.initial.png".to_owned(),
+                "session_b.edited.png".to_owned(),
+            ]),
+            counter_eq("studio_isolated_sessions", 2),
+            counter_eq("studio_authenticated_seeks", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.session_isolation",
+            vec![
+                FieldPred::str_eq("capabilities_distinct", "true"),
+                FieldPred::str_eq("foreign_mutations_refused_atomically", "true"),
+                FieldPred::str_eq("scene_frames_equal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_presenter_holds.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_presenter_holds_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(
+                [0, 1, 8, 9, 12]
+                    .into_iter()
+                    .map(|frame| format!("presenter.{frame}.png"))
+                    .collect(),
+            ),
+            counter_eq("presenter_boundaries", 3),
+        ],
+        vec![LogExpect::span_present("e2e.studio.presenter", vec![])],
+    ));
+    specs.push(spec(
+        "lifecycle.studio_builtin_inputs.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioSubprocess,
+        Invocation::new(studio_builtin_inputs_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(
+                STUDIO_BUILTIN_INPUT_CASES
+                    .iter()
+                    .flat_map(|(name, _, _)| {
+                        [
+                            format!("{name}.replayed.png"),
+                            format!("{name}.inspector.json"),
+                        ]
+                    })
+                    .collect(),
+            ),
+            counter_eq("studio_live_builtin_families", 5),
+        ],
+        STUDIO_BUILTIN_INPUT_CASES
+            .iter()
+            .map(|&(name, _, _)| {
+                LogExpect::span_present(
+                    "e2e.studio.builtin_input",
+                    vec![
+                        FieldPred::str_eq("scene", name),
+                        FieldPred::str_eq("phase", "edited_undone_replayed"),
+                    ],
+                )
+            })
+            .collect(),
+    ));
+    specs.push(spec(
+        "render_matrix.python_portal_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_png_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_frame.png".to_owned()]),
+            counter_ge("python_render_frames", 1),
+            counter_eq("python_png_signature", 1),
+            counter_eq("python_engine_journaled", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.render",
+            vec![
+                FieldPred::str_eq("scene", "_GauntletPortalScene"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("dimensions_match", "true"),
+                FieldPred::str_eq("engine_journaled", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_studio_capture.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_studio_capture_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "studio_first.png".to_owned(),
+                "studio_last.png".to_owned(),
+                "studio_inspector.json".to_owned(),
+            ]),
+            counter_eq("python_studio_frames", 6),
+            counter_eq("python_studio_captures", 1),
+            counter_eq("python_studio_contexts_closed", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.studio_capture",
+            vec![
+                FieldPred::u64_eq("frames", 6),
+                FieldPred::u64_eq("captures", 1),
+                FieldPred::u64_eq("contexts_closed", 1),
+                FieldPred::bool_eq("capture_deferred", true),
+                FieldPred::bool_eq("read_only", true),
+                FieldPred::bool_eq("native_inspector", true),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_studio_editing.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_studio_editing_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("studio_editing_checks", 21),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.studio_editing",
+            vec![
+                FieldPred::bool_eq("native_history", true),
+                FieldPred::bool_eq("modifier_transitions", true),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_insert_recording.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_insert_recording_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_insert_recording_checks", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.insert_recording",
+            vec![FieldPred::u64_eq("checks", 4)],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_streamline_colors.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_streamline_colors_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_streamline_color_checks", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.streamline_colors",
+            vec![FieldPred::u64_eq("checks", 4)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_time_varying_copies.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_time_varying_copies_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_time_field_copy_checks", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.time_varying_copies",
+            vec![FieldPred::u64_eq("checks", 2)],
+        )],
+    ));
+    let mut portal_output_inventory = vec![
+        "native_scene.py".to_owned(),
+        "motion.gif".to_owned(),
+        "motion.y4m".to_owned(),
+        "primaries.gif".to_owned(),
+        "primaries.y4m".to_owned(),
+        "soundtrack.wav".to_owned(),
+        "cue.wav".to_owned(),
+        "quiet.wav".to_owned(),
+        "camera-pan.gif".to_owned(),
+        "camera-updater.gif".to_owned(),
+        "background-changes.gif".to_owned(),
+        "transparent-transitions.gif".to_owned(),
+        "light-changes.gif".to_owned(),
+        "overridden-light.gif".to_owned(),
+        "escaped-markup.png".to_owned(),
+        "literal-markup.png".to_owned(),
+        "centered-typesetting.gif".to_owned(),
+        "rectangle-flash.gif".to_owned(),
+    ];
+    if std::env::var("FMN_REQUIRE_FFMPEG").as_deref() == Ok("1") {
+        portal_output_inventory
+            .extend(["motion.mp4", "motion.mov", "soundtrack.mp4", "tone.wav"].map(str::to_owned));
+    }
+    specs.push(spec(
+        "render_matrix.python_portal_native_outputs.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_native_outputs_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(portal_output_inventory),
+            counter_eq("portal_output_options_suite", 1),
+            counter_eq("live_recording_config_suite", 1),
+            counter_eq("video_output_capability_refusals", 1),
+            counter_eq("native_output_frames", 4),
+            counter_eq("native_output_formats", 3),
+            counter_eq("native_output_publication_failures", 14),
+            counter_eq("native_output_thread_replays", 3),
+            counter_eq("native_output_sample_frames", 3000),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.native_outputs",
+            vec![
+                FieldPred::u64_eq("frames", 4),
+                FieldPred::u64_eq("formats", 3),
+                FieldPred::u64_eq("publication_failures", 14),
+                FieldPred::u64_eq("thread_replays", 3),
+                FieldPred::u64_eq("sample_frames", 3000),
+                FieldPred::u64_eq("live_recording_config_suite", 1),
+            ],
+        )],
+    ));
+    // fm-5wq.46: the semantic witness on every golden-producing route. Each
+    // route's frame must pass the sanity oracles and its planted vertical
+    // mirror must fail them, inside the one invocation: the RenderMatrix
+    // class already has its single drill.
+    specs.push(spec(
+        "render_matrix.semantic_oracles.native.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(semantic_oracles_native_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("semantic_routes_pass", 5),
+            counter_eq("semantic_mirrors_rejected", 5),
+        ],
+        [
+            "library_2d",
+            "cli_2d",
+            "cli_camera",
+            "fmtl_native",
+            "fmtl_wasm_player",
+        ]
+        .map(|route| {
+            LogExpect::span_present(
+                "e2e.oracle.semantic",
+                vec![
+                    FieldPred::str_eq("route", route),
+                    FieldPred::str_eq("frame", "rendered"),
+                    FieldPred::str_eq("oracle", "orientation.triangle"),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            )
+        })
+        .to_vec(),
+    ));
+    specs.push(spec(
+        "render_matrix.semantic_oracles.portal.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(semantic_oracles_portal_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("semantic_routes_pass", 2),
+        ],
+        ["portal_scene", "portal_camera_readback"]
+            .map(|route| {
+                LogExpect::span_present(
+                    "e2e.oracle.semantic",
+                    vec![
+                        FieldPred::str_eq("route", route),
+                        FieldPred::str_eq("frame", "planted_vertical_flip"),
+                        FieldPred::str_eq("oracle", "orientation.triangle"),
+                        FieldPred::str_eq("verdict", "fail"),
+                    ],
+                )
+            })
+            .to_vec(),
+    ));
+    specs.push(spec(
+        "lifecycle.python_scene_console.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_scene_console_run),
+        vec![Assertion::ExitCode(0), counter_eq("console_checks", 8)],
+        vec![LogExpect::span_present(
+            "e2e.python.scene_console",
+            vec![FieldPred::u64_eq("checks", 8)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_reference_render_flags.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_reference_render_flags_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("reference_flag_checks", 15),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.reference_flags",
+            vec![FieldPred::u64_eq("checks", 15)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_bundle_audio_capabilities.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_bundle_audio_capabilities_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_bundle_native_comparisons", 5),
+            counter_ge("python_bundle_artifact_comparisons", 5),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.bundle_audio_capabilities",
+            vec![
+                FieldPred::u64_eq("native_comparisons", 5),
+                FieldPred::u64_ge("artifact_comparisons", 5),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_text_configuration.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_text_configuration_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("text_configuration_cases", 37),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.text_configuration",
+            vec![FieldPred::u64_eq("cases", 37)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_surface_hooks.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_surface_hooks_run),
+        vec![Assertion::ExitCode(0), counter_eq("surface_hook_cases", 15)],
+        vec![LogExpect::span_present(
+            "e2e.python.surface_hooks",
+            vec![FieldPred::u64_eq("cases", 15)],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_surface_holes.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_surface_holes_run),
+        vec![Assertion::ExitCode(0), counter_eq("surface_hole_cases", 17)],
+        vec![LogExpect::span_present(
+            "e2e.python.surface_holes",
+            vec![FieldPred::u64_eq("cases", 17)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_camera_frame_points.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_camera_frame_points_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("camera_frame_point_cases", 26),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.camera_frame_points",
+            vec![FieldPred::u64_ge("cases", 26)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_control_panel_frame.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_control_panel_frame_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("control_panel_frame_cases", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.control_panel_frame",
+            vec![FieldPred::u64_eq("cases", 2)],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_rectangle_recovery.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_rectangle_recovery_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("rectangle_recovery_candidates", 61),
+            counter_eq("rectangle_recovery_frames", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.rectangle_recovery",
+            vec![
+                FieldPred::str_eq("mode", "standard"),
+                FieldPred::str_eq("engine", "fast_cpu"),
+                FieldPred::u64_eq("candidates", 61),
+                FieldPred::u64_eq("frames", 13),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_disc_recovery.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_disc_recovery_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("disc_recovery_candidates", 61),
+            counter_eq("disc_recovery_frames", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.disc_recovery",
+            vec![
+                FieldPred::str_eq("mode", "standard"),
+                FieldPred::str_eq("engine", "fast_cpu"),
+                FieldPred::u64_eq("candidates", 61),
+                FieldPred::u64_eq("frames", 13),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_rounded_rectangle_recovery.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_rounded_rectangle_recovery_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("rounded_rectangle_recovery_candidates", 61),
+            counter_eq("rounded_rectangle_recovery_frames", 13),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.rounded_rectangle_recovery",
+            vec![
+                FieldPred::str_eq("mode", "standard"),
+                FieldPred::str_eq("engine", "fast_cpu"),
+                FieldPred::u64_eq("candidates", 61),
+                FieldPred::u64_eq("frames", 13),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.structural_facts.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_structural_facts_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("structural_subjects", 26),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.structural_facts",
+            vec![FieldPred::u64_eq("compared", 26)],
+        )],
+    ));
+    specs.push(spec(
+        "parity.tex_selection_reference.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_tex_selection_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tex_selection_rows", 2352),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.tex_selection",
+            vec![
+                FieldPred::u64_eq("rows", 2352),
+                FieldPred::u64_ge("planted_mismatches", 100),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.class_sweep.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_class_sweep_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("class_sweep_subjects", 309),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.class_sweep",
+            vec![FieldPred::u64_eq("compared", 309)],
+        )],
+    ));
+    specs.push(spec(
+        "parity.structural_envelope.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_structural_envelope_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("envelope_violations_detected", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.structural_envelope",
+            vec![
+                FieldPred::str_eq("subject", "tex"),
+                FieldPred::str_eq("planted_verdict", "differs"),
+                FieldPred::str_eq("violated_row", "bn05-text-geometry"),
+            ],
+        )],
+    ));
+    specs.push(
+        spec(
+            "parity.differential_fuzz_smoke.v1",
+            ScenarioClass::ParityDrill,
+            Surface::ReferenceDifferential,
+            Invocation::new(differential_fuzz_smoke_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("fuzz_programs", 50),
+                counter_eq("fuzz_engine_exits", 0),
+                counter_eq("fuzz_position_mismatches", 0),
+                counter_eq("fuzz_log_lines", 50),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.differential_fuzz",
+                vec![FieldPred::u64_eq("programs", 50)],
+            )],
+        )
+        .tier(Tier::Full),
+    );
+    specs.push(spec(
+        "parity.reference_corpus_regressions.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_reference_corpus_regressions_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("corpus_regression_cases", 24),
+        ],
+        vec![
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-5wq.30"),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+            // The corpus's WriteAntipode matching (fm-5wq.11): "Antipode" moves as
+            // one block, the quotes and the "s" fade out, "map" fades in.
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-5wq.11"),
+                    FieldPred::str_eq(
+                        "construct",
+                        "TransformMatchingStrings(Text(\"“Antipodes”\"), Text(\"Antipode map\"))",
+                    ),
+                    FieldPred::str_eq(
+                        "observed",
+                        "11>11: transform s1-8>t0-7; fade_out s0; fade_out s9; fade_out s10; \
+                         fade_in t8; fade_in t9; fade_in t10",
+                    ),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+            // fm-k00v: a Square's RIGHT-shift updater keeps acting through its 1 s
+            // FadeIn, as the Reference's starting copy and target carry it.
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-k00v"),
+                    FieldPred::str_eq("observed", "2.0000"),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+            LogExpect::span_present(
+                "e2e.python.reference_corpus_regression",
+                vec![
+                    FieldPred::str_eq("bead", "fm-5wq.70"),
+                    FieldPred::str_eq("observed", "two lines; whitespace and star preserve layout"),
+                    FieldPred::str_eq("verdict", "pass"),
+                ],
+            ),
+        ],
+    ));
+    specs.push(spec(
+        "failure_path.python_witness_registry.v1",
+        ScenarioClass::FailurePath,
+        Surface::PythonInProcess,
+        Invocation::new(python_witness_registry_run),
+        vec![Assertion::ExitCode(0)],
+        vec![LogExpect::span_present(
+            "e2e.python.witness_registry",
+            vec![
+                FieldPred::u64_ge("cases", 15),
+                FieldPred::u64_eq("failed", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_svg.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_svg_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["diagram.svg".to_owned()]),
+            counter_eq("svg_thread_counts", 3),
+            counter_eq("svg_failure_paths", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.svg",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_subclass_hooks.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_subclass_hooks_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("subclass_hook_bases", 11),
+            counter_eq("subclass_hook_cases", 11),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.subclass_hooks",
+            vec![
+                FieldPred::u64_eq("failed", 0),
+                FieldPred::u64_eq("bases", 11),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_live_tex.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_live_tex_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "live_tex_first.png".to_owned(),
+                "live_tex_last.png".to_owned(),
+            ]),
+            counter_eq("live_tex_frames", 6),
+            counter_eq("live_tex_thread_counts", 3),
+            counter_eq("live_tex_failure_paths", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.live_tex",
+            vec![
+                FieldPred::u64_eq("frames", 6),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 2),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_complex_readouts.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_complex_readouts_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "complex_readouts_first.png".to_owned(),
+                "complex_readouts_last.png".to_owned(),
+            ]),
+            counter_eq("complex_readouts_frames", 6),
+            counter_eq("complex_readouts_thread_counts", 3),
+            counter_eq("complex_readouts_failure_paths", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.complex_readouts",
+            vec![
+                FieldPred::u64_eq("frames", 6),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 1),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_tex_preamble.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_tex_preamble_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "tex_preamble_first.png".to_owned(),
+                "tex_preamble_last.png".to_owned(),
+            ]),
+            counter_eq("tex_preamble_frames", 8),
+            counter_eq("tex_preamble_thread_counts", 3),
+            counter_eq("tex_preamble_failure_paths", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.tex_preamble",
+            vec![
+                FieldPred::u64_eq("frames", 8),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("failure_paths", 1),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_textured_surfaces.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_textured_surfaces_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "textures_first.png".to_owned(),
+                "textures_last.png".to_owned(),
+            ]),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.textures",
+            vec![
+                FieldPred::u64_eq("frames", 4),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(
+        spec(
+            "lifecycle.python_image_inputs.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::PythonInProcess,
+            Invocation::new(python_image_inputs_run),
+            vec![Assertion::ExitCode(0), counter_eq("image_input_checks", 3)],
+            vec![LogExpect::span_present(
+                "e2e.python.image_inputs",
+                vec![FieldPred::u64_eq("checks", 3)],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "lifecycle.portal_asset_root.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::PythonInProcess,
+            Invocation::new(python_asset_root_run),
+            vec![Assertion::ExitCode(0), counter_eq("asset_root_checks", 3)],
+            vec![LogExpect::span_present(
+                "e2e.python.asset_root",
+                vec![FieldPred::u64_eq("checks", 3)],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "parity.geometry_defaults_both_doors.v1",
+            ScenarioClass::ParityDrill,
+            Surface::PythonInProcess,
+            Invocation::new(geometry_defaults_both_doors_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("geometry_classes_compared", 18),
+                counter_eq("planted_default_detected", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.geometry_defaults",
+                vec![
+                    FieldPred::u64_eq("classes", 18),
+                    FieldPred::u64_eq("planted_detected", 1),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
+            "parity.translated_arc_centers.v1",
+            ScenarioClass::ParityDrill,
+            Surface::RustApi,
+            Invocation::new(translated_arc_centers_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("arc_centers_checked", 16),
+                counter_eq("arc_first_anchor_rejected", 16),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.geometry.arc_centers",
+                vec![
+                    FieldPred::u64_eq("checked", 16),
+                    FieldPred::u64_eq("rejected_anchors", 16),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(spec(
+        "render_matrix.python_surface_mesh.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_surface_mesh_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["surface_mesh.png".to_owned()]),
+            counter_eq("surface_mesh_checks", 12),
+            counter_ge("surface_mesh_visible_pixels", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.surface_mesh",
+            vec![FieldPred::u64_eq("checks", 12)],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.python_animation_semantics.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_animation_lifecycle_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_frame.png".to_owned()]),
+            counter_ge("python_render_frames", 3),
+            counter_eq("python_png_signature", 1),
+            counter_eq("python_engine_journaled", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.render",
+            vec![
+                FieldPred::str_eq("scene", "AnimationLifecycleScene"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("dimensions_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "parity.python_ode_solution.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_ode_solution_run),
+        vec![Assertion::ExitCode(0), counter_eq("ode_checks", 8)],
+        vec![LogExpect::span_present(
+            "e2e.python.ode_solution",
+            vec![FieldPred::u64_eq("checks", 8)],
+        )],
+    ));
+    specs.push(spec(
+        "parity.python_portal_reference_defaults.v1",
+        ScenarioClass::ParityDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_reference_defaults_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_defaults.y4m".to_owned()]),
+            counter_eq("python_defaults_reference_background", 1),
+            counter_eq("python_defaults_reference_rate", 1),
+            counter_eq("python_defaults_brace_spans_composite", 1),
+            counter_eq("python_defaults_matrix_label_below", 1),
+            counter_eq("python_defaults_front_doors_agree", 1),
+            counter_eq("python_defaults_display_style_tex", 1),
+            counter_eq("python_defaults_readme_formula_envelope", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.reference_defaults",
+            vec![
+                FieldPred::str_eq("rate", "30:1"),
+                FieldPred::str_eq("background_is_reference", "true"),
+                FieldPred::str_eq("rate_is_reference", "true"),
+                FieldPred::str_eq("brace_spans", "true"),
+                FieldPred::str_eq("matrix_label_below", "true"),
+                FieldPred::str_eq("front_doors_agree", "true"),
+                FieldPred::str_eq("display_style", "true"),
+                FieldPred::str_eq("readme_envelope", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.rate_func_tabulated_offload.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_exact_rate_offload_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_ge("exact_rate_compared_frames", 1),
+            counter_ge("exact_rate_distinct_samples", 1),
+            counter_ge("exact_rate_logical_table_bytes", 16),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.exact_rate_offload",
+            vec![
+                FieldPred::str_eq("serial_pixels_identical", "true"),
+                FieldPred::str_eq("ordinary_callbacks_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_portal_native_offload.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_native_offload_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_offload_pure_frames", 55),
+            counter_eq("python_offload_compared_frames", 63),
+            counter_eq("python_offload_fallback_cases", 5),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.native_offload",
+            vec![
+                FieldPred::u64_eq("pure_frames", 55),
+                FieldPred::u64_eq("compared_frames", 63),
+                FieldPred::u64_eq("fallback_cases", 5),
+                FieldPred::str_eq("serial_pixels_identical", "true"),
+                FieldPred::str_eq("authored_observers_preserved", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_portal_planar_route.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_planar_route_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_planar_native_identical", 1),
+            counter_eq("python_planar_surface_camera", 1),
+            counter_eq("python_planar_route_frames", 6),
+            counter_ge("python_planar_converted_frames", 1),
+            counter_ge("python_planar_conversion_reuses", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.planar_route",
+            vec![
+                FieldPred::str_eq("native_identical", "true"),
+                FieldPred::str_eq("conversion_accounted", "true"),
+                FieldPred::u64_eq("camera_frames", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.python_portal_planar_aspects.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_planar_aspects_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_planar_aspect_cases", 2),
+            counter_ge("python_planar_aspect_frames", 4),
+            counter_eq("python_planar_aspect_camera_refusals", 6),
+        ],
+        vec![
+            LogExpect::span_present(
+                "e2e.python.planar_aspect",
+                vec![
+                    FieldPred::u64_eq("width", 854),
+                    FieldPred::u64_eq("height", 480),
+                    FieldPred::u64_eq("camera_frames", 0),
+                    FieldPred::str_eq("readback_matches_file", "true"),
+                    FieldPred::str_eq("serial_matches_parallel", "true"),
+                ],
+            ),
+            LogExpect::span_present(
+                "e2e.python.planar_aspect",
+                vec![
+                    FieldPred::u64_eq("width", 480),
+                    FieldPred::u64_eq("height", 854),
+                    FieldPred::u64_eq("camera_frames", 0),
+                    FieldPred::str_eq("readback_matches_file", "true"),
+                    FieldPred::str_eq("serial_matches_parallel", "true"),
+                ],
+            ),
+        ],
+    ));
+    specs.push(spec(
+        "render_matrix.python_portal_png_still.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_png_still_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["python_portal_still.png".to_owned()]),
+            counter_eq("python_still_frames", 1),
+            counter_eq("python_still_png_signature", 1),
+            counter_eq("python_still_engine_journaled", 1),
+            counter_eq("python_still_wrong_node_kind_refused", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.render",
+            vec![
+                FieldPred::str_eq("scene", "_GauntletPortalScene"),
+                FieldPred::str_eq("format", "png"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("dimensions_match", "true"),
+                FieldPred::str_eq("engine_journaled", "true"),
+                FieldPred::str_eq("wrong_node_kind_refused", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_prerun_subdivide_y4m.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_prerun_subdivide_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_prerun_frames", 3),
+            counter_eq("cli_subdivision_segments", 2),
+            counter_eq("cli_subdivision_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.prerun_subdivide",
+            vec![
+                FieldPred::str_eq("prerun_record", "true"),
+                FieldPred::str_eq("render_records", "true"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::u64_eq("rendered_frames", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_batch_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_batch_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_batch_scenes", 2),
+            counter_eq("cli_batch_frames", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.batch",
+            vec![
+                FieldPred::str_eq("source", "builtin"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signatures", "true"),
+                FieldPred::str_eq("manifests", "true"),
+                FieldPred::str_eq("ordered_records", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_native_png_gif.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_native_png_gif_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_png_still_frames", 1),
+            counter_eq("cli_gif_stream_frames", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.native_rgba_artifacts",
+            vec![
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("gif_signature", "true"),
+                FieldPred::str_eq("robot_records", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_compiled_fmtl_png_sequence.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_compiled_bundle_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_compiled_render_frames", 2),
+            counter_eq("cli_compiled_png_signature", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.render",
+            vec![
+                FieldPred::str_eq("source", "compiled"),
+                FieldPred::str_eq("format", "png_sequence"),
+                FieldPred::str_eq("complete", "true"),
+                FieldPred::str_eq("png_signature", "true"),
+                FieldPred::str_eq("robot_record", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.cli_compiled_fmtl_range.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_compiled_range_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_compiled_range_frames", 2),
+            counter_eq("cli_compiled_range_prefix_omitted", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.compiled_range",
+            vec![
+                FieldPred::u64_eq("source_start", 4),
+                FieldPred::u64_eq("source_end", 6),
+                FieldPred::str_eq("source_samples_match", "true"),
+                FieldPred::str_eq("exact_stop", "true"),
+            ],
+        )],
+    ));
+
+    // DETERMINISM DRILLS.
+    specs.push(spec(
+        "determinism.repeat_byte_identical.v1",
+        ScenarioClass::DeterminismDrill,
+        Surface::RustApi,
+        Invocation::new(determinism_repeat_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("repeat_byte_equal", 1),
+            Assertion::GoldenLock {
+                suite: E2E_SUITE,
+                scope: Scope::Certified,
+            },
+        ],
+        vec![
+            LogExpect::counter_ge("repeat_byte_equal", 1),
+            LogExpect::no_event("e2e.failure"),
+        ],
+    ));
+    specs.push(spec(
+        "determinism.threads_1_4_byte_identical.v1",
+        ScenarioClass::DeterminismDrill,
+        Surface::RustApi,
+        Invocation::new(|ctx| determinism_threads_run(ctx, 4)),
+        vec![Assertion::ExitCode(0), counter_eq("thread_byte_equal", 1)],
+        vec![LogExpect::counter_ge("thread_byte_equal", 1)],
+    ));
+    specs.push(
+        spec(
+            "determinism.threads_16_byte_identical.v1",
+            ScenarioClass::DeterminismDrill,
+            Surface::RustApi,
+            Invocation::new(|ctx| determinism_threads_run(ctx, 16)),
+            vec![Assertion::ExitCode(0), counter_eq("thread_byte_equal", 1)],
+            vec![LogExpect::counter_ge("thread_byte_equal", 1)],
+        )
+        .tier(Tier::Full),
+    );
+
+    specs.push(spec(
+        "lifecycle.bundle_soundtrack_capabilities.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(bundle_soundtrack_capabilities_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("bundle_audio_thread_counts", 3),
+            counter_eq("bundle_audio_source_receipts", 2),
+            counter_eq("bundle_audio_refusals", 2),
+            counter_eq("bundle_audio_no_cue_unchanged", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.bundle.soundtrack_capabilities",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("source_receipts", 2),
+                FieldPred::u64_eq("prepublication_refusals", 2),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "lifecycle.scene_soundtrack_windows.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(scene_soundtrack_windows_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("soundtrack_cues", 2),
+            counter_eq("soundtrack_windows_equal", 1),
+            counter_eq("soundtrack_skip_rebased", 1),
+            counter_eq("soundtrack_source_identity", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.soundtrack.windows",
+            vec![
+                FieldPred::u64_eq("cues", 2),
+                FieldPred::u64_eq("captured_frames", 45),
+                FieldPred::str_eq("sample_window_equal", "true"),
+                FieldPred::str_eq("skipped_prefix_removed", "true"),
+                FieldPred::str_eq("source_identity", "true"),
+            ],
+        )],
+    ));
+
+    // FAILURE-PATH DRILLS.
+    specs.push(spec(
+        "failure_path.tex_resource_budget_named.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_tex_budget_run),
+        vec![Assertion::ExitCode(0), counter_eq("budgets_named", 2)],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("error_kind", "MathError::Budget"),
+                FieldPred::str_eq("names_budget", "true"),
+                FieldPred::str_eq("prompt", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.tex_unsupported_construct_named.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_tex_run),
+        vec![Assertion::ExitCode(0), counter_eq("error_named", 1)],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("error_kind", "TexError::Math"),
+                FieldPred::str_eq("names_construct", "true"),
+                FieldPred::str_eq("named_refusal", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cache_corrupt_recovers.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_cache_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cache_corrupt_miss", 1),
+            counter_eq("cache_recovery_ok", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("cache_corrupt_miss", "true"),
+                FieldPred::str_eq("cache_corrupt_evicted", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.move_along_path_live_input.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(failure_move_along_path_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("motion_failure_modes", 2),
+            counter_eq("motion_failure_emitted_frames", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.move_along_path",
+            vec![
+                FieldPred::u64_eq("modes_checked", 2),
+                FieldPred::u64_eq("emitted_frames", 1),
+                FieldPred::str_eq("refused_before_advance", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cli_quality_exclusive_named.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_run),
+        vec![
+            Assertion::ExitCode(2),
+            counter_eq("cli_rule_named", 1),
+            Assertion::NdjsonSchema,
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure",
+            vec![
+                FieldPred::str_eq("rule", "quality-exclusive"),
+                FieldPred::str_eq("rule_named", "true"),
+                FieldPred::str_eq("stderr_empty", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cli_video_quality_admission.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_video_quality_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_video_quality_refusals", 6),
+            counter_eq("cli_video_quality_tool_calls", 0),
+            Assertion::NdjsonSchema,
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.cli_video_quality",
+            vec![
+                FieldPred::u64_eq("refused", 6),
+                FieldPred::u64_eq("tool_calls", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.cli_ffmpeg_limit_admission.v1",
+        ScenarioClass::FailurePath,
+        Surface::CliInProcess,
+        Invocation::new(failure_cli_ffmpeg_limits_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_ffmpeg_limit_refusals", 4),
+            counter_eq("cli_ffmpeg_limit_tool_calls", 0),
+            counter_eq("cli_ffmpeg_admitted_timeout", 21_600),
             counter_eq("cli_ffmpeg_admitted_artifact", 8 << 30),
             counter_eq("cli_ffmpeg_admitted_input", 8 << 30),
             Assertion::NdjsonSchema,
