@@ -311,11 +311,12 @@ worker_config.replay = NativeReplayPolicy::Checkpointed;
 
 `register_no_dt` supports ordinary scene updaters with signature
 `fn(&mut Stage, Mob)`. Unregistered callbacks, replaced bindings and native
-`updater_state` attributes require cold reconstruction. Earlier waits with
-pending executable steps also retain that path; only the original final
-declarative wait suffix is eligible. A terminal closed native `Play` can also
-restore its prepared lifecycle as described below. A generated wait inside
-deferred work does not become an independent durable continuation.
+`updater_state` attributes require cold reconstruction. Waits in a fully declared
+schedule of supported native plays and waits can resume before later plays;
+the closed-schedule contract is described below. Schedules with deferred work
+retain the original final-wait-suffix path. A terminal closed native `Play` can
+also restore its prepared lifecycle. A generated wait inside deferred work does
+not become an independent durable continuation.
 
 Custom preflight hooks, sound requests, input history, live event ingress and
 edited source spans cannot be discarded by a direct restore. Deferred access
@@ -339,9 +340,9 @@ It does not evaluate the preceding frames, rerun the current wait's zero-dt
 opener, or emit its pre-play lifecycle again.
 
 The original all-wait envelope remains readable and keeps its canonical bytes.
-Mixed schedules use a separate `FMNR` record that also binds the wait's suffix
-index and the completed prefix's frame, segment and play counters. These counts
-remain distinct: deferred constructors and empty plays can consume schedule
+Waits after a completed executable prefix use a separate `FMNR` record that also
+binds the wait's suffix index and the completed prefix's frame, segment and play
+counters. These counts remain distinct: deferred constructors and empty plays can consume schedule
 entries without incrementing the scene's play count. No executable prefix is
 decoded or resumed, and its stateful effect evidence remains in the journal.
 
@@ -383,7 +384,37 @@ callback rates and stateful `Succession` retain bounded cold reconstruction;
 interpolation purity alone does not establish that their lifecycle hooks are
 serializable.
 
-Run the complete portable example:
+### Closed native schedules
+
+Recovery also works during earlier plays and intermediate waits when the factory
+declares the entire native schedule up front. For example, a `Write`, a wait,
+a nested `AnimationGroup`, and another wait can resume during the first drawing
+or the intervening wait. The active play must satisfy the same closed, pure
+continuation contract as a terminal play.
+
+This path requires every original segment to be a supported native `Play`,
+`Wait`, or `WaitFrames`, with no deferred `Build`. Animation carriers must still
+be fresh when the factory returns: no prior timing preparation, begin state,
+starting copies, family tables, or pending lifecycle state. The worker binds
+every original declaration and its exact planned frame count to the saved
+program cursor. Unsupported future animations, callback rates, and already
+prepared carriers retain the verified cold path.
+
+Restoration installs the SceneState in an independent factory's arena, verifies
+every future declaration and handle against that restored state, and discards
+only the already-started factory segments. The active segment resumes from its
+saved frame. Future animations stay unopened until playback reaches them, after
+the current segment's pending finish and cleanup. Zero-frame waits still consume
+their original segment and play counts exactly once.
+
+The additional `FMNR` record binds the full schedule digest, active segment kind,
+base frame, completed samples and play count. Existing all-wait, wait-tail and
+terminal-play checkpoints retain their original canonical encoding, including
+when they are restored and captured again.
+
+### Recovery example and receipts
+
+Run the portable registered-updater example:
 
 ```sh
 cargo run --locked -p fmn-studio --example native_checkpoint
@@ -424,8 +455,9 @@ arbitrary source files. Programs have an owned declarative segment schedule,
 not a suspended arbitrary Rust stack. Perspective editing, projected overlays,
 Metal presentation, Python callback ownership and audio export are not added.
 
-Admitted waits and terminal native plays restore data and their continuation
-without prefix execution. Other schedules still need bounded cold execution.
+Admitted waits, terminal native plays, and earlier segments of closed native
+schedules restore data and their continuation without prefix execution. Other
+schedules still need bounded cold execution.
 Restore latency and memory
 cost depend on the saved scene; no constant-time claim is made. Native editing
 history does not rewind external state inside closures.

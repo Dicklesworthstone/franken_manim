@@ -2430,9 +2430,8 @@ fn restored_active_play_can_be_checkpointed_again_without_changing_canonical_sta
 }
 
 #[test]
-fn nonterminal_plays_opaque_rates_and_delegating_lifecycle_wrappers_stay_cold() {
+fn opaque_rates_and_delegating_lifecycle_wrappers_stay_cold() {
     for (policy, frame) in [
-        (TerminalPlayPolicy::Native, 2),
         (TerminalPlayPolicy::OpaqueRate, 10),
         (TerminalPlayPolicy::DelegatingWrapper, 10),
     ] {
@@ -2469,6 +2468,278 @@ fn nonterminal_plays_opaque_rates_and_delegating_lifecycle_wrappers_stay_cold() 
         if matches!(policy, TerminalPlayPolicy::DelegatingWrapper) {
             // One uninterrupted owner and one cold-restored owner each finish.
             assert_eq!(ACTIVE_PLAY_CALLS.with(Cell::get), (1, 2));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum FutureNativePolicy {
+    Closed,
+    RegisteredWait,
+    OpaqueRate,
+    Wrapper,
+    Prepared,
+    Deferred,
+}
+
+fn closed_schedule_drift(stage: &mut Stage, mob: Mob, dt: f64) {
+    // Both ordinary samples and zero-dt wait prologues change durable state.
+    // Re-entering the active wait after restore therefore cannot go unnoticed.
+    stage.shift(mob, [0.0002 + dt * 0.05, 0.0, 0.0]);
+}
+
+fn closed_schedule_program(
+    zero_wait: bool,
+    policy: FutureNativePolicy,
+    future_frames: u64,
+    angle: f64,
+) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 75).unwrap();
+    let root = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [-0.8, -0.4, 0.0],
+        [-0.4, 0.6, 0.0],
+        [0.0, -0.4, 0.0],
+    ]));
+    let other = scene.stage_mut().copy_family(root).unwrap();
+    scene.stage_mut().shift(other, [1.0, 0.0, 0.0]);
+    let target = scene.stage_mut().copy_family(other).unwrap();
+    scene.stage_mut().shift(target, [0.5, 0.6, 0.0]);
+    scene.add(&[root, other]).unwrap();
+    let first = fmn_anim::write(scene.stage(), root);
+    let rotation =
+        fmn_anim::Rotating::new(root)
+            .with_angle(angle)
+            .with_config(fmn_anim::AnimConfig {
+                run_time_frames: Some(5),
+                final_alpha_value: 0.35,
+                ..fmn_anim::AnimConfig::default()
+            });
+    let moved = fmn_anim::Transform::new(other, target).with_config(fmn_anim::AnimConfig {
+        run_time_frames: Some(7),
+        remover: true,
+        final_alpha_value: 0.4,
+        ..fmn_anim::AnimConfig::default()
+    });
+    let inner = fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(rotation)]).unwrap();
+    let group = fmn_anim::lagged_start(scene.stage_mut(), vec![Box::new(inner), Box::new(moved)])
+        .unwrap()
+        .with_duration_scale(0.75);
+    let mut future: Box<dyn Animation> = Box::new(group);
+    match policy {
+        FutureNativePolicy::Closed
+        | FutureNativePolicy::RegisteredWait
+        | FutureNativePolicy::Deferred => {}
+        FutureNativePolicy::OpaqueRate => {
+            future.state_mut().config.rate_func = fmn_anim::RateFunc::Base(opaque_play_rate);
+        }
+        FutureNativePolicy::Wrapper => {
+            future = Box::new(DelegatingPlayAnimation(future));
+        }
+        FutureNativePolicy::Prepared => {
+            future.prepare_timing(30).unwrap();
+            future.begin(scene.stage_mut()).unwrap();
+        }
+    }
+    let mut segments = vec![NativeSegment::Play {
+        animations: vec![Box::new(first)],
+        overrides: fmn_scene::PlayOverrides {
+            run_time_frames: Some(6),
+            ..fmn_scene::PlayOverrides::default()
+        },
+    }];
+    if zero_wait {
+        segments.push(NativeSegment::WaitFrames { frames: 0 });
+        let empty = fmn_anim::AnimationGroup::new(scene.stage_mut(), Vec::new())
+            .unwrap()
+            .with_run_time_frames(0);
+        segments.push(NativeSegment::Play {
+            animations: vec![Box::new(empty)],
+            overrides: fmn_scene::PlayOverrides::default(),
+        });
+    }
+    if matches!(policy, FutureNativePolicy::Deferred) {
+        segments.push(NativeSegment::defer(|_| Ok(Vec::new())));
+    }
+    segments.extend([
+        NativeSegment::WaitFrames { frames: 2 },
+        NativeSegment::Play {
+            animations: vec![future],
+            overrides: fmn_scene::PlayOverrides {
+                run_time_frames: Some(future_frames),
+                ..fmn_scene::PlayOverrides::default()
+            },
+        },
+        NativeSegment::WaitFrames { frames: 3 },
+    ]);
+    let mut registry = NativeUpdaterRegistry::new();
+    if matches!(policy, FutureNativePolicy::RegisteredWait) {
+        let marker = scene.stage_mut().add(Mobject::vector_from_points(&[
+            [1.2, 0.7, 0.0],
+            [1.4, 0.9, 0.0],
+            [1.6, 0.7, 0.0],
+        ]));
+        scene.add(&[marker]).unwrap();
+        registry.register_dt(
+            scene.stage_mut(),
+            marker,
+            protocol_digest(b"closed-schedule-drift-v1"),
+            closed_schedule_drift,
+        )?;
+    }
+    NativeSceneProgram::new(scene, segments, 18)?.with_checkpoint_registry(registry)
+}
+
+fn closed_schedule_worker(
+    zero_wait: bool,
+    policy: FutureNativePolicy,
+    future_frames: u64,
+    angle: f64,
+    threads: usize,
+    replay_budget: u64,
+) -> NativeSceneWorker {
+    let mut config = terminal_play_config(false);
+    config.frame_count = 19;
+    config.source_digest = protocol_digest(b"closed-native-schedule-v1");
+    config.renderer.threads = threads;
+    config.max_replay_frames = replay_budget;
+    NativeSceneWorker::new(config, move || {
+        closed_schedule_program(zero_wait, policy, future_frames, angle)
+    })
+    .unwrap()
+}
+
+#[test]
+fn closed_native_schedules_restore_nonterminal_plays_waits_and_later_begins() {
+    for zero_wait in [false, true] {
+        for frame in [3, 6, 7, 8] {
+            let mut original =
+                closed_schedule_worker(zero_wait, FutureNativePolicy::Closed, 7, 2.4, 1, 100);
+            let entry = commit(&mut original, frame);
+            let saved = checkpoint(&entry, 0);
+            assert_eq!(&saved.state[..8], b"FMNR\x04\0\0\0");
+            let at_checkpoint = checkpoint_observation(&original);
+            let at_checkpoint_png = seek(&mut original, frame);
+            let mut expected = Vec::new();
+            for next in frame + 1..=18 {
+                expected.push((
+                    next,
+                    seek(&mut original, next),
+                    checkpoint_observation(&original),
+                ));
+            }
+            for threads in [1, 4] {
+                let mut resumed = closed_schedule_worker(
+                    zero_wait,
+                    FutureNativePolicy::Closed,
+                    7,
+                    2.4,
+                    threads,
+                    1,
+                );
+                resumed
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                    .unwrap();
+                let report = resumed.last_restore().unwrap();
+                assert_eq!(report.mode, NativeRestoreMode::Checkpoint);
+                assert_eq!(report.fallback, None);
+                assert_eq!(resumed.last_state_hash(), Some(entry.state_hash));
+                assert_eq!(checkpoint_observation(&resumed), at_checkpoint);
+                assert_eq!(png(&seek(&mut resumed, frame)), png(&at_checkpoint_png));
+                for (next, rendered, observation) in &expected {
+                    assert_eq!(png(&seek(&mut resumed, *next)), png(rendered));
+                    // Includes the off-root prepared copies. Beginning a
+                    // future group early, twice, or from the factory's old
+                    // geometry would change these bytes or the next pixels.
+                    assert_eq!(
+                        &checkpoint_observation(&resumed),
+                        observation,
+                        "zero_wait={zero_wait}, saved={frame}, next={next}, threads={threads}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn closed_schedule_restore_binds_future_declarations_and_their_exact_timing() {
+    let mut original = closed_schedule_worker(false, FutureNativePolicy::Closed, 7, 2.4, 1, 100);
+    let entry = commit(&mut original, 3);
+    let saved = checkpoint(&entry, 0);
+    for (frames, angle) in [(8, 2.4), (7, 1.8)] {
+        let mut changed =
+            closed_schedule_worker(false, FutureNativePolicy::Closed, frames, angle, 1, 100);
+        let _ = seek(&mut changed, 1);
+        let before = checkpoint_observation(&changed);
+        assert!(
+            changed
+                .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                .is_err()
+        );
+        assert_eq!(checkpoint_observation(&changed), before);
+    }
+}
+
+#[test]
+fn unsupported_or_prebegun_future_segments_keep_verified_cold_recovery() {
+    for policy in [
+        FutureNativePolicy::OpaqueRate,
+        FutureNativePolicy::Wrapper,
+        FutureNativePolicy::Prepared,
+        FutureNativePolicy::Deferred,
+    ] {
+        let mut original = closed_schedule_worker(false, policy, 7, 2.4, 1, 100);
+        let entry = commit(&mut original, 3);
+        let expected = checkpoint_observation(&original);
+        let mut resumed = closed_schedule_worker(false, policy, 7, 2.4, 1, 100);
+        resumed
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        assert_eq!(
+            resumed.last_restore().unwrap().mode,
+            NativeRestoreMode::ColdVerified,
+            "{policy:?}"
+        );
+        assert_eq!(
+            resumed.last_restore().unwrap().fallback,
+            Some(fmn_studio::native::NativeCheckpointFallback::UnsupportedSchedule),
+            "{policy:?}"
+        );
+        assert_eq!(checkpoint_observation(&resumed), expected);
+    }
+}
+
+#[test]
+fn declared_schedule_resumes_a_stateful_intermediate_wait_without_zero_dt_reentry() {
+    for frame in [7, 8] {
+        let mut original =
+            closed_schedule_worker(false, FutureNativePolicy::RegisteredWait, 7, 2.4, 1, 100);
+        let entry = commit(&mut original, frame);
+        let saved = checkpoint(&entry, 0);
+        assert_eq!(&saved.state[..8], b"FMNR\x04\0\0\0");
+        let at_checkpoint = checkpoint_observation(&original);
+        assert!(!matches!(at_checkpoint.3, EffectClass::Pure));
+        let mut expected = Vec::new();
+        for next in frame + 1..=18 {
+            expected.push((
+                next,
+                seek(&mut original, next),
+                checkpoint_observation(&original),
+            ));
+        }
+        let mut resumed =
+            closed_schedule_worker(false, FutureNativePolicy::RegisteredWait, 7, 2.4, 4, 1);
+        resumed
+            .handle(SupervisorRequest::RestoreCheckpoint(saved))
+            .unwrap();
+        assert_eq!(
+            resumed.last_restore().unwrap().mode,
+            NativeRestoreMode::Checkpoint
+        );
+        assert_eq!(checkpoint_observation(&resumed), at_checkpoint);
+        for (next, rendered, observation) in expected {
+            assert_eq!(png(&seek(&mut resumed, next)), png(&rendered));
+            assert_eq!(checkpoint_observation(&resumed), observation);
         }
     }
 }

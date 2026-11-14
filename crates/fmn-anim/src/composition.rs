@@ -895,6 +895,15 @@ fn same_exact_timings(a: &Option<Arc<ExactTimings>>, b: &Option<Arc<ExactTimings
 }
 
 impl AnimationGroup {
+    pub(crate) fn declaration_is_fresh(&self) -> bool {
+        self.begun == 0
+            && self.finished == 0
+            && self.updater_error.is_none()
+            && self.frame_timings.is_none()
+            && self.max_frame_end.is_none()
+            && self.exact_timings.is_none()
+    }
+
     pub(crate) fn continuation_controls(&self) -> GroupContinuationControls {
         GroupContinuationControls {
             layout_lag_ratio: self.layout_lag_ratio,

@@ -607,24 +607,103 @@ fn group_program(nested: bool) -> Result<NativeSceneProgram, ServiceError> {
 }
 
 pub(super) fn run_drawing(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    run_prepared_checkpoints(ctx, drawing_program, "drawing")
+    run_prepared_checkpoints(ctx, drawing_program, "drawing", &[4, 9, 16])
 }
 
 pub(super) fn run_groups(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    run_prepared_checkpoints(ctx, group_program, "group")
+    run_prepared_checkpoints(ctx, group_program, "group", &[4, 9, 16])
+}
+
+fn schedule_program(empty_wait: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 79).map_err(service_error)?;
+    let drawn = scene
+        .add_mobject(
+            fmn_library::Rectangle::new()
+                .width(0.9)
+                .height(0.5)
+                .build()
+                .map_err(service_error)?,
+        )
+        .map_err(service_error)?;
+    scene.stage_mut().shift(drawn, [-0.7, 0.0, 0.0]);
+    scene.stage_mut().set_fill(
+        drawn,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    let removed = scene
+        .add_mobject(fmn_library::Circle::new().radius(0.3).build())
+        .map_err(service_error)?;
+    scene.stage_mut().shift(removed, [0.7, 0.0, 0.0]);
+    let drawing = fmn_anim::write(scene.stage(), drawn);
+    // The second play must take its begin-state after Write has completed its
+    // drawing/filling lifecycle. Constructing a future group is not beginning
+    // it: a restored early checkpoint must retain this distinction.
+    let rotation = fmn_anim::Rotating::new(drawn)
+        .with_angle(1.7)
+        .with_about_point([-0.7, 0.0, 0.0])
+        .with_config(fmn_anim::AnimConfig {
+            run_time_frames: Some(5),
+            final_alpha_value: 0.6,
+            ..fmn_anim::AnimConfig::default()
+        });
+    let mut fade = fmn_anim::v_fade_out(removed);
+    fade.state_mut().config.run_time_frames = Some(3);
+    let inner = fmn_anim::AnimationGroup::with_lag_ratio(
+        scene.stage_mut(),
+        vec![Box::new(rotation), Box::new(fade)],
+        0.4,
+    )
+    .map_err(service_error)?;
+    let group =
+        fmn_anim::lagged_start(scene.stage_mut(), vec![Box::new(inner)]).map_err(service_error)?;
+    let mut segments = vec![NativeSegment::Play {
+        animations: vec![Box::new(drawing)],
+        overrides: fmn_scene::PlayOverrides {
+            run_time_frames: Some(6),
+            ..fmn_scene::PlayOverrides::default()
+        },
+    }];
+    if empty_wait {
+        // This consumes a program segment and a play count without consuming
+        // a frame. It must run once when leaving the restored first play.
+        segments.push(NativeSegment::WaitFrames { frames: 0 });
+    }
+    segments.extend([
+        NativeSegment::WaitFrames { frames: 2 },
+        NativeSegment::Play {
+            animations: vec![Box::new(group)],
+            overrides: fmn_scene::PlayOverrides {
+                run_time_frames: Some(7),
+                ..fmn_scene::PlayOverrides::default()
+            },
+        },
+        NativeSegment::WaitFrames { frames: 3 },
+    ]);
+    NativeSceneProgram::new(scene, segments, 18)
+}
+
+pub(super) fn run_schedules(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    // Exercise an earlier play, its pending epilogue, an intermediate wait,
+    // and that wait's pending epilogue. Every continuation then crosses the
+    // later nested play and verifies all remaining native state and pixels.
+    run_prepared_checkpoints(ctx, schedule_program, "schedule", &[3, 6, 7, 8])
 }
 
 fn run_prepared_checkpoints(
     ctx: &mut RunCtx,
     factory: fn(bool) -> Result<NativeSceneProgram, ServiceError>,
     family: &str,
+    saved_frames: &[i64],
 ) -> Result<RunOutcome, ScenarioError> {
     let mut restored_count = 0;
     let mut matching_frames = 0;
     let mut last_checkpoint = Vec::new();
     let mut last_png = Vec::new();
     for variant in [false, true] {
-        for saved_frame in [4, 9, 16] {
+        for &saved_frame in saved_frames {
             let mut original_config = config();
             original_config.frame_count = 19;
             original_config.checkpoint_frames = 1;
@@ -637,7 +716,7 @@ fn run_prepared_checkpoints(
             let state = entry
                 .checkpoint
                 .clone()
-                .ok_or_else(|| fail("drawing play omitted its checkpoint"))?;
+                .ok_or_else(|| fail("native program omitted its checkpoint"))?;
             let expected = original
                 .program()
                 .unwrap()
@@ -661,7 +740,7 @@ fn run_prepared_checkpoints(
                 .map_err(|e| fail(e.to_string()))?;
             let receipt = recovered
                 .last_restore()
-                .ok_or_else(|| fail("drawing restore omitted its receipt"))?;
+                .ok_or_else(|| fail("native program restore omitted its receipt"))?;
             if receipt.mode != NativeRestoreMode::Checkpoint
                 || receipt.frame != saved_frame as u64
                 || receipt.fallback.is_some()

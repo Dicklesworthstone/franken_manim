@@ -775,6 +775,18 @@ pub struct SteppedWait {
 }
 
 impl SteppedPlay {
+    /// Original base frame, completed samples and planned frame count. A
+    /// continuation owner uses this to bind a restored play to its declared
+    /// schedule; inspecting the cursor never advances or finishes the play.
+    #[must_use]
+    pub fn frame_cursor(&self) -> (i64, i64, i64) {
+        (
+            self.open.report().base_frame,
+            self.open.stepped(),
+            self.open.report().n_frames,
+        )
+    }
+
     /// Whether every nominal frame has been captured or explicitly skipped by
     /// pure catch-up. The animation epilogue remains pending until
     /// `finish_stepped_play` is explicitly called.
@@ -1532,6 +1544,30 @@ impl Scene {
                 rate_func: overrides.rate_func.as_ref(),
                 lag_ratio: overrides.lag_ratio,
             },
+            max_bytes,
+        )
+        .map_err(Into::into)
+    }
+
+    /// Read a wholly unprepared native declaration and its planned sample
+    /// count, without invoking preparation or lifecycle hooks. Unsupported or
+    /// previously prepared carriers cannot become future durable segments.
+    pub fn fresh_play_declaration(
+        &self,
+        animations: &[Box<dyn Animation>],
+        overrides: &PlayOverrides,
+        max_bytes: usize,
+    ) -> Result<Option<(Vec<u8>, i64)>, SceneError> {
+        fmn_anim::continuation::fresh_declaration(
+            &self.stage,
+            animations,
+            fmn_anim::continuation::DeclarationOverrides {
+                run_time: overrides.run_time,
+                run_time_frames: overrides.run_time_frames,
+                rate_func: overrides.rate_func.as_ref(),
+                lag_ratio: overrides.lag_ratio,
+            },
+            self.clock.fps(),
             max_bytes,
         )
         .map_err(Into::into)

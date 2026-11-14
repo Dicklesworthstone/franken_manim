@@ -18962,6 +18962,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_schedule_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run_schedules),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_schedule_checkpoint.bin".into(),
+                "native_schedule_continued.png".into(),
+            ]),
+            counter_eq("studio_schedule_checkpoint_restores", 8),
+            counter_eq("studio_schedule_checkpoint_frames", 96),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.schedule_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 8),
+                FieldPred::u64_eq("matching_frames", 96),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_wait_tail_checkpoint.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioInProcess,
@@ -22903,6 +22927,16 @@ fn studio_group_checkpoint_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_group_checkpoint.v1")
         .expect("group checkpoint lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_schedule_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_schedule_checkpoint.v1")
+        .expect("closed schedule checkpoint lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

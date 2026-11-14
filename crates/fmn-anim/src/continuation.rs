@@ -75,7 +75,7 @@ impl From<AnimError> for Error {
 }
 
 /// Timing overrides read without executing a factory or animation hook.
-#[derive(Default)]
+#[derive(Clone, Copy, Default)]
 pub struct DeclarationOverrides<'a> {
     /// Optional second-based duration.
     pub run_time: Option<f64>,
@@ -1085,18 +1085,14 @@ fn prepared_valid(stage: &Stage, animation: &dyn Animation, fps: u32) -> Result<
     }
     let families: Vec<_> = family_roots.iter().map(|&mob| stage.family(mob)).collect();
     let count = families.iter().map(Vec::len).min().unwrap_or(0);
-    if state.families().len() != count
-        || state.families().iter().enumerate().any(|(index, row)| {
-            row.len() != width
-                || row
+    Ok(state.families().len() == count
+        && state.families().iter().enumerate().all(|(index, row)| {
+            row.len() == width
+                && row
                     .iter()
                     .zip(&families)
-                    .any(|(&mob, family)| mob != family[index])
-        })
-    {
-        return Ok(false);
-    }
-    Ok(true)
+                    .all(|(&mob, family)| mob == family[index])
+        }))
 }
 
 /// Serialize a completed-frame boundary of a prepared native play.
@@ -1243,6 +1239,80 @@ pub fn declaration_bytes(
         put_native(&mut writer, stage, owned.as_ref(), false)?;
     }
     Ok(Some(writer.finish()?))
+}
+
+fn declaration_is_fresh(animation: &dyn Animation) -> bool {
+    let state = animation.state();
+    if state.starting_mobject().is_some()
+        || !state.families().is_empty()
+        || state.mobject_was_updating()
+        || state.prepared_duration().is_some()
+        || state.frame_units().is_some()
+    {
+        return false;
+    }
+    let any = animation as &dyn Any;
+    if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+        group.declaration_is_fresh()
+            && group
+                .animations()
+                .iter()
+                .all(|child| declaration_is_fresh(child.as_ref()))
+    } else if let Some(transform) = any.downcast_ref::<Transform>() {
+        transform.target_copy.is_none()
+    } else if let Some(drawing) = any.downcast_ref::<DrawBorderThenFill>() {
+        drawing.outline.is_none() && drawing.crossed.is_empty()
+    } else {
+        true
+    }
+}
+
+/// Bind an entirely unprepared closed declaration and its exact planned frame
+/// count. A future program segment can retain the fresh factory's carrier only
+/// when it has no hidden begin, interpolation or timing state. No preparation,
+/// rate evaluation, lifecycle hook or Stage mutation occurs here.
+///
+/// # Errors
+/// The declaration's encoding errors or invalid exact timing.
+pub fn fresh_declaration(
+    stage: &Stage,
+    animations: &[Box<dyn Animation>],
+    overrides: DeclarationOverrides<'_>,
+    fps: u32,
+    max_bytes: usize,
+) -> Result<Option<(Vec<u8>, i64)>, Error> {
+    if !native_play_supported(animations)
+        || !animations
+            .iter()
+            .all(|animation| declaration_is_fresh(animation.as_ref()))
+    {
+        return Ok(None);
+    }
+    let Some(bytes) = declaration_bytes(stage, animations, overrides, max_bytes)? else {
+        return Ok(None);
+    };
+    let mut owned = Vec::with_capacity(animations.len());
+    for animation in animations {
+        let Some(mut clone) = clone_native(animation.as_ref()) else {
+            return Ok(None);
+        };
+        clone.update_rate_info(
+            overrides.run_time,
+            overrides.rate_func.cloned(),
+            overrides.lag_ratio,
+        );
+        if let Some(frames) = overrides.run_time_frames {
+            clone.state_mut().config.run_time_frames = Some(frames);
+        }
+        owned.push(clone);
+    }
+    let duration = crate::frame::play_duration(&owned, fps)?;
+    let frames = RationalFrameClock::new(fps)
+        .map_err(AnimError::Clock)?
+        .segment_duration(&duration)
+        .map_err(AnimError::Clock)?
+        .n_frames();
+    Ok(Some((bytes, frames)))
 }
 
 #[cfg(test)]

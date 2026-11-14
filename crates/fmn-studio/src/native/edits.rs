@@ -9,8 +9,8 @@ use crate::{ProtocolDigest, ServiceError};
 
 use super::NativeSceneProgram;
 use super::program::{
-    NativePlayCursor, NativeProgramCheckpoint, NativeWaitCursor, NativeWaitTailCursor,
-    execution_error, invalid,
+    NativePlayCursor, NativeProgramCheckpoint, NativeScheduleCursor, NativeWaitCursor,
+    NativeWaitTailCursor, execution_error, invalid,
 };
 
 const EDIT_STATE_SCHEMA: Schema = Schema::new(*b"FMEI", 1, 2, 0);
@@ -21,6 +21,9 @@ const WAIT_TAIL_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 2, 0, 0);
 // Prepared closed native plays have their own bounded data carrier. Earlier
 // wait-only envelopes retain their complete record layout and canonical bytes.
 const PLAY_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 3, 0, 0);
+// Fully declared native schedules bind their complete declaration separately;
+// legacy terminal-play and wait carriers retain their exact bytes.
+const SCHEDULE_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 4, 0, 0);
 /// Hard ceiling independent of caller policy; each label is separately bounded.
 pub(super) const MAX_RECORDED_INPUTS: usize = 65_536;
 
@@ -314,12 +317,21 @@ pub(super) fn encode_resume_state(
     state: &[u8],
     max_bytes: usize,
 ) -> Result<Vec<u8>, ServiceError> {
+    if cursor.schedule.is_some()
+        && (cursor.play.is_some() || cursor.active.is_some() || cursor.tail.is_some())
+    {
+        return Err(invalid(
+            "closed schedule continuation cannot contain a legacy cursor",
+        ));
+    }
     if cursor.play.is_some() && (cursor.active.is_some() || cursor.tail.is_some()) {
         return Err(invalid(
             "native continuation cannot contain both play and wait cursors",
         ));
     }
-    let schema = if cursor.play.is_some() {
+    let schema = if cursor.schedule.is_some() {
+        SCHEDULE_RESUME_STATE_SCHEMA
+    } else if cursor.play.is_some() {
         PLAY_RESUME_STATE_SCHEMA
     } else if cursor.tail.is_some() {
         WAIT_TAIL_RESUME_STATE_SCHEMA
@@ -347,6 +359,21 @@ pub(super) fn encode_resume_state(
         .put_u64(cursor.frame_shape[1])
         .put_u64(cursor.started_segments as u64)
         .put_u8(cursor.effects);
+    if let Some(schedule) = &cursor.schedule {
+        writer
+            .put_bytes(schedule.declaration.as_bytes())
+            .put_u64(schedule.index as u64)
+            .put_u64(schedule.admitted_segments as u64)
+            .put_i64(schedule.base_frame)
+            .put_i64(schedule.stepped)
+            .put_u8(schedule.wait_purity)
+            .put_bool(schedule.continuation.is_some());
+        if let Some(bytes) = &schedule.continuation {
+            writer.put_bytes(bytes);
+        }
+        writer.put_bytes(state);
+        return writer.finish().map_err(execution_error);
+    }
     if let Some(play) = &cursor.play {
         writer
             .put_u64(play.completed_plays)
@@ -393,7 +420,11 @@ pub(super) fn decode_resume_state<'a>(
     let is_tail =
         bytes.get(4..8) == Some(WAIT_TAIL_RESUME_STATE_SCHEMA.id.to_le_bytes().as_slice());
     let is_play = bytes.get(4..8) == Some(PLAY_RESUME_STATE_SCHEMA.id.to_le_bytes().as_slice());
-    let schema = if is_play {
+    let is_schedule =
+        bytes.get(4..8) == Some(SCHEDULE_RESUME_STATE_SCHEMA.id.to_le_bytes().as_slice());
+    let schema = if is_schedule {
+        SCHEDULE_RESUME_STATE_SCHEMA
+    } else if is_play {
         PLAY_RESUME_STATE_SCHEMA
     } else if is_tail {
         WAIT_TAIL_RESUME_STATE_SCHEMA
@@ -436,6 +467,55 @@ pub(super) fn decode_resume_state<'a>(
     let started_segments =
         usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
     let effects = reader.get_u8().map_err(execution_error)?;
+    if is_schedule {
+        let declaration = reader
+            .get_bytes()
+            .map_err(execution_error)?
+            .try_into()
+            .map(ProtocolDigest::from_bytes)
+            .map_err(|_| invalid("closed schedule declaration digest has an invalid length"))?;
+        let index =
+            usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
+        let admitted_segments =
+            usize::try_from(reader.get_u64().map_err(execution_error)?).map_err(execution_error)?;
+        let base_frame = reader.get_i64().map_err(execution_error)?;
+        let stepped = reader.get_i64().map_err(execution_error)?;
+        let wait_purity = reader.get_u8().map_err(execution_error)?;
+        let continuation = if reader.get_bool().map_err(execution_error)? {
+            let bytes = reader.get_bytes().map_err(execution_error)?;
+            let mut owned = Vec::new();
+            owned
+                .try_reserve_exact(bytes.len())
+                .map_err(execution_error)?;
+            owned.extend_from_slice(bytes);
+            Some(owned)
+        } else {
+            None
+        };
+        let state = reader.get_bytes().map_err(execution_error)?;
+        reader.finish().map_err(execution_error)?;
+        return Ok(RestoredContinuation {
+            cursor: NativeProgramCheckpoint {
+                frame,
+                frame_shape,
+                started_segments,
+                effects,
+                active: None,
+                tail: None,
+                play: None,
+                schedule: Some(Box::new(NativeScheduleCursor {
+                    declaration,
+                    index,
+                    admitted_segments,
+                    base_frame,
+                    stepped,
+                    continuation,
+                    wait_purity,
+                })),
+            },
+            state,
+        });
+    }
     if is_play {
         let completed_plays = reader.get_u64().map_err(execution_error)?;
         let admitted_segments =
@@ -471,6 +551,7 @@ pub(super) fn decode_resume_state<'a>(
                     declaration,
                     continuation,
                 }),
+                schedule: None,
             },
             state,
         });
@@ -507,6 +588,7 @@ pub(super) fn decode_resume_state<'a>(
             active,
             tail,
             play: None,
+            schedule: None,
         },
         state,
     })
