@@ -58,6 +58,61 @@ as a regression in our colour pipeline. Measured and traced in G0-2's look study
 [BN-06's fill note](BN-06-analytic-fill.md), which owns the rest of the fill's
 differences.
 
+## Native movie gamma and saturation
+
+`file_writer.gamma` and `file_writer.saturation` now apply to MP4/MOV output
+in the shared native frame layer. Configurations such as the corpus's
+`saturation: 1.5` can render movies without an ffmpeg color filter. The Rust
+API, CLI (including narrated FMTL replay), and Python portal use the same
+`fmn_frame::VideoColorGrade` rule. Still images and PNG sequences keep their
+ordinary canonical transfer and ignore these movie settings. Native GIF and
+Y4M do not acquire a movie grade; the Python writer retains its explicit
+refusal of nondefault grading for those formats.
+
+This is a creative adjustment **after** the single sRGB output transfer,
+before encoder publication. It does not change linear-light compositing or
+apply a second transfer function. In encoded RGB, define BT.709 luma
+`Y = 0.2126*R + 0.7152*G + 0.0722*B`. For each color channel `C`, the result is
+`clamp(Y^(1/gamma) + saturation*(C-Y), 0, 1)`, rounded half up to its byte.
+RGBA and BGRA preserve alpha exactly. Gamma above one brightens the picture;
+zero saturation produces gray.
+
+For the native limited-range NV12 and P010 wires, gamma operates on luma
+normalized between the legal black and white endpoints. Saturation scales
+chroma about its neutral midpoint. Nonidentity grades clamp to the legal
+range, then round half up:
+
+| Wire | Luma endpoints | Chroma endpoints | Neutral chroma |
+|---|---|---|---|
+| NV12 | 16–235 | 16–240 | 128 |
+| P010 | 64–940 | 64–960 | 512 |
+
+P010 retains ten-bit samples; it never passes through an eight-bit scratch
+image. The exact identity `(gamma=1, saturation=1)` preserves every output
+byte and allocates no grading tables. Other grades share small immutable
+tables, leave row padding untouched, and allocate no frame-sized scratch.
+Retained raster caches remain ungraded; retained converted-frame caches hold
+the result of one application. Reusing a frame cannot compound the effect.
+
+Both settings must be finite: gamma is in `0.1..=10` and saturation in
+`0..=3`. Invalid requests refuse before an encoder starts. The grade is fixed
+for one output generation; changing writer attributes mid-generation does
+not change already admitted frames.
+
+**Intentional Reference difference:** the pinned Reference delegated these
+settings to ffmpeg `eq`, including its implicit eight-bit YUV conversion and
+gamma over unnormalized code values. This native rule preserves legal black
+and white endpoints, defines the alpha and ten-bit behavior, and does not
+promise those legacy pixels. Existing numeric settings remain meaningful;
+review the intended look when migrating a deliberately graded scene. Video
+color metadata still describes the actual sRGB transfer and BT.709 primaries.
+
+Kernel evidence is in `fmn-frame/src/video_color.rs`; real rendered wire
+comparisons, including repeated cached frames and both planar/camera workers,
+are in `fmn/tests/native_cpu_pipeline.rs`. Portal cache and lossless movie
+acceptance live in `fmn-python/src/portal_video/conversion_tests.rs` and
+`fmn-python/tests/video_options.py`.
+
 ## Migration guidance
 
 - Scenes that read back composited pixel values will see different (more

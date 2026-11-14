@@ -9,6 +9,7 @@ mod quality;
 #[cfg(test)]
 mod conversion_tests;
 
+use fmn_frame::VideoColorGrade;
 use fmn_frame::convert::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010, rgba16f_to_rgba8};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
@@ -24,6 +25,7 @@ pub(crate) struct PortalVideoConfig {
     pub(crate) audio_quality: fmn_output::AudioQuality,
     pub(crate) job_limits: fmn_output::JobLimits,
     pub(crate) max_input_bytes: u64,
+    pub(crate) color_grade: VideoColorGrade,
 }
 
 impl PortalVideoConfig {
@@ -65,14 +67,10 @@ impl PortalVideoConfig {
         let ffmpeg_bin: String = writer.getattr("ffmpeg_bin")?.extract()?;
         let codec: String = writer.getattr("video_codec")?.extract()?;
         let pixel_format: String = writer.getattr("pixel_format")?.extract()?;
-        for name in ["saturation", "gamma"] {
-            let value: f64 = writer.getattr(name)?.extract()?;
-            if value != 1.0 {
-                return Err(CapabilityError::new_err(format!(
-                    "non-default file_writer {name} requires a native color-transform stage; ffmpeg filters are forbidden"
-                )));
-            }
-        }
+        let gamma: f64 = writer.getattr("gamma")?.extract()?;
+        let saturation: f64 = writer.getattr("saturation")?.extract()?;
+        let color_grade = VideoColorGrade::new(gamma, saturation)
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
         let rgba: [f64; 4] = scene
             .getattr("camera")?
             .getattr("background_rgba")?
@@ -125,6 +123,7 @@ impl PortalVideoConfig {
             audio_quality,
             job_limits,
             max_input_bytes,
+            color_grade,
         })
     }
 }
@@ -267,6 +266,7 @@ fn video_job(
 pub(crate) struct RetainedConversion {
     frame: FrameBuffer,
     valid: bool,
+    color_grade: VideoColorGrade,
 }
 
 impl RetainedConversion {
@@ -274,7 +274,18 @@ impl RetainedConversion {
         Self {
             frame: FrameBuffer::new(layout),
             valid: false,
+            color_grade: VideoColorGrade::default(),
         }
+    }
+
+    pub(crate) fn with_color_grade(mut self, color_grade: VideoColorGrade) -> Self {
+        self.color_grade = color_grade;
+        self.valid = false;
+        self
+    }
+
+    pub(crate) fn color_grade(&self) -> &VideoColorGrade {
+        &self.color_grade
     }
 
     pub(crate) fn bytes(&self) -> usize {
@@ -310,6 +321,7 @@ impl RetainedConversion {
                 .copy_from_slice(self.frame.as_bytes());
         } else {
             convert_frame(source, destination, None)?;
+            self.color_grade.apply(destination)?;
             self.frame
                 .as_bytes_mut()
                 .copy_from_slice(destination.as_bytes());

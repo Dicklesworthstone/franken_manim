@@ -22,10 +22,12 @@ pub(super) struct Completed {
     pub teams_used: u64,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn render<F>(
     mut plan: ExecutionPlan,
     config: RetainedFrameRendererConfig,
     output: EmitterHandle,
+    color_grade: fmn_frame::VideoColorGrade,
     segment: PureSegment,
     camera: NativeAdaptiveCamera,
     first_sequence: u64,
@@ -54,7 +56,16 @@ where
         }
         let mut prefix_config = config;
         prefix_config.threads = plan.render_teams[0].threads();
-        Some(NativeFramePipeline::new(plan, prefix_config, None, output.clone()).map_err(error)?)
+        Some(
+            NativeFramePipeline::new_with_color_grade(
+                plan,
+                prefix_config,
+                None,
+                output.clone(),
+                color_grade,
+            )
+            .map_err(error)?,
+        )
     } else {
         None
     };

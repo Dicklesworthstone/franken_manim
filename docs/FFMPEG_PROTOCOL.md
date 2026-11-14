@@ -58,6 +58,15 @@ that a refused request cannot start process work or publish an artifact.
 
 ### 1.1 Native transfer ruling, 10-bit P010, and NV12 passthrough
 
+Movie `file_writer.gamma` and `file_writer.saturation` are supported by
+`fmn_frame::VideoColorGrade` after native conversion and before publication.
+No filter argv is added. Gamma acts on normalized encoded luma, saturation on
+centered chroma; RGBA/BGRA retain alpha and P010 retains ten-bit precision.
+Identity settings preserve existing bytes. The legal ranges, endpoint policy,
+and intentional difference from the Reference's old `eq` filter are defined in
+[BN-04](behavior_notes/BN-04-color.md#native-movie-gamma-and-saturation).
+These controls apply only to movie generations, not still images or previews.
+
 - **Native transfer ruling (`ColorDescription::for_native_wire`).** Native
   renders convert linear-light `RGBA16F` rasters using the sRGB transfer curve
   (`rgba16f_to_nv12`, `rgba16f_to_p010`, `rgba16f_to_rgba8`,

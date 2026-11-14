@@ -284,13 +284,9 @@ fn prepare_with_manifests(
             "narrated FMTL replay requires render.engine=cpu; an accelerator request is never silently substituted",
         ));
     }
-    if matches!(target, Target::Video(_))
-        && (config.file_writer.gamma != 1.0 || config.file_writer.saturation != 1.0)
-    {
-        return Err(Failure::new(
-            "capability",
-            "non-default file_writer gamma/saturation have no native color-transform adapter",
-        ));
+    if matches!(target, Target::Video(_)) {
+        fmn_frame::VideoColorGrade::new(config.file_writer.gamma, config.file_writer.saturation)
+            .map_err(|error| Failure::new("config", error.to_string()))?;
     }
     if !bundle.has_soundtrack() {
         return Err(Failure::new(

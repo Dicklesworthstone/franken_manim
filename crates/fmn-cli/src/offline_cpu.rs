@@ -24,8 +24,9 @@ impl CpuRenderer {
         config: RetainedFrameRendererConfig,
         output: EmitterHandle,
         camera: Option<fmn_render::Camera>,
+        color_grade: fmn_frame::VideoColorGrade,
     ) -> Result<Self, CliError> {
-        NativeFramePipeline::new(plan, config, camera, output)
+        NativeFramePipeline::new_with_color_grade(plan, config, camera, output, color_grade)
             .map(|pipeline| Self {
                 pipeline: Some(pipeline),
             })

@@ -654,7 +654,13 @@ impl PortalFrameSession {
         // Replaces the obsolete RGBA8 conversion scratch: the direct native
         // converters need no scratch, and the retained output uses only its
         // negotiated wire size, including the smaller NV12 representation.
-        let conversion = portal_video::RetainedConversion::new(output_layout.clone());
+        let color_grade = video
+            .as_ref()
+            .map_or_else(fmn_frame::VideoColorGrade::default, |video| {
+                video.color_grade.clone()
+            });
+        let conversion = portal_video::RetainedConversion::new(output_layout.clone())
+            .with_color_grade(color_grade);
         let conversion_cache_bytes = conversion.bytes() as u64;
         let frame_bytes = u64::try_from(output_layout.total_bytes())
             .map_err(|_| PyOverflowError::new_err("render frame size exceeds u64"))?;
@@ -1046,6 +1052,7 @@ impl PortalFrameSession {
         let segment = segment.clone();
         let first_sequence = self.next_sequence;
         let had_camera_reason = self.routes.first_camera_reason.is_some();
+        let color_grade = self.conversion.color_grade().clone();
         let started = Instant::now();
         // No Scene borrow, Python handle or authored callback enters the
         // detached closure. Every bounded worker joins before begin/finish-
@@ -1056,6 +1063,7 @@ impl PortalFrameSession {
                     plan,
                     config,
                     output,
+                    color_grade,
                     segment,
                     camera,
                     first_sequence,

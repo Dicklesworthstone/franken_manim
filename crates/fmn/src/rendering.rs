@@ -940,6 +940,12 @@ impl RenderSink {
         } else {
             None
         };
+        let color_grade = if options.format.is_video() {
+            fmn_frame::VideoColorGrade::new(config.file_writer.gamma, config.file_writer.saturation)
+                .map_err(RenderError::Frame)?
+        } else {
+            fmn_frame::VideoColorGrade::default()
+        };
         let job_limits = options
             .format
             .is_video()
@@ -1253,7 +1259,7 @@ impl RenderSink {
             vec![binding],
         )
         .map_err(RenderError::Emitter)?;
-        let pipeline = match NativeFramePipeline::with_projection_cache_budget(
+        let pipeline = match NativeFramePipeline::with_projection_cache_budget_and_color_grade(
             plan.clone(),
             renderer_config,
             camera,
@@ -1261,6 +1267,7 @@ impl RenderSink {
             prefix_cache_bytes,
             camera_cache_bytes,
             projection_cache_bytes,
+            color_grade,
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
@@ -1479,13 +1486,8 @@ fn negotiate_video(
     config: &Config,
     camera: Option<&CameraConfig>,
 ) -> Result<VideoJob, RenderError> {
-    // Any represented non-identity value is semantically observable; an
-    // epsilon check would silently discard a requested color transform.
-    if config.file_writer.saturation != 1.0 || config.file_writer.gamma != 1.0 {
-        return Err(RenderError::Capability(
-            "non-default file_writer saturation/gamma require a native color-transform stage; ffmpeg filters are forbidden",
-        ));
-    }
+    fmn_frame::VideoColorGrade::new(config.file_writer.gamma, config.file_writer.saturation)
+        .map_err(RenderError::Frame)?;
     let (width, height) = config.camera.resolution;
     let transparent = format == RenderFormat::Mov
         && camera.map_or(config.camera.background_opacity < 1.0, |camera| {

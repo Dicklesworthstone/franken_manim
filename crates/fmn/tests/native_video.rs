@@ -157,10 +157,10 @@ fn incompatible_video_profiles_fail_before_any_process() {
     translucent.config.camera.background_opacity = 0.5;
     assert_refused(translucent, "RenderFormat::Mov");
 
-    // Color transforms would need ffmpeg filters, which D2 forbids.
+    // Native movie grading validates before any encoder work.
     let mut graded = options("/movie.mp4", RenderFormat::Mp4);
-    graded.config.file_writer.gamma = 1.2;
-    assert_refused(graded, "ffmpeg filters are forbidden");
+    graded.config.file_writer.gamma = 0.0;
+    assert_refused(graded, "gamma");
 
     // Encoder names are argv tokens, never shell fragments.
     let mut hostile = options("/movie.mp4", RenderFormat::Mp4);

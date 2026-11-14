@@ -180,10 +180,22 @@ class SceneRenderTests(unittest.TestCase):
                 self.assertEqual(result.format, format)
 
     def test_public_render_scene_also_validates_writer_configuration(self):
-        self.scene.file_writer.gamma = 2.0
-        with self.assertRaisesRegex(RuntimeError, "gamma"):
+        self.scene.file_writer.open_file_upon_completion = True
+        with self.assertRaisesRegex(RuntimeError, "open_file_upon_completion"):
             render_scene(self.scene, "out.mp4")
         self.assertEqual(self.scene.events, [])
+
+    def test_movie_color_options_reach_native_generation(self):
+        for format in ("mp4", "mov"):
+            with self.subTest(format=format):
+                scene = self.native.Scene()
+                scene.file_writer.gamma = 2.0
+                scene.file_writer.saturation = 1.5
+                result = render_scene(scene, "out." + format)
+                self.assertEqual(result.format, format)
+                self.assertEqual(scene.file_writer.gamma, 2.0)
+                self.assertEqual(scene.file_writer.saturation, 1.5)
+                self.assertIn(("finish",), scene.events)
 
     def test_negotiated_writer_options_reach_native_generation(self):
         self.scene.file_writer.video_codec = "qtrle"

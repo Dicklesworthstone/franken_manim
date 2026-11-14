@@ -18,6 +18,8 @@
 //!   (certified), RGB → BT.709 NV12/P010 in defined-rounding integer
 //!   fixed point (standard-mode, for the ffmpeg boundary), and the
 //!   RGBA⇄BGRA swizzle.
+//! - [`VideoColorGrade`] — native movie-only gamma and saturation after
+//!   transfer, preserving encoded output formats, alpha, and row padding.
 //!
 //! Two structural rules hold everywhere: **orientation is always output
 //! orientation** — row 0 is the top row of the delivered image, and no
@@ -32,10 +34,12 @@ pub mod format;
 pub mod half;
 pub mod pool;
 pub mod transfer;
+pub mod video_color;
 
 pub use buffer::FrameBuffer;
 pub use format::{ChromaSiting, ColorRange, FrameLayout, PixelFormat};
 pub use pool::FramePool;
+pub use video_color::VideoColorGrade;
 
 /// Typed refusals of the frame layer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +129,10 @@ pub enum FrameError {
     /// The requested conversion is a typed refusal, never a silent
     /// substitution.
     UnsupportedConversion(&'static str),
+    /// Video gamma must be finite and in the declared 0.1 through 10 range.
+    InvalidVideoGamma,
+    /// Video saturation must be finite and in the declared 0 through 3 range.
+    InvalidVideoSaturation,
 }
 
 impl std::fmt::Display for FrameError {
@@ -189,6 +197,10 @@ impl std::fmt::Display for FrameError {
                 write!(f, "frame buffer needs exactly {expected} bytes, got {got}")
             }
             Self::UnsupportedConversion(what) => write!(f, "unsupported conversion: {what}"),
+            Self::InvalidVideoGamma => f.write_str("video gamma must be finite and in 0.1..=10"),
+            Self::InvalidVideoSaturation => {
+                f.write_str("video saturation must be finite and in 0..=3")
+            }
         }
     }
 }

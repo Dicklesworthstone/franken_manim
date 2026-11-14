@@ -12,7 +12,7 @@ use fmn_anim::pure_frame::PureFrameJob;
 use fmn_frame::convert::{
     rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_threaded, rgba16f_to_rgba8,
 };
-use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat};
+use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat, VideoColorGrade};
 use fmn_mobject::FrozenRenderState;
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
@@ -342,6 +342,7 @@ pub(super) struct NativeFrameStages {
     // The preparation compiler and each optional compiled-camera worker own
     // distinct projection caches; frozen packets share their compiler's cache.
     max_projection_bytes_per_compiler: usize,
+    color_grade: VideoColorGrade,
 }
 
 impl NativeFrameStages {
@@ -355,6 +356,7 @@ impl NativeFrameStages {
         Self {
             compiler: Mutex::new(compiler),
             max_projection_bytes_per_compiler,
+            color_grade: VideoColorGrade::default(),
             workers: (0..render_teams)
                 .map(|_| {
                     Mutex::new(RenderWorker::with_cache_budgets(
@@ -582,6 +584,12 @@ impl PipelineStages for NativeFrameStages {
                 worker.render_vector(&frame, team.threads(), output.frame_mut())?;
             }
         }
+        // Creative movie grading follows the one transfer, while this affine
+        // worker still owns the reserved output. Raw caches remain ungraded;
+        // independent frame teams also keep this pass off the serial emitter.
+        self.color_grade
+            .apply(output.frame_mut())
+            .map_err(NativeFrameError::Frame)?;
         Ok(output)
     }
 
@@ -690,6 +698,31 @@ enum NativeCompiler {
 }
 
 impl NativeFramePipeline {
+    /// Compose a pipeline whose encoded output receives one native movie grade.
+    /// Pass the identity grade for PNG, GIF, Y4M, preview or ungraded output.
+    /// Grading preserves output orientation, alpha and the negotiated precision.
+    ///
+    /// # Errors
+    /// As [`Self::new`]. The grade is validated when constructed.
+    pub fn new_with_color_grade(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        output: EmitterHandle,
+        color_grade: VideoColorGrade,
+    ) -> Result<Self, RenderError> {
+        Self::with_projection_cache_budget_and_color_grade(
+            plan,
+            config,
+            camera,
+            output,
+            PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES,
+            0,
+            0,
+            color_grade,
+        )
+    }
+
     /// Compose the existing runtime, Lumen renderer and ordered output ring.
     ///
     /// # Errors
@@ -783,6 +816,37 @@ impl NativeFramePipeline {
         max_camera_bytes_per_team: usize,
         max_projection_bytes_per_compiler: usize,
     ) -> Result<Self, RenderError> {
+        Self::with_projection_cache_budget_and_color_grade(
+            plan,
+            config,
+            camera,
+            output,
+            max_prefix_bytes_per_team,
+            max_camera_bytes_per_team,
+            max_projection_bytes_per_compiler,
+            VideoColorGrade::default(),
+        )
+    }
+
+    /// Combine admitted cache budgets with one immutable native movie grade.
+    /// This uses the same pipeline and budget rules as
+    /// [`Self::with_projection_cache_budget`], applying the grade exactly once
+    /// to each reserved output after raster conversion and before publication.
+    /// Raw raster caches therefore never contain already-graded pixels.
+    ///
+    /// # Errors
+    /// As [`Self::with_projection_cache_budget`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_projection_cache_budget_and_color_grade(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        output: EmitterHandle,
+        max_prefix_bytes_per_team: usize,
+        max_camera_bytes_per_team: usize,
+        max_projection_bytes_per_compiler: usize,
+        color_grade: VideoColorGrade,
+    ) -> Result<Self, RenderError> {
         // Source demand is synchronous. A smaller output ring could block
         // its producer while the coordinator awaits that same next source
         // value instead of processing the completion that frees the ring.
@@ -861,13 +925,14 @@ impl NativeFramePipeline {
         } else {
             0
         };
-        let stages = NativeFrameStages::new(
+        let mut stages = NativeFrameStages::new(
             plan.render_teams.len(),
             compiler,
             max_prefix_bytes_per_team,
             max_camera_bytes_per_team.min(camera_cache_budget_bytes(viewport)),
             max_projection_bytes_per_compiler,
         );
+        stages.color_grade = color_grade;
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
         })

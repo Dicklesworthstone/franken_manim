@@ -5,7 +5,7 @@ use std::collections::BTreeSet;
 use fmn_frame::convert::{rgba_to_nv12, rgba_to_p010, rgba16f_to_rgba8, swap_rb8};
 use fmn_frame::half::f16_from_f32;
 use fmn_frame::transfer::srgb_decode;
-use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat};
+use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameLayout, PixelFormat, VideoColorGrade};
 
 use super::{RetainedConversion, convert_frame};
 
@@ -96,6 +96,108 @@ fn retained_portal_conversion_reuses_exact_bytes_for_every_wire() {
             "cache grew for {wire:?}"
         );
     }
+}
+
+#[test]
+fn retained_movie_grading_runs_once_and_a_new_grade_invalidates_every_wire_cache() {
+    let mut source = frame(PixelFormat::Rgba16F, 6, 4);
+    for y in 0..4 {
+        for x in 0..6 {
+            set_pixel(
+                &mut source,
+                x,
+                y,
+                [
+                    f16_from_f32(x as f32 / 6.0),
+                    f16_from_f32(y as f32 / 4.0),
+                    f16_from_f32(0.18),
+                    f16_from_f32((x + y) as f32 / 10.0),
+                ],
+            );
+        }
+    }
+    let source_bytes = source.as_bytes().to_vec();
+    let first_grade = VideoColorGrade::new(2.0, 0.4).unwrap();
+    for wire in [
+        PixelFormat::Rgba8,
+        PixelFormat::Bgra8,
+        PixelFormat::Nv12,
+        PixelFormat::P010,
+    ] {
+        let mut output = frame(wire, 6, 4);
+        let mut ungraded = frame(wire, 6, 4);
+        convert_frame(&source, &mut ungraded, None).unwrap();
+        let mut cache = RetainedConversion::new(output.layout().clone());
+        let storage = cache.frame.as_bytes().as_ptr();
+        for grade in [
+            first_grade.clone(),
+            VideoColorGrade::new(0.5, 1.75).unwrap(),
+            VideoColorGrade::default(),
+            first_grade.clone(),
+        ] {
+            let mut expected = ungraded.clone();
+            grade.apply(&mut expected).unwrap();
+            if !grade.is_identity() {
+                assert_ne!(
+                    expected.as_bytes(),
+                    ungraded.as_bytes(),
+                    "visible grade {wire:?}"
+                );
+                let mut twice = expected.clone();
+                grade.apply(&mut twice).unwrap();
+                assert_ne!(
+                    twice.as_bytes(),
+                    expected.as_bytes(),
+                    "double-grade witness {wire:?}"
+                );
+            }
+            let receipt = (grade.gamma(), grade.saturation());
+            cache = cache.with_color_grade(grade);
+            assert_eq!(
+                (
+                    cache.color_grade().gamma(),
+                    cache.color_grade().saturation()
+                ),
+                receipt
+            );
+            // Pixel identity alone cannot reuse output prepared by another
+            // grade, including the transition back to exact identity.
+            assert!(!cache.write_frame(&source, &mut output, true).unwrap());
+            assert_eq!(output.as_bytes(), expected.as_bytes(), "new grade {wire:?}");
+            for _ in 0..8 {
+                output.as_bytes_mut().fill(0xBD);
+                assert!(cache.write_frame(&source, &mut output, true).unwrap());
+                assert_eq!(
+                    output.as_bytes(),
+                    expected.as_bytes(),
+                    "reused grade {wire:?}"
+                );
+            }
+            assert_eq!(
+                cache.frame.as_bytes().as_ptr(),
+                storage,
+                "cache allocation {wire:?}"
+            );
+        }
+        let mut changed = source.clone();
+        set_pixel(&mut changed, 0, 0, [0x3c00, 0, 0, 0x3c00]);
+        let mut expected = frame(wire, 6, 4);
+        convert_frame(&changed, &mut expected, None).unwrap();
+        first_grade.apply(&mut expected).unwrap();
+        assert!(!cache.write_frame(&changed, &mut output, false).unwrap());
+        assert_eq!(
+            output.as_bytes(),
+            expected.as_bytes(),
+            "changed capture {wire:?}"
+        );
+        assert!(cache.write_frame(&changed, &mut output, true).unwrap());
+        assert_eq!(output.as_bytes(), expected.as_bytes());
+    }
+    assert_eq!(
+        source.as_bytes(),
+        source_bytes,
+        "linear retained pixels stay ungraded"
+    );
 }
 
 #[test]

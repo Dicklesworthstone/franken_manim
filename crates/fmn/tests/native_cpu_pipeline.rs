@@ -165,6 +165,103 @@ fn all_cpu_formats_match_serial_lumen_on_multiple_render_teams() {
 }
 
 #[test]
+fn movie_grade_is_applied_once_after_conversion_on_all_worker_routes() {
+    let grade = fmn_frame::VideoColorGrade::new(2.0, 0.5).unwrap();
+    for use_camera in [false, true] {
+        for (negotiated, format) in [
+            (OutputPixelFormat::Rgba8, PixelFormat::Rgba8),
+            (OutputPixelFormat::Bgra8, PixelFormat::Bgra8),
+            (OutputPixelFormat::Nv12, PixelFormat::Nv12),
+            (OutputPixelFormat::P010, PixelFormat::P010),
+        ] {
+            let plan = plan(negotiated);
+            let config = config(&plan);
+            let camera = use_camera.then(|| {
+                fmn_render::Camera::new(fmn_render::CameraConfig {
+                    resolution: (32, 24),
+                    background: config.frame.background,
+                    ..fmn_render::CameraConfig::default()
+                })
+                .unwrap()
+            });
+            let layout = FrameLayout::tight(format, 32, 24).unwrap();
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let output = received.clone();
+            let emitter = OrderedEmitter::new(
+                EmitterConfig::new(layout.clone(), plan.frames_in_flight, 0).unwrap(),
+                vec![SinkBinding::reliable(
+                    "graded-wire",
+                    move |sequence, frame: &FrameBuffer| {
+                        output
+                            .lock()
+                            .unwrap()
+                            .push((sequence, frame.as_bytes().to_vec()));
+                        Ok(SinkWrite::Consumed)
+                    },
+                )],
+            )
+            .unwrap();
+            let mut pipeline = NativeFramePipeline::new_with_color_grade(
+                plan.clone(),
+                config,
+                camera.clone(),
+                emitter.handle(),
+                grade.clone(),
+            )
+            .unwrap();
+            let mut serial = RetainedFrameRenderer::new(config).unwrap();
+            let mut stage = Stage::new();
+            let mob = stage.add(shape());
+            stage.add_to_scene(mob).unwrap();
+            let mut expected = Vec::new();
+            for sequence in 0..12 {
+                if let Some(camera) = &camera {
+                    serial.render_with_camera(&stage, camera).unwrap();
+                } else {
+                    serial.render(&stage, 0).unwrap();
+                }
+                let raw = convert_reference(serial.frame(), format);
+                let mut graded = FrameBuffer::new(layout.clone());
+                graded.as_bytes_mut().copy_from_slice(&raw);
+                grade.apply(&mut graded).unwrap();
+                assert_ne!(
+                    graded.as_bytes(),
+                    raw,
+                    "grade must visibly change {format:?}"
+                );
+                let mut twice = graded.clone();
+                grade.apply(&mut twice).unwrap();
+                assert_ne!(
+                    twice.as_bytes(),
+                    graded.as_bytes(),
+                    "fixture detects double grading"
+                );
+                expected.push((sequence, graded.as_bytes().to_vec()));
+                pipeline.capture(&stage, sequence).unwrap();
+                // Each pair of affine workers sees repeated raw frames before
+                // geometry changes. Reused rasters must never compound a grade.
+                if sequence % 4 == 3 {
+                    pipeline.flush().unwrap();
+                    stage.shift(mob, [0.3, 0.0, 0.0]);
+                }
+            }
+            let stats = pipeline.finish().unwrap();
+            emitter.finish().unwrap();
+            assert_eq!(stats.emitted, 12);
+            assert_eq!(stats.outstanding_slots, 0);
+            assert!(stats.render_team_frames.iter().all(|count| *count > 0));
+            assert_eq!(
+                *received.lock().unwrap(),
+                expected,
+                "camera={use_camera}, {format:?}"
+            );
+            assert_eq!(expected[0].1, expected[3].1);
+            assert_ne!(expected[0].1, expected[11].1);
+        }
+    }
+}
+
+#[test]
 fn incompatible_ring_capacity_or_identity_is_refused_before_work() {
     for wrong_ring in [true, false] {
         let plan = plan(OutputPixelFormat::Rgba8);

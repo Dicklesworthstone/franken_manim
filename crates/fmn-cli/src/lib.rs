@@ -4554,6 +4554,8 @@ struct RenderSink {
     format: PixelFormat,
     #[cfg(feature = "metal")]
     output_layout: FrameLayout,
+    #[cfg(feature = "metal")]
+    color_grade: fmn_frame::VideoColorGrade,
     emitter: Option<OrderedEmitter>,
     receipt: RenderReceipt,
     ffmpeg_limits: Option<FfmpegLimitsReport>,
@@ -4606,6 +4608,12 @@ impl RenderSink {
         camera: Option<fmn_render::Camera>,
     ) -> Result<Self, CliError> {
         let camera_journal = camera.as_ref().map(camera_route::descriptor);
+        let color_grade = if matches!(target, RenderTarget::Video(_)) {
+            fmn_frame::VideoColorGrade::new(config.file_writer.gamma, config.file_writer.saturation)
+                .map_err(|error| CliError::new("config", error.to_string()))?
+        } else {
+            fmn_frame::VideoColorGrade::default()
+        };
         let (width, height) = config.camera.resolution;
         let format = target.pixel_format();
         let output_layout = FrameLayout::tight(format, width, height)
@@ -4782,6 +4790,7 @@ impl RenderSink {
                         },
                         emitter.handle(),
                         camera,
+                        color_grade.clone(),
                     )?;
                     let mut backend = BackendAccumulator::cpu(identity, &frame_config, tiling);
                     if let Some(descriptor) = &camera_journal {
@@ -4844,6 +4853,8 @@ impl RenderSink {
             format,
             #[cfg(feature = "metal")]
             output_layout,
+            #[cfg(feature = "metal")]
+            color_grade,
             emitter: Some(emitter),
             receipt,
             ffmpeg_limits,
@@ -4939,6 +4950,9 @@ impl RenderSink {
                         .copy_from_slice(rendered.as_bytes());
                 }
                 self.backend.record_metal_frame(&report)?;
+                self.color_grade
+                    .apply(reservation.frame_mut())
+                    .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
                 reservation
                     .publish()
                     .map_err(|error| IntegrationError::new("reel", error.to_string()))?;
@@ -6201,14 +6215,8 @@ fn ffmpeg_video_job(
             "ffmpeg video is outside the certified artifact set; use --format png_sequence or --format y4m with --reproducible",
         ));
     }
-    // Any represented non-identity value is semantically observable. An
-    // epsilon check would silently discard a requested color transform.
-    if config.file_writer.saturation != 1.0 || config.file_writer.gamma != 1.0 {
-        return Err(CliError::new(
-            "capability",
-            "non-default file_writer saturation/gamma require a native color-transform stage, which is not registered; ffmpeg filters are forbidden",
-        ));
-    }
+    fmn_frame::VideoColorGrade::new(config.file_writer.gamma, config.file_writer.saturation)
+        .map_err(|error| CliError::new("config", error.to_string()))?;
     let wire = ffmpeg_wire_format(command, config)?;
     if command.transparent && !wire.has_alpha() {
         return Err(CliError::new(

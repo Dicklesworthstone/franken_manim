@@ -542,9 +542,10 @@ def _validate_writer_options(scene: Any, format: str, native: Any, *,
     for name in ("subdivide_output", "open_file_upon_completion", "show_file_location_upon_completion"):
         if getattr(writer, name, False) and not (allow_subdivide and name == "subdivide_output"):
             unsupported.append(name)
-    # The Reference applies saturation and gamma only in its ffmpeg movie pipe
-    # (scene_file_writer.py:211, `-vf eq=...`); a saved still image ignores them.
-    if format not in {"wav", "png", "png_sequence"}:
+    # Movie generations validate and apply these natively after the one sRGB
+    # transfer. Reference still images ignore them; native GIF/Y4M keep their
+    # existing explicit refusal until those formats expose a grading policy.
+    if format not in {"wav", "png", "png_sequence", "mp4", "mov"}:
         for name in ("saturation", "gamma"):
             if getattr(writer, name, 1.0) != 1.0:
                 unsupported.append(name)

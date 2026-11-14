@@ -65,12 +65,27 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-options-") as directory:
                                         video_codec="qtrle", pixel_format="nv12")
         assert "qtrle" in rejected(root, "alpha-codec.mov", transparent=True,
                                    video_codec="libx265", pixel_format="rgba")
-        assert "gamma" in rejected(root, "gamma.mov", gamma=1.2)
+        for name, value in (("gamma", 0), ("gamma", float("nan")),
+                            ("saturation", -1), ("saturation", float("inf"))):
+            assert name in rejected(root, "invalid-grade.mov", **{name: value})
+        assert "gamma" in rejected(root, "grade.y4m", format="y4m", gamma=2)
     finally:
         if before is None:
             os.environ.pop("PATH", None)
         else:
             os.environ["PATH"] = before
+
+    # Movie-only creative adjustments must not change canonical still pixels
+    # or force an encoder dependency into still-image rendering.
+    stills = []
+    for label, grade in (("identity", {}), ("movie-grade", {"gamma": 2, "saturation": .25})):
+        scene = Swatch(**options(**grade))
+        target = root / (label + ".png")
+        render_scene(scene, target, format="png", resolution=(96, 54), fps=8, threads=1)
+        stills.append(target.read_bytes())
+        assert scene.file_writer.gamma == grade.get("gamma", 1)
+        assert scene.file_writer.saturation == grade.get("saturation", 1)
+    assert stills[0] == stills[1], "movie grading leaked into a canonical still"
 
     if ffmpeg:
         def decode(path, pixel_format="rgba"):
@@ -155,6 +170,72 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-options-") as directory:
             frames = decode(target)
             assert len(frames) == 2 and np.all(frames[:, :, :, 3] == 255)
             assert frames[0, :, :, 0].max() >= 240, f"wire={wire}, codec={codec}, max={frames[0, :, :, 0].max()}"
+
+        class SerialGradeScene(m.Scene):
+            def update_mobjects(self, dt):
+                super().update_mobjects(dt)
+                self.observations.append(float(dt))
+
+        def grade_movie(label, scene_type, *, gamma=1, saturation=1, wire="rgba", threads=4):
+            scene = scene_type(
+                camera_config={"background_color": "#183048", "background_opacity": .25},
+                **options(video_codec="qtrle", pixel_format=wire, ffmpeg_bin=ffmpeg,
+                          gamma=gamma, saturation=saturation))
+            scene.observations = []
+            writer, camera, frame = scene.file_writer, scene.camera, scene.frame
+            target = root / ("grade-" + label + ".mov")
+            with scene.render_session(target, format="mov", resolution=(96, 54),
+                                      fps=8, threads=threads) as session:
+                square = m.Square(side_length=2, fill_color="#B06030", fill_opacity=.75,
+                                  stroke_width=0)
+                scene.add(square)
+                scene.play(m.Transform(square, square.copy().shift(m.RIGHT).set_color("#30A0D0")),
+                           run_time_frames=4, rate_func=m.linear)
+                scene.wait(2 / 8)
+            assert scene.file_writer is writer and scene.camera is camera and scene.frame is frame
+            assert (writer.gamma, writer.saturation) == (gamma, saturation)
+            assert session.result.frame_count == 6 and scene.time == .75
+            stats = scene._render_performance
+            assert stats["pure_play_frames"] == (4 if scene_type is m.Scene else 0), stats
+            assert stats["converted_frames"] == 4 and stats["conversion_reuses"] == 2, stats
+            assert stats["raw_frame_reuses"] == 2, stats
+            invocation, = session.result.ffmpeg_invocations
+            assert "-vf" not in invocation["argv"], "movie color was delegated to an encoder filter"
+            result = decode(target)
+            assert len(result) == 6
+            assert len({image.tobytes() for image in result[:4]}) == 4
+            np.testing.assert_array_equal(result[3], result[4])
+            np.testing.assert_array_equal(result[4], result[5])
+            return result
+
+        baseline = grade_movie("identity", m.Scene)
+        rgb = baseline[..., :3].astype(np.float64) / 255
+        # Independent encoded-RGB oracle: one creative luma adjustment after
+        # ordinary transfer, BT.709 chroma scaled about that original luma.
+        luma = rgb @ np.array([.2126, .7152, .0722])
+        adjusted = np.sqrt(luma)[..., None] + .25 * (rgb - luma[..., None])
+        expected = np.floor(255 * np.clip(adjusted, 0, 1) + .5).astype(np.uint8)
+        graded = []
+        for label, scene_type, wire, threads in (
+            ("serial", SerialGradeScene, "rgba", 4),
+            ("native-one", m.Scene, "rgba", 1),
+            ("native-team", m.Scene, "rgba", 4),
+            ("native-bgra", m.Scene, "bgra", 4),
+        ):
+            result = grade_movie(label, scene_type, gamma=2, saturation=.25, wire=wire, threads=threads)
+            # The independent NumPy power oracle can round a half-byte tie
+            # differently from deterministic native math; all execution routes
+            # themselves must remain byte-identical below.
+            assert np.max(np.abs(result[..., :3].astype(np.int16) - expected.astype(np.int16))) <= 1
+            np.testing.assert_array_equal(result[..., 3], baseline[..., 3])
+            assert np.any(result[..., :3] != baseline[..., :3]), "the nonidentity grade was ignored"
+            graded.append(result)
+        for result in graded[1:]:
+            np.testing.assert_array_equal(result, graded[0])
+        neutral = grade_movie("zero-saturation", m.Scene, saturation=0)
+        np.testing.assert_array_equal(neutral[..., 0], neutral[..., 1])
+        np.testing.assert_array_equal(neutral[..., 1], neutral[..., 2])
+        np.testing.assert_array_equal(neutral[..., 3], baseline[..., 3])
 
         assert "does not offer encoder" in rejected(root, "unknown.mov", video_codec="fmn_missing_codec")
         target = root / "late-alpha.mp4"
