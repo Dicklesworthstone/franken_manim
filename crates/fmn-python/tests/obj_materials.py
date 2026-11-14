@@ -6,6 +6,7 @@ assembled models use the real Atlas decoder, Marionette records and Lumen.
 from __future__ import annotations
 
 import inspect
+import math
 from pathlib import Path
 import pickle
 import struct
@@ -36,6 +37,13 @@ GEOMETRY = ''.join('v %s %s %s\n' % tuple(point) for point in VERTICES)
 GEOMETRY += 'vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 0 1\n'
 LEFT = 'f 1/1/1 2/2/1 3/3/1 4/4/1\n'
 RIGHT = 'f 2/1/1 5/2/1 6/3/1 3/4/1\n'
+
+# Two adjacent faces have areas 1 and 2, with normals +Z and +Y.
+# Their shared vertices therefore have the independently known area-weighted
+# unit normal (0, 2, 1) / sqrt(5), even across material and UV boundaries.
+WEDGE = ('v 0 0 0\nv 2 0 0\nv 0 1 0\nv 0 0 2\n'
+         'vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n')
+WEDGE_NORMAL = np.array([0., 2., 1.]) / math.sqrt(5.)
 
 
 class ObjMaterialTests(unittest.TestCase):
@@ -123,6 +131,113 @@ class ObjMaterialTests(unittest.TestCase):
         self.assertEqual(len(model), 1)
         np.testing.assert_array_equal(model[0].data, expected[0].data)
         self.assertEqual(self.capture(model).png(), self.capture(expected).png())
+
+    def test_smoothing_crosses_material_and_uv_seams_and_matches_authored_normals(self):
+        source = ('mtllib materials/scene.mtl\n' + WEDGE
+                  + 's 7\nusemtl painted\nf 1/1 2/2 3/3\n'
+                  + 'usemtl plain\nf 1/4 4/3 2/2\n')
+        model = m.ThreeDModel(self.write('smooth.obj', source), height=1)
+        self.assertEqual([part.material_name for part in model], ['painted', 'plain'])
+        self.assertIsInstance(model[0], m.TexturedGeometry)
+        self.assertIsInstance(model[1], m.Surface)
+        np.testing.assert_allclose(model[0].get_unit_normals(),
+                                   [WEDGE_NORMAL, WEDGE_NORMAL, [0, 0, 1]], atol=2e-7)
+        np.testing.assert_allclose(model[1].get_unit_normals(),
+                                   [WEDGE_NORMAL, [0, 1, 0], WEDGE_NORMAL], atol=2e-7)
+        # The same shared position carries distinct texture coordinates.
+        # Normal continuity must not collapse the authored UV seam.
+        np.testing.assert_array_equal(model[0].get_points()[0], model[1].get_points()[0])
+        np.testing.assert_array_equal(model[0].data['im_coords'][0], [0, 1])
+
+        textured_source = ('mtllib materials/scene.mtl\n' + WEDGE
+                           + 's 7\nusemtl painted\nf 1/1 2/2 3/3\nf 1/4 4/3 2/2\n')
+        textured = m.ThreeDModel(self.write('smooth-uv.obj', textured_source), height=1)
+        np.testing.assert_array_equal(textured[0].data['im_coords'][[0, 3]], [[0, 1], [0, 0]])
+        np.testing.assert_allclose(textured[0].get_unit_normals()[[0, 3]],
+                                   np.tile(WEDGE_NORMAL, (2, 1)), atol=2e-7)
+
+        explicit = ('mtllib materials/scene.mtl\n' + WEDGE
+                    + 'vn 0 2 1\nvn 0 0 1\nvn 0 1 0\n'
+                    + 'usemtl painted\nf 1/1/1 2/2/1 3/3/2\n'
+                    + 'usemtl plain\nf 1/4/1 4/3/3 2/2/1\n')
+        control = m.ThreeDModel(self.write('explicit.obj', explicit), height=1)
+        flat = m.ThreeDModel(self.write('flat.obj', source.replace('s 7\n', 's off\n')), height=1)
+        for actual, expected in zip(model, control):
+            np.testing.assert_allclose(actual.data['d_normal_point'],
+                                       expected.data['d_normal_point'], atol=2e-7)
+        # Tilting exposes both faces. The rendered lighting must agree with
+        # authored analytic normals and differ from the old flat-shaded result.
+        for current in (model, control, flat):
+            current.rotate(-.55, axis=m.RIGHT).rotate(.3, axis=m.UP)
+        pixels = self.capture(control).png()
+        self.assertEqual(self.capture(model).png(), pixels)
+        self.assertNotEqual(self.capture(flat).png(), pixels)
+
+    def test_smoothing_group_switches_keep_hard_edges(self):
+        expected = np.array([[0., 0., 1.]] * 3 + [[0., 1., 0.]] * 3)
+        for first, second in (('', ''), ('s off\n', ''), ('s 0\n', ''),
+                              ('s 1\n', 's 2\n'), ('s on\n', 's off\n')):
+            with self.subTest(first=first, second=second):
+                source = WEDGE + first + 'f 1 2 3\n' + second + 'f 1 4 2\n'
+                model = m.ThreeDModel(self.write('hard.obj', source), height=1)
+                np.testing.assert_allclose(model[0].get_unit_normals(), expected, atol=2e-7)
+
+        source = WEDGE + 's on\nf 1 2 3\ns 1\nf 1 4 2\n'
+        model = m.ThreeDModel(self.write('on.obj', source), height=1)
+        np.testing.assert_allclose(model[0].get_unit_normals()[[0, 1, 3, 5]],
+                                   np.tile(WEDGE_NORMAL, (4, 1)), atol=2e-7)
+
+    def test_explicit_normals_and_source_relative_indices_remain_authoritative(self):
+        # Negative normal indices refer to declarations already present at
+        # that face, never to synthesized normals or later vn statements.
+        source = (WEDGE + 'vn 1 0 0\ns 3\nf 1//1 2//-1 3\n'
+                  + 'vn 0 0 -1\nf 1//-2 4//2 2\n')
+        model = m.ThreeDModel(self.write('mixed-normals.obj', source), height=1)
+        np.testing.assert_allclose(model[0].get_unit_normals(), [
+            [1, 0, 0], [1, 0, 0], [0, 0, 1],
+            [1, 0, 0], [0, 0, -1], WEDGE_NORMAL,
+        ], atol=2e-7)
+
+        # Both front doors consume the same resolved corner normals. The
+        # legacy geometry-only builder must not retain face-flat behavior.
+        expected = m.Group()
+        specs = expected._build_three_d_model(
+            m._native_surface_shell_factory, source.encode(), 1)
+        m._hang_native_children(expected, specs)
+        np.testing.assert_array_equal(model[0].data, expected[0].data)
+
+    def test_polygon_smoothing_weights_source_faces_not_incident_triangles(self):
+        # The quad and the upright triangle both have area 2. Vertex 2 is in
+        # only one triangle of the quad's fan; its normal must still be 45°,
+        # just like vertex 1, which is in both fan triangles.
+        source = ('v 0 0 0\nv 2 0 0\nv 2 1 0\nv 0 1 0\nv 0 0 2\n'
+                  's 9\nf 1 2 3 4\nf 1 5 2\n')
+        model = m.ThreeDModel(self.write('polygon-smooth.obj', source), height=1)
+        points = model[0].get_points()
+        normals = model[0].get_unit_normals()
+        shared_normal = [0., math.sqrt(.5), math.sqrt(.5)]
+        for point in ([-1., -.5, -1.], [1., -.5, -1.]):
+            rows = np.all(np.isclose(points, point, atol=1e-7), axis=1)
+            self.assertTrue(rows.any())
+            np.testing.assert_allclose(normals[rows],
+                                       np.tile(shared_normal, (np.count_nonzero(rows), 1)),
+                                       atol=2e-7)
+
+    def test_generated_normals_survive_copy_pickle_transforms_and_scene_restore(self):
+        source = WEDGE + 's 1\nf 1 2 3\nf 1 4 2\n'
+        model = m.ThreeDModel(self.write('persistent-smooth.obj', source), height=1)
+        normals = model[0].get_unit_normals().copy()
+        expected = normals[:, [1, 0, 2]].copy()
+        expected[:, 0] *= -1
+        for copied in (model.copy(), pickle.loads(pickle.dumps(model))):
+            copied.rotate(math.pi / 2, axis=m.OUT).scale(1.25).shift((.25, -.5, .75))
+            np.testing.assert_allclose(copied[0].get_unit_normals(), expected, atol=5e-7)
+        np.testing.assert_array_equal(model[0].get_unit_normals(), normals)
+        scene = m.Scene(); scene.add(model)
+        state = scene.get_state()
+        model.rotate(.6, axis=m.UP)
+        scene.restore_state(state)
+        np.testing.assert_array_equal(model[0].get_unit_normals(), normals)
 
     def test_missing_required_inputs_and_uvs_preserve_existing_detached_model(self):
         model = m.ThreeDModel(self.path, height=2)

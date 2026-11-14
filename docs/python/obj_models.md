@@ -68,6 +68,30 @@ triangulated in the authoring tool with the intended diagonal choices.
 See [BN-22](../behavior_notes/BN-22-surface-construction-admission.md#planar-obj-polygon-admission)
 for the admission contract.
 
+## Smooth shading and hard edges
+
+OBJ files can request smooth shading without supplying `vn` declarations.
+`s on` selects smoothing group 1; `s N` selects a positive integer group.
+Faces sharing a vertex index in the same group receive area weighted normals
+at corners that have no authored normal. The default, `s off`, and `s 0` keep
+flat face normals. Different groups preserve hard edges, and an explicit
+corner normal always takes precedence.
+
+Each original polygon contributes its full oriented area once per shared
+vertex. Changing the polygon's fan root or triangulating a concave face does
+not bias that weight. Texture seams, material changes, and `o`/`g` names do
+not split a smoothing group. Separate vertex indices remain separate even
+when their coordinates coincide, so exporters can preserve intentional seams.
+Degenerate or exactly cancelling neighborhoods use the existing face-normal
+fallback.
+
+Generated normals are appended after parsing, preserving the declaration-time
+meaning of positive and negative `vn` indices. The normal admission limit
+counts authored and generated normals together. Invalid smoothing directives
+and exhausted budgets report their source line. Both the material-aware loader
+and geometry-only Rust APIs use this same normal generation; copied, animated,
+pickled, and restored models carry the resulting native normal records.
+
 ## Texture placement and addressing
 
 `map_Kd` and the `map_Ka` fallback accept these options before the filename:
@@ -174,8 +198,9 @@ can replace a native resource's policy while sharing its immutable pixel
 storage; install the resulting resource through `Stage` to update retained
 render state.
 
-The independent Rust tests are `fmn-library/tests/obj_materials.rs` and
-`fmn-library/tests/obj_polygons.rs`. They verify exact corner records, signed
-area, independent cutout coverage, material ranges, and named refusals. Native
+The independent Rust tests are `fmn-library/tests/obj_materials.rs`,
+`fmn-library/tests/obj_polygons.rs`, and `fmn-library/tests/obj_smoothing.rs`.
+They verify exact corner records, signed area, independent cutout coverage,
+material ranges, smooth lighting against explicit normal records, and named refusals. Native
 portal acceptance is `fmn-python/tests/obj_materials.py`; host input policy is
 `test_obj_inputs.py`, whose parser doubles are explicitly not geometry evidence.
