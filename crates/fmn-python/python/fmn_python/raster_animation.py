@@ -46,7 +46,6 @@ def install_raster_animation(native):
                 raise ValueError("image quads do not accept a dark-side texture")
             kwargs.setdefault("suspend_mobject_updating", True)
             super().__init__(mobject, **kwargs)
-            self._raster_options = dict(kwargs)
             self._raster_plan = None
             with _editing(mobject):
                 self._raster_end, path = _source(g, image, ffmpeg_bin)
@@ -148,22 +147,17 @@ def install_raster_animation(native):
     Textured.set_textures._override_animate = textures_override
     Textured.set_pixel_array._override_animate = texture_pixels_override
 
-    # The reference builder's override hook receives method arguments only.
-    # Its stock build() returns that animation unchanged, losing anim_args.
-    # Forward arguments solely for our own result; leave other overrides alone.
+    # The shared builder applies options without replaying initialization.
+    # Guard our live native plan before that configuration can mutate it.
     Builder = g["_AnimationBuilder"]
     previous_build = Builder.build
 
     @wraps(previous_build)
     def build(self):
-        result = previous_build(self)
-        if isinstance(result, RasterTransition) and result is self.overridden_animation:
-            if getattr(result, "_movement_active", False):
-                raise RuntimeError("cannot rebuild an active raster animation")
-            options = dict(result._raster_options)
-            options.update(self.anim_args)
-            Animation.__init__(result, result.mobject, **options)
-        return result
+        result = self.overridden_animation
+        if isinstance(result, RasterTransition) and getattr(result, "_movement_active", False):
+            raise RuntimeError("cannot rebuild an active raster animation")
+        return previous_build(self)
 
     Builder.build = build
     g["_FMN_RASTER_ANIMATION_INSTALLED"] = True

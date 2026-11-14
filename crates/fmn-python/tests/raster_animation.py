@@ -303,17 +303,37 @@ class RasterAnimationTests(unittest.TestCase):
         self.assertFalse(self.obj._is_updating_suspended())
         self.assertEqual(scene.time, .5)
 
-    def test_other_animation_overrides_do_not_receive_new_builder_argument_behavior(self):
+    def test_other_animation_overrides_share_options_without_reconstruction(self):
         # Local subclass prevents a test-only hook escaping to another suite.
         class Custom(m.ImageMobject):
             def custom(self): return self
         owned = m.Animation(self.obj, run_time=7)
         Custom.custom._override_animate = lambda obj: owned
         instance = Custom(pixels(RED))
-        self.assertIs(instance.animate(run_time=.5).custom().build(), owned)
+        self.assertIs(instance.animate.custom().build(), owned)
         self.assertEqual(owned.run_time, 7)
+        self.assertIs(instance.animate(run_time=.5).custom().build(), owned)
+        self.assertEqual(owned.run_time, .5)
         with self.assertRaises(NotImplementedError):
             self.obj.animate.set_pixel_array(pixels(BLUE)).shift((1,0,0))
+
+    def test_rebuilding_active_raster_refuses_before_options_or_plan_change(self):
+        builder = self.obj.animate(run_time_frames=4, rate_func=m.linear).set_pixel_array(pixels(BLUE))
+        animation = builder.build()
+        animation.token = token = object()
+        animation.begin(); animation.interpolate(.5)
+        plan = animation._raster_plan
+        builder.anim_args["run_time_frames"] = 9
+        with self.assertRaisesRegex(RuntimeError, "active raster"):
+            builder.build()
+        self.assertEqual(animation.run_time_frames, 4)
+        self.assertIs(animation._raster_plan, plan)
+        self.assertIs(animation.token, token)
+        np.testing.assert_array_equal(self.obj.get_pixel_array(), pixels(PURPLE))
+        animation.finish()
+        self.assertIs(builder.build(), animation)
+        self.assertEqual(animation.run_time_frames, 9)
+        self.assertIs(animation.token, token)
 
     def test_pixel_frames_match_frozen_captures_at_one_four_and_sixteen_threads(self):
         all_frames=[]

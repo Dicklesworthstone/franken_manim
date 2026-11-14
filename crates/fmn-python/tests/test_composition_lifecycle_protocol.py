@@ -286,6 +286,18 @@ class CompositionLifecycleTests(unittest.TestCase):
         self.assertEqual(scene.calls[0][0][0][0], "animation_group")
         self.assertEqual(scene.calls[0][1], [None])
         self.assertIs(group.mobject, root)
+    def test_explicit_group_lifecycle_options_keep_callback_cleanup(self):
+        for options in ({"remover": True}, {"final_alpha_value": .5}):
+            with self.subTest(options=options):
+                group = self.Group(self.Transform(self.Mob()), **options)
+                self.assertTrue(self.g["_requires_python_animation"](group))
+                scene = self.Scene()
+                scene.add(group.mobject)
+                scene.play(group)
+                self.assertIsNotNone(scene.calls[0][1][0])
+                self.assertIsNone(group._composition_driver)
+                if options.get("remover"):
+                    self.assertNotIn(group.mobject, scene.mobjects)
     def test_nested_constructor_roots_preserve_member_identity_and_order(self):
         first, second = self.g["VMobject"](), self.g["VMobject"]()
         inner = self.Group(self.Transform(first), self.Transform(second), self.Transform(first))

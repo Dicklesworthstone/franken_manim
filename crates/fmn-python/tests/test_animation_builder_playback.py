@@ -2,6 +2,7 @@
 import ast
 import copy
 import importlib.util
+import math
 import pathlib
 import types
 import sys
@@ -12,6 +13,10 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 SPEC = importlib.util.spec_from_file_location("fmn_playback_under_test", ROOT / "python/fmn_python/playback.py")
 playback = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(playback)
+SEMANTICS_SPEC = importlib.util.spec_from_file_location(
+    "builder_animation_semantics", ROOT / "python/manimlib/_animation_semantics.py")
+semantics = importlib.util.module_from_spec(SEMANTICS_SPEC)
+SEMANTICS_SPEC.loader.exec_module(semantics)
 
 
 def environment():
@@ -42,6 +47,7 @@ def environment():
             self.suspend_mobject_updating = kwargs.pop("suspend_mobject_updating", False)
             self.time_span = kwargs.pop("time_span", None)
             self.name = kwargs.pop("name", "")
+            self.run_time_frames = kwargs.pop("run_time_frames", None)
             if kwargs:
                 raise TypeError("unknown animation options: " + ", ".join(kwargs))
     class NativeAnimation(Animation):
@@ -65,9 +71,28 @@ def environment():
     def refuse(where, values):
         if any(active for _, active in values):
             raise NotImplementedError(where + " unsupported path_func")
+    def linear(alpha):
+        return alpha
     g.update(_NativeAnimation=NativeAnimation, _OUT=(0., 0., 1.), _vec3=tuple,
              _refuse_unrouted=refuse, Mobject=Mobject, Animation=Animation, Transform=Transform, Scene=Scene,
-             _requires_python_animation=requires)
+             _requires_python_animation=requires,
+             _math=math, _RATE_FUNC_NAMES={linear: "linear"},
+             _fmn_validate_frame_count=semantics._validate_frame_count)
+    # Execute the installed timing mutation hooks, not a second implementation
+    # in this protocol fixture. Native clock/render acceptance lives separately.
+    for filename, owner, function in (
+        ("manimlib/_animation_semantics.py", "install", "animation_setattr"),
+        ("fmn_python/live_rates.py", "install_live_rates", "update_rate_info"),
+    ):
+        source = ROOT / "python" / filename
+        definition = next(node for node in ast.parse(source.read_text()).body
+                          if isinstance(node, ast.FunctionDef) and node.name == owner)
+        node = next(node for node in definition.body
+                    if isinstance(node, ast.FunctionDef) and node.name == function)
+        namespace = {"g": g, "_validate_frame_count": semantics._validate_frame_count}
+        exec(compile(ast.Module(body=[node], type_ignores=[]), str(source), "exec"), namespace)
+        setattr(Animation, "__setattr__" if function == "animation_setattr" else function,
+                namespace[function])
     names = {"_AnimationBuilder", "MoveToTarget", "_MethodAnimation", "prepare_animation", "override_animate", "Restore"}
     path = ROOT / "python/manimlib_bootstrap.py"
     tree = ast.parse(path.read_text())
@@ -85,6 +110,9 @@ class BuilderPlaybackTests(unittest.TestCase):
         self.original = self.native.Scene.play
         self.previous_requires = self.g["_requires_python_animation"]
         playback.install_scene_playback(self.native)
+        # This fixture exercises the builder boundary, without installing the
+        # separately tested composition subsystem or its native interval kernel.
+        self.g["AnimationGroup"] = type("AnimationGroup", (self.native.Animation,), {})
         self.scene, self.mob = self.native.Scene(), self.native.Mobject()
     def builder(self, **kwargs):
         return self.native._AnimationBuilder(self.mob)(**kwargs).shift(4)
@@ -219,6 +247,143 @@ class BuilderPlaybackTests(unittest.TestCase):
         builder.overridden_animation = product
         self.scene.play(builder)
         self.assertIs(self.scene.calls[0][0][0], product)
+    def test_override_options_keep_constructor_state_and_dispatch_rate_hook(self):
+        calls, marker = [], object()
+        base = self.native.Animation
+        class Owned(base):
+            def __init__(self, mob):
+                calls.append("constructor")
+                super().__init__(mob, run_time=7, lag_ratio=.5, remover=True)
+                self.marker = marker
+            def update_rate_info(self, **kwargs):
+                calls.append(dict(kwargs))
+                return super().update_rate_info(**kwargs)
+        product = Owned(self.mob)
+        builder = self.native._AnimationBuilder(self.mob)(
+            run_time=0, lag_ratio=0, rate_func="linear", final_alpha_value=.25,
+            remover=False, suspend_mobject_updating=True, name="chosen", time_span=(.1, .2))
+        builder.overridden_animation = product
+        self.assertIs(builder.build(), product)
+        self.assertIs(product.marker, marker)
+        self.assertEqual(calls[0], "constructor")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual((product.run_time, product.lag_ratio), (0, 0))
+        self.assertEqual((product.final_alpha_value, product.remover), (.25, False))
+        self.assertTrue(product.suspend_mobject_updating)
+        self.assertEqual((product.name, product.time_span), ("chosen", (.1, .2)))
+        self.assertEqual(product.rate_func(.25), .25)
+    def test_method_factory_receives_only_method_args_and_runs_once(self):
+        calls = []
+        product = self.native.Animation(self.mob, run_time=7)
+        def travel(source, distance, *, direction):
+            raise AssertionError("the ordinary mutation must not run")
+        @self.native.override_animate(travel)
+        def override(source, distance, *, direction):
+            calls.append((source, distance, direction))
+            return product
+        self.native.Mobject.travel = travel
+        builder = self.native._AnimationBuilder(self.mob)(run_time=2).travel(4, direction="right")
+        self.assertEqual(calls, [(self.mob, 4, "right")])
+        self.assertIs(builder.build(), product)
+        self.assertIs(builder.build(), product)
+        self.assertEqual(product.run_time, 2)
+        self.assertEqual(calls, [(self.mob, 4, "right")])
+    def test_override_without_options_never_calls_rate_hook_or_resets_defaults(self):
+        class Owned(self.native.Animation):
+            def update_rate_info(self, **kwargs):
+                raise AssertionError("no timing was supplied")
+        product = Owned(self.mob, run_time=7, remover=True, final_alpha_value=.4)
+        builder = self.native._AnimationBuilder(self.mob)
+        builder.overridden_animation = product
+        before = vars(product).copy()
+        self.assertIs(builder.build(), product)
+        self.assertEqual(vars(product), before)
+    def test_override_frame_duration_uses_shared_units_and_seconds_clear_binding(self):
+        product = self.native.Animation(self.mob, run_time=7)
+        product._fmn_derived_run_time = True
+        builder = self.native._AnimationBuilder(self.mob)(run_time_frames=5)
+        builder.overridden_animation = product
+        self.assertIs(builder.build(), product)
+        self.assertEqual(product.run_time_frames, 5)
+        self.assertFalse(product._fmn_derived_run_time)
+        product._fmn_frame_timing = object()
+        product._fmn_timing_fps = 24
+        builder = self.native._AnimationBuilder(self.mob)(run_time=.5)
+        builder.overridden_animation = product
+        builder.build()
+        self.assertEqual(product.run_time, .5)
+        self.assertIsNone(product.run_time_frames)
+        self.assertNotIn("_fmn_frame_timing", vars(product))
+        self.assertNotIn("_fmn_timing_fps", vars(product))
+    def test_bad_override_options_fail_before_any_product_change(self):
+        cases = [
+            {"run_time": 1, "run_time_frames": 3}, {"run_time_frames": True},
+            {"run_time_frames": 1.5}, {"run_time_frames": -1},
+            {"run_time": float("nan")}, {"run_time": -1},
+            {"run_time": 2, "time_span": (.5, .5)},
+            {"run_time": 2, "rate_func": "unknown"},
+            {"run_time": 2, "rate_func": object()},
+            {"run_time": 2, "final_alpha_value": object()},
+            {"run_time": 2, "unsupported": 1}, {"run_time": 2, "path_arc": 1},
+        ]
+        for options in cases:
+            with self.subTest(options=options):
+                product = self.native.Animation(self.mob, run_time=7, remover=True)
+                before = vars(product).copy()
+                builder = self.native._AnimationBuilder(self.mob)(**options)
+                builder.overridden_animation = product
+                with self.assertRaises((TypeError, ValueError, NotImplementedError)):
+                    builder.build()
+                self.assertEqual(vars(product), before)
+    def test_override_rate_object_is_never_truth_tested_or_compared(self):
+        class Rate:
+            __hash__ = None
+            def __bool__(self):
+                raise AssertionError("rate truth value")
+            def __eq__(self, other):
+                raise AssertionError("rate equality")
+            def __call__(self, alpha):
+                return alpha * alpha
+        rate = Rate()
+        product = self.native.Animation(self.mob)
+        builder = self.native._AnimationBuilder(self.mob)(rate_func=rate)
+        builder.overridden_animation = product
+        builder.build()
+        self.assertIs(product.rate_func, rate)
+    def test_override_rate_hook_failure_keeps_original_exception(self):
+        error = RuntimeError("authored timing failure")
+        class Owned(self.native.Animation):
+            def update_rate_info(self, **kwargs):
+                raise error
+        product = Owned(self.mob, run_time=7)
+        builder = self.native._AnimationBuilder(self.mob)(run_time=2)
+        builder.overridden_animation = product
+        with self.assertRaises(RuntimeError) as raised:
+            self.scene.play(builder)
+        self.assertIs(raised.exception, error)
+        self.assertEqual(self.scene.calls, [])
+    def test_active_group_override_is_rejected_without_changes(self):
+        product = self.native.AnimationGroup(self.mob, run_time=7)
+        product._composition_driver = object()
+        before = vars(product).copy()
+        builder = self.native._AnimationBuilder(self.mob)(run_time_frames=2, remover=True)
+        builder.overridden_animation = product
+        with self.assertRaisesRegex(RuntimeError, "active animation group"):
+            builder.build()
+        self.assertEqual(vars(product), before)
+    def test_authored_group_intervals_are_not_replaced_by_builder_lag(self):
+        class Authored(self.native.AnimationGroup):
+            def build_animations_with_timings(self, lag):
+                raise AssertionError("the authored interval table must be kept")
+        child = self.native.Animation(self.mob)
+        product = Authored(self.mob, run_time=7)
+        product.anims_with_timings = [(child, .5, 2)]
+        product._composition_initial_timings = ((id(child), 0, 1),)
+        builder = self.native._AnimationBuilder(self.mob)(lag_ratio=.5)
+        builder.overridden_animation = product
+        self.assertIs(builder.build(), product)
+        self.assertEqual(product.anims_with_timings, [(child, .5, 2)])
+        self.assertEqual(product.run_time, 7)
     def test_arguments_can_still_only_be_set_once(self):
         builder = self.builder(run_time=2)
         with self.assertRaises(ValueError):

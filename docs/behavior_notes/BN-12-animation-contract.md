@@ -242,3 +242,53 @@ coordinates and unchanged drawable-curve bits; `fmn-anim/tests/creation.rs`
 checks live reveals, reverse seeks, and flash teardown; the registered
 `lifecycle.partial_reveal_contours.v1` scenario compares certified frames
 with independently authored geometry at one, four, and sixteen threads.
+
+## Explicit builder options apply to method overrides
+
+The pinned Reference's `_AnimationBuilder.build` immediately returns the
+animation from an `override_animate` factory. It never applies `anim_args`, so
+`mob.animate(run_time=2, rate_func=linear).custom_method()` silently keeps the
+factory's duration and easing. FrankenManim deliberately corrects this: explicit
+builder options configure that same returned animation. This agrees with the
+native `MethodOverride` precedence for duration, easing, lag, and time windows.
+
+The factory receives the method arguments as before and runs once, when the
+method is recorded. Building keeps the returned object's identity, subclass,
+target, custom fields, and lifecycle methods. It does not replay `__init__`.
+An empty option dictionary leaves the product entirely unchanged; omitted
+options preserve factory defaults. For timing arguments, `None` is absent and
+zero is an explicit value, as with `update_rate_info`.
+
+Timing changes use the product's public `update_rate_info` hook. Exact
+`run_time_frames` retain their units until Choreo binds the scene frame rate;
+explicit seconds clear a previous frame duration. Both units cannot be supplied
+together. A returned composition retains its members and group object, and an
+explicit duration disables derived duration. Changing lag refreshes a stock
+interval table and its derived duration before that group is nested in another
+composition. An authored interval table or a timing hook's replacement table
+keeps its own schedule.
+
+Explicit `time_span`, `final_alpha_value`, `suspend_mobject_updating`, `remover`,
+and `name` also take effect. Path options are accepted for returned Transforms
+and use their existing `update_config` surface; catalog arc callables retain
+their native arc metadata, and authored path callables retain callback dispatch.
+Path options on a different animation mechanism and unknown options are refused
+instead of being ignored. Unsupported options, conflicting duration units, and
+malformed numeric arguments fail before configuration changes the product.
+An authored configuration hook still owns its own mutations and exceptions.
+
+Raster transitions use this same contract instead of reinitializing their base
+Animation. Rebuilding an active raster transition still refuses before changing
+its native material plan or animation options. An active composition is likewise
+protected from builder reconfiguration. Later `Scene.play` options keep their
+existing precedence over builder options.
+
+**Migration:** code which relied on ignored builder options should omit them or
+pass them to the factory through its own method arguments. Factories can retain
+special defaults simply by leaving the corresponding builder option unspecified.
+
+Evidence: actual production definitions and timing setters in
+`fmn-python/tests/test_animation_builder_playback.py`; real native geometry,
+exact frame counts, nested compositions, and lifecycle results in
+`fmn-python/tests/builder_playback.py`; native raster plans and pixels in
+`fmn-python/tests/raster_animation.py`.

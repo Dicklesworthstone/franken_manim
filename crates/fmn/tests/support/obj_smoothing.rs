@@ -65,7 +65,7 @@ fn model(source: &str, materials: bool) -> Result<Mobject, String> {
     }
 }
 
-fn render(source: &str, materials: bool, threads: usize) -> Result<Vec<Vec<u8>>, String> {
+fn render(source: &str, materials: bool, threads: u32) -> Result<Vec<Vec<u8>>, String> {
     let fs = Arc::new(VirtualFs::new());
     let mut options = RenderOptions::new("/obj-smoothing").map_err(|error| error.to_string())?;
     options.config.camera.resolution = (64, 48);

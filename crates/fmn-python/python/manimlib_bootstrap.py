@@ -699,10 +699,11 @@ def _install_live_state(mobject):
 
 
 class _AnimationBuilder:
-    """Reference mobject.py:2250 verbatim: intercepted methods apply to
+    """Reference mobject.py:2250: intercepted methods apply to
     the mobject's generated target through the ordinary bound surfaces;
     the product is a MoveToTarget-shaped (mobject, target) spec plus
-    anim_args."""
+    anim_args. Explicit options also configure an override's existing
+    animation, without reconstructing it (the intentional BN-12 correction)."""
 
     def __init__(self, mobject):
         self.mobject = mobject
@@ -751,8 +752,117 @@ class _AnimationBuilder:
 
     def build(self):
         if self.overridden_animation is not None:
+            if self.anim_args:
+                self._configure_override(self.overridden_animation, self.anim_args)
             return self.overridden_animation
         return _MethodAnimation(self.mobject, self.methods, **self.anim_args)
+
+    @staticmethod
+    def _configure_override(animation, options):
+        # A factory owns its product, constructor state and method arguments.
+        # Only explicitly authored animation options replace that state. In
+        # particular, never replay __init__ or replace the factory's object.
+        if not isinstance(animation, Animation):
+            raise TypeError("AnimationBuilder.build must return an Animation")
+        allowed = {
+            "run_time", "run_time_frames", "rate_func", "lag_ratio",
+            "time_span", "final_alpha_value", "suspend_mobject_updating",
+            "name", "remover", "path_arc", "path_arc_axis", "path_func",
+        }
+        for key in sorted(options):
+            if key not in allowed:
+                raise NotImplementedError(
+                    "anim arg `" + key + "` is not yet routed to the engine play"
+                )
+        values = dict(options)
+        if values.get("run_time") is not None and values.get("run_time_frames") is not None:
+            raise ValueError("run_time and run_time_frames are mutually exclusive")
+        if values.get("run_time_frames") is not None:
+            values["run_time_frames"] = _fmn_validate_frame_count(values["run_time_frames"])
+        for key in ("run_time", "lag_ratio", "final_alpha_value"):
+            if key in values and (values[key] is not None or key == "final_alpha_value"):
+                value = float(values[key])
+                if not _math.isfinite(value) or (key == "run_time" and value < 0):
+                    suffix = " and non-negative" if key == "run_time" else ""
+                    raise ValueError(key + " must be finite" + suffix)
+                values[key] = value
+        rate = values.get("rate_func")
+        if isinstance(rate, str):
+            for function, name in _RATE_FUNC_NAMES.items():
+                if name == rate:
+                    values["rate_func"] = function
+                    break
+            else:
+                raise ValueError("unknown rate function: " + rate)
+        elif rate is not None and not callable(rate):
+            raise TypeError("rate_func must be callable or a catalog name")
+        if values.get("time_span") is not None:
+            start, end = values["time_span"]
+            start, end = float(start), float(end)
+            if not (_math.isfinite(start) and _math.isfinite(end) and end > start):
+                raise ValueError("time_span must have finite, increasing bounds")
+            values["time_span"] = (start, end)
+        for key in ("remover", "suspend_mobject_updating"):
+            if key in values:
+                values[key] = bool(values[key])
+        if "name" in values:
+            values["name"] = values["name"] or type(animation).__name__ + str(animation.mobject)
+
+        paths = {
+            key: values[key] for key in ("path_arc", "path_arc_axis", "path_func")
+            if key in values
+        }
+        if paths:
+            if not isinstance(animation, Transform):
+                raise NotImplementedError("path animation arguments require a Transform override")
+            if paths.get("path_func") is not None and not callable(paths["path_func"]):
+                raise TypeError("Transform path_func must be callable")
+            routed_arc = getattr(paths.get("path_func"), "_fmn_path_arc", None)
+            if routed_arc is not None:
+                paths["path_arc"] = routed_arc
+                paths["path_arc_axis"] = getattr(
+                    paths["path_func"], "_fmn_path_axis", animation.path_arc_axis)
+            paths["path_arc"] = float(paths.get("path_arc", animation.path_arc))
+            paths["path_arc_axis"] = _vec3(paths.get("path_arc_axis", animation.path_arc_axis))
+            if (not _math.isfinite(paths["path_arc"])
+                    or not all(_math.isfinite(v) for v in paths["path_arc_axis"])):
+                raise ValueError("Transform path arc and axis must be finite")
+            if (animation._target_attr is None and paths.get("path_func") is not None
+                    and routed_arc is None):
+                _refuse_unrouted(type(animation).__name__ + "()", [("path_func", True)])
+
+        # Composition timing and exact-frame ownership belong to the existing
+        # rate hook. Preserve authored hook dispatch and its exception identity.
+        timing = {
+            key: values[key] for key in ("run_time", "run_time_frames", "rate_func", "lag_ratio")
+            if values.get(key) is not None
+        }
+        group = isinstance(animation, AnimationGroup)
+        if group and getattr(animation, "_composition_driver", None) is not None:
+            raise RuntimeError("cannot rebuild an active animation group")
+        def profile():
+            return tuple((id(member), start, end) for member, start, end in animation.anims_with_timings)
+        previous_profile = profile() if group else None
+        if timing:
+            animation.update_rate_info(**timing)
+        if (group and "lag_ratio" in timing
+                and previous_profile == getattr(animation, "_composition_initial_timings", None)
+                and previous_profile == profile()):
+            # Refresh only a stock interval table. An authored table or a rate
+            # hook which replaced it retains its own schedule and callback route.
+            animation.build_animations_with_timings(animation.lag_ratio)
+            if getattr(animation, "_fmn_derived_run_time", False):
+                object.__setattr__(animation, "run_time", None)
+            animation.calculate_max_end_time()
+            animation._composition_initial_timings = profile()
+        for key in ("time_span", "final_alpha_value", "suspend_mobject_updating", "name", "remover"):
+            if key in values:
+                setattr(animation, key, values[key])
+        if paths:
+            path = paths.pop("path_func", None)
+            animation.update_config(**paths)
+            if path is not None:
+                animation.path_func = path
 
 
 def override_animate(method):

@@ -402,7 +402,165 @@ class TransformObjectHooks(_hooks_unittest.TestCase):
             self.assertNotEqual(payloads[0], payloads[1])
 
 
-_hooks_result = _hooks_unittest.TextTestRunner(verbosity=2).run(
-    _hooks_unittest.defaultTestLoader.loadTestsFromTestCase(TransformObjectHooks))
+class BuilderOverrideOptions(_hooks_unittest.TestCase):
+    def test_custom_override_uses_builder_timing_easing_and_lifecycle(self):
+        events, token = [], object()
+        class Source(m.VectorizedPoint):
+            def travel(self, distance):
+                return self.shift(distance * m.RIGHT)
+        class Owned(m.Transform):
+            def __init__(self, source, distance):
+                events.append("constructor")
+                super().__init__(source, source.copy().shift(distance * m.RIGHT),
+                                 run_time=7, rate_func=m.linear)
+                self.token = token
+            def finish(self):
+                events.append("finish")
+                return super().finish()
+        @m.override_animate(Source.travel)
+        def travel_animation(source, distance):
+            events.append(("factory", distance))
+            return Owned(source, distance)
+        source, scene = Source(), m.Scene()
+        ticks = []
+        source.add_updater(lambda obj, dt: ticks.append(dt) if obj is source else None, call=False)
+        rate = lambda alpha: alpha * alpha
+        builder = source.animate(run_time_frames=4, rate_func=rate, final_alpha_value=.5,
+                                 time_span=(0, .5), suspend_mobject_updating=True,
+                                 remover=True, name="custom trip").travel(4)
+        animation = builder.build()
+        self.assertIs(animation, builder.overridden_animation)
+        self.assertIs(animation.token, token)
+        self.assertEqual(animation.name, "custom trip")
+        with _hooks_tempfile.TemporaryDirectory() as directory:
+            with scene.render_session(_HooksPath(directory) / "override.y4m",
+                                      resolution=(16, 8), fps=8, threads=1) as output:
+                scene.add(source)
+                scene.play(builder)
+            self.assertEqual(output.result.frame_count, 4)
+        self.assertEqual(scene.time, .5)
+        close(source.get_center(), m.RIGHT)
+        self.assertNotIn(source, scene.mobjects)
+        self.assertFalse(source._is_updating_suspended())
+        self.assertTrue(ticks and all(dt == 0 for dt in ticks), ticks)
+        self.assertEqual(events, [("factory", 4), "constructor", "finish"])
+        self.assertIs(animation.token, token)
+
+    def test_override_composition_retains_members_and_exact_frame_duration(self):
+        class Source(m.VectorizedPoint):
+            def perform(self):
+                return self
+        source, second, scene = Source(), m.VectorizedPoint(m.UP), m.Scene()
+        children = (
+            m.Transform(source, source.copy().shift(m.RIGHT), run_time_frames=2, rate_func=m.linear),
+            m.Transform(second, second.copy().shift(2*m.RIGHT), run_time_frames=4, rate_func=m.linear),
+        )
+        product = m.AnimationGroup(*children)
+        root = product.mobject
+        Source.perform._override_animate = lambda obj: product
+        builder = source.animate(run_time_frames=3, rate_func=m.linear, lag_ratio=1).perform()
+        self.assertIs(builder.build(), product)
+        self.assertEqual(tuple(product.animations), children)
+        self.assertIs(product.mobject, root)
+        self.assertFalse(product._fmn_derived_run_time)
+        seen = []
+        observer = m.Mobject()
+        observer.add_updater(lambda obj, dt: seen.append((source.get_x(), second.get_x())) if dt > 0 else None,
+                             call=False)
+        with _hooks_tempfile.TemporaryDirectory() as directory:
+            with scene.render_session(_HooksPath(directory) / "group.y4m",
+                                      resolution=(16, 8), fps=12, threads=1) as output:
+                scene.add(root, observer)
+                scene.play(builder)
+            self.assertEqual(output.result.frame_count, 3)
+        self.assertEqual(scene.time, .25)
+        np.testing.assert_allclose(seen, [(1, 0), (1, 1), (1, 2)], atol=2e-5)
+        self.assertIs(product.mobject, root)
+
+    def test_override_lag_recomputes_derived_duration_before_nesting(self):
+        class Source(m.VectorizedPoint):
+            def perform(self):
+                return self
+        source, other = Source(), m.VectorizedPoint(m.UP)
+        product = m.AnimationGroup(
+            m.Transform(source, source.copy().shift(m.RIGHT), run_time=.125, rate_func=m.linear),
+            m.Transform(other, other.copy().shift(m.RIGHT), run_time=.25, rate_func=m.linear))
+        Source.perform._override_animate = lambda obj: product
+        self.assertEqual(product.get_run_time(), .25)
+        builder = source.animate(lag_ratio=1).perform()
+        self.assertIs(builder.build(), product)
+        self.assertTrue(product._fmn_derived_run_time)
+        self.assertEqual(product.get_run_time(), .375)
+        self.assertEqual([row[1:] for row in product.anims_with_timings], [(0, .125), (.125, .375)])
+        parent = m.AnimationGroup(builder)
+        self.assertEqual(parent.get_run_time(), .375)
+        scene = m.Scene()
+        scene.play(parent)
+        close(source.get_center(), m.RIGHT)
+        close(other.get_center(), m.UP + m.RIGHT)
+
+    def test_override_group_remover_uses_its_existing_cleanup(self):
+        class Source(m.VectorizedPoint):
+            def perform(self):
+                return self
+        source, scene = Source(), m.Scene()
+        product = m.AnimationGroup(m.Transform(source, source.copy().shift(m.RIGHT), rate_func=m.linear))
+        root = product.mobject
+        Source.perform._override_animate = lambda obj: product
+        builder = source.animate(run_time_frames=2, remover=True).perform()
+        self.assertIs(builder.build(), product)
+        self.assertTrue(m._requires_python_animation(product))
+        scene.add(root)
+        scene.play(builder)
+        close(source.get_center(), m.RIGHT)
+        self.assertNotIn(root, scene.mobjects)
+        self.assertFalse(source._is_updating_suspended())
+
+    def test_play_options_still_override_builder_and_factory_timing(self):
+        class Source(m.VectorizedPoint):
+            def perform(self):
+                return self
+        source, scene = Source(), m.Scene()
+        product = m.Transform(source, source.copy().shift(m.RIGHT), run_time_frames=9)
+        Source.perform._override_animate = lambda obj: product
+        builder = source.animate(run_time=.5, rate_func=m.linear).perform()
+        self.assertIs(builder.build(), product)
+        self.assertIsNone(product.run_time_frames)
+        scene.play(builder, run_time_frames=3)
+        self.assertEqual(scene.time, .1)
+        close(source.get_center(), m.RIGHT)
+
+    def test_transform_override_paths_reach_native_and_callback_playback(self):
+        class Source(m.VectorizedPoint):
+            def perform(self):
+                return self
+        arc = m.path_along_arc(m.PI / 2)
+        def custom(start, end, alpha):
+            return (1-alpha)*start + alpha*end + 4*alpha*(1-alpha)*m.UP
+        for options, path, callback in (
+            ({"path_arc": m.PI / 2}, arc, False),
+            ({"path_func": arc}, arc, False),
+            ({"path_func": custom}, custom, True),
+        ):
+            with self.subTest(options=options):
+                source, scene, seen = Source(), m.Scene(), []
+                product = m.Transform(source, source.copy().shift(2*m.RIGHT))
+                Source.perform._override_animate = lambda obj: product
+                builder = source.animate(run_time_frames=4, rate_func=m.linear, **options).perform()
+                self.assertIs(builder.build(), product)
+                self.assertEqual(m._requires_python_animation(product), callback)
+                observer = m.Mobject()
+                observer.add_updater(lambda obj, dt: seen.append(source.get_center().copy()) if dt > 0 else None,
+                                     call=False)
+                scene.add(source, observer)
+                scene.play(builder)
+                expected = [path(np.zeros((1, 3)), np.array([2*m.RIGHT]), alpha)[0]
+                            for alpha in (.25, .5, .75, 1)]
+                np.testing.assert_allclose(seen, expected, atol=2e-5)
+
+
+_hooks_result = _hooks_unittest.TextTestRunner(verbosity=2).run(_hooks_unittest.TestSuite(
+    _hooks_unittest.defaultTestLoader.loadTestsFromTestCase(case)
+    for case in (TransformObjectHooks, BuilderOverrideOptions)))
 if not _hooks_result.wasSuccessful():
     raise AssertionError("native Transform object-hook acceptance failed")

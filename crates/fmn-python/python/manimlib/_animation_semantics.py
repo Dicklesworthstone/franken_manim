@@ -1793,6 +1793,11 @@ def _install_composition_lifecycle(g):
 
     def requires_python_animation(animation):
         if isinstance(animation, AnimationGroup):
+            # Native group lowering has no general remover/final-alpha fields.
+            # Keep the already complete group lifecycle when these are edited
+            # explicitly, including by an override_animate builder (BN-12).
+            if getattr(animation, "remover", False) or getattr(animation, "final_alpha_value", 1.0) != 1.0:
+                return True
             if getattr(animation, "_composition_authored_root", False) or custom_timings(animation):
                 return True
             for cls in type(animation).__mro__:
