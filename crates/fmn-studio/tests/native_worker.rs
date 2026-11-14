@@ -4,6 +4,7 @@ use std::cell::Cell;
 use std::io::Cursor;
 use std::rc::Rc;
 
+use fmn_anim::Animation;
 use fmn_core::color::LinearRgba;
 use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 use fmn_render::{
@@ -1908,6 +1909,9 @@ enum TerminalPlayKind {
     Replacement,
     VectorFade,
     PassingFlash,
+    BorderFill,
+    Write,
+    ReverseWrite,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2001,6 +2005,19 @@ fn terminal_play_program(
     }
     let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
     scene.add(&[root]).unwrap();
+    if matches!(
+        kind,
+        TerminalPlayKind::Write | TerminalPlayKind::ReverseWrite
+    ) {
+        // Family lag leaves different members in different drawing/filling
+        // phases at a checkpoint. Their private phase state must survive too.
+        for offset in [[1.6, 0.0, 0.0], [-1.6, 0.0, 0.0]] {
+            let buffer = scene.stage().get(root).unwrap().buffer.deep_clone();
+            let child = scene.stage_mut().add(Mobject::from_buffer(buffer));
+            scene.stage_mut().shift(child, offset);
+            scene.stage_mut().attach(root, child).unwrap();
+        }
+    }
     let mut animation: Box<dyn fmn_anim::Animation> = match kind {
         TerminalPlayKind::Rotation => Box::new(
             fmn_anim::Rotating::new(root)
@@ -2026,6 +2043,19 @@ fn terminal_play_program(
         }
         TerminalPlayKind::VectorFade => Box::new(fmn_anim::v_fade_out(root)),
         TerminalPlayKind::PassingFlash => Box::new(fmn_anim::show_passing_flash(root, 0.3)),
+        TerminalPlayKind::BorderFill => Box::new(
+            fmn_anim::DrawBorderThenFill::new(root)
+                .with_stroke_width(3.5)
+                .with_stroke_color(Some([0.7, 0.1, 0.9])),
+        ),
+        TerminalPlayKind::Write | TerminalPlayKind::ReverseWrite => {
+            let mut animation = fmn_anim::write(scene.stage(), root);
+            if matches!(kind, TerminalPlayKind::ReverseWrite) {
+                animation.state_mut().config.rate_func =
+                    fmn_anim::RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack);
+            }
+            Box::new(animation)
+        }
     };
     animation.state_mut().config.suspend_mobject_updating = true;
     match policy {
@@ -2102,6 +2132,9 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
         TerminalPlayKind::Replacement,
         TerminalPlayKind::VectorFade,
         TerminalPlayKind::PassingFlash,
+        TerminalPlayKind::BorderFill,
+        TerminalPlayKind::Write,
+        TerminalPlayKind::ReverseWrite,
     ] {
         for saved_frame in [7, 10, 14] {
             let mut original = terminal_play_worker(kind, TerminalPlayPolicy::Native, true, 1, 100);
@@ -2174,7 +2207,10 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
                         assert!(!stage.is_animating(root));
                         assert!(!stage.is_updating_suspended(root));
                         match kind {
-                            TerminalPlayKind::Rotation => assert_eq!(stage.roots(), &[root]),
+                            TerminalPlayKind::Rotation
+                            | TerminalPlayKind::BorderFill
+                            | TerminalPlayKind::Write
+                            | TerminalPlayKind::ReverseWrite => assert_eq!(stage.roots(), &[root]),
                             TerminalPlayKind::FadeOut
                             | TerminalPlayKind::VectorFade
                             | TerminalPlayKind::PassingFlash => assert!(stage.roots().is_empty()),

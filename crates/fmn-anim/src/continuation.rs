@@ -17,12 +17,12 @@ use fmn_mobject::{Mob, Stage};
 use crate::creation::PartialGeometry;
 use crate::transform::TargetPrep;
 use crate::{
-    AnimConfig, AnimError, AnimState, Animation, OpenSegment, PathFunc, RateFunc,
-    RationalFrameClock, RevealBounds, Rotating, ShowPartial, Transform, VFade,
+    AnimConfig, AnimError, AnimState, Animation, DrawBorderThenFill, OpenSegment, PathFunc,
+    RateFunc, RationalFrameClock, RevealBounds, Rotating, ShowPartial, Transform, VFade,
 };
 
-const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 0);
-const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 0);
+const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 1);
+const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 1);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_RATE_DEPTH: usize = 32;
@@ -101,6 +101,8 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
         Some(3)
     } else if any.is::<ShowPartial>() {
         Some(4)
+    } else if any.is::<DrawBorderThenFill>() {
+        Some(5)
     } else {
         None
     }
@@ -115,6 +117,8 @@ fn clone_native(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
     } else if let Some(value) = any.downcast_ref::<VFade>() {
         Some(Box::new(value.clone()))
     } else if let Some(value) = any.downcast_ref::<ShowPartial>() {
+        Some(Box::new(value.clone()))
+    } else if let Some(value) = any.downcast_ref::<DrawBorderThenFill>() {
         Some(Box::new(value.clone()))
     } else {
         None
@@ -185,9 +189,56 @@ fn native_parameters_valid(stage: &Stage, animation: &dyn Animation) -> bool {
                 .state
                 .starting_mobject()
                 .is_some_and(|starting| value.validate_geometry(stage, starting).is_ok())
+    } else if let Some(value) = any.downcast_ref::<DrawBorderThenFill>() {
+        if !border_parameters_valid(value)
+            || value.outline.is_none()
+            || value.crossed.len() > value.state.families().len()
+        {
+            return false;
+        }
+        let reveal = ShowPartial::new(value.state.mobject(), RevealBounds::Creation);
+        if value
+            .all_mobjects()
+            .into_iter()
+            .any(|mob| reveal.validate_geometry(stage, mob).is_err())
+        {
+            return false;
+        }
+        // This is an unordered phase set. Reversing a rate curve removes and
+        // later re-adds members, so insertion order is not a family invariant.
+        // Sort bounded copies to avoid quadratic validation on long text.
+        let mut crossed = value.crossed.clone();
+        if crossed
+            .iter()
+            .any(|&mob| stage.snapshot_handle(mob).is_none())
+        {
+            return false;
+        }
+        crossed.sort_unstable_by_key(|&mob| stage.snapshot_handle(mob));
+        if crossed.windows(2).any(|pair| pair[0] == pair[1]) {
+            return false;
+        }
+        let mut family = stage.family(value.state.mobject());
+        family.sort_unstable_by_key(|&mob| stage.snapshot_handle(mob));
+        crossed.iter().all(|&mob| {
+            family
+                .binary_search_by_key(&stage.snapshot_handle(mob), |&member| {
+                    stage.snapshot_handle(member)
+                })
+                .is_ok()
+        })
     } else {
         false
     }
+}
+
+fn border_parameters_valid(value: &DrawBorderThenFill) -> bool {
+    value.stroke_width.is_finite()
+        && value.stroke_width >= 0.0
+        && value.stroke_width <= f64::from(f32::MAX)
+        && value
+            .stroke_color
+            .is_none_or(|color| color.iter().all(|component| component.is_finite()))
 }
 
 // Execution parameters retain their binary64 identity, including signed zero.
@@ -262,6 +313,7 @@ fn charge_carrier(budget: &mut Budget, kind: u8) -> Result<(), Error> {
         2 => budget.charge::<Rotating>(1),
         3 => budget.charge::<VFade>(1),
         4 => budget.charge::<ShowPartial>(1),
+        5 => budget.charge::<DrawBorderThenFill>(1),
         _ => Err(Error::Invalid("unknown native animation kind")),
     }
 }
@@ -299,6 +351,12 @@ fn capture_budget(animations: &[Box<dyn Animation>]) -> Result<(), Error> {
         budget.charge::<Vec<Mob>>(state.families().len())?;
         for row in state.families() {
             budget.charge::<Mob>(row.len())?;
+        }
+        if let Some(value) = (animation.as_ref() as &dyn Any).downcast_ref::<DrawBorderThenFill>() {
+            budget.charge::<Mob>(value.crossed.len())?;
+            // Phase membership validation sorts a copy and the live family.
+            budget.charge::<Mob>(value.crossed.len())?;
+            budget.charge::<Mob>(state.families().len())?;
         }
     }
     Ok(())
@@ -657,6 +715,30 @@ fn put_native(
         writer
             .put_bool(value.should_match_start)
             .put_bool(value.restore_on_teardown);
+    } else if let Some(value) = any.downcast_ref::<DrawBorderThenFill>() {
+        if !border_parameters_valid(value) {
+            return Err(Error::Invalid("invalid border/fill stroke settings"));
+        }
+        put_float(writer, value.stroke_width);
+        writer.put_bool(value.stroke_color.is_some());
+        if let Some(color) = value.stroke_color {
+            for component in color {
+                writer.put_u32(component.to_bits());
+            }
+        }
+        if prepared {
+            put_mob(
+                writer,
+                stage,
+                value
+                    .outline
+                    .ok_or(Error::Invalid("missing prepared outline"))?,
+            )?;
+            put_count(writer, value.crossed.len())?;
+            for &mob in &value.crossed {
+                put_mob(writer, stage, mob)?;
+            }
+        }
     }
     Ok(())
 }
@@ -668,11 +750,12 @@ fn get_native(
     fps: u32,
 ) -> Result<Box<dyn Animation>, Error> {
     let kind = reader.get_u8()?;
-    if !(1..=4).contains(&kind) {
+    if !(1..=5).contains(&kind) {
         return Err(Error::Invalid("unknown native animation kind"));
     }
     charge_carrier(budget, kind)?;
-    let state = get_state(reader, stage, budget, fps, if kind == 1 { 3 } else { 2 })?;
+    let width = if matches!(kind, 1 | 5) { 3 } else { 2 };
+    let state = get_state(reader, stage, budget, fps, width)?;
     Ok(match kind {
         1 => {
             let target = get_mob(reader, stage)?;
@@ -738,6 +821,35 @@ fn get_native(
             value.restore_on_teardown = reader.get_bool()?;
             Box::new(value)
         }
+        5 => {
+            let mut value = DrawBorderThenFill::new(state.mobject());
+            value.state = state;
+            value.stroke_width = get_float(reader)?;
+            value.stroke_color = if reader.get_bool()? {
+                Some([
+                    f32::from_bits(reader.get_u32()?),
+                    f32::from_bits(reader.get_u32()?),
+                    f32::from_bits(reader.get_u32()?),
+                ])
+            } else {
+                None
+            };
+            if !border_parameters_valid(&value) {
+                return Err(Error::Invalid("invalid border/fill stroke settings"));
+            }
+            value.outline = Some(get_mob(reader, stage)?);
+            let count = get_count(reader, 8)?;
+            if count > value.state.families().len() {
+                return Err(Error::Invalid("border/fill phase count exceeds its family"));
+            }
+            value.crossed = budget.vector::<Mob>(count)?;
+            budget.charge::<Mob>(count)?;
+            budget.charge::<Mob>(value.state.families().len())?;
+            for _ in 0..count {
+                value.crossed.push(get_mob(reader, stage)?);
+            }
+            Box::new(value)
+        }
         _ => return Err(Error::Invalid("unknown native animation kind")),
     })
 }
@@ -765,7 +877,7 @@ fn prepared_valid(stage: &Stage, animation: &dyn Animation, fps: u32) -> Result<
         return Ok(false);
     }
     let family_roots = animation.all_mobjects();
-    let width = if native_kind(animation) == Some(1) {
+    let width = if matches!(native_kind(animation), Some(1 | 5)) {
         3
     } else {
         2
@@ -934,4 +1046,117 @@ pub fn declaration_bytes(
         put_native(&mut writer, stage, owned.as_ref(), false)?;
     }
     Ok(Some(writer.finish()?))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use fmn_mobject::Mobject;
+
+    fn prepared_border() -> (Stage, DrawBorderThenFill) {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::vector_from_points(&[
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        stage.add_to_scene(mob).unwrap();
+        let mut animation = DrawBorderThenFill::new(mob);
+        animation.prepare_timing(30).unwrap();
+        animation.begin(&mut stage).unwrap();
+        animation.interpolate(&mut stage, 0.75);
+        (stage, animation)
+    }
+
+    fn decode_border(stage: &Stage, value: &DrawBorderThenFill) -> Result<bool, Error> {
+        let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+        put_native(&mut writer, stage, value, true)?;
+        let bytes = writer.finish()?;
+        let mut reader = Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict)?;
+        let mut budget = Budget {
+            remaining: MAX_BYTES,
+        };
+        let decoded = get_native(&mut reader, stage, &mut budget, 30)?;
+        reader.finish()?;
+        prepared_valid(stage, decoded.as_ref(), 30)
+    }
+
+    #[test]
+    fn border_continuation_rejects_forged_phase_members_and_geometry() {
+        let (mut stage, animation) = prepared_border();
+        assert!(decode_border(&stage, &animation).unwrap());
+        let mut forged = animation.clone();
+        forged.crossed = vec![animation.outline.unwrap()];
+        assert!(!decode_border(&stage, &forged).unwrap());
+        forged.crossed = vec![animation.state.mobject(); 2];
+        assert!(decode_border(&stage, &forged).is_err());
+        forged = animation.clone();
+        forged.outline = Some(stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]])));
+        assert!(!decode_border(&stage, &forged).unwrap());
+        let foreign = Stage::new().add(Mobject::new());
+        forged = animation.clone();
+        forged.crossed = vec![foreign];
+        assert!(decode_border(&stage, &forged).is_err());
+    }
+
+    #[test]
+    fn border_continuation_binds_finite_representable_stroke_settings() {
+        let (stage, animation) = prepared_border();
+        for width in [f64::NAN, f64::INFINITY, -1.0, f64::from(f32::MAX) * 2.0] {
+            let forged = animation.clone().with_stroke_width(width);
+            assert!(decode_border(&stage, &forged).is_err());
+        }
+        let forged = animation
+            .clone()
+            .with_stroke_color(Some([1.0, f32::NAN, 0.0]));
+        assert!(decode_border(&stage, &forged).is_err());
+        let declared: Vec<Box<dyn Animation>> =
+            vec![Box::new(DrawBorderThenFill::new(animation.state.mobject()))];
+        let first = declaration_bytes(
+            &stage,
+            &declared,
+            DeclarationOverrides::default(),
+            MAX_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+        let changed: Vec<Box<dyn Animation>> = vec![Box::new(
+            DrawBorderThenFill::new(animation.state.mobject()).with_stroke_width(3.0),
+        )];
+        let second =
+            declaration_bytes(&stage, &changed, DeclarationOverrides::default(), MAX_BYTES)
+                .unwrap()
+                .unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn older_native_continuation_documents_remain_readable() {
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::vector_from_points(&[
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        stage.add_to_scene(mob).unwrap();
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(crate::v_fade_in(mob))];
+        let clock = RationalFrameClock::new(30).unwrap();
+        let open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+        let legacy = Schema::new(*b"FMPC", 1, 1, 0);
+        let mut writer = Writer::with_limits(legacy, limits(MAX_BYTES));
+        writer.put_u32(30).put_i64(0).put_i64(0).put_u32(1);
+        put_native(&mut writer, &stage, animations[0].as_ref(), true).unwrap();
+        let bytes = writer.finish().unwrap();
+        let (restored, restored_open) = restore(&stage, &clock, &bytes).unwrap();
+        let current = capture(&stage, &clock, &animations, &open, MAX_BYTES)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            capture(&stage, &clock, &restored, &restored_open, MAX_BYTES)
+                .unwrap()
+                .unwrap(),
+            current
+        );
+        assert!(Reader::open(&current, legacy, limits(MAX_BYTES), UnknownPolicy::Strict).is_err());
+    }
 }

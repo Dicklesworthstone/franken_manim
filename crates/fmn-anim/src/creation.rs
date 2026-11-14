@@ -361,11 +361,11 @@ pub fn show_passing_flash(mobject: Mob, time_width: f64) -> ShowPartial {
 /// outline, second half cross-fades outline → start.
 #[derive(Debug, Clone)]
 pub struct DrawBorderThenFill {
-    state: AnimState,
-    outline: Option<Mob>,
-    stroke_width: f64,
-    stroke_color: Option<[f32; 3]>,
-    crossed: Vec<Mob>,
+    pub(crate) state: AnimState,
+    pub(crate) outline: Option<Mob>,
+    pub(crate) stroke_width: f64,
+    pub(crate) stroke_color: Option<[f32; 3]>,
+    pub(crate) crossed: Vec<Mob>,
 }
 
 impl DrawBorderThenFill {

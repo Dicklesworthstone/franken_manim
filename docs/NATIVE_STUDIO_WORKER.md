@@ -311,11 +311,11 @@ worker_config.replay = NativeReplayPolicy::Checkpointed;
 
 `register_no_dt` supports ordinary scene updaters with signature
 `fn(&mut Stage, Mob)`. Unregistered callbacks, replaced bindings and native
-`updater_state` attributes require cold reconstruction. An open `Play`, including
-its final nominal capture before the finish lifecycle, also retains that path.
-So do earlier waits with pending executable steps; only the original final
-declarative wait suffix is eligible. A generated wait inside deferred work does
-not become an independent durable continuation.
+`updater_state` attributes require cold reconstruction. Earlier waits with
+pending executable steps also retain that path; only the original final
+declarative wait suffix is eligible. A terminal closed native `Play` can also
+restore its prepared lifecycle as described below. A generated wait inside
+deferred work does not become an independent durable continuation.
 
 Custom preflight hooks, sound requests, input history, live event ingress and
 edited source spans cannot be discarded by a direct restore. Deferred access
@@ -360,6 +360,25 @@ owner and rechecks updater, input and live-view activity before advancing.
 It does not require inventing a historical begin snapshot; when current effects
 prevent the jump, normal per-frame stepping remains available.
 
+### Prepared native plays
+
+A terminal `NativeSegment::Play` followed only by its original declarative
+wait suffix can resume supported native animations without replaying its
+prefix or rerunning `begin()`. The closed carriers include `Transform`,
+`Rotating`, `VFade`, `ShowPartial`, and `DrawBorderThenFill` (including `Write`).
+The continuation preserves the prepared copies, family alignment, timing,
+rate function and updater-suspension state. Drawing animations also retain
+their outline and each family member's draw/fill phase, so a reversing rate
+curve resumes the same visible frame and subsequent transitions.
+
+The saved cursor can sit on the last nominal capture with `finish()` and
+cleanup still pending. Restoration performs that epilogue exactly once when
+playback advances. Identity validation binds the native declaration and
+parameters to the fresh factory before installing the continuation. Unknown
+animation wrappers, callback rates and unsupported compositions retain bounded
+cold reconstruction; interpolation purity alone does not establish that their
+lifecycle hooks are serializable.
+
 Run the complete portable example:
 
 ```sh
@@ -401,8 +420,9 @@ arbitrary source files. Programs have an owned declarative segment schedule,
 not a suspended arbitrary Rust stack. Perspective editing, projected overlays,
 Metal presentation, Python callback ownership and audio export are not added.
 
-Admitted waits restore data and their continuation without prefix execution.
-Other schedules still need bounded cold execution. Restore latency and memory
+Admitted waits and terminal native plays restore data and their continuation
+without prefix execution. Other schedules still need bounded cold execution.
+Restore latency and memory
 cost depend on the saved scene; no constant-time claim is made. Native editing
 history does not rewind external state inside closures.
 

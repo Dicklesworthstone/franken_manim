@@ -6,7 +6,7 @@ use fmn_anim::{
 };
 use fmn_core::rate::CatalogRate;
 use fmn_core::rng::RngRoot;
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{Mob, Mobject, Snapshot, Stage};
 
 fn shape(stage: &mut Stage) -> Mob {
     let mob = stage.add(Mobject::vector_from_points(&[
@@ -231,4 +231,111 @@ fn write_does_not_transfer_an_unknown_rate_callback() {
         PureFrameRefusal::UnsupportedAnimation(0)
     );
     finish_open_play(&mut stage, &mut animations, open).unwrap();
+}
+
+#[test]
+fn durable_write_resumes_each_draw_and_fill_phase_without_rebeginning() {
+    for use_write in [false, true] {
+        for rate in [
+            RateFunc::linear(),
+            RateFunc::Catalog(CatalogRate::ThereAndBack),
+            RateFunc::Sampled(std::sync::Arc::from([0.0, 1.0, 0.0, 1.0])),
+        ] {
+            let (mut serial, mut animations) = scene(rate, false, use_write);
+            let mut clock = RationalFrameClock::new(30).unwrap();
+            let rng = RngRoot::from_seed(9);
+            let mut open = open_play(&mut serial, &clock, &mut animations).unwrap();
+            for checkpoint_frame in [0, 4, 9, 15, 22, 29, 30] {
+                advance_play(
+                    &mut serial,
+                    &mut clock,
+                    &rng,
+                    &mut animations,
+                    &mut open,
+                    checkpoint_frame,
+                    &mut |_| {},
+                )
+                .unwrap();
+                let checkpoint = fmn_anim::continuation::capture(
+                    &serial,
+                    &clock,
+                    &animations,
+                    &open,
+                    1024 * 1024,
+                )
+                .unwrap()
+                .expect("native writing has a durable lifecycle");
+                let snapshot = serial.snapshot().to_bytes().unwrap();
+                let mut restored = Stage::new();
+                let decoded = Snapshot::from_bytes(&snapshot, &restored).unwrap();
+                restored.restore(&decoded.snapshot);
+                let (mut resumed, mut resumed_open) =
+                    fmn_anim::continuation::restore(&restored, &clock, &checkpoint).unwrap();
+                let mut resumed_clock = clock;
+                assert_eq!(restored.snapshot().to_bytes().unwrap(), snapshot);
+                assert_eq!(
+                    fmn_anim::continuation::capture(
+                        &restored,
+                        &resumed_clock,
+                        &resumed,
+                        &resumed_open,
+                        1024 * 1024,
+                    )
+                    .unwrap()
+                    .unwrap(),
+                    checkpoint,
+                    "recapture must preserve the prepared outline and phase set"
+                );
+
+                // A fresh ordinary run supplies every remaining frame and the
+                // cleanup result independently of the serialized carrier.
+                let (mut expected, mut expected_animations) = scene(
+                    animations[0].state().config.rate_func.clone(),
+                    false,
+                    use_write,
+                );
+                let mut expected_clock = RationalFrameClock::new(30).unwrap();
+                let mut expected_open =
+                    open_play(&mut expected, &expected_clock, &mut expected_animations).unwrap();
+                advance_play(
+                    &mut expected,
+                    &mut expected_clock,
+                    &rng,
+                    &mut expected_animations,
+                    &mut expected_open,
+                    checkpoint_frame,
+                    &mut |_| {},
+                )
+                .unwrap();
+                let mut expected_frames = Vec::new();
+                let mut resumed_frames = Vec::new();
+                advance_play(
+                    &mut expected,
+                    &mut expected_clock,
+                    &rng,
+                    &mut expected_animations,
+                    &mut expected_open,
+                    30,
+                    &mut |frame| expected_frames.push(facts(&frame.materialize_stage())),
+                )
+                .unwrap();
+                advance_play(
+                    &mut restored,
+                    &mut resumed_clock,
+                    &rng,
+                    &mut resumed,
+                    &mut resumed_open,
+                    30,
+                    &mut |frame| resumed_frames.push(facts(&frame.materialize_stage())),
+                )
+                .unwrap();
+                assert_eq!(resumed_frames, expected_frames);
+                finish_open_play(&mut expected, &mut expected_animations, expected_open).unwrap();
+                finish_open_play(&mut restored, &mut resumed, resumed_open).unwrap();
+                assert_eq!(facts(&restored), facts(&expected));
+                assert_eq!(resumed_clock.now(), expected_clock.now());
+            }
+            finish_open_play(&mut serial, &mut animations, open).unwrap();
+        }
+    }
 }

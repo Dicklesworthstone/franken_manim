@@ -1,6 +1,6 @@
 //! Registered updater restoration and journal suffixes under a prefix-sized budget.
 
-use fmn_anim::{FrameMetadata, FramePacket};
+use fmn_anim::{Animation, FrameMetadata, FramePacket};
 use fmn_core::color::LinearRgba;
 use fmn_mobject::{Mob, Stage};
 use fmn_render::{
@@ -469,4 +469,160 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("native_resume_checkpoint.bin", state)
         .with_artifact("native_resume_next.png", next_png)
         .with_artifact("native_resume_suffix.png", suffix_png))
+}
+
+fn drawing_program(writing: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 71).map_err(service_error)?;
+    let rectangle = fmn_library::Rectangle::new()
+        .width(0.8)
+        .height(0.6)
+        .build()
+        .map_err(service_error)?;
+    let root = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.4).build().into(),
+            rectangle.into(),
+        ]))
+        .map_err(service_error)?;
+    let children = scene.stage().get(root).unwrap().submobjects().to_vec();
+    scene.stage_mut().shift(children[0], [-0.7, 0.0, 0.0]);
+    scene.stage_mut().shift(children[1], [0.7, 0.0, 0.0]);
+    scene.stage_mut().set_fill(
+        root,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    let mut animation = if writing {
+        fmn_anim::write(scene.stage(), root)
+    } else {
+        fmn_anim::DrawBorderThenFill::new(root)
+            .with_stroke_color(Some([0.9, 0.2, 0.4]))
+            .with_stroke_width(3.5)
+    };
+    if writing {
+        // Checkpoint both sides of a reversal through the drawing/filling
+        // boundary; a resumed carrier must preserve each member's phase.
+        animation.state_mut().config.rate_func =
+            fmn_anim::RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack);
+    }
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(animation)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(16),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_drawing(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let mut restored_count = 0;
+    let mut matching_frames = 0;
+    let mut last_checkpoint = Vec::new();
+    let mut last_png = Vec::new();
+    for writing in [false, true] {
+        for saved_frame in [4, 9, 16] {
+            let mut original_config = config();
+            original_config.frame_count = 19;
+            original_config.checkpoint_frames = 1;
+            let mut original =
+                NativeSceneWorker::new(original_config.clone(), move || drawing_program(writing))
+                    .map_err(|e| fail(e.to_string()))?;
+            let mut journal = Journal::new();
+            commit(&mut original, saved_frame, &mut journal)?;
+            let entry = &journal.entries()[0];
+            let state = entry
+                .checkpoint
+                .clone()
+                .ok_or_else(|| fail("drawing play omitted its checkpoint"))?;
+            let expected = original
+                .program()
+                .unwrap()
+                .preview()
+                .scene()
+                .state_bytes()
+                .map_err(|e| fail(e.to_string()))?;
+            // Even the shortest saved prefix cannot be replayed under this
+            // budget. Recovery must restore the actual prepared lifecycle.
+            original_config.max_replay_frames = 1;
+            original_config.renderer.threads = 4;
+            let mut recovered =
+                NativeSceneWorker::new(original_config, move || drawing_program(writing))
+                    .map_err(|e| fail(e.to_string()))?;
+            recovered
+                .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                    scene: NAME.into(),
+                    after_entry: 0,
+                    state_hash: entry.state_hash,
+                    state: state.clone(),
+                }))
+                .map_err(|e| fail(e.to_string()))?;
+            let receipt = recovered
+                .last_restore()
+                .ok_or_else(|| fail("drawing restore omitted its receipt"))?;
+            if receipt.mode != NativeRestoreMode::Checkpoint
+                || receipt.frame != saved_frame as u64
+                || receipt.fallback.is_some()
+                || recovered
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .state_bytes()
+                    .map_err(|e| fail(e.to_string()))?
+                    != expected
+            {
+                return Err(fail(
+                    "drawing checkpoint replayed or changed its prepared state",
+                ));
+            }
+            restored_count += 1;
+            for frame in saved_frame + 1..=18 {
+                let actual = png(&mut recovered, frame)?;
+                let expected = png(&mut original, frame)?;
+                let actual_state = recovered
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .state_bytes()
+                    .map_err(|e| fail(e.to_string()))?;
+                let expected_state = original
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .state_bytes()
+                    .map_err(|e| fail(e.to_string()))?;
+                if actual != expected || actual_state != expected_state {
+                    return Err(fail(
+                        "drawing continuation changed pixels, phase or finish state",
+                    ));
+                }
+                matching_frames += 1;
+                last_png = actual;
+            }
+            last_checkpoint = state;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.studio.drawing_checkpoint")
+            .field("checkpoint_restores", restored_count)
+            .field("matching_frames", matching_frames)
+            .field("threads", "1,4")
+            .field("prefix_replays", 0_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("studio_drawing_checkpoint_restores", restored_count)
+        .with_counter("studio_drawing_checkpoint_frames", matching_frames)
+        .with_artifact("native_drawing_checkpoint.bin", last_checkpoint)
+        .with_artifact("native_drawing_continued.png", last_png))
 }
