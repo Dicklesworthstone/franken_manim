@@ -30,9 +30,9 @@ pub use idle::IdleFrame;
 use fmn_anim::pure_frame::{PureSegment, PureWaitAdvance};
 use fmn_anim::{
     AnimError, Animation, AnimationBoundary, BeginState, Duration, FrameMetadata, FramePacket,
-    ImpureEffect, OpenSegment, OpenWait, PlaySetup, Purity, RateFunc, RationalFrameClock, RationalTime,
-    SceneUpdaterBoundary, SegmentKind, SegmentReport, abort_open_play, abort_open_wait,
-    abort_play_setup, begin_play_animation, complete_open_play_animation_finish,
+    ImpureEffect, OpenSegment, OpenWait, PlaySetup, Purity, RateFunc, RationalFrameClock,
+    RationalTime, SceneUpdaterBoundary, SegmentKind, SegmentReport, abort_open_play,
+    abort_open_wait, abort_play_setup, begin_play_animation, complete_open_play_animation_finish,
     complete_play_animation_begin, complete_play_frame_with_capture, complete_play_setup,
     complete_wait_frame_with_capture, finish_open_play, finish_open_play_animation,
     finish_open_wait, open_play_with_mode, open_wait, open_wait_after_updaters,
@@ -1376,11 +1376,7 @@ impl Scene {
 
     /// Restore an interrupted prologue without landing animation endpoints.
     /// No frame or completed-play count is produced by an unstarted play.
-    pub fn abort_stepped_play_setup(
-        &mut self,
-        mut play: PreparingPlay,
-        _sink: &mut dyn SceneSink,
-    ) {
+    pub fn abort_stepped_play_setup(&mut self, mut play: PreparingPlay, _sink: &mut dyn SceneSink) {
         abort_play_setup(&mut self.stage, &mut play.animations, play.setup);
     }
 
@@ -1699,12 +1695,8 @@ impl Scene {
         &mut self,
         play: &mut SteppedPlay,
     ) -> Result<(), SceneError> {
-        complete_open_play_animation_finish(
-            &mut self.stage,
-            &mut play.animations,
-            &mut play.open,
-        )
-        .map_err(Into::into)
+        complete_open_play_animation_finish(&mut self.stage, &mut play.animations, &mut play.open)
+            .map_err(Into::into)
     }
 
     /// Finish animation lifecycles while retaining the stepped-play handle.

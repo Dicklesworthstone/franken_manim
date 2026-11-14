@@ -7,7 +7,7 @@ use fmn_anim::{
 };
 use fmn_core::rate::CatalogRate;
 use fmn_core::rng::RngRoot;
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{Mob, Mobject, Snapshot, Stage};
 
 fn object(stage: &mut Stage, x: f64) -> Mob {
     let mob = stage.add(Mobject::from_points(&[[x, 0.0, 0.0], [x + 1.0, 1.0, 0.0]]));
@@ -458,4 +458,220 @@ fn group_owner_completion_keeps_member_final_alpha_removal_and_clock() {
         .unwrap();
     assert_eq!(facts(&native), facts(&serial));
     assert_eq!(native_clock.now(), serial_clock.now());
+}
+
+fn durable_group_scene(case: usize) -> (Stage, Vec<Box<dyn Animation>>) {
+    if case == 4 {
+        return cleanup_scene();
+    }
+    let mut stage = Stage::new();
+    let mut members = vec![
+        transform(&mut stage, -4.0, 0.2),
+        transform(&mut stage, 0.0, 0.35),
+        transform(&mut stage, 4.0, 0.0),
+    ];
+    if case == 0 {
+        for (member, frames) in members.iter_mut().zip([29, 38, 0]) {
+            member.state_mut().config.run_time_frames = Some(frames);
+        }
+        let inner = AnimationGroup::with_lag_ratio(&mut stage, members, 1.0).unwrap();
+        let outer = AnimationGroup::new(&mut stage, vec![Box::new(inner)])
+            .unwrap()
+            .with_run_time_frames(67);
+        return (stage, vec![Box::new(outer)]);
+    }
+    if case == 3 {
+        let empty = AnimationGroup::new(&mut stage, Vec::new())
+            .unwrap()
+            .with_run_time_frames(11);
+        members.push(Box::new(empty));
+    }
+    if case == 1 {
+        members[0].state_mut().config.run_time_frames = Some(7);
+    }
+    let mut inner = AnimationGroup::with_lag_ratio(&mut stage, members, 0.3)
+        .unwrap()
+        .with_duration_scale(1.3)
+        .with_rate_func(RateFunc::Catalog(CatalogRate::ThereAndBack).squish(0.1, 0.9));
+    if case == 2 {
+        inner = inner.with_run_time(0.5);
+        inner.state_mut().config.time_span = Some((0.05, 0.55));
+    }
+    let other = transform(&mut stage, 8.0, 0.4);
+    let mut outer =
+        AnimationGroup::with_lag_ratio(&mut stage, vec![Box::new(inner), other], 0.2).unwrap();
+    if case == 1 {
+        outer = outer.with_duration_scale(1.35);
+    } else {
+        outer = outer.with_run_time(0.8);
+    }
+    (stage, vec![Box::new(outer)])
+}
+
+#[test]
+fn durable_nested_groups_resume_exact_timing_and_remaining_lifecycles() {
+    let rng = RngRoot::from_seed(91);
+    for case in 0..5 {
+        for boundary in 0..5 {
+            let (mut serial, mut animations) = durable_group_scene(case);
+            let mut clock = RationalFrameClock::new(30).unwrap();
+            clock.advance_frames(7).unwrap();
+            serial.set_time_from_clock(clock.now().to_f64());
+            let mut open = open_play(&mut serial, &clock, &mut animations).unwrap();
+            let total = open.report().n_frames;
+            let frame = [0, 1, total / 2, total - 1, total][boundary];
+            advance_play(
+                &mut serial,
+                &mut clock,
+                &rng,
+                &mut animations,
+                &mut open,
+                frame,
+                &mut |_| {},
+            )
+            .unwrap();
+            let checkpoint =
+                fmn_anim::continuation::capture(&serial, &clock, &animations, &open, 1024 * 1024)
+                    .unwrap()
+                    .expect("closed eager groups have a durable native lifecycle");
+            let snapshot = serial.snapshot().to_bytes().unwrap();
+            let mut restored = Stage::new();
+            let decoded = Snapshot::from_bytes(&snapshot, &restored).unwrap();
+            restored.restore(&decoded.snapshot);
+            let (mut resumed, mut resumed_open) =
+                fmn_anim::continuation::restore(&restored, &clock, &checkpoint).unwrap();
+            let mut resumed_clock = clock;
+            assert_eq!(restored.snapshot().to_bytes().unwrap(), snapshot);
+            assert_eq!(
+                fmn_anim::continuation::capture(
+                    &restored,
+                    &resumed_clock,
+                    &resumed,
+                    &resumed_open,
+                    1024 * 1024,
+                )
+                .unwrap()
+                .unwrap(),
+                checkpoint,
+                "case={case}, frame={frame}: nested prepared timing identity"
+            );
+            let mut expected_frames = Vec::new();
+            let mut resumed_frames = Vec::new();
+            advance_play(
+                &mut serial,
+                &mut clock,
+                &rng,
+                &mut animations,
+                &mut open,
+                total,
+                &mut |packet| expected_frames.push(facts(&packet.materialize_stage())),
+            )
+            .unwrap();
+            advance_play(
+                &mut restored,
+                &mut resumed_clock,
+                &rng,
+                &mut resumed,
+                &mut resumed_open,
+                total,
+                &mut |packet| resumed_frames.push(facts(&packet.materialize_stage())),
+            )
+            .unwrap();
+            assert_eq!(
+                resumed_frames, expected_frames,
+                "case={case}, frame={frame}"
+            );
+            finish_open_play(&mut serial, &mut animations, open).unwrap();
+            finish_open_play(&mut restored, &mut resumed, resumed_open).unwrap();
+            assert_eq!(
+                facts(&restored),
+                facts(&serial),
+                "case={case}, frame={frame}"
+            );
+            assert_eq!(resumed_clock.now(), clock.now());
+        }
+    }
+}
+
+#[test]
+fn durable_group_reconstruction_preserves_frame_boundaries_above_f64_precision() {
+    let mut stage = Stage::new();
+    let boundary = (1_i64 << 53) + 1;
+    let mut first = transform(&mut stage, 0.0, 1.0);
+    first.state_mut().config.run_time_frames = Some(boundary as u64);
+    first.state_mut().config.rate_func = RateFunc::linear();
+    let mut second = transform(&mut stage, 4.0, 1.0);
+    second.state_mut().config.run_time_frames = Some(1);
+    second.state_mut().config.rate_func = RateFunc::linear();
+    let inner = AnimationGroup::with_lag_ratio(&mut stage, vec![first, second], 1.0).unwrap();
+    let outer = AnimationGroup::new(&mut stage, vec![Box::new(inner)]).unwrap();
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(outer)];
+    let clock = RationalFrameClock::new(24).unwrap();
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let checkpoint =
+        fmn_anim::continuation::capture(&stage, &clock, &animations, &open, 1024 * 1024)
+            .unwrap()
+            .unwrap();
+    let mut restored = Stage::new();
+    let decoded = Snapshot::from_bytes(&stage.snapshot().to_bytes().unwrap(), &restored).unwrap();
+    restored.restore(&decoded.snapshot);
+    let (mut resumed, resumed_open) =
+        fmn_anim::continuation::restore(&restored, &clock, &checkpoint).unwrap();
+    for frame in [boundary - 1, boundary, boundary + 1] {
+        let position = fmn_anim::FramePosition::from_frame(frame);
+        animations[0]
+            .interpolate_at_position(&mut stage, &position, 24)
+            .unwrap();
+        resumed[0]
+            .interpolate_at_position(&mut restored, &position, 24)
+            .unwrap();
+        assert_eq!(facts(&restored), facts(&stage), "frame={frame}");
+    }
+    finish_open_play(&mut stage, &mut animations, open).unwrap();
+    finish_open_play(&mut restored, &mut resumed, resumed_open).unwrap();
+    assert_eq!(facts(&restored), facts(&stage));
+}
+
+#[test]
+fn durable_group_declarations_bind_nested_controls_and_refuse_unknown_children() {
+    use fmn_anim::continuation::{DeclarationOverrides, declaration_bytes};
+
+    let (stage, animations) = durable_group_scene(1);
+    let declared = declaration_bytes(
+        &stage,
+        &animations,
+        DeclarationOverrides::default(),
+        1024 * 1024,
+    )
+    .unwrap()
+    .unwrap();
+    let retimed = declaration_bytes(
+        &stage,
+        &animations,
+        DeclarationOverrides {
+            run_time_frames: Some(81),
+            ..DeclarationOverrides::default()
+        },
+        1024 * 1024,
+    )
+    .unwrap()
+    .unwrap();
+    assert_ne!(declared, retimed);
+    let mut stage = Stage::new();
+    let mob = object(&mut stage, 0.0);
+    let opaque = Opaque(AnimState::new(mob, AnimConfig::default()));
+    let inner = AnimationGroup::new(&mut stage, vec![Box::new(opaque)]).unwrap();
+    let outer = AnimationGroup::new(&mut stage, vec![Box::new(inner)]).unwrap();
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(
+        declaration_bytes(
+            &stage,
+            &[Box::new(outer)],
+            DeclarationOverrides::default(),
+            1024 * 1024,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
 }

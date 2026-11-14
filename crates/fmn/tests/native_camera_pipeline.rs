@@ -657,11 +657,9 @@ fn pure_camera_programs_leave_only_the_final_sample_on_the_scene_owner() {
                         // A real owner-thread updater must conservatively
                         // retain every frame boundary, even when it does no
                         // geometric work. Its frame results are the oracle.
-                        scene.stage_mut().add_dt_updater(
-                            rig.light()[0],
-                            |_, _, _| {},
-                            false,
-                        )?;
+                        scene
+                            .stage_mut()
+                            .add_dt_updater(rig.light()[0], |_, _, _| {}, false)?;
                     }
                     Ok((
                         Program {
@@ -680,9 +678,15 @@ fn pure_camera_programs_leave_only_the_final_sample_on_the_scene_owner() {
             assert_eq!(report.scene.time.frames(), 6);
             assert_eq!(report.artifact.frame_count, 6);
             let stats = report.frame_pipeline.unwrap();
-            assert_eq!((stats.submitted, stats.emitted, stats.outstanding_slots), (6, 6, 0));
+            assert_eq!(
+                (stats.submitted, stats.emitted, stats.outstanding_slots),
+                (6, 6, 0)
+            );
             let got = images(&fs, "/camera-program", 6);
-            assert_ne!(got[0], got[3], "camera/light interpolation must stay visible");
+            assert_ne!(
+                got[0], got[3],
+                "camera/light interpolation must stay visible"
+            );
             assert_eq!(got[3], got[4]);
             assert_eq!(got[4], got[5]);
             if let Some(expected) = &expected {

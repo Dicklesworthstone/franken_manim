@@ -14054,7 +14054,9 @@ fn native_pure_camera_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
                 |scene, base| {
                     let rig = CameraRig::new(scene, base)?;
                     if stateful {
-                        scene.stage_mut().add_dt_updater(rig.light()[0], |_, _, _| {}, false)?;
+                        scene
+                            .stage_mut()
+                            .add_dt_updater(rig.light()[0], |_, _, _| {}, false)?;
                     }
                     let mut target = base.clone();
                     target.frame.set_euler_angles(Some(0.6), Some(0.8), None)?;
@@ -18900,6 +18902,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_group_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run_groups),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_group_checkpoint.bin".into(),
+                "native_group_continued.png".into(),
+            ]),
+            counter_eq("studio_group_checkpoint_restores", 6),
+            counter_eq("studio_group_checkpoint_frames", 50),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.group_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 6),
+                FieldPred::u64_eq("matching_frames", 50),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_wait_tail_checkpoint.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioInProcess,
@@ -22821,6 +22847,16 @@ fn studio_drawing_checkpoint_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_drawing_checkpoint.v1")
         .expect("drawing checkpoint lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_group_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_group_checkpoint.v1")
+        .expect("group checkpoint lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

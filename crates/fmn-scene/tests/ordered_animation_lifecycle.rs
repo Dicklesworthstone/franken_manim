@@ -125,7 +125,10 @@ fn mixed_begins_and_finishes_observe_authored_order_including_skip_mode() {
             .prepare_stepped_play(animations, PlayOverrides::default(), &mut sink)
             .unwrap()
             .unwrap();
-        assert!(log.borrow().is_empty(), "preparation must not begin a member");
+        assert!(
+            log.borrow().is_empty(),
+            "preparation must not begin a member"
+        );
         assert!(scene.complete_stepped_play_begin(&mut setup).is_err());
         while let Some(index) = scene.begin_stepped_play_animation(&mut setup).unwrap() {
             assert!(!scene.stage().roots().contains(&mobs[index]));
@@ -140,7 +143,11 @@ fn mixed_begins_and_finishes_observe_authored_order_including_skip_mode() {
         }
         let mut play = scene.complete_stepped_play_setup(setup).unwrap();
         assert_eq!(scene.stage().roots(), &mobs);
-        while scene.prepare_stepped_play_frame(&mut play).unwrap().is_some() {
+        while scene
+            .prepare_stepped_play_frame(&mut play)
+            .unwrap()
+            .is_some()
+        {
             scene
                 .complete_stepped_play_frame(&mut play, &mut sink)
                 .unwrap();
@@ -159,7 +166,12 @@ fn mixed_begins_and_finishes_observe_authored_order_including_skip_mode() {
             }
             scene.complete_stepped_play_finish(&mut play).unwrap();
         }
-        assert!(scene.finish_stepped_play_animations(&mut play).unwrap().is_empty());
+        assert!(
+            scene
+                .finish_stepped_play_animations(&mut play)
+                .unwrap()
+                .is_empty()
+        );
         scene.finish_stepped_play(play, &mut sink).unwrap();
         assert_eq!(
             *log.borrow(),
@@ -197,7 +209,9 @@ fn shift(scene: &mut Scene, mob: Mob) -> Box<dyn Animation> {
 #[test]
 fn resumed_host_updaters_run_before_native_remover_cleanup() {
     let mut scene = scene(false);
-    let mob = scene.add_mobject(Mobject::from_points(&[[0.0; 3]])).unwrap();
+    let mob = scene
+        .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+        .unwrap();
     let native_ticks = Rc::new(RefCell::new(Vec::new()));
     let ticks = Rc::clone(&native_ticks);
     scene
@@ -206,7 +220,9 @@ fn resumed_host_updaters_run_before_native_remover_cleanup() {
             mob,
             move |stage, target, dt| {
                 if target == mob {
-                    ticks.borrow_mut().push((dt, stage.roots().contains(&target)));
+                    ticks
+                        .borrow_mut()
+                        .push((dt, stage.roots().contains(&target)));
                 }
             },
             false,
@@ -220,7 +236,11 @@ fn resumed_host_updaters_run_before_native_remover_cleanup() {
         .begin_stepped_play(vec![animation], PlayOverrides::default(), &mut sink)
         .unwrap()
         .unwrap();
-    while scene.prepare_stepped_play_frame(&mut play).unwrap().is_some() {
+    while scene
+        .prepare_stepped_play_frame(&mut play)
+        .unwrap()
+        .is_some()
+    {
         scene
             .complete_stepped_play_frame(&mut play, &mut sink)
             .unwrap();
@@ -241,7 +261,12 @@ fn resumed_host_updaters_run_before_native_remover_cleanup() {
     scene.stage_mut().shift(mob, [1.0, 0.0, 0.0]); // resumed host updater
     scene.complete_stepped_play_finish(&mut play).unwrap();
     assert!(!scene.stage().roots().contains(&mob));
-    assert!(scene.finish_stepped_play_animation(&mut play).unwrap().is_none());
+    assert!(
+        scene
+            .finish_stepped_play_animation(&mut play)
+            .unwrap()
+            .is_none()
+    );
     scene.finish_stepped_play(play, &mut sink).unwrap();
     assert_eq!(scene.stage().get_center(mob)[0], 3.0);
     assert_eq!(
@@ -307,7 +332,11 @@ fn finish_callback_failure_aborts_only_unfinished_members_without_remover_cleanu
         .unwrap()
         .unwrap();
     assert_eq!(
-        scene.finish_stepped_play_animation(&mut play).unwrap().unwrap().0,
+        scene
+            .finish_stepped_play_animation(&mut play)
+            .unwrap()
+            .unwrap()
+            .0,
         0
     );
     scene.abort_stepped_play(play, &mut sink); // the released host finish raised

@@ -776,7 +776,216 @@ pub struct AnimationGroup {
     exact_timings: Option<Arc<ExactTimings>>,
 }
 
+/// Authored controls needed to rebuild a closed group's prepared timing.
+/// The presentation `run_time` alone loses frame-native provenance, explicit
+/// overrides and the distinction between layout lag and family lag.
+#[derive(Clone, Copy)]
+pub(crate) struct GroupContinuationControls {
+    pub(crate) layout_lag_ratio: f64,
+    pub(crate) duration_scale: f64,
+    pub(crate) timing_run_time: f64,
+    pub(crate) run_time_override: bool,
+}
+
+struct ContinuedGroupTiming {
+    state: AnimState,
+    layout: ResolvedTimings,
+    max_end_time: f64,
+    max_frame_end: Option<f64>,
+}
+
+/// Re-derive the original bind from closed children. No child is re-prepared:
+/// an explicit seconds override with a time span has already widened its
+/// public run_time at begin, while its original sampling denominator must
+/// remain intact. The stored timing_run_time recovers that pre-begin value.
+fn continued_group_timing(
+    state: &AnimState,
+    animations: &[Box<dyn Animation>],
+    controls: GroupContinuationControls,
+    fps: u32,
+) -> Result<ContinuedGroupTiming, AnimError> {
+    let invalid = || AnimError::InvalidFramePhase("inconsistent native group continuation timing");
+    if !controls.layout_lag_ratio.is_finite()
+        || !controls.duration_scale.is_finite()
+        || controls.duration_scale < 0.0
+        || !controls.timing_run_time.is_finite()
+    {
+        return Err(invalid());
+    }
+    let mut prepared = state.clone();
+    prepared.config.run_time = controls.timing_run_time;
+    let authored_seconds = (controls.run_time_override
+        && prepared.config.run_time_frames.is_none())
+    .then_some(controls.timing_run_time);
+    let layout = resolve_timings(
+        animations,
+        controls.layout_lag_ratio,
+        fps,
+        prepared.config.run_time_frames.is_some(),
+    )?;
+    let duration = group_duration(
+        &prepared.config,
+        layout.duration.clone(),
+        controls.run_time_override,
+        controls.duration_scale,
+        fps,
+    )?;
+    let max_end_time = if layout.frames.is_some() {
+        layout.duration.to_seconds()
+    } else {
+        max_end_time(&layout.seconds)
+    };
+    let max_frame_end = layout
+        .frames
+        .as_ref()
+        .map(|_| layout.duration.frame_units());
+    if !controls.run_time_override && prepared.config.run_time_frames.is_none() {
+        prepared.config.run_time = duration.to_seconds();
+    }
+    prepared.bind_duration(&duration);
+    if let Some(seconds) = authored_seconds {
+        if prepared.config.time_span.is_some() {
+            let sampling = FrameDuration::new(seconds, fps).map_err(AnimError::Clock)?;
+            prepared.bind_duration(&sampling);
+        }
+        prepared.config.run_time = seconds;
+    }
+    if prepared.config.run_time.to_bits() != controls.timing_run_time.to_bits() {
+        return Err(invalid());
+    }
+    if let Some((_, end)) = prepared.config.time_span {
+        prepared.config.run_time = prepared.config.run_time.max(end);
+    }
+    if prepared.config.run_time.to_bits() != state.config.run_time.to_bits() {
+        return Err(invalid());
+    }
+    Ok(ContinuedGroupTiming {
+        state: prepared,
+        layout,
+        max_end_time,
+        max_frame_end,
+    })
+}
+
+fn same_intervals(a: &[Interval], b: &[Interval]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b).all(|(a, b)| {
+            a.start.to_bits() == b.start.to_bits() && a.end.to_bits() == b.end.to_bits()
+        })
+}
+
+fn same_exact_timings(a: &Option<Arc<ExactTimings>>, b: &Option<Arc<ExactTimings>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.fps == b.fps
+                && a.intervals.len() == b.intervals.len()
+                && a.max_end
+                    .checked_cmp(&b.max_end)
+                    .is_ok_and(|order| order.is_eq())
+                && a.intervals.iter().zip(&b.intervals).all(|(a, b)| {
+                    a.start
+                        .checked_cmp(&b.start)
+                        .is_ok_and(|order| order.is_eq())
+                        && a.end.checked_cmp(&b.end).is_ok_and(|order| order.is_eq())
+                })
+        }
+        _ => false,
+    }
+}
+
 impl AnimationGroup {
+    pub(crate) fn continuation_controls(&self) -> GroupContinuationControls {
+        GroupContinuationControls {
+            layout_lag_ratio: self.layout_lag_ratio,
+            duration_scale: self.duration_scale,
+            timing_run_time: self.timing_run_time,
+            run_time_override: self.run_time_override,
+        }
+    }
+
+    /// The caller clones only dynamically verified native children. This
+    /// copies data without invoking a user hook or constructing a new family.
+    pub(crate) fn clone_for_continuation(&self, animations: Vec<Box<dyn Animation>>) -> Self {
+        Self {
+            state: self.state.clone(),
+            animations,
+            timings: self.timings.clone(),
+            max_end_time: self.max_end_time,
+            updater_error: self.updater_error.clone(),
+            begun: self.begun,
+            finished: self.finished,
+            layout_lag_ratio: self.layout_lag_ratio,
+            duration_scale: self.duration_scale,
+            timing_run_time: self.timing_run_time,
+            run_time_override: self.run_time_override,
+            frame_timings: self.frame_timings.clone(),
+            max_frame_end: self.max_frame_end,
+            exact_timings: self.exact_timings.clone(),
+        }
+    }
+
+    pub(crate) fn continuation_lifecycle_valid(&self, stage: &Stage) -> bool {
+        self.begun == self.animations.len()
+            && self.finished == 0
+            && self.updater_error.is_none()
+            && self.state.starting_mobject().is_none()
+            && self.state.families().is_empty()
+            && !self.state.mobject_was_updating()
+            && stage.is_animating(self.state.mobject())
+    }
+
+    pub(crate) fn continuation_timing_valid(&self, fps: u32) -> bool {
+        let Ok(expected) = continued_group_timing(
+            &self.state,
+            &self.animations,
+            self.continuation_controls(),
+            fps,
+        ) else {
+            return false;
+        };
+        self.state.prepared_duration() == expected.state.prepared_duration()
+            && self.state.frame_units().map(f64::to_bits)
+                == expected.state.frame_units().map(f64::to_bits)
+            && same_intervals(&self.timings, &expected.layout.seconds)
+            && match (&self.frame_timings, &expected.layout.frames) {
+                (None, None) => true,
+                (Some(a), Some(b)) => same_intervals(a, b),
+                _ => false,
+            }
+            && self.max_end_time.to_bits() == expected.max_end_time.to_bits()
+            && self.max_frame_end.map(f64::to_bits) == expected.max_frame_end.map(f64::to_bits)
+            && same_exact_timings(&self.exact_timings, &expected.layout.exact)
+    }
+
+    /// Rebuild a known eager group's executable carrier from data. Every
+    /// child has already been decoded and its arena handles rebound; no
+    /// begin/setup/interpolate hook runs and no mobject is allocated.
+    pub(crate) fn from_continuation(
+        state: AnimState,
+        animations: Vec<Box<dyn Animation>>,
+        controls: GroupContinuationControls,
+        fps: u32,
+    ) -> Result<Self, AnimError> {
+        let restored = continued_group_timing(&state, &animations, controls, fps)?;
+        Ok(Self {
+            state: restored.state,
+            begun: animations.len(),
+            animations,
+            timings: restored.layout.seconds,
+            max_end_time: restored.max_end_time,
+            updater_error: None,
+            finished: 0,
+            layout_lag_ratio: controls.layout_lag_ratio,
+            duration_scale: controls.duration_scale,
+            timing_run_time: controls.timing_run_time,
+            run_time_override: controls.run_time_override,
+            frame_timings: restored.layout.frames,
+            max_frame_end: restored.max_frame_end,
+            exact_timings: restored.layout.exact,
+        })
+    }
+
     /// `AnimationGroup(*animations)` — simultaneous (`lag_ratio = 0`), run
     /// time derived from the members. An empty member list is valid: its
     /// timeline has length zero, and an explicit run-time override still

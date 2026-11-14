@@ -60,8 +60,8 @@ pub use journal::{
 pub use runtime::{
     BlankScene, CameraOrientation, CaptureReason, CompletionRequest, EndScene, HoldController,
     HoldDecision, HoldKind, IntegrationError, LifecycleEvent, LifecyclePhase, NullSceneSink,
-    OpenWaitCheckpoint, OutputNaming, PlayOverrides, PreparingPlay, RuntimeConfig, Scene, SceneError,
-    SceneProgram, SceneRegistration, SceneRegistry, SceneRunReport, SceneSelection,
+    OpenWaitCheckpoint, OutputNaming, PlayOverrides, PreparingPlay, RuntimeConfig, Scene,
+    SceneError, SceneProgram, SceneRegistration, SceneRegistry, SceneRunReport, SceneSelection,
     SceneSelectionError, SceneSink, SceneStateRestore, SoundRequest, SteppedPlay, SteppedWait,
     ThreeDAddOptions, ThreeDScene,
 };

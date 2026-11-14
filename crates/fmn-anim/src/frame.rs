@@ -989,10 +989,7 @@ pub fn prepare_play_animation(
     open: &mut OpenSegment,
 ) -> Result<Option<AnimationBoundary>, AnimError> {
     check_updater_error(stage)?;
-    if open.animations_finished
-        || open.finished_animations != 0
-        || open.pending_cleanup.is_some()
-    {
+    if open.animations_finished || open.finished_animations != 0 || open.pending_cleanup.is_some() {
         return Err(AnimError::InvalidFramePhase(
             "cannot advance a play after animation cleanup",
         ));
@@ -1204,9 +1201,11 @@ pub fn finish_open_play_animation(
         open.animations_finished = true;
         return Ok(None);
     }
-    let animation = animations.get_mut(index).ok_or(AnimError::InvalidFramePhase(
-        "the open play's animation list changed",
-    ))?;
+    let animation = animations
+        .get_mut(index)
+        .ok_or(AnimError::InvalidFramePhase(
+            "the open play's animation list changed",
+        ))?;
     let mut resumed = Vec::new();
     animation.collect_resumed_updater_mobjects(&mut resumed);
     // Once finish has run, an exception must neither repeat that endpoint nor
@@ -1236,9 +1235,11 @@ pub fn complete_open_play_animation_finish(
     let index = open.pending_cleanup.ok_or(AnimError::InvalidFramePhase(
         "finish an animation before completing its cleanup",
     ))?;
-    let animation = animations.get_mut(index).ok_or(AnimError::InvalidFramePhase(
-        "the open play's animation list changed",
-    ))?;
+    let animation = animations
+        .get_mut(index)
+        .ok_or(AnimError::InvalidFramePhase(
+            "the open play's animation list changed",
+        ))?;
     animation.clean_up_from_scene(stage);
     if let Err(error) = check_updater_error(stage) {
         abort_unfinished_play_animations(stage, animations, open);

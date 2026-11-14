@@ -3,7 +3,8 @@
 //! A continuation owns data describing interpolation AND the remaining native
 //! lifecycle. Interpolation purity alone is insufficient: a user wrapper may
 //! delegate interpolation while adding an effectful finish hook. Actual dynamic
-//! types are checked through Any; callbacks, groups and unknown rates fall back.
+//! types are checked through Any; callbacks, just-in-time compositions and
+//! unknown rates fall back. Closed eager groups retain their nested lifecycle.
 //! Stage contents live in the enclosing SceneState, whose identity the caller
 //! must bind to this document. Handles rebind only after that state is restored.
 
@@ -14,18 +15,21 @@ use std::sync::Arc;
 use fmn_hash::{Limits, Reader, Schema, SerialError, UnknownPolicy, Writer};
 use fmn_mobject::{Mob, Stage};
 
+use crate::composition::GroupContinuationControls;
 use crate::creation::PartialGeometry;
 use crate::transform::TargetPrep;
 use crate::{
-    AnimConfig, AnimError, AnimState, Animation, DrawBorderThenFill, OpenSegment, PathFunc,
-    RateFunc, RationalFrameClock, RevealBounds, Rotating, ShowPartial, Transform, VFade,
+    AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FramePosition,
+    OpenSegment, PathFunc, RateFunc, RationalFrameClock, RevealBounds, Rotating, ShowPartial,
+    Transform, VFade,
 };
 
-const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 1);
-const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 1);
+const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 2);
+const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 2);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_RATE_DEPTH: usize = 32;
+const MAX_NATIVE_DEPTH: usize = 32;
 
 /// A malformed, resource-bounded or semantically invalid native continuation.
 #[derive(Debug)]
@@ -103,6 +107,8 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
         Some(4)
     } else if any.is::<DrawBorderThenFill>() {
         Some(5)
+    } else if any.is::<AnimationGroup>() {
+        Some(6)
     } else {
         None
     }
@@ -120,6 +126,13 @@ fn clone_native(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
         Some(Box::new(value.clone()))
     } else if let Some(value) = any.downcast_ref::<DrawBorderThenFill>() {
         Some(Box::new(value.clone()))
+    } else if let Some(value) = any.downcast_ref::<AnimationGroup>() {
+        let children = value
+            .animations()
+            .iter()
+            .map(|child| clone_native(child.as_ref()))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Box::new(value.clone_for_continuation(children)))
     } else {
         None
     }
@@ -153,6 +166,42 @@ fn config_supported(config: &AnimConfig) -> bool {
             .time_span
             .is_none_or(|(start, end)| start.is_finite() && end.is_finite())
         && rate_supported(&config.rate_func, 0)
+}
+
+fn group_controls_supported(controls: GroupContinuationControls) -> bool {
+    controls.layout_lag_ratio.is_finite()
+        && controls.duration_scale.is_finite()
+        && controls.duration_scale >= 0.0
+        && controls.timing_run_time.is_finite()
+}
+
+// Complete this bounded, concrete-type walk before invoking any trait hook.
+// A group may contain an arbitrary user wrapper, including a wrapper that
+// advertises pure interpolation but adds effects to begin or finish.
+fn native_tree_supported(animation: &dyn Animation, depth: usize, remaining: &mut usize) -> bool {
+    if depth > MAX_NATIVE_DEPTH || *remaining == 0 || native_kind(animation).is_none() {
+        return false;
+    }
+    *remaining -= 1;
+    if !config_supported(&animation.state().config) {
+        return false;
+    }
+    if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
+        group_controls_supported(group.continuation_controls())
+            && group
+                .animations()
+                .iter()
+                .all(|child| native_tree_supported(child.as_ref(), depth + 1, remaining))
+    } else {
+        true
+    }
+}
+
+fn native_play_supported(animations: &[Box<dyn Animation>]) -> bool {
+    let mut remaining = MAX_ITEMS;
+    animations
+        .iter()
+        .all(|animation| native_tree_supported(animation.as_ref(), 0, &mut remaining))
 }
 
 fn native_parameters_valid(stage: &Stage, animation: &dyn Animation) -> bool {
@@ -284,8 +333,19 @@ fn put_count(writer: &mut Writer, count: usize) -> Result<(), Error> {
 
 struct Budget {
     remaining: usize,
+    native_items: usize,
 }
 impl Budget {
+    fn native_node(&mut self, depth: usize) -> Result<(), Error> {
+        if depth > MAX_NATIVE_DEPTH || self.native_items >= MAX_ITEMS {
+            return Err(Error::Invalid(
+                "native nesting or node count exceeds its bound",
+            ));
+        }
+        self.native_items += 1;
+        Ok(())
+    }
+
     fn charge<T>(&mut self, count: usize) -> Result<(), Error> {
         let bytes = count
             .checked_mul(std::mem::size_of::<T>())
@@ -314,8 +374,25 @@ fn charge_carrier(budget: &mut Budget, kind: u8) -> Result<(), Error> {
         3 => budget.charge::<VFade>(1),
         4 => budget.charge::<ShowPartial>(1),
         5 => budget.charge::<DrawBorderThenFill>(1),
+        6 => budget.charge::<AnimationGroup>(1),
         _ => Err(Error::Invalid("unknown native animation kind")),
     }
+}
+
+fn charge_group_timing(budget: &mut Budget, children: usize) -> Result<(), Error> {
+    // A cached interval has two bounded exact positions. Re-derivation and
+    // semantic validation can briefly retain both tables plus duration and
+    // arithmetic temporaries. Charge their worst-case integer storage before
+    // resolving any timing, even when ordinary seconds need much less.
+    let positions = children
+        .checked_mul(6)
+        .and_then(|count| count.checked_add(8))
+        .ok_or(Error::Invalid("group timing allocation overflow"))?;
+    budget.charge::<FramePosition>(positions)?;
+    let words = positions
+        .checked_mul(FramePosition::MAX_RATIO_BYTES)
+        .ok_or(Error::Invalid("group timing allocation overflow"))?;
+    budget.charge::<u8>(words)
 }
 
 fn charge_rate(budget: &mut Budget, rate: &RateFunc) -> Result<(), Error> {
@@ -338,25 +415,44 @@ fn charge_rate(budget: &mut Budget, rate: &RateFunc) -> Result<(), Error> {
 fn capture_budget(animations: &[Box<dyn Animation>]) -> Result<(), Error> {
     let mut budget = Budget {
         remaining: MAX_BYTES,
+        native_items: 0,
     };
     budget.charge::<Box<dyn Animation>>(animations.len())?;
     for animation in animations {
-        let kind = native_kind(animation.as_ref())
-            .ok_or(Error::Invalid("unsupported native animation"))?;
-        charge_carrier(&mut budget, kind)?;
-        let state = animation.state();
-        charge_rate(&mut budget, &state.config.rate_func)?;
+        capture_native_budget(animation.as_ref(), &mut budget, 0)?;
+    }
+    Ok(())
+}
+
+fn capture_native_budget(
+    animation: &dyn Animation,
+    budget: &mut Budget,
+    depth: usize,
+) -> Result<(), Error> {
+    budget.native_node(depth)?;
+    let kind = native_kind(animation).ok_or(Error::Invalid("unsupported native animation"))?;
+    charge_carrier(budget, kind)?;
+    let state = animation.state();
+    charge_rate(budget, &state.config.rate_func)?;
+    budget.charge::<u8>(state.config.name.len())?;
+    budget.charge::<Vec<Mob>>(state.families().len())?;
+    budget.charge::<Vec<Mob>>(state.families().len())?;
+    for row in state.families() {
+        budget.charge::<Mob>(row.len())?;
+    }
+    let any = animation as &dyn Any;
+    if let Some(value) = any.downcast_ref::<DrawBorderThenFill>() {
+        budget.charge::<Mob>(value.crossed.len())?;
+        // Phase membership validation sorts a copy and the live family.
+        budget.charge::<Mob>(value.crossed.len())?;
+        budget.charge::<Mob>(state.families().len())?;
+    } else if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+        charge_group_timing(budget, group.animations().len())?;
+        charge_rate(budget, &state.config.rate_func)?;
         budget.charge::<u8>(state.config.name.len())?;
-        budget.charge::<Vec<Mob>>(state.families().len())?;
-        budget.charge::<Vec<Mob>>(state.families().len())?;
-        for row in state.families() {
-            budget.charge::<Mob>(row.len())?;
-        }
-        if let Some(value) = (animation.as_ref() as &dyn Any).downcast_ref::<DrawBorderThenFill>() {
-            budget.charge::<Mob>(value.crossed.len())?;
-            // Phase membership validation sorts a copy and the live family.
-            budget.charge::<Mob>(value.crossed.len())?;
-            budget.charge::<Mob>(state.families().len())?;
+        budget.charge::<Box<dyn Animation>>(group.animations().len())?;
+        for child in group.animations() {
+            capture_native_budget(child.as_ref(), budget, depth + 1)?;
         }
     }
     Ok(())
@@ -664,10 +760,53 @@ fn put_native(
     animation: &dyn Animation,
     prepared: bool,
 ) -> Result<(), Error> {
+    let mut remaining = MAX_ITEMS;
+    put_native_node(writer, stage, animation, prepared, 0, &mut remaining)
+}
+
+fn put_native_node(
+    writer: &mut Writer,
+    stage: &Stage,
+    animation: &dyn Animation,
+    prepared: bool,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<(), Error> {
+    if depth > MAX_NATIVE_DEPTH || *remaining == 0 {
+        return Err(Error::Invalid(
+            "native nesting or node count exceeds its bound",
+        ));
+    }
+    *remaining -= 1;
     let kind = native_kind(animation).ok_or(Error::Invalid("unsupported native animation"))?;
     writer.put_u8(kind);
-    put_state(writer, stage, animation.state(), prepared)?;
     let any: &dyn Any = animation;
+    if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+        // Eager groups own no starting copy or zipped family table. Each
+        // child's independently prepared state carries those handles.
+        put_state(writer, stage, group.state(), false)?;
+        let controls = group.continuation_controls();
+        if !group_controls_supported(controls) {
+            return Err(Error::Invalid("invalid native group controls"));
+        }
+        put_float(writer, controls.layout_lag_ratio);
+        put_float(writer, controls.duration_scale);
+        put_float(writer, controls.timing_run_time);
+        writer.put_bool(controls.run_time_override);
+        put_count(writer, group.animations().len())?;
+        for child in group.animations() {
+            put_native_node(
+                writer,
+                stage,
+                child.as_ref(),
+                prepared,
+                depth + 1,
+                remaining,
+            )?;
+        }
+        return Ok(());
+    }
+    put_state(writer, stage, animation.state(), prepared)?;
     if let Some(value) = any.downcast_ref::<Transform>() {
         put_mob(writer, stage, value.target)?;
         put_path(writer, value.path);
@@ -749,11 +888,52 @@ fn get_native(
     budget: &mut Budget,
     fps: u32,
 ) -> Result<Box<dyn Animation>, Error> {
+    get_native_node(reader, stage, budget, fps, 0)
+}
+
+fn get_native_node(
+    reader: &mut Reader<'_>,
+    stage: &Stage,
+    budget: &mut Budget,
+    fps: u32,
+    depth: usize,
+) -> Result<Box<dyn Animation>, Error> {
+    budget.native_node(depth)?;
     let kind = reader.get_u8()?;
-    if !(1..=5).contains(&kind) {
+    if !(1..=6).contains(&kind) {
         return Err(Error::Invalid("unknown native animation kind"));
     }
     charge_carrier(budget, kind)?;
+    if kind == 6 {
+        let mob = get_mob(reader, stage)?;
+        let config = get_config(reader, budget)?;
+        let controls = GroupContinuationControls {
+            layout_lag_ratio: get_float(reader)?,
+            duration_scale: get_float(reader)?,
+            timing_run_time: get_float(reader)?,
+            run_time_override: reader.get_bool()?,
+        };
+        if !group_controls_supported(controls) {
+            return Err(Error::Invalid("invalid native group controls"));
+        }
+        let count = get_count(reader, 1)?;
+        if count > MAX_ITEMS - budget.native_items {
+            return Err(Error::Invalid("native node count exceeds its bound"));
+        }
+        charge_group_timing(budget, count)?;
+        charge_rate(budget, &config.rate_func)?;
+        budget.charge::<u8>(config.name.len())?;
+        let mut children = budget.vector::<Box<dyn Animation>>(count)?;
+        for _ in 0..count {
+            children.push(get_native_node(reader, stage, budget, fps, depth + 1)?);
+        }
+        return Ok(Box::new(AnimationGroup::from_continuation(
+            AnimState::new(mob, config),
+            children,
+            controls,
+            fps,
+        )?));
+    }
     let width = if matches!(kind, 1 | 5) { 3 } else { 2 };
     let state = get_state(reader, stage, budget, fps, width)?;
     Ok(match kind {
@@ -855,7 +1035,25 @@ fn get_native(
 }
 
 fn prepared_valid(stage: &Stage, animation: &dyn Animation, fps: u32) -> Result<bool, Error> {
-    if !config_supported(&animation.state().config) || !native_parameters_valid(stage, animation) {
+    if native_kind(animation).is_none() || !config_supported(&animation.state().config) {
+        return Ok(false);
+    }
+    if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
+        if !group.continuation_lifecycle_valid(stage) {
+            return Ok(false);
+        }
+        for child in group.animations() {
+            if !prepared_valid(stage, child.as_ref(), fps)? {
+                return Ok(false);
+            }
+        }
+        if !group.continuation_timing_valid(fps) {
+            return Ok(false);
+        }
+        animation.validate_begin(stage)?;
+        return Ok(true);
+    }
+    if !native_parameters_valid(stage, animation) {
         return Ok(false);
     }
     animation.validate_begin(stage)?;
@@ -920,9 +1118,8 @@ pub fn capture(
     }
     if animations.is_empty()
         || !open.report().purity.is_pure()
-        || animations
-            .iter()
-            .any(|animation| native_kind(animation.as_ref()).is_none())
+        || !native_play_supported(animations)
+        || capture_budget(animations).is_err()
         || !crate::classify_play(stage, animations).is_pure()
         || crate::pure_frame::freeze_animations(stage, animations).is_err()
     {
@@ -932,9 +1129,6 @@ pub fn capture(
         if !prepared_valid(stage, animation.as_ref(), clock.fps())? {
             return Ok(None);
         }
-    }
-    if capture_budget(animations).is_err() {
-        return Ok(None);
     }
     let grid_clock = RationalFrameClock::new(clock.fps()).map_err(AnimError::Clock)?;
     let duration = crate::frame::play_duration(animations, clock.fps())?;
@@ -980,6 +1174,7 @@ pub fn restore(
     }
     let mut budget = Budget {
         remaining: MAX_BYTES,
+        native_items: 0,
     };
     let mut animations = budget.vector::<Box<dyn Animation>>(count)?;
     for _ in 0..count {
@@ -1023,6 +1218,8 @@ pub fn declaration_bytes(
 ) -> Result<Option<Vec<u8>>, Error> {
     if animations.is_empty()
         || (overrides.run_time.is_some() && overrides.run_time_frames.is_some())
+        || !native_play_supported(animations)
+        || capture_budget(animations).is_err()
     {
         return Ok(None);
     }
@@ -1075,6 +1272,7 @@ mod tests {
         let mut reader = Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict)?;
         let mut budget = Budget {
             remaining: MAX_BYTES,
+            native_items: 0,
         };
         let decoded = get_native(&mut reader, stage, &mut budget, 30)?;
         reader.finish()?;
@@ -1158,5 +1356,126 @@ mod tests {
             current
         );
         assert!(Reader::open(&current, legacy, limits(MAX_BYTES), UnknownPolicy::Strict).is_err());
+    }
+
+    fn put_raw_group(
+        writer: &mut Writer,
+        stage: &Stage,
+        state: &AnimState,
+        controls: GroupContinuationControls,
+        count: u32,
+    ) {
+        writer.put_u8(6);
+        put_state(writer, stage, state, false).unwrap();
+        put_float(writer, controls.layout_lag_ratio);
+        put_float(writer, controls.duration_scale);
+        put_float(writer, controls.timing_run_time);
+        writer.put_bool(controls.run_time_override).put_u32(count);
+    }
+
+    #[test]
+    fn nested_group_decode_enforces_depth_and_allocation_bounds() {
+        let (stage, animation) = prepared_border();
+        let state = AnimState::new(animation.state.mobject(), AnimConfig::default());
+        let controls = GroupContinuationControls {
+            layout_lag_ratio: 0.0,
+            duration_scale: 1.0,
+            timing_run_time: 1.0,
+            run_time_override: false,
+        };
+        let before = stage.snapshot().to_bytes().unwrap();
+        for (depth, allowance) in [(MAX_NATIVE_DEPTH + 1, MAX_BYTES), (1, 4096)] {
+            let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+            for _ in 0..depth {
+                put_raw_group(&mut writer, &stage, &state, controls, 1);
+            }
+            put_native(&mut writer, &stage, &animation, true).unwrap();
+            let bytes = writer.finish().unwrap();
+            let mut reader =
+                Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+            let mut budget = Budget {
+                remaining: allowance,
+                native_items: 0,
+            };
+            assert!(get_native(&mut reader, &stage, &mut budget, 30).is_err());
+        }
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn group_decode_refuses_nonfinite_controls_inconsistent_timing_and_forged_counts() {
+        let mut stage = Stage::new();
+        let mut group = AnimationGroup::new(&mut stage, Vec::new())
+            .unwrap()
+            .with_run_time(0.2);
+        group.prepare_timing(30).unwrap();
+        group.begin(&mut stage).unwrap();
+        for case in 0..5 {
+            let mut controls = group.continuation_controls();
+            match case {
+                0 => controls.layout_lag_ratio = f64::INFINITY,
+                1 => controls.duration_scale = f64::NAN,
+                2 => controls.duration_scale = -1.0,
+                3 => controls.timing_run_time = 0.3,
+                _ => {}
+            }
+            let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+            put_raw_group(
+                &mut writer,
+                &stage,
+                group.state(),
+                controls,
+                if case == 4 { u32::MAX } else { 0 },
+            );
+            let bytes = writer.finish().unwrap();
+            let mut reader =
+                Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+            let mut budget = Budget {
+                remaining: MAX_BYTES,
+                native_items: 0,
+            };
+            assert!(get_native(&mut reader, &stage, &mut budget, 30).is_err());
+        }
+    }
+
+    #[test]
+    fn unknown_nested_children_are_refused_without_calling_their_state_hook() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct Unknown {
+            state: AnimState,
+            refuse_hooks: Arc<AtomicBool>,
+        }
+        impl Animation for Unknown {
+            fn state(&self) -> &AnimState {
+                assert!(!self.refuse_hooks.load(Ordering::SeqCst));
+                &self.state
+            }
+            fn state_mut(&mut self) -> &mut AnimState {
+                panic!("declaration must not invoke a nested mutable state hook")
+            }
+            fn interpolate_submobject(&mut self, _: &mut Stage, _: &[Mob], _: f64) {
+                panic!("declaration must not invoke interpolation")
+            }
+        }
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::new());
+        let refuse_hooks = Arc::new(AtomicBool::new(false));
+        let unknown = Unknown {
+            state: AnimState::new(mob, AnimConfig::default()),
+            refuse_hooks: refuse_hooks.clone(),
+        };
+        let group = AnimationGroup::new(&mut stage, vec![Box::new(unknown)]).unwrap();
+        refuse_hooks.store(true, Ordering::SeqCst);
+        assert!(
+            declaration_bytes(
+                &stage,
+                &[Box::new(group)],
+                DeclarationOverrides::default(),
+                MAX_BYTES,
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 }

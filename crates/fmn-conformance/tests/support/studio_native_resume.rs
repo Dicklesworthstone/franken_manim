@@ -523,18 +523,113 @@ fn drawing_program(writing: bool) -> Result<NativeSceneProgram, ServiceError> {
     )
 }
 
+fn group_program(nested: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 73).map_err(service_error)?;
+    let drawn = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.25).build().into(),
+            fmn_library::Circle::new().radius(0.4).build().into(),
+        ]))
+        .map_err(service_error)?;
+    let children = scene.stage().get(drawn).unwrap().submobjects().to_vec();
+    scene.stage_mut().shift(children[0], [-1.0, -0.5, 0.0]);
+    scene.stage_mut().shift(children[1], [-1.0, 0.5, 0.0]);
+    scene.stage_mut().set_fill(
+        drawn,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    let rotating = scene
+        .add_mobject(
+            fmn_library::Rectangle::new()
+                .width(0.8)
+                .height(0.3)
+                .build()
+                .map_err(service_error)?,
+        )
+        .map_err(service_error)?;
+    scene.stage_mut().shift(rotating, [0.8, 0.4, 0.0]);
+    let removed = scene
+        .add_mobject(fmn_library::Circle::new().radius(0.3).build())
+        .map_err(service_error)?;
+    scene.stage_mut().shift(removed, [0.8, -0.5, 0.0]);
+
+    let mut drawing = fmn_anim::write(scene.stage(), drawn);
+    drawing.state_mut().config.run_time_frames = Some(9);
+    let rotation = fmn_anim::Rotating::new(rotating)
+        .with_angle(2.4)
+        .with_about_point([0.8, 0.4, 0.0])
+        .with_config(fmn_anim::AnimConfig {
+            run_time_frames: Some(11),
+            final_alpha_value: 0.35,
+            ..fmn_anim::AnimConfig::default()
+        });
+    let mut fade = fmn_anim::v_fade_out(removed);
+    fade.state_mut().config.run_time_frames = Some(7);
+    let group = if nested {
+        let inner = fmn_anim::AnimationGroup::with_lag_ratio(
+            scene.stage_mut(),
+            vec![Box::new(drawing), Box::new(rotation)],
+            0.35,
+        )
+        .map_err(service_error)?
+        .with_run_time_frames(11);
+        fmn_anim::lagged_start(scene.stage_mut(), vec![Box::new(inner), Box::new(fade)])
+            .map_err(service_error)?
+            .with_duration_scale(0.75)
+            .with_rate_func(fmn_anim::RateFunc::Catalog(
+                fmn_core::rate::CatalogRate::ThereAndBack,
+            ))
+    } else {
+        fmn_anim::AnimationGroup::with_lag_ratio(
+            scene.stage_mut(),
+            vec![Box::new(drawing), Box::new(rotation), Box::new(fade)],
+            0.4,
+        )
+        .map_err(service_error)?
+    };
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(group)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(16),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
 pub(super) fn run_drawing(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, drawing_program, "drawing")
+}
+
+pub(super) fn run_groups(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, group_program, "group")
+}
+
+fn run_prepared_checkpoints(
+    ctx: &mut RunCtx,
+    factory: fn(bool) -> Result<NativeSceneProgram, ServiceError>,
+    family: &str,
+) -> Result<RunOutcome, ScenarioError> {
     let mut restored_count = 0;
     let mut matching_frames = 0;
     let mut last_checkpoint = Vec::new();
     let mut last_png = Vec::new();
-    for writing in [false, true] {
+    for variant in [false, true] {
         for saved_frame in [4, 9, 16] {
             let mut original_config = config();
             original_config.frame_count = 19;
             original_config.checkpoint_frames = 1;
             let mut original =
-                NativeSceneWorker::new(original_config.clone(), move || drawing_program(writing))
+                NativeSceneWorker::new(original_config.clone(), move || factory(variant))
                     .map_err(|e| fail(e.to_string()))?;
             let mut journal = Journal::new();
             commit(&mut original, saved_frame, &mut journal)?;
@@ -554,9 +649,8 @@ pub(super) fn run_drawing(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
             // budget. Recovery must restore the actual prepared lifecycle.
             original_config.max_replay_frames = 1;
             original_config.renderer.threads = 4;
-            let mut recovered =
-                NativeSceneWorker::new(original_config, move || drawing_program(writing))
-                    .map_err(|e| fail(e.to_string()))?;
+            let mut recovered = NativeSceneWorker::new(original_config, move || factory(variant))
+                .map_err(|e| fail(e.to_string()))?;
             recovered
                 .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
                     scene: NAME.into(),
@@ -581,7 +675,7 @@ pub(super) fn run_drawing(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
                     != expected
             {
                 return Err(fail(
-                    "drawing checkpoint replayed or changed its prepared state",
+                    "native play checkpoint replayed or changed its prepared state",
                 ));
             }
             restored_count += 1;
@@ -604,7 +698,7 @@ pub(super) fn run_drawing(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
                     .map_err(|e| fail(e.to_string()))?;
                 if actual != expected || actual_state != expected_state {
                     return Err(fail(
-                        "drawing continuation changed pixels, phase or finish state",
+                        "native play continuation changed pixels, phase or finish state",
                     ));
                 }
                 matching_frames += 1;
@@ -614,15 +708,21 @@ pub(super) fn run_drawing(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
         }
     }
     ctx.event(
-        LogEvent::new("e2e.studio.drawing_checkpoint")
+        LogEvent::new(&format!("e2e.studio.{family}_checkpoint"))
             .field("checkpoint_restores", restored_count)
             .field("matching_frames", matching_frames)
             .field("threads", "1,4")
             .field("prefix_replays", 0_u64),
     );
     Ok(RunOutcome::ok()
-        .with_counter("studio_drawing_checkpoint_restores", restored_count)
-        .with_counter("studio_drawing_checkpoint_frames", matching_frames)
-        .with_artifact("native_drawing_checkpoint.bin", last_checkpoint)
-        .with_artifact("native_drawing_continued.png", last_png))
+        .with_counter(
+            &format!("studio_{family}_checkpoint_restores"),
+            restored_count,
+        )
+        .with_counter(
+            &format!("studio_{family}_checkpoint_frames"),
+            matching_frames,
+        )
+        .with_artifact(&format!("native_{family}_checkpoint.bin"), last_checkpoint)
+        .with_artifact(&format!("native_{family}_continued.png"), last_png))
 }

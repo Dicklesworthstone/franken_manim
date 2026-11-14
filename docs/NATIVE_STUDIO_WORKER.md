@@ -365,7 +365,8 @@ prevent the jump, normal per-frame stepping remains available.
 A terminal `NativeSegment::Play` followed only by its original declarative
 wait suffix can resume supported native animations without replaying its
 prefix or rerunning `begin()`. The closed carriers include `Transform`,
-`Rotating`, `VFade`, `ShowPartial`, and `DrawBorderThenFill` (including `Write`).
+`Rotating`, `VFade`, `ShowPartial`, and `DrawBorderThenFill` (including `Write`),
+plus eager `AnimationGroup` and `LaggedStart` compositions of supported carriers.
 The continuation preserves the prepared copies, family alignment, timing,
 rate function and updater-suspension state. Drawing animations also retain
 their outline and each family member's draw/fill phase, so a reversing rate
@@ -374,10 +375,13 @@ curve resumes the same visible frame and subsequent transitions.
 The saved cursor can sit on the last nominal capture with `finish()` and
 cleanup still pending. Restoration performs that epilogue exactly once when
 playback advances. Identity validation binds the native declaration and
-parameters to the fresh factory before installing the continuation. Unknown
-animation wrappers, callback rates and unsupported compositions retain bounded
-cold reconstruction; interpolation purity alone does not establish that their
-lifecycle hooks are serializable.
+parameters to the fresh factory before installing the continuation. Nested
+groups preserve their original layout lag, duration scaling and exact child
+intervals, including fractional frame boundaries. Restoring a group does not
+begin its children or allocate new mobjects. Unknown animation wrappers,
+callback rates and stateful `Succession` retain bounded cold reconstruction;
+interpolation purity alone does not establish that their lifecycle hooks are
+serializable.
 
 Run the complete portable example:
 

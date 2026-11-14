@@ -2230,6 +2230,116 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
     }
 }
 
+fn terminal_group_program(nested: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 73).unwrap();
+    let drawn = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [-0.9, -0.4, 0.0],
+        [-0.5, 0.6, 0.0],
+        [-0.1, -0.4, 0.0],
+    ]));
+    let rotating = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [0.2, -0.4, 0.0],
+        [0.6, 0.6, 0.0],
+        [1.0, -0.4, 0.0],
+    ]));
+    scene.add(&[drawn, rotating]).unwrap();
+    let mut drawing = fmn_anim::write(scene.stage(), drawn);
+    drawing.state_mut().config.run_time_frames = Some(7);
+    let rotation = fmn_anim::Rotating::new(rotating)
+        .with_angle(2.4)
+        .with_about_point([0.6, 0.0, 0.0])
+        .with_config(fmn_anim::AnimConfig {
+            run_time_frames: Some(9),
+            final_alpha_value: 0.35,
+            ..fmn_anim::AnimConfig::default()
+        });
+    let group = if nested {
+        let inner = fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(drawing)])
+            .unwrap()
+            .with_run_time_frames(7);
+        fmn_anim::lagged_start(scene.stage_mut(), vec![Box::new(inner), Box::new(rotation)])
+            .unwrap()
+            .with_duration_scale(0.75)
+            .with_rate_func(fmn_anim::RateFunc::Catalog(
+                fmn_core::rate::CatalogRate::ThereAndBack,
+            ))
+    } else {
+        fmn_anim::AnimationGroup::with_lag_ratio(
+            scene.stage_mut(),
+            vec![Box::new(drawing), Box::new(rotation)],
+            0.35,
+        )
+        .unwrap()
+    };
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(group)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(12),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        14,
+    )
+}
+
+#[test]
+fn terminal_group_checkpoints_restore_nested_timing_and_pending_cleanup() {
+    for nested in [false, true] {
+        for saved_frame in [3, 7, 12] {
+            let mut original_config = terminal_play_config(false);
+            original_config.source_digest = protocol_digest(b"terminal-prepared-group-v1");
+            let mut original = NativeSceneWorker::new(original_config.clone(), move || {
+                terminal_group_program(nested)
+            })
+            .unwrap();
+            let entry = commit(&mut original, saved_frame);
+            let saved = checkpoint(&entry, 0);
+            let at_checkpoint = checkpoint_observation(&original);
+            let mut expected = Vec::new();
+            for frame in saved_frame + 1..=14 {
+                expected.push((
+                    frame,
+                    seek(&mut original, frame),
+                    checkpoint_observation(&original),
+                ));
+            }
+            for threads in [1, 4] {
+                let mut resumed_config = original_config.clone();
+                resumed_config.renderer.threads = threads;
+                resumed_config.max_replay_frames = 1;
+                let mut resumed =
+                    NativeSceneWorker::new(resumed_config, move || terminal_group_program(nested))
+                        .unwrap();
+                resumed
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                    .unwrap();
+                let receipt = resumed.last_restore().unwrap();
+                assert_eq!(receipt.mode, NativeRestoreMode::Checkpoint);
+                assert_eq!(receipt.frame, saved_frame as u64);
+                assert_eq!(receipt.fallback, None);
+                assert_eq!(checkpoint_observation(&resumed), at_checkpoint);
+                for (frame, rendered, observation) in &expected {
+                    assert_eq!(
+                        png(&seek(&mut resumed, *frame)),
+                        png(rendered),
+                        "nested {nested}, saved {saved_frame}, frame {frame}, threads {threads}"
+                    );
+                    assert_eq!(
+                        &checkpoint_observation(&resumed),
+                        observation,
+                        "nested {nested}, saved {saved_frame}, frame {frame}, threads {threads}"
+                    );
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn terminal_play_without_waits_preserves_the_unfinished_last_capture() {
     for frame in [10, 14] {
