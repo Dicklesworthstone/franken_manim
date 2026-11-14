@@ -292,15 +292,21 @@ fn method_override_resolves_live_targets_once_and_keeps_its_native_lifecycle() {
     })
     .unwrap();
     assert_eq!(calls.get(), 0, "recording must not run authored code");
-    let before = stage.len();
     stage.shift(source, [1.0, 0.0, 0.0]);
     stage.shift(anchor, [3.0, 0.0, 0.0]);
+    // Unrooted targets do not appear in roots()/family(). Compare the whole
+    // arena against exactly the one copy and shift authored by the factory.
+    let mut expected = stage.snapshot().materialize();
+    let target = expected.copy_family(source).unwrap();
+    let start = expected.get_center(source);
+    let end = expected.get_center(anchor);
+    expected.shift(target, std::array::from_fn(|axis| end[axis] - start[axis]));
     let mut animation = prepare_animation(overridden, &mut stage).unwrap();
     assert_eq!(calls.get(), 1);
     assert_eq!(
-        stage.len(),
-        before + 1,
-        "only the factory's target was copied"
+        stage.snapshot().to_bytes().unwrap(),
+        expected.snapshot().to_bytes().unwrap(),
+        "preparation must perform only the factory's one target copy and shift"
     );
     let config = &animation.state().config;
     assert_eq!(config.run_time_frames, Some(4));

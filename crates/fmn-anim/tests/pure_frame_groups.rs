@@ -538,10 +538,14 @@ fn durable_nested_groups_resume_exact_timing_and_remaining_lifecycles() {
             let mut restored = Stage::new();
             let decoded = Snapshot::from_bytes(&snapshot, &restored).unwrap();
             restored.restore(&decoded.snapshot);
+            // Arena snapshots exclude the runtime clock. Reinstall its Stage
+            // mirror as Scene::apply_state does, including when no frames remain.
+            restored.set_time_from_clock(clock.now().to_f64());
             let (mut resumed, mut resumed_open) =
                 fmn_anim::continuation::restore(&restored, &clock, &checkpoint).unwrap();
             let mut resumed_clock = clock;
             assert_eq!(restored.snapshot().to_bytes().unwrap(), snapshot);
+            assert_eq!(facts(&restored), facts(&serial));
             assert_eq!(
                 fmn_anim::continuation::capture(
                     &restored,

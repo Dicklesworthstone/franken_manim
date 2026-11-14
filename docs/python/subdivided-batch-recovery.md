@@ -14,8 +14,9 @@ fmn-python lessons.py Intro Derivation Summary \
 
 Repeat the same command with `--resume` after interruption or a transient
 failure. Every completed scene's clips and optional final PNG are verified
-before any render retry starts. Completed scenes do not run again; the robot
-batch receipt's `reused` field names them. Discovery still runs in its ordinary
+before any render retry starts. Completed scenes do not run again. Sequential
+batches preserve their existing ordered receipts; process-batch robot receipts
+also name reused scenes in `reused`. Discovery still runs in its ordinary
 isolated process for `--workers` batches. `--write_all` uses the selected batch
 mode; `--jobs-file` retains its process-batch owner. For a process batch, add
 `--workers 4` to both the initial and recovery commands.
