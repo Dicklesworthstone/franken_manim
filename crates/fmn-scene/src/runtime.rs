@@ -30,11 +30,13 @@ pub use idle::IdleFrame;
 use fmn_anim::pure_frame::{PureSegment, PureWaitAdvance};
 use fmn_anim::{
     AnimError, Animation, AnimationBoundary, BeginState, Duration, FrameMetadata, FramePacket,
-    ImpureEffect, OpenSegment, OpenWait, Purity, RateFunc, RationalFrameClock, RationalTime,
+    ImpureEffect, OpenSegment, OpenWait, PlaySetup, Purity, RateFunc, RationalFrameClock, RationalTime,
     SceneUpdaterBoundary, SegmentKind, SegmentReport, abort_open_play, abort_open_wait,
-    complete_play_frame_with_capture, complete_wait_frame_with_capture, finish_open_play,
-    finish_open_play_animations, finish_open_wait, open_play_with_mode, open_wait,
-    open_wait_after_updaters, prepare_play_animation, prepare_play_frame, prepare_wait_frame,
+    abort_play_setup, begin_play_animation, complete_open_play_animation_finish,
+    complete_play_animation_begin, complete_play_frame_with_capture, complete_play_setup,
+    complete_wait_frame_with_capture, finish_open_play, finish_open_play_animation,
+    finish_open_wait, open_play_with_mode, open_wait, open_wait_after_updaters,
+    prepare_play_animation, prepare_play_frame, prepare_play_setup, prepare_wait_frame,
     resume_open_wait, validate_play, wait_segment_with_capture,
 };
 use fmn_core::constants::{FRAME_HEIGHT, FRAME_WIDTH};
@@ -754,6 +756,16 @@ pub struct SteppedPlay {
     sink_error: Option<IntegrationError>,
 }
 
+/// A play prologue released between top-level animation begins.
+///
+/// Begin one member, run its host callback, then complete its scene admission
+/// before starting the next. A failed callback must consume this cursor through
+/// [`Scene::abort_stepped_play_setup`] to restore the native pre-begin arena.
+pub struct PreparingPlay {
+    animations: Vec<Box<dyn Animation>>,
+    setup: PlaySetup,
+}
+
 /// One wait split around the same host-language scene-updater boundary as
 /// [`SteppedPlay`].
 pub struct SteppedWait {
@@ -1303,22 +1315,90 @@ impl Scene {
         self.begin_stepped_play_impl(animations, overrides, sink, true)
     }
 
-    fn begin_stepped_play_impl(
+    /// Validate and prepare a play without beginning any animation.
+    ///
+    /// Host portals use this when native and host animations share one play.
+    /// Each member's begin and scene admission remain in authored argument
+    /// order, with a released Scene borrow available between those phases.
+    pub fn prepare_stepped_play(
         &mut self,
         mut animations: Vec<Box<dyn Animation>>,
         overrides: PlayOverrides,
         sink: &mut dyn SceneSink,
-        seekable: bool,
-    ) -> Result<Option<SteppedPlay>, SceneError> {
+    ) -> Result<Option<PreparingPlay>, SceneError> {
+        if !self.prepare_stepped_play_inputs(&mut animations, overrides, sink)? {
+            return Ok(None);
+        }
+        let setup = prepare_play_setup(&self.stage, &self.clock, &mut animations)?;
+        Ok(Some(PreparingPlay { animations, setup }))
+    }
+
+    /// Begin the next native member, yielding before its scene admission.
+    /// The host runs the matching callback before completing this member.
+    pub fn begin_stepped_play_animation(
+        &mut self,
+        play: &mut PreparingPlay,
+    ) -> Result<Option<usize>, SceneError> {
+        begin_play_animation(&mut self.stage, &mut play.animations, &mut play.setup)
+            .map_err(Into::into)
+    }
+
+    /// Admit the just-begun member after its host begin callback has returned.
+    pub fn complete_stepped_play_begin(
+        &mut self,
+        play: &mut PreparingPlay,
+    ) -> Result<(), SceneError> {
+        complete_play_animation_begin(&mut self.stage, &play.animations, &mut play.setup)
+            .map_err(Into::into)
+    }
+
+    /// Complete a fully begun prologue and enable normal frame stepping.
+    ///
+    /// An invalid phase restores the native pre-begin arena before returning
+    /// an error. Host effects outside that arena remain the caller's concern.
+    pub fn complete_stepped_play_setup(
+        &mut self,
+        mut play: PreparingPlay,
+    ) -> Result<SteppedPlay, SceneError> {
+        let open = complete_play_setup(
+            &mut self.stage,
+            &self.clock,
+            &mut play.animations,
+            play.setup,
+        )?;
+        Ok(SteppedPlay {
+            animations: play.animations,
+            open,
+            pure_seek: None,
+            sink_error: None,
+        })
+    }
+
+    /// Restore an interrupted prologue without landing animation endpoints.
+    /// No frame or completed-play count is produced by an unstarted play.
+    pub fn abort_stepped_play_setup(
+        &mut self,
+        mut play: PreparingPlay,
+        _sink: &mut dyn SceneSink,
+    ) {
+        abort_play_setup(&mut self.stage, &mut play.animations, play.setup);
+    }
+
+    fn prepare_stepped_play_inputs(
+        &mut self,
+        animations: &mut [Box<dyn Animation>],
+        overrides: PlayOverrides,
+        sink: &mut dyn SceneSink,
+    ) -> Result<bool, SceneError> {
         if overrides.run_time.is_some() && overrides.run_time_frames.is_some() {
             return Err(SceneError::InvalidConfig(
                 "run_time and run_time_frames are mutually exclusive",
             ));
         }
         if animations.is_empty() {
-            return Ok(None);
+            return Ok(false);
         }
-        for animation in &mut animations {
+        for animation in animations.iter_mut() {
             animation.update_rate_info(
                 overrides.run_time,
                 overrides.rate_func.clone(),
@@ -1328,14 +1408,27 @@ impl Scene {
                 animation.state_mut().config.run_time_frames = Some(frames);
             }
         }
-        validate_play(&self.stage, &self.clock, &animations)?;
-        self.note_frame_play(&animations)?;
+        validate_play(&self.stage, &self.clock, animations)?;
+        self.note_frame_play(animations)?;
         let animation_anchors: Vec<Mob> = animations
             .iter()
             .flat_map(|animation| animation.preflight_mobjects())
             .collect();
         self.pre_play(SegmentKind::Play, &animation_anchors, sink)?;
         self.emit_event(sink, LifecyclePhase::DriveSegment, Some(SegmentKind::Play))?;
+        Ok(true)
+    }
+
+    fn begin_stepped_play_impl(
+        &mut self,
+        mut animations: Vec<Box<dyn Animation>>,
+        overrides: PlayOverrides,
+        sink: &mut dyn SceneSink,
+        seekable: bool,
+    ) -> Result<Option<SteppedPlay>, SceneError> {
+        if !self.prepare_stepped_play_inputs(&mut animations, overrides, sink)? {
+            return Ok(None);
+        }
         let allow_seek = seekable && self.allows_unobserved_advance();
         let open = open_play_with_mode(
             &mut self.stage,
@@ -1589,6 +1682,31 @@ impl Scene {
         Ok(())
     }
 
+    /// Finish one native member, yielding before remover/replacement cleanup.
+    ///
+    /// The host runs this member's callback and any resumed zero-dt updaters,
+    /// then calls [`Self::complete_stepped_play_finish`] before the next member.
+    pub fn finish_stepped_play_animation(
+        &mut self,
+        play: &mut SteppedPlay,
+    ) -> Result<Option<(usize, Vec<Mob>)>, SceneError> {
+        finish_open_play_animation(&mut self.stage, &mut play.animations, &mut play.open)
+            .map_err(Into::into)
+    }
+
+    /// Apply scene cleanup after the just-finished member's host callbacks.
+    pub fn complete_stepped_play_finish(
+        &mut self,
+        play: &mut SteppedPlay,
+    ) -> Result<(), SceneError> {
+        complete_open_play_animation_finish(
+            &mut self.stage,
+            &mut play.animations,
+            &mut play.open,
+        )
+        .map_err(Into::into)
+    }
+
     /// Finish animation lifecycles while retaining the stepped-play handle.
     ///
     /// A host-language portal calls this after the last frame and before its
@@ -1600,10 +1718,10 @@ impl Scene {
         play: &mut SteppedPlay,
     ) -> Result<Vec<Mob>, SceneError> {
         let mut resumed = Vec::new();
-        for animation in &play.animations {
-            animation.collect_resumed_updater_mobjects(&mut resumed);
+        while let Some((_, members)) = self.finish_stepped_play_animation(play)? {
+            resumed.extend(members);
+            self.complete_stepped_play_finish(play)?;
         }
-        finish_open_play_animations(&mut self.stage, &mut play.animations, &mut play.open)?;
         Ok(resumed)
     }
 

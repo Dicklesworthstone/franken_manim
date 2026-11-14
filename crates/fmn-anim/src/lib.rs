@@ -97,12 +97,14 @@ pub use fading::{
 };
 pub use frame::{
     AnimationBoundary, BeginState, FrameMetadata, FramePacket, OpenSegment, OpenWait,
-    OpenWaitCheckpoint, SceneUpdaterBoundary, abort_open_play, abort_open_wait, advance_play,
-    advance_play_with_boundary, complete_play_frame, complete_play_frame_with_capture,
-    complete_wait_frame, complete_wait_frame_with_capture, finish_open_play,
+    OpenWaitCheckpoint, PlaySetup, SceneUpdaterBoundary, abort_open_play, abort_open_wait,
+    abort_play_setup, advance_play, advance_play_with_boundary, begin_play_animation,
+    complete_open_play_animation_finish, complete_play_animation_begin, complete_play_frame,
+    complete_play_frame_with_capture, complete_play_setup, complete_wait_frame,
+    complete_wait_frame_with_capture, finish_open_play, finish_open_play_animation,
     finish_open_play_animations, finish_open_wait, open_play, open_play_with_mode, open_wait,
     open_wait_after_updaters, play_segment, play_segment_with_boundary, prepare_play_animation,
-    prepare_play_frame, prepare_wait_frame, resume_open_wait, validate_play, wait_segment,
+    prepare_play_frame, prepare_play_setup, prepare_wait_frame, resume_open_wait, validate_play, wait_segment,
     wait_segment_upto, wait_segment_with_boundary, wait_segment_with_capture,
 };
 pub use growing::{grow_arrow, grow_from_center, grow_from_edge, grow_from_point};

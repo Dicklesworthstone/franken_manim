@@ -315,6 +315,16 @@ fn in_scene_family(stage: &Stage, mob: Mob) -> bool {
         .any(|root| stage.family(root).contains(&mob))
 }
 
+fn admit_animation_mobject(stage: &mut Stage, animation: &dyn Animation) -> Result<(), AnimError> {
+    let mobject = animation.state().mobject();
+    if !in_scene_family(stage, mobject) {
+        stage
+            .add_to_scene(mobject)
+            .map_err(|_| AnimError::StaleHandle(mobject))?;
+    }
+    Ok(())
+}
+
 /// The Reference's `begin_animations`: begin each animation, then root any
 /// animated mobject not already on stage (begin first — its starting copy
 /// must not be swept into the membership probe).
@@ -331,12 +341,7 @@ fn begin_animations(
             let begin = animation.begin(stage);
             check_updater_error(stage)?;
             begin?;
-            let mobject = animation.state().mobject();
-            if !in_scene_family(stage, mobject) {
-                stage
-                    .add_to_scene(mobject)
-                    .map_err(|_| AnimError::StaleHandle(mobject))?;
-            }
+            admit_animation_mobject(stage, animation.as_ref())?;
         }
         Ok(())
     })();
@@ -626,6 +631,8 @@ pub struct OpenSegment {
     current_sample: Option<FrameSample>,
     next_animation: usize,
     prepared: Option<StepPlan>,
+    finished_animations: usize,
+    pending_cleanup: Option<usize>,
     animations_finished: bool,
     final_updaters_completed: bool,
 }
@@ -666,6 +673,8 @@ impl OpenSegment {
             current_sample: None,
             next_animation: 0,
             prepared: None,
+            finished_animations: 0,
+            pending_cleanup: None,
             animations_finished: false,
             final_updaters_completed: false,
         })
@@ -708,6 +717,8 @@ impl OpenSegment {
         self.current_sample.is_none()
             && self.prepared.is_none()
             && self.next_animation == 0
+            && self.finished_animations == 0
+            && self.pending_cleanup.is_none()
             && !self.animations_finished
             && !self.final_updaters_completed
     }
@@ -758,6 +769,171 @@ impl OpenSegment {
     }
 }
 
+/// A validated play prologue whose top-level begins may release the Stage
+/// borrow. A member begins, its host callback runs, and only then is its
+/// mobject admitted to the scene. The next member observes all three steps.
+///
+/// Keep this cursor until [`complete_play_setup`] succeeds, or pass it to
+/// [`abort_play_setup`] after a host exception. The saved native arena makes
+/// prologue refusal transactional, as it is for [`open_play`]. Host-language
+/// effects outside that arena are owned by the caller.
+pub struct PlaySetup {
+    segment: FrameSegment,
+    base_frame: i64,
+    run_time: f64,
+    animation_count: usize,
+    next_animation: usize,
+    pending_admission: Option<usize>,
+    begun: usize,
+    before_begin: Snapshot,
+}
+
+/// Validate the complete play and prepare timing without beginning a member.
+/// No clock advance, updater, rooting or capture occurs here.
+///
+/// # Errors
+/// The same timing and handle validation failures as [`open_play`].
+pub fn prepare_play_setup(
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    animations: &mut [Box<dyn Animation>],
+) -> Result<PlaySetup, AnimError> {
+    let (segment, run_time) = plan_play(stage, clock, animations)?;
+    for animation in animations.iter_mut() {
+        animation.prepare_timing(clock.fps())?;
+    }
+    Ok(PlaySetup {
+        segment,
+        base_frame: clock.now().frames(),
+        run_time,
+        animation_count: animations.len(),
+        next_animation: 0,
+        pending_admission: None,
+        begun: 0,
+        before_begin: stage.snapshot(),
+    })
+}
+
+/// Begin one top-level animation and yield its index before scene admission.
+/// Release the Stage borrow, run that member's host begin callback if any,
+/// then call [`complete_play_animation_begin`] before asking for another.
+///
+/// # Errors
+/// Begin/updater failure, a changed animation inventory, or an uncompleted
+/// admission. The caller must abort the setup after a begin failure.
+pub fn begin_play_animation(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    setup: &mut PlaySetup,
+) -> Result<Option<usize>, AnimError> {
+    check_updater_error(stage)?;
+    if animations.len() != setup.animation_count || setup.pending_admission.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the pending begin admission without changing the animation list",
+        ));
+    }
+    if setup.next_animation == setup.animation_count {
+        return Ok(None);
+    }
+    let index = setup.next_animation;
+    setup.pending_admission = Some(index);
+    setup.begun = index + 1;
+    let result = animations[index].begin(stage);
+    check_updater_error(stage)?;
+    result?;
+    Ok(Some(index))
+}
+
+/// Admit the member whose native and host begin hooks have both completed.
+/// The membership probe deliberately runs after the host hook: it may have
+/// rooted, regrouped or removed that member.
+///
+/// # Errors
+/// Missing/changed setup, updater failure, or a stale animated mobject.
+pub fn complete_play_animation_begin(
+    stage: &mut Stage,
+    animations: &[Box<dyn Animation>],
+    setup: &mut PlaySetup,
+) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
+    if animations.len() != setup.animation_count {
+        return Err(AnimError::InvalidFramePhase(
+            "the begin animation list changed",
+        ));
+    }
+    let index = setup.pending_admission.ok_or(AnimError::InvalidFramePhase(
+        "begin an animation before admitting its mobject",
+    ))?;
+    admit_animation_mobject(stage, animations[index].as_ref())?;
+    setup.pending_admission = None;
+    setup.next_animation += 1;
+    Ok(())
+}
+
+/// Complete an ordered prologue, classifying the state after every begin.
+/// Host-driven setup retains no pure-worker snapshot; ordinary stepped
+/// playback and its conservative callback classification remain unchanged.
+///
+/// # Errors
+/// An unfinished/changed prologue or a moved clock. Refusal aborts begun
+/// native lifecycles and restores the pre-begin arena before returning.
+pub fn complete_play_setup(
+    stage: &mut Stage,
+    clock: &RationalFrameClock,
+    animations: &mut [Box<dyn Animation>],
+    setup: PlaySetup,
+) -> Result<OpenSegment, AnimError> {
+    let validation = if animations.len() != setup.animation_count
+        || setup.next_animation != setup.animation_count
+        || setup.pending_admission.is_some()
+        || clock.now().frames() != setup.base_frame
+        || clock.fps() != setup.segment.end_time().fps()
+    {
+        Err(AnimError::InvalidFramePhase(
+            "complete every begin admission before opening the original play clock",
+        ))
+    } else {
+        check_updater_error(stage)
+    };
+    if let Err(error) = validation {
+        abort_play_setup(stage, animations, setup);
+        return Err(error);
+    }
+    Ok(OpenSegment {
+        report: SegmentReport {
+            kind: SegmentKind::Play,
+            purity: classify_play(stage, animations),
+            begin_state: None,
+            base_frame: setup.base_frame,
+            n_frames: setup.segment.n_frames(),
+            run_time: setup.run_time,
+        },
+        segment: setup.segment,
+        stepped: 0,
+        current_sample: None,
+        next_animation: 0,
+        prepared: None,
+        finished_animations: 0,
+        pending_cleanup: None,
+        animations_finished: false,
+        final_updaters_completed: false,
+    })
+}
+
+/// Abandon a borrow-released prologue without landing animation endpoints.
+/// Only members whose native begin was entered receive abort; the complete
+/// pre-begin native arena is then restored, including its scene membership.
+pub fn abort_play_setup(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    setup: PlaySetup,
+) {
+    for animation in animations.iter_mut().take(setup.begun) {
+        animation.abort(stage);
+    }
+    stage.restore(&setup.before_begin);
+}
+
 /// Open a `play()` segment: begin the animations, classify the segment, and
 /// stop. Nothing is emitted and the clock does not move.
 ///
@@ -790,6 +966,8 @@ pub fn open_play_with_mode(
         current_sample: None,
         next_animation: 0,
         prepared: None,
+        finished_animations: 0,
+        pending_cleanup: None,
         animations_finished: false,
         final_updaters_completed: false,
     })
@@ -811,7 +989,10 @@ pub fn prepare_play_animation(
     open: &mut OpenSegment,
 ) -> Result<Option<AnimationBoundary>, AnimError> {
     check_updater_error(stage)?;
-    if open.animations_finished {
+    if open.animations_finished
+        || open.finished_animations != 0
+        || open.pending_cleanup.is_some()
+    {
         return Err(AnimError::InvalidFramePhase(
             "cannot advance a play after animation cleanup",
         ));
@@ -986,6 +1167,104 @@ pub fn finish_open_play(
     Ok(open.report)
 }
 
+/// Finish one animation, releasing the Stage before its scene cleanup.
+///
+/// The returned mobjects resumed their native updater slots during `finish`.
+/// A host dispatches their own zero-dt updaters and this member's host finish
+/// callback before calling [`complete_open_play_animation_finish`]. Only then
+/// may the next member finish. Removers therefore remain in the scene while
+/// their resumed updaters run, as they do in ordinary native playback.
+///
+/// # Errors
+/// A frame or member cleanup is pending, or an updater failed.
+pub fn finish_open_play_animation(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+) -> Result<Option<(usize, Vec<Mob>)>, AnimError> {
+    if let Err(error) = check_updater_error(stage) {
+        abort_unfinished_play_animations(stage, animations, open);
+        return Err(error);
+    }
+    if open.prepared.is_some() || open.current_sample.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete the prepared frame before finishing the segment",
+        ));
+    }
+    if open.pending_cleanup.is_some() {
+        return Err(AnimError::InvalidFramePhase(
+            "complete this animation's cleanup before finishing another",
+        ));
+    }
+    if open.animations_finished {
+        return Ok(None);
+    }
+    let index = open.finished_animations;
+    if index == animations.len() {
+        open.animations_finished = true;
+        return Ok(None);
+    }
+    let animation = animations.get_mut(index).ok_or(AnimError::InvalidFramePhase(
+        "the open play's animation list changed",
+    ))?;
+    let mut resumed = Vec::new();
+    animation.collect_resumed_updater_mobjects(&mut resumed);
+    // Once finish has run, an exception must neither repeat that endpoint nor
+    // run its remover cleanup. Only later members still need abort cleanup.
+    open.pending_cleanup = Some(index);
+    animation.finish(stage);
+    if let Err(error) = check_updater_error(stage) {
+        abort_unfinished_play_animations(stage, animations, open);
+        return Err(error);
+    }
+    Ok(Some((index, resumed)))
+}
+
+/// Complete the member whose finish just released the Stage borrow.
+///
+/// # Errors
+/// No member is awaiting cleanup, its list changed, or an updater failed.
+pub fn complete_open_play_animation_finish(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+) -> Result<(), AnimError> {
+    if let Err(error) = check_updater_error(stage) {
+        abort_unfinished_play_animations(stage, animations, open);
+        return Err(error);
+    }
+    let index = open.pending_cleanup.ok_or(AnimError::InvalidFramePhase(
+        "finish an animation before completing its cleanup",
+    ))?;
+    let animation = animations.get_mut(index).ok_or(AnimError::InvalidFramePhase(
+        "the open play's animation list changed",
+    ))?;
+    animation.clean_up_from_scene(stage);
+    if let Err(error) = check_updater_error(stage) {
+        abort_unfinished_play_animations(stage, animations, open);
+        return Err(error);
+    }
+    open.pending_cleanup = None;
+    open.finished_animations += 1;
+    open.animations_finished = open.finished_animations == animations.len();
+    Ok(())
+}
+
+fn abort_unfinished_play_animations(
+    stage: &mut Stage,
+    animations: &mut [Box<dyn Animation>],
+    open: &mut OpenSegment,
+) {
+    if !open.animations_finished {
+        let next = open.finished_animations + usize::from(open.pending_cleanup.is_some());
+        for animation in animations.iter_mut().skip(next) {
+            animation.abort(stage);
+        }
+        open.pending_cleanup = None;
+        open.animations_finished = true;
+    }
+}
+
 /// Finish animation lifecycles without running the final scene-updater pass.
 ///
 /// Host-language portals use this release point to resume animation-suspended
@@ -1001,24 +1280,8 @@ pub fn finish_open_play_animations(
     animations: &mut [Box<dyn Animation>],
     open: &mut OpenSegment,
 ) -> Result<(), AnimError> {
-    if let Err(error) = check_updater_error(stage) {
-        if !open.animations_finished {
-            for animation in animations {
-                animation.abort(stage);
-            }
-            open.animations_finished = true;
-        }
-        return Err(error);
-    }
-    if open.prepared.is_some() || open.current_sample.is_some() {
-        return Err(AnimError::InvalidFramePhase(
-            "complete the prepared frame before finishing the segment",
-        ));
-    }
-    if !open.animations_finished {
-        let result = finish_animation_lifecycles(stage, animations);
-        open.animations_finished = true;
-        result?;
+    while finish_open_play_animation(stage, animations, open)?.is_some() {
+        complete_open_play_animation_finish(stage, animations, open)?;
     }
     Ok(())
 }
@@ -1033,13 +1296,9 @@ pub fn finish_open_play_animations(
 pub fn abort_open_play(
     stage: &mut Stage,
     animations: &mut [Box<dyn Animation>],
-    open: OpenSegment,
+    mut open: OpenSegment,
 ) -> SegmentReport {
-    if !open.animations_finished {
-        for animation in animations {
-            animation.abort(stage);
-        }
-    }
+    abort_unfinished_play_animations(stage, animations, &mut open);
     open.report
 }
 

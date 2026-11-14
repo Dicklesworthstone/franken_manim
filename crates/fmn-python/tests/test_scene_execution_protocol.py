@@ -1,8 +1,8 @@
 """Execution ownership over an explicit native-loop fixture, not native output.
 
-The fixture preserves the production boundary's ordering: all callback begins
-precede native construction, then helper/interpolation, finish and cleanup.
-The companion installed-wheel suite is required to validate real native state.
+The fixture models callback ownership and failure recovery after native
+construction. The installed-wheel suite validates argument ordering across
+real native and Python begin, interpolation, finish and cleanup lifecycles.
 """
 from __future__ import annotations
 
@@ -105,11 +105,11 @@ def environment(install=True):
         def _play_animations(self, specs, callbacks, camera, run_time, rate_func, lag_ratio):
             self._last_specs = specs
             self.events.append("core")
+            if self.native_failure is not None:
+                raise self.native_failure
             for callback in callbacks:
                 if callback is not None:
                     callback.begin()
-            if self.native_failure is not None:
-                raise self.native_failure
             for callback in callbacks:
                 if callback is not None:
                     if hasattr(callback, "update_mobjects"):
@@ -212,10 +212,12 @@ class ExecutionTests(unittest.TestCase):
         self.assert_released()
         self.assert_released(second.mobject)
         self.assertEqual(third.events, [])
-    def test_native_construction_failure_after_begins_is_covered(self):
+    def test_native_construction_failure_does_not_begin_callbacks(self):
         self.scene.native_failure = ValueError("native lowering")
+        anim = self.animation()
         with self.assertRaisesRegex(ValueError, "native lowering"):
-            self.scene.play(self.animation())
+            self.scene.play(anim)
+        self.assertEqual(anim.events, [])
         self.assert_released()
     def test_interpolate_failure_restores_original_set_objects(self):
         locked = self.mob.locked_data_keys

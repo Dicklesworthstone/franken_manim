@@ -718,6 +718,175 @@ assert 0.0 < failed_source.get_x() < 1.0, failed_source.get_x()
 assert not failed_source.locked_data_keys
 assert not failed_source._is_updating_suspended()
 
+
+def _assert_ordered_mixed_lifecycle():
+    from manimlib import FadeOut
+
+    # Each begin observes prior members' suspension and scene admission;
+    # each finish observes prior members' replacement and cleanup. Include
+    # zero-frame plays, which still execute the complete ordered lifecycle.
+    for frames in (0, 2):
+        for native_first in (False, True):
+            scene = Scene()
+            source = timeline_point()
+            target = source.copy().set_x(1.0)
+            witness = Mobject()
+            observations = []
+
+            class MembershipProbe(Animation):
+                def begin(self):
+                    observations.append((
+                        "begin", source._is_updating_suspended(),
+                        source in scene.mobjects, witness in scene.mobjects,
+                    ))
+                    super().begin()
+
+                def finish(self):
+                    observations.append((
+                        "finish", source._is_updating_suspended(),
+                        source in scene.mobjects, target in scene.mobjects,
+                    ))
+                    super().finish()
+
+            change = ReplacementTransform(
+                source, target, rate_func=linear, suspend_mobject_updating=True,
+            )
+            assert not _animation_native._requires_python_animation(change)
+            probe = MembershipProbe(witness, rate_func=linear)
+            animations = (change, probe) if native_first else (probe, change)
+            scene.play(*animations, run_time_frames=frames)
+            assert observations == [
+                ("begin", native_first, native_first, False),
+                ("finish", not native_first, not native_first, native_first),
+            ], (frames, native_first, observations)
+            assert source not in scene.mobjects and target in scene.mobjects
+            assert not witness._is_updating_suspended()
+            assert scene.get_frame_count() == frames
+
+    # The earlier native transform must snapshot its source before a later
+    # authored begin changes that same source. Reordered begins render 1.5
+    # here, although the correct halfway position is 0.5.
+    scene = Scene()
+    source = timeline_point()
+    target = source.copy().set_x(1.0)
+    midpoints = []
+
+    class BeginMutation(Animation):
+        def begin(self):
+            source.set_x(2.0)
+            super().begin()
+
+        def interpolate_mobject(self, alpha):
+            if 0.0 < alpha < 1.0:
+                midpoints.append(source.get_x())
+
+    change = Transform(source, target, rate_func=linear)
+    assert not _animation_native._requires_python_animation(change)
+    scene.play(
+        change, BeginMutation(Mobject(), rate_func=linear), run_time_frames=2,
+    )
+    assert np.allclose(midpoints, [0.5], atol=1e-6), midpoints
+    assert np.allclose(source.get_points(), [[1.0, 0.0, 0.0]], atol=1e-6)
+
+    # A Python updater added after native admission resumes before replacement
+    # cleanup. It observes the source still rooted and the target unpublished.
+    source = timeline_point()
+    target = source.copy().set_x(1.0)
+    scene = Scene().add(source)
+    resumed = []
+
+    class AttachUpdater(Animation):
+        attached = False
+
+        def interpolate_mobject(self, alpha):
+            if alpha > 0.0 and not self.attached:
+                self.attached = True
+                source.add_updater(
+                    lambda mob, dt: resumed.append((
+                        dt, source in scene.mobjects, target in scene.mobjects,
+                    )), call=False,
+                )
+
+    change = ReplacementTransform(
+        source, target, rate_func=linear, suspend_mobject_updating=True,
+    )
+    assert not _animation_native._requires_python_animation(change)
+    scene.play(change, AttachUpdater(Mobject()), run_time_frames=2)
+    assert resumed == [(0.0, True, False)], resumed
+    assert source not in scene.mobjects and target in scene.mobjects
+
+    # A failed host finalizer preserves cleanup already completed by an
+    # earlier native member but must not clean up a later remover.
+    for phase in ("finish", "cleanup"):
+        source = timeline_point()
+        tail = timeline_point().set_x(3.0)
+        target = source.copy().set_x(1.0)
+        scene = Scene().add(source, tail)
+        failure = LookupError("ordered mixed " + phase)
+        observations = []
+
+        class FinishFailure(Animation):
+            def finish(self):
+                observations.append((
+                    source in scene.mobjects, target in scene.mobjects,
+                    tail in scene.mobjects,
+                ))
+                if phase == "finish":
+                    raise failure
+                super().finish()
+
+            def clean_up_from_scene(self, current_scene):
+                raise failure
+
+        change = ReplacementTransform(source, target, rate_func=linear)
+        removal = FadeOut(tail, rate_func=linear, suspend_mobject_updating=True)
+        assert not _animation_native._requires_python_animation(change)
+        assert not _animation_native._requires_python_animation(removal)
+        try:
+            scene.play(change, FinishFailure(Mobject()), removal, run_time_frames=2)
+        except LookupError as error:
+            assert error is failure
+        else:
+            raise AssertionError("mixed play swallowed a host finalizer failure")
+        assert observations == [(False, True, True)], observations
+        assert source not in scene.mobjects and target in scene.mobjects
+        assert tail in scene.mobjects and not tail._is_updating_suspended()
+        scene.wait(1.0 / 30.0)
+
+    # A begin exception unwinds earlier native suspension without starting
+    # later members or consuming scene time. The scene remains usable.
+    source = timeline_point()
+    future = timeline_point().set_x(4.0)
+    target = source.copy().set_x(1.0)
+    scene = Scene().add(source)
+    failure = RuntimeError("ordered mixed begin")
+    observations = []
+
+    class BeginFailure(Animation):
+        def begin(self):
+            observations.append(source._is_updating_suspended())
+            super().begin()
+            raise failure
+
+    try:
+        scene.play(
+            Transform(source, target, suspend_mobject_updating=True),
+            BeginFailure(Mobject(), suspend_mobject_updating=True),
+            Transform(future, future.copy().set_x(5.0)), run_time_frames=2,
+        )
+    except RuntimeError as error:
+        assert error is failure
+    else:
+        raise AssertionError("mixed play swallowed a host begin failure")
+    assert observations == [True], observations
+    assert scene.get_frame_count() == 0 and scene.num_plays == 0
+    assert not source._is_updating_suspended()
+    assert future not in scene.mobjects and not future._is_updating_suspended()
+    scene.wait(1.0 / 30.0)
+
+
+_assert_ordered_mixed_lifecycle()
+
 # TransformFromCopy's public constructor owns exactly one source copy. The
 # native play must remove it after replacement, without an orphaned family.
 copy_source = Group(timeline_point(), timeline_point().shift((0.0, 1.0, 0.0)))

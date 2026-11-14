@@ -9909,18 +9909,23 @@ impl PyScene {
                 session.routes.performance.exact_rate_prepare_ns += elapsed;
             }
         }
-        for callback in callbacks.iter().flatten() {
-            crossing::record(CrossingClass::MethodDispatch);
-            callback.bind(slf.py()).call_method0("begin")?;
-        }
         let (animations, start_time, start_frame) = {
             let mut scene = engine.borrow_mut();
             let start_time = scene.stage().time();
             let start_frame = scene.time().frames();
             let mut animations: Vec<Box<dyn fmn_anim::Animation>> =
                 Vec::with_capacity(resolved.len());
-            for spec in resolved {
-                animations.push(build_native_animation(scene.stage_mut(), spec)?);
+            for (spec, callback) in resolved.into_iter().zip(&callbacks) {
+                let animation = build_native_animation(scene.stage_mut(), spec)?;
+                // A callback composition still needs Choreo's exact duration
+                // algebra, but its Python driver already owns every begin,
+                // helper update, suspension and cleanup. Do not run a second
+                // native lifecycle over the same roots before that driver.
+                animations.push(if callback.is_some() {
+                    Box::new(HostAnimationTiming { animation })
+                } else {
+                    animation
+                });
             }
             (animations, start_time, start_frame)
         };
@@ -10068,11 +10073,52 @@ impl PyScene {
             // Scene RefCell borrow is then genuinely gone while Python
             // updaters run; completing the same frame performs native scene
             // updaters, event dispatch, immutable freeze, and capture.
-            let mut play = engine
-                .borrow_mut()
-                .begin_stepped_play(animations, overrides, &mut sink)
-                .map_err(&map_play_error)?
-                .ok_or_else(|| PyRuntimeError::new_err("a nonempty play did not open"))?;
+            let mut play = if callback_count == 0 {
+                engine
+                    .borrow_mut()
+                    .begin_stepped_play(animations, overrides, &mut sink)
+                    .map_err(&map_play_error)?
+                    .ok_or_else(|| PyRuntimeError::new_err("a nonempty play did not open"))?
+            } else {
+                let mut setup = engine
+                    .borrow_mut()
+                    .prepare_stepped_play(animations, overrides, &mut sink)
+                    .map_err(&map_play_error)?
+                    .ok_or_else(|| PyRuntimeError::new_err("a nonempty play did not prepare"))?;
+                let begin_result: PyResult<()> = (|| {
+                    loop {
+                        let index = engine
+                            .borrow_mut()
+                            .begin_stepped_play_animation(&mut setup)
+                            .map_err(&map_play_error)?;
+                        let Some(index) = index else {
+                            break;
+                        };
+                        if let Some(callback) = &callbacks[index] {
+                            crossing::record(CrossingClass::MethodDispatch);
+                            callback.bind(slf.py()).call_method0("begin")?;
+                        }
+                        // Begin observes the old scene membership. Only
+                        // after both native and host work succeed is this
+                        // member admitted, before the next member begins.
+                        engine
+                            .borrow_mut()
+                            .complete_stepped_play_begin(&mut setup)
+                            .map_err(&map_play_error)?;
+                    }
+                    Ok(())
+                })();
+                if let Err(error) = begin_result {
+                    engine
+                        .borrow_mut()
+                        .abort_stepped_play_setup(setup, &mut sink);
+                    return Err(error);
+                }
+                engine
+                    .borrow_mut()
+                    .complete_stepped_play_setup(setup)
+                    .map_err(&map_play_error)?
+            };
             let drive_result: PyResult<()> = (|| {
                 loop {
                     if callback_count != 0 {
@@ -10127,13 +10173,33 @@ impl PyScene {
                         u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
                     crossing::record_phase(python_ns, native_ns);
                 }
-                for callback in callbacks.iter().flatten() {
-                    crossing::record(CrossingClass::MethodDispatch);
-                    callback.bind(slf.py()).call_method0("finish")?;
-                    if callback.bind(slf.py()).hasattr("clean_up_from_scene")? {
-                        callback
-                            .bind(slf.py())
-                            .call_method1("clean_up_from_scene", (slf,))?;
+                if callback_count != 0 {
+                    loop {
+                        let finished = engine
+                            .borrow_mut()
+                            .finish_stepped_play_animation(&mut play)
+                            .map_err(&map_play_error)?;
+                        let Some((index, resumed)) = finished else {
+                            break;
+                        };
+                        // Native finish resumes its host updaters before
+                        // cleanup, exactly where a Python-owned finish does.
+                        // The following animation must see that completed
+                        // lifecycle, including replacement/remover effects.
+                        run_resumed_python_updaters(slf, &resumed)?;
+                        if let Some(callback) = &callbacks[index] {
+                            crossing::record(CrossingClass::MethodDispatch);
+                            callback.bind(slf.py()).call_method0("finish")?;
+                            if callback.bind(slf.py()).hasattr("clean_up_from_scene")? {
+                                callback
+                                    .bind(slf.py())
+                                    .call_method1("clean_up_from_scene", (slf,))?;
+                            }
+                        }
+                        engine
+                            .borrow_mut()
+                            .complete_stepped_play_finish(&mut play)
+                            .map_err(&map_play_error)?;
                     }
                 }
                 sink.finish_camera_before_updaters(slf.py())?;
@@ -10577,13 +10643,84 @@ impl PyNativeAnimationDriver {
     }
 }
 
-/// Timing/lifecycle slot for a top-level Python-authored Animation.
+/// Preserve Choreo's timing and preflight for a host-owned lifecycle.
+///
+/// A callback can represent a leaf or a complete nested composition. Its
+/// native description remains the authority for exact frame durations and
+/// admission, while the released host driver alone owns begin, interpolation,
+/// suspension, finish and cleanup. In particular, a native placeholder must
+/// not suspend a family before an authored begin observes it, or run the
+/// same helper updaters twice. Unknown host effects remain unclassified.
+struct HostAnimationTiming {
+    animation: Box<dyn fmn_anim::Animation>,
+}
+
+impl fmn_anim::Animation for HostAnimationTiming {
+    fn state(&self) -> &fmn_anim::AnimState {
+        self.animation.state()
+    }
+
+    fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+        self.animation.state_mut()
+    }
+
+    fn duration_on_grid(&self, fps: u32) -> Result<fmn_anim::FrameDuration, fmn_anim::AnimError> {
+        self.animation.duration_on_grid(fps)
+    }
+
+    fn prepare_timing(&mut self, fps: u32) -> Result<(), fmn_anim::AnimError> {
+        self.animation.prepare_timing(fps)
+    }
+
+    fn composition_timing(&self) -> Option<fmn_anim::composition::CompositionTiming> {
+        self.animation.composition_timing()
+    }
+
+    fn update_rate_info(
+        &mut self,
+        run_time: Option<f64>,
+        rate_func: Option<fmn_anim::RateFunc>,
+        lag_ratio: Option<f64>,
+    ) {
+        self.animation
+            .update_rate_info(run_time, rate_func, lag_ratio);
+    }
+
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        self.animation.preflight_mobjects()
+    }
+
+    fn validate_begin(&self, stage: &Stage) -> Result<(), fmn_anim::AnimError> {
+        self.animation.validate_begin(stage)
+    }
+
+    fn begin(&mut self, _stage: &mut Stage) -> Result<(), fmn_anim::AnimError> {
+        Ok(())
+    }
+
+    fn update_mobjects(&mut self, _stage: &mut Stage, _dt: f64) {}
+
+    fn interpolate(&mut self, _stage: &mut Stage, _alpha: f64) {}
+
+    fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {}
+
+    fn finish(&mut self, _stage: &mut Stage) {}
+
+    fn clean_up_from_scene(&mut self, _stage: &mut Stage) {}
+
+    fn abort(&mut self, _stage: &mut Stage) {}
+
+    fn collect_resumed_updater_mobjects(&self, _out: &mut Vec<Mob>) {}
+}
+
+/// Timing description for a Python-authored Animation.
 ///
 /// Its interpolation is intentionally empty: Choreo yields immediately after
 /// this slot in step 2, the bridge releases the Scene borrow, and invokes the
 /// Python animation at the slot's exact raw alpha before advancing to the next
-/// animation. The slot still owns native animating/remover semantics and the
-/// segment's authoritative timing.
+/// animation. Top-level callback descriptions are wrapped in
+/// [`HostAnimationTiming`], including compositions of these slots, so only the
+/// host owns their actual lifecycle.
 struct PythonAnimationSlot {
     state: fmn_anim::AnimState,
     frame_timing: Option<PyFrameTiming>,
