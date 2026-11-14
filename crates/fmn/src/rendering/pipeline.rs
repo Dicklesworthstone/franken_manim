@@ -47,6 +47,8 @@ pub enum NativeFrameError {
     Renderer(RetainedFrameRendererError),
     /// A frozen camera/light capture was invalid.
     Camera(fmn_render::CameraError),
+    /// A camera rig could not be sampled from its reconstructed frame.
+    CameraRig(fmn_scene::SceneError),
     /// Frame layout or output conversion failed.
     Frame(FrameError),
     /// The ordered output stream failed or was cancelled.
@@ -62,6 +64,7 @@ impl fmt::Display for NativeFrameError {
             Self::Animation(error) => error.fmt(f),
             Self::Renderer(error) => error.fmt(f),
             Self::Camera(error) => error.fmt(f),
+            Self::CameraRig(error) => error.fmt(f),
             Self::Frame(error) => error.fmt(f),
             Self::Emitter(error) => error.fmt(f),
             Self::WorkerState(message) => f.write_str(message),
@@ -76,6 +79,7 @@ impl std::error::Error for NativeFrameError {
             Self::Animation(error) => Some(error),
             Self::Renderer(error) => Some(error),
             Self::Camera(error) => Some(error),
+            Self::CameraRig(error) => Some(error),
             Self::Frame(error) => Some(error),
             Self::Emitter(error) => Some(error),
             Self::WorkerState(_) => None,
@@ -95,6 +99,12 @@ pub(super) enum NativeFrame {
         job: PureFrameJob,
         config: RetainedFrameRendererConfig,
         camera: Option<Camera>,
+    },
+    RigPure {
+        job: PureFrameJob,
+        config: RetainedFrameRendererConfig,
+        rig: fmn_scene::CameraRig,
+        base: CameraConfig,
     },
     AdaptivePure {
         job: PureFrameJob,
@@ -518,6 +528,23 @@ impl PipelineStages for NativeFrameStages {
                 // team, not on the ordered preparation worker or scene owner.
                 let stage = job.try_materialize().map_err(NativeFrameError::Animation)?;
                 self.rasterize_reconstructed(&stage, config, camera, team, &mut output)?;
+            }
+            NativeFrame::RigPure {
+                job,
+                config,
+                rig,
+                base,
+            } => {
+                // Camera trackers and geometry are evaluated by the same
+                // closed program at the same nominal sample. Sampling the
+                // owner here would freeze the begin pose for every frame.
+                let stage = job.try_materialize().map_err(NativeFrameError::Animation)?;
+                let camera = Camera::new(
+                    rig.sample(&stage, &base)
+                        .map_err(NativeFrameError::CameraRig)?,
+                )
+                .map_err(NativeFrameError::Camera)?;
+                self.rasterize_reconstructed(&stage, config, Some(camera), team, &mut output)?;
             }
             NativeFrame::AdaptivePure {
                 job,
@@ -1032,6 +1059,26 @@ impl NativeFramePipeline {
             job,
             config: self.renderer_config,
             camera: self.camera.clone(),
+        };
+        self.capture_ready(frame, sequence)
+    }
+
+    /// Queue a camera-rig sample without materializing its Stage on the owner.
+    /// The rig contains handles only; the immutable program owns their records.
+    /// The base is the already-admitted camera policy, shared with serial
+    /// captures. Every worker samples the rig after its native interpolation.
+    pub(super) fn capture_pure_camera_rig(
+        &mut self,
+        job: PureFrameJob,
+        sequence: u64,
+        rig: fmn_scene::CameraRig,
+        base: CameraConfig,
+    ) -> Result<(), RenderError> {
+        let frame = NativeFrame::RigPure {
+            job,
+            config: self.renderer_config,
+            rig,
+            base,
         };
         self.capture_ready(frame, sequence)
     }

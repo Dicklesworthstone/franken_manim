@@ -23,6 +23,9 @@ use crate::{ProgramAdapter, SceneConstruct};
 /// orientation, field of view and light are animated via [`CameraRig`].
 /// Its existing quaternion interpolation is normalized linear interpolation,
 /// not spherical interpolation or a constant-angular-speed promise.
+/// Pure plays and waits use the ordinary bounded render teams: each worker
+/// samples camera trackers and geometry from the same native frame program.
+/// Camera updaters and other stateful effects retain owner-thread evaluation.
 ///
 /// A successful report is an artifact receipt, not a certified input closure.
 /// Factory callbacks and external inputs still require closure attestation.
@@ -156,6 +159,53 @@ impl fmn_scene::SceneSink for RigSink {
 
     fn event(&mut self, event: fmn_scene::LifecycleEvent) -> Result<(), IntegrationError> {
         fmn_scene::SceneSink::event(&mut self.inner, event)
+    }
+
+    fn accepts_pure_segments(&self) -> bool {
+        fmn_scene::SceneSink::accepts_pure_segments(&self.inner)
+    }
+
+    fn capture_pure_segment(
+        &mut self,
+        segment: &fmn_anim::pure_frame::PureSegment,
+    ) -> Result<(), IntegrationError> {
+        if self.inner.format == RenderFormat::Png {
+            // Final-state PNGs account for the same nominal samples without
+            // reconstructing intermediate camera poses or geometry.
+            return fmn_scene::SceneSink::capture_pure_segment(&mut self.inner, segment);
+        }
+        if let Some(error) = &self.inner.failure {
+            return Err(IntegrationError::new("native-camera", error.to_string()));
+        }
+        let result = (|| {
+            for frame in 1..=segment.frame_count() {
+                if self.inner.next_sequence >= self.inner.max_frames {
+                    return Err(RenderError::InvalidOptions("scene exceeded max_frames"));
+                }
+                let job = segment.job(frame).map_err(|_| {
+                    RenderError::InvalidOptions("pure camera segment lost its nominal sample")
+                })?;
+                self.inner
+                    .pipeline
+                    .as_mut()
+                    .ok_or(RenderError::InvalidOptions(
+                        "camera frame pipeline was already finalized",
+                    ))?
+                    .capture_pure_camera_rig(
+                        job,
+                        self.inner.next_sequence,
+                        self.rig,
+                        self.base.clone(),
+                    )?;
+                self.inner.next_sequence += 1;
+            }
+            Ok(())
+        })();
+        result.map_err(|error: RenderError| {
+            let message = error.to_string();
+            self.inner.failure = Some(error);
+            IntegrationError::new("native-camera", message)
+        })
     }
 
     fn capture(&mut self, _: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {

@@ -561,3 +561,174 @@ fn camera_animation_gif_and_y4m_are_window_independent() {
         }
     }
 }
+
+/// Observe owner-side interpolation without changing the native mechanism
+/// that frame workers reconstruct. The counter never enters a worker job.
+struct CountedCameraTransform {
+    inner: Transform,
+    samples: Rc<Cell<usize>>,
+}
+
+impl Animation for CountedCameraTransform {
+    fn state(&self) -> &fmn_anim::AnimState {
+        self.inner.state()
+    }
+
+    fn state_mut(&mut self) -> &mut fmn_anim::AnimState {
+        self.inner.state_mut()
+    }
+
+    fn preflight_mobjects(&self) -> Vec<Mob> {
+        self.inner.preflight_mobjects()
+    }
+
+    fn all_mobjects(&self) -> Vec<Mob> {
+        self.inner.all_mobjects()
+    }
+
+    fn begin(&mut self, stage: &mut fmn_mobject::Stage) -> Result<(), fmn_anim::AnimError> {
+        self.inner.begin(stage)
+    }
+
+    fn interpolate(&mut self, stage: &mut fmn_mobject::Stage, alpha: f64) {
+        self.samples.set(self.samples.get() + 1);
+        self.inner.interpolate(stage, alpha);
+    }
+
+    fn interpolate_submobject(&mut self, stage: &mut fmn_mobject::Stage, mobs: &[Mob], alpha: f64) {
+        self.inner.interpolate_submobject(stage, mobs, alpha);
+    }
+
+    fn finish(&mut self, stage: &mut fmn_mobject::Stage) {
+        self.inner.finish(stage);
+    }
+
+    fn abort(&mut self, stage: &mut fmn_mobject::Stage) {
+        self.inner.abort(stage);
+    }
+
+    fn effect_signature(&self) -> fmn_anim::AnimationSignature {
+        self.inner.effect_signature()
+    }
+
+    fn freeze_interpolation(&self) -> Option<fmn_anim::pure_frame::FrozenAnimation> {
+        self.inner.freeze_interpolation()
+    }
+}
+
+#[test]
+fn pure_camera_programs_leave_only_the_final_sample_on_the_scene_owner() {
+    struct Program {
+        rig: CameraRig,
+        target: CameraConfig,
+        samples: Rc<Cell<usize>>,
+    }
+    impl SceneConstruct for Program {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            populate(stage.scene_mut())?;
+            let inner = self.rig.animate_to(stage.scene_mut(), &self.target)?;
+            stage.play_prepared_with(
+                vec![Box::new(CountedCameraTransform {
+                    inner,
+                    samples: Rc::clone(&self.samples),
+                })],
+                PlayOverrides {
+                    run_time_frames: Some(4),
+                    rate_func: Some(RateFunc::linear()),
+                    ..PlayOverrides::default()
+                },
+            )?;
+            stage.wait_frames(2)?;
+            Ok(())
+        }
+    }
+
+    let mut expected = None;
+    for threads in [1, 4, 16] {
+        for stateful in [false, true] {
+            let fs = Arc::new(VirtualFs::new());
+            let samples = Rc::new(Cell::new(0));
+            let mut options = options("/camera-program", 3);
+            options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+            let report = render_camera_with_fs(
+                |scene, base| {
+                    let rig = CameraRig::new(scene, base)?;
+                    if stateful {
+                        // A real owner-thread updater must conservatively
+                        // retain every frame boundary, even when it does no
+                        // geometric work. Its frame results are the oracle.
+                        scene.stage_mut().add_dt_updater(
+                            rig.light()[0],
+                            |_, _, _| {},
+                            false,
+                        )?;
+                    }
+                    Ok((
+                        Program {
+                            rig,
+                            target: target(base),
+                            samples: Rc::clone(&samples),
+                        },
+                        rig,
+                    ))
+                },
+                options,
+                fs.clone(),
+            )
+            .unwrap();
+            assert_eq!(samples.get(), if stateful { 4 } else { 1 });
+            assert_eq!(report.scene.time.frames(), 6);
+            assert_eq!(report.artifact.frame_count, 6);
+            let stats = report.frame_pipeline.unwrap();
+            assert_eq!((stats.submitted, stats.emitted, stats.outstanding_slots), (6, 6, 0));
+            let got = images(&fs, "/camera-program", 6);
+            assert_ne!(got[0], got[3], "camera/light interpolation must stay visible");
+            assert_eq!(got[3], got[4]);
+            assert_eq!(got[4], got[5]);
+            if let Some(expected) = &expected {
+                assert_eq!(&got, expected, "stateful={stateful}, threads={threads}");
+            } else {
+                expected = Some(got);
+            }
+        }
+    }
+}
+
+#[test]
+fn invalid_intermediate_pure_camera_pose_never_publishes_an_artifact() {
+    struct InvalidZoom {
+        rig: CameraRig,
+    }
+    impl SceneConstruct for InvalidZoom {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            populate(stage.scene_mut())?;
+            let width = self.rig.width();
+            let animation = width
+                .animate()
+                .set_anim_args(AnimateArgs {
+                    run_time_frames: Some(2),
+                    rate_func: Some(fmn_core::rate::linear),
+                    ..AnimateArgs::default()
+                })?
+                .set_value(-stage.tracker_value(width).unwrap())?;
+            stage.play(animation)?;
+            Ok(())
+        }
+    }
+    let fs = Arc::new(VirtualFs::new());
+    let error = render_camera_with_fs(
+        |scene, base| {
+            let rig = CameraRig::new(scene, base)?;
+            Ok((InvalidZoom { rig }, rig))
+        },
+        options("/invalid-pure-camera", 4),
+        fs.clone(),
+    )
+    .unwrap_err();
+    assert!(
+        matches!(&error, RenderError::Pipeline(_)),
+        "the worker must retain its invalid-rig failure: {error:?}",
+    );
+    assert!(!fs.exists(Path::new("/invalid-pure-camera")));
+    render_camera_with_fs(factory, options("/invalid-pure-camera", 4), fs).unwrap();
+}

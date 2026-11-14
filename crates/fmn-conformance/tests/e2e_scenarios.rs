@@ -14007,6 +14007,114 @@ fn native_method_override_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         .with_counter("method_override_thread_counts", 3))
 }
 
+/// Camera and geometry share each reconstructed frame, including a pure wait
+/// after motion. An owner-thread updater supplies an independent serial route.
+fn native_pure_camera_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::rendering::{CameraConfig, render_camera_with_fs};
+    use fmn_scene::CameraRig;
+
+    struct CameraScene {
+        rig: CameraRig,
+        target: CameraConfig,
+    }
+    impl fmn::SceneConstruct for CameraScene {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.add(fmn::prelude::Cube::new(1.2).color(BLUE_C))?;
+            let circle = stage.add(Circle::new().radius(0.25).color(WHITE))?;
+            stage.set_fill(circle, Some(WHITE), Some(1.0), None, true);
+            stage.shift(circle, [-1.5, 0.0, 0.0]);
+            let animation = self.rig.animate_to(stage.scene_mut(), &self.target)?;
+            stage.play_prepared_with(
+                vec![Box::new(animation)],
+                PlayOverrides {
+                    run_time_frames: Some(4),
+                    rate_func: Some(RateFunc::linear()),
+                    ..PlayOverrides::default()
+                },
+            )?;
+            stage.wait_frames(2)?;
+            Ok(())
+        }
+    }
+
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut rendered_frames = 0;
+    for threads in [1, 4, 16] {
+        for stateful in [false, true] {
+            let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+            let mut options = fmn::RenderOptions::new("/pure-camera")
+                .map_err(|error| fail(format!("pure camera options: {error}")))?;
+            options.config.camera.resolution = (48, 32);
+            options.config.camera.fps = FPS;
+            options.config.sizes.frame_height = 4.0;
+            options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+            options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+            options.frames_in_flight = 3;
+            let report = render_camera_with_fs(
+                |scene, base| {
+                    let rig = CameraRig::new(scene, base)?;
+                    if stateful {
+                        scene.stage_mut().add_dt_updater(rig.light()[0], |_, _, _| {}, false)?;
+                    }
+                    let mut target = base.clone();
+                    target.frame.set_euler_angles(Some(0.6), Some(0.8), None)?;
+                    target.frame.set_center([0.2, -0.1, 0.0])?;
+                    target.frame.set_width(base.frame.width() * 0.85)?;
+                    target.frame.set_field_of_view(0.9)?;
+                    target.light_source_position = [5.0, 4.0, 8.0];
+                    Ok((CameraScene { rig, target }, rig))
+                },
+                options,
+                fs.clone(),
+            )
+            .map_err(|error| fail(format!("pure camera render: {error}")))?;
+            let pipeline = report
+                .frame_pipeline
+                .as_ref()
+                .ok_or_else(|| fail("pure camera omitted its frame pipeline"))?;
+            if report.scene.time.frames() != 6
+                || report.artifact.frame_count != 6
+                || pipeline.submitted != 6
+                || pipeline.emitted != 6
+                || pipeline.outstanding_slots != 0
+            {
+                return Err(fail("pure camera changed timing or publication"));
+            }
+            let mut frames = Vec::new();
+            for frame in 0..6 {
+                frames.push(
+                    fs.read(&PathBuf::from("/pure-camera").join(format!("frame_{frame:06}.png")))
+                        .map_err(|error| fail(format!("pure camera PNG: {error}")))?,
+                );
+            }
+            if frames[0] == frames[3] || frames[3] != frames[4] || frames[4] != frames[5] {
+                return Err(fail("camera motion or final-pose wait was lost"));
+            }
+            if let Some(expected) = &baseline {
+                if &frames != expected {
+                    return Err(fail(format!(
+                        "camera frames differ at threads={threads}, stateful={stateful}"
+                    )));
+                }
+            } else {
+                baseline = Some(frames);
+            }
+            rendered_frames += report.artifact.frame_count;
+        }
+    }
+    let frames = baseline.ok_or_else(|| fail("no camera frames rendered"))?;
+    ctx.event(
+        LogEvent::new("e2e.native.pure_camera")
+            .field("rendered_frames", rendered_frames)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("pure-camera-first.png", frames[0].clone())
+        .with_artifact("pure-camera-last.png", frames[5].clone())
+        .with_counter("pure_camera_frames", rendered_frames)
+        .with_counter("pure_camera_thread_counts", 3))
+}
+
 /// Graph authoring through the public native facade, including layout motion,
 /// ordered traversal and weighted directed flow (including a self-loop), at
 /// three worker counts.
@@ -21039,6 +21147,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     );
     specs.push(
         spec(
+            "lifecycle.native_pure_camera.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(native_pure_camera_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("pure_camera_frames", 36),
+                counter_eq("pure_camera_thread_counts", 3),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.native.pure_camera",
+                vec![
+                    FieldPred::u64_eq("rendered_frames", 36),
+                    FieldPred::u64_eq("thread_counts", 3),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "lifecycle.graph_animations.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -22642,6 +22771,16 @@ fn graph_animations_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.graph_animations.v1")
         .expect("native graph animation lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_pure_camera_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.native_pure_camera.v1")
+        .expect("native pure camera scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
