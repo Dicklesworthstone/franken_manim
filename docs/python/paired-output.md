@@ -101,8 +101,11 @@ fmn-python scenes.py Example --format y4m --subdivide --save-last-frame
 Both spellings select the same boolean option. Native option parsing still owns
 resolution, fps, codec parameters and output directories. This switch never
 consumes another flag's value, and duplicate aliases are rejected. It cannot be
-combined with `-s`/`--skip_animations`, still-only formats, certified output, or
-checkpoint/resume. Incompatible modes are refused before importing scene code.
+combined with `-s`/`--skip_animations`, still-only formats, or certified output.
+Batch checkpoint/resume verifies both outputs before skipping a completed
+scene, including every clip when subdivided. This works for sequential and
+process batches; incomplete pairs retain their no-clobber protection.
+Incompatible modes are refused before importing scene code.
 
 A single file output `Example.mp4` is paired with `Example.png`. Directory
 outputs use an adjacent image: `Example/frames` with `Example/frames.png`, or

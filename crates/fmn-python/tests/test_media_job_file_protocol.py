@@ -421,9 +421,9 @@ class MediaJobFileTests(unittest.TestCase):
         self.assertEqual(options["animation_range"], (2, 5))
         self.assertEqual([job.name for job in options["scene_names"]], ["seed7", "seed11"])
         self.assertEqual(options["scene_names"][1].scene_kwargs, {"value": 11})
-        # Parallel collections now support recovery; the sequential refusal
-        # remains, and dedicated CLI recovery tests exercise the positive path.
-        self.assertEqual(self.invoke("--subdivide", "--checkpoint", str(self.checkpoint), "--resume-key", "v1",
+        # Whole-scene recovery works on both routes. Prefix replay inside each
+        # unfinished scene still belongs to the process-batch owner.
+        self.assertEqual(self.invoke("--subdivide", "--clip-checkpoint-dir", str(self.root / "clip-state"), "--resume-key", "v1",
                                      workers=False, job_file=False, names=("Lesson", "Other"), format="mp4"), 2)
         self.assertEqual(len(self.discoveries), 1)
 

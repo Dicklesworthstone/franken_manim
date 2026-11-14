@@ -275,9 +275,9 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.assertEqual(options["scene_names"], ["Second", "First"])
         self.assertFalse(self.loads)
 
-    def test_parallel_pair_and_subdivided_collection_recovery_are_admitted(self):
-        # 305adc54: --workers --subdivide --checkpoint is the shipping whole-collection recovery,
-        # final PNGs included. Only the sequential form still refuses, before discovery.
+    def test_parallel_and_sequential_subdivided_collection_recovery_are_admitted(self):
+        # Both front doors delegate complete collection recovery, final PNGs
+        # included, to the same journal and receipt verifier.
         flags = ("--write_all", "--workers=2", "--format", "gif", "--save-last-frame",
                  "--checkpoint", str(self.root / "pair.json"), "--resume-key", "inputs", "--resume")
         self.assertEqual(self.run_cli(*flags), 0)
@@ -292,8 +292,13 @@ class ConsoleParallelDispatchTests(unittest.TestCase):
         self.calls.clear()
         self.discovery_calls.clear()
         sequential = [flag for flag in flags if flag != "--workers=2"]
-        self.assertEqual(self.run_cli(*sequential, "--subdivide"), 2)
-        self.assertFalse(self.calls)
+        self.assertEqual(self.run_cli(*sequential, "--subdivide"), 0)
+        mode, _, options = self.calls[0]
+        self.assertEqual(mode, "sequential")
+        self.assertEqual((options["subdivide"], options["save_last_frame"], options["resume"]),
+                         (True, True, True))
+        self.assertEqual(Path(options["checkpoint"]), self.root / "pair.json")
+        self.assertEqual(len(self.loads), 1)
         self.assertFalse(self.discovery_calls)
 
     def test_single_scene_and_invalid_workers_refuse_before_source_load(self):

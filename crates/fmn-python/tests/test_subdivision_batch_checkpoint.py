@@ -17,11 +17,11 @@ import unittest
 from unittest.mock import patch
 
 from fmn_python.batch_checkpoint import BatchCheckpoint
-from fmn_python.batch_rendering import SceneRenderOutcome
+from fmn_python.batch_rendering import RenderJob, SceneRenderOutcome
 from fmn_python.paired_output import PairedRenderResult, companion_png_path
 from fmn_python.rendering import RenderResult
 from fmn_python.subdivision import RenderSegment, SubdividedRenderResult
-from fmn_python import parallel_batch
+from fmn_python import batch_rendering, parallel_batch
 from fmn_python.subdivision_checkpoint import collection_inventory, collection_receipt
 
 
@@ -308,6 +308,169 @@ class CollectionJournalTests(unittest.TestCase):
         saved = json.loads(self.path.read_text())
         self.assertIsInstance(saved["artifacts"]["A"], list)
         self.assertEqual(saved["version"], 2)
+
+
+class SequentialCollectionRecoveryTests(unittest.TestCase):
+    """Real ordered batch ownership with explicitly non-media publications."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="fmn-sequential-collections-"))
+        self.output, self.journal = self.root / "output", self.root / "progress.json"
+        self.behavior, self.calls = {}, []
+        owner = self
+
+        class Scene:
+            def __init__(self, name):
+                owner.calls.append(name)
+                self.name = name
+                if owner.behavior.get(name) == "fail":
+                    raise RuntimeError("fixture constructor failed before output")
+                if owner.behavior.get(name) == "interrupt":
+                    raise KeyboardInterrupt("fixture interrupted before output")
+
+        self.Scene = Scene
+        self.native = SimpleNamespace(Scene=Scene, _portal_prepare_recording_scene=lambda: None,
+                                      _portal_begin_audio_clip=lambda: None,
+                                      _CameraCapture=SimpleNamespace(prepare_png=lambda: None))
+
+    def publish(self, scene, destination, *, format, scene_kwargs=None,
+                still_destination=None, **_options):
+        scene = scene(**scene_kwargs)
+        mode = self.behavior.get(scene.name, "ok")
+        result = collection(destination, format, paired=still_destination is not None,
+                            empty=mode == "empty", complete=mode != "partial")
+        if mode == "partial":
+            error = RuntimeError("fixture failed after clip publication")
+            if still_destination is None:
+                error.render_subdivision_result = result
+            else:
+                error.render_pair_result = result
+            raise error
+        return result
+
+    def run_batch(self, **options):
+        settings = dict(format="y4m", resolution=(64, 36), fps=8, threads=1, subdivide=True,
+                        max_segments=8, animation_range=(2, 5), checkpoint=self.journal,
+                        resume_key="inputs-v1", continue_on_error=True)
+        settings.update(options)
+        jobs = [RenderJob(name, self.Scene, {"name": name}) for name in ("A", "B", "C")]
+        with patch.dict(sys.modules, manimlib=self.native), patch.object(
+                batch_rendering, "render_subdivided_scene", self.publish), patch.object(
+                batch_rendering, "render_scene_with_still", self.publish):
+            return batch_rendering.render_scenes(jobs, self.output, **settings)
+
+    def test_retry_only_failed_scenes_and_keep_receipts_in_input_order(self):
+        self.behavior["B"] = "fail"
+        first = self.run_batch()
+        self.assertEqual([row.status for row in first.outcomes], ["succeeded", "failed", "succeeded"])
+        saved = {segment.render.destination: (segment.render.destination.read_bytes(),
+                                              segment.render.destination.stat().st_mtime_ns)
+                 for row in (first.outcomes[0], first.outcomes[2]) for segment in row.result.segments}
+        self.behavior.clear()
+        observations = []
+        second = self.run_batch(resume=True, on_result=lambda row: observations.append(row.name))
+        self.assertTrue(second.ok)
+        self.assertEqual(observations, ["A", "B", "C"])
+        self.assertEqual(self.calls, ["A", "B", "C", "B"])
+        for index in (0, 2):
+            self.assertEqual(second.outcomes[index].as_dict(), first.outcomes[index].as_dict())
+        for path, expected in saved.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected)
+
+    def test_all_formats_empty_collections_and_final_images_round_trip(self):
+        self.behavior["B"] = "empty"
+        for format in ("gif", "y4m", "wav", "mp4", "mov", "png_sequence"):
+            for paired in (False, True):
+                with self.subTest(format=format, paired=paired):
+                    self.output = self.root / f"{format}-{paired}"
+                    self.journal = self.root / f"{format}-{paired}.json"
+                    first = self.run_batch(format=format, save_last_frame=paired)
+                    calls = list(self.calls)
+                    second = self.run_batch(format=format, save_last_frame=paired, resume=True)
+                    self.assertEqual(second.as_dict(), first.as_dict())
+                    self.assertEqual(self.calls, calls)
+                    empty = second.outcomes[1].result
+                    if paired:
+                        self.assertTrue(empty.still_destination.is_file())
+                        empty = empty.primary
+                    self.assertEqual(empty.segments, ())
+
+    def test_every_saved_clip_and_final_image_is_verified_before_retry(self):
+        self.behavior["B"] = "fail"
+        first = self.run_batch(save_last_frame=True)
+        pair = first.outcomes[2].result
+        paths = [segment.render.destination for segment in pair.primary.segments] + [pair.still_destination]
+        self.behavior.clear()
+        for path in paths:
+            with self.subTest(path=path):
+                original = path.read_bytes()
+                path.write_bytes(b"changed checkpoint fixture")
+                with self.assertRaises(ValueError):
+                    self.run_batch(save_last_frame=True, resume=True)
+                self.assertEqual(self.calls, ["A", "B", "C"])
+                path.write_bytes(original)
+
+    def test_partial_collections_and_pairs_remain_no_clobber_on_retry(self):
+        for paired in (False, True):
+            with self.subTest(paired=paired):
+                self.output = self.root / f"partial-{paired}"
+                self.journal = self.root / f"partial-{paired}.json"
+                self.behavior["B"] = "partial"
+                first = self.run_batch(save_last_frame=paired)
+                partial = first.outcomes[1].result
+                self.assertFalse(partial.completed)
+                primary = partial.primary if paired else partial
+                path = primary.segments[0].render.destination
+                expected = path.read_bytes()
+                calls = list(self.calls)
+                self.behavior.clear()
+                with self.assertRaises(FileExistsError):
+                    self.run_batch(save_last_frame=paired, resume=True)
+                self.assertEqual(self.calls, calls)
+                self.assertEqual(path.read_bytes(), expected)
+
+    def test_journal_binds_collection_budget_range_format_and_constructor_inputs(self):
+        self.behavior["B"] = "fail"
+        self.run_batch()
+        for changes in ({"max_segments": 9}, {"animation_range": (2, 6)}, {"fps": 9},
+                        {"format": "gif"}, {"resolution": (80, 45)}, {"save_last_frame": True}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, "plan or render options"):
+                self.run_batch(resume=True, **changes)
+        self.assertEqual(self.calls, ["A", "B", "C"])
+        saved = json.loads(self.journal.read_text())
+        self.assertIs(saved["plan"]["options"]["subdivide"], True)
+        self.assertEqual(saved["plan"]["options"]["max_segments"], 8)
+        self.assertEqual(saved["plan"]["jobs"][1]["scene_kwargs"], {"name": "B"})
+
+    def test_observer_failure_journals_success_before_the_next_constructor(self):
+        def observer(row):
+            document = json.loads(self.journal.read_text())
+            self.assertEqual(document["outcomes"][0]["result"], row.result.as_dict())
+            raise RuntimeError("observer stopped after saved publication")
+
+        with self.assertRaisesRegex(RuntimeError, "observer stopped") as caught:
+            self.run_batch(on_result=observer)
+        self.assertEqual([row.status for row in caught.exception.render_batch_result.outcomes],
+                         ["succeeded", "not_run", "not_run"])
+        resumed = self.run_batch(resume=True)
+        self.assertTrue(resumed.ok)
+        self.assertEqual(self.calls, ["A", "B", "C"])
+
+    def test_interrupt_journals_completed_prefix_without_claiming_later_success(self):
+        self.behavior["B"] = "interrupt"
+        with self.assertRaises(KeyboardInterrupt) as caught:
+            self.run_batch()
+        self.assertEqual([row.status for row in caught.exception.render_batch_result.outcomes],
+                         ["succeeded", "cancelled", "not_run"])
+        self.behavior.clear()
+        self.assertTrue(self.run_batch(resume=True).ok)
+        self.assertEqual(self.calls, ["A", "B", "B", "C"])
+
+    def test_journal_must_remain_outside_the_collection_and_final_png(self):
+        for path in (self.output / "A_2_5/clips/state.json", self.output / "A_2_5/clips.png"):
+            with self.subTest(path=path), self.assertRaisesRegex(ValueError, "outside published artifacts"):
+                self.run_batch(checkpoint=path, save_last_frame=True)
+        self.assertEqual(self.calls, [])
 
 
 class ParallelCollectionRecoveryTests(unittest.TestCase):

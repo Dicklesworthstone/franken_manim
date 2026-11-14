@@ -333,8 +333,6 @@ def try_render_cli(native: Any, arguments: list[str]) -> int | None:
             validate_paired_mode(native, options["format"],
                                 reproducible=bool(options.get("reproducible")), checkpoint=recovery.get("checkpoint"))
         if subdivide:
-            if recovery and not parallel:
-                raise ValueError("subdivided batch checkpoint recovery requires --workers")
             if still:
                 raise ValueError("--subdivide cannot be combined with --skip_animations")
             validate_subdivided_mode(native, options["format"],

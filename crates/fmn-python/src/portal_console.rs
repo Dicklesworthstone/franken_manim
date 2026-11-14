@@ -101,7 +101,8 @@ pub fn run_portal_gauntlet_reference_flags() -> Result<u64, String> {
     })
 }
 
-/// Exercise portal parallel-batch CLI option parsing and multi-scene checkpoint resume.
+/// Exercise batch CLI options, ordinary checkpoint resume, and sequential
+/// subdivided collections with native clips, final PNGs and integrity refusal.
 ///
 /// # Errors
 /// Returns the actual Python/native acceptance failure.
@@ -122,11 +123,12 @@ pub fn run_portal_gauntlet_parallel_batch_checkpoint(
             .map_err(|error| error.to_string())?;
         let script = r#"
 import sys
+import hashlib
 from pathlib import Path
 if _FMN_REPO_PYTHON not in sys.path:
     sys.path.insert(0, _FMN_REPO_PYTHON)
 import manimlib
-from fmn_python import render_scenes
+from fmn_python import RenderJob, render_scenes
 from fmn_python.parallel_cli_options import take_parallel_options
 from fmn_python.checkpoint_cli import take_checkpoint_options
 
@@ -168,7 +170,79 @@ def _run_parallel_batch_checkpoint_gauntlet():
     calls.clear()
     resumed = render_scenes(jobs, root / "output", resume=True, **opts)
     assert resumed.ok and calls == []
-    return (len(initial.outcomes), len(calls))
+    assert resumed.as_dict() == initial.as_dict()
+    ordinary_checks = len(initial.outcomes)
+
+    collection_calls = []
+    blocked = [True]
+    class Motion(manimlib.Scene):
+        def __init__(self, label, **kwargs):
+            collection_calls.append(label)
+            if label == "second" and blocked[0]:
+                raise RuntimeError("transient constructor failure")
+            super().__init__(**kwargs)
+        def construct(self):
+            square = manimlib.Square(side_length=1, fill_opacity=1)
+            self.add(square)
+            self.wait(0.125)
+            self.play(square.animate.shift(manimlib.RIGHT), run_time=0.25)
+            self.wait(0.125)
+
+    jobs = [RenderJob(name, Motion, {"label": name}) for name in ("first", "second")]
+    opts = dict(format="y4m", subdivide=True, save_last_frame=True,
+                resolution=(64, 36), fps=8, threads=1, continue_on_error=True,
+                checkpoint=root / "collections.json", resume_key="collections-v1")
+    initial = render_scenes(jobs, root / "collections", **opts)
+    assert [row.status for row in initial.outcomes] == ["succeeded", "failed"]
+    assert collection_calls == ["first", "second"]
+
+    def snapshot_pair(pair):
+        assert pair.completed and pair.primary.completed
+        saved = {}
+        for receipt in [segment.render for segment in pair.primary.segments] + [pair.still]:
+            path = receipt.destination
+            data = path.read_bytes()
+            assert len(data) == receipt.bytes and hashlib.sha256(data).hexdigest() == receipt.digest
+            assert data.startswith(b"YUV4MPEG2 ") if receipt.format == "y4m" else data.startswith(b"\x89PNG\r\n\x1a\n")
+            saved[path] = (data, path.stat().st_mtime_ns)
+        return saved
+
+    saved = snapshot_pair(initial.outcomes[0].result)
+    blocked[0] = False
+    collection_calls.clear()
+    resumed = render_scenes(jobs, root / "collections", resume=True, **opts)
+    assert resumed.ok and collection_calls == ["second"]
+    assert resumed.outcomes[0].as_dict() == initial.outcomes[0].as_dict()
+    for path, snapshot in saved.items():
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == snapshot
+    for row in resumed.outcomes:
+        assert [segment.play_index for segment in row.result.primary.segments] == [0, 1, 2]
+        snapshot_pair(row.result)
+    collection_calls.clear()
+    complete = render_scenes(jobs, root / "collections", resume=True, **opts)
+    assert complete.as_dict() == resumed.as_dict() and collection_calls == []
+
+    empty_opts = dict(opts, checkpoint=root / "empty-collections.json", animation_range=(9, None))
+    empty = render_scenes(jobs, root / "empty-collections", **empty_opts)
+    assert empty.ok and collection_calls == ["first", "second"]
+    for row in empty.outcomes:
+        assert row.result.primary.segments == ()
+        snapshot_pair(row.result)
+    collection_calls.clear()
+    empty_resume = render_scenes(jobs, root / "empty-collections", resume=True, **empty_opts)
+    assert empty_resume.as_dict() == empty.as_dict() and collection_calls == []
+
+    damaged = initial.outcomes[0].result.primary.segments[0].render.destination
+    changed = saved[damaged][0] + b"changed saved native clip"
+    damaged.write_bytes(changed)
+    try:
+        render_scenes(jobs, root / "collections", resume=True, **opts)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("modified native clip was accepted for checkpoint reuse")
+    assert collection_calls == [] and damaged.read_bytes() == changed
+    return (ordinary_checks, len(complete.outcomes) + len(empty_resume.outcomes) + 1)
 "#;
         let source = std::ffi::CString::new(script).map_err(|error| error.to_string())?;
         py.run(source.as_c_str(), Some(globals), Some(globals))
@@ -220,7 +294,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let result = super::run_portal_gauntlet_parallel_batch_checkpoint(&root);
         let _ = std::fs::remove_dir_all(&root);
-        assert_eq!(result.unwrap(), (2, 0));
+        assert_eq!(result.unwrap(), (2, 5));
     }
 
     #[test]

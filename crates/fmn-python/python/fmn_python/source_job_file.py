@@ -23,7 +23,8 @@ one job. Formats: png, png_sequence, gif, y4m, wav, svg, mp4, mov and fmtl.
 Media jobs support existing range, encoding, subdivision and final-PNG options;
 FMTL jobs support camera/audio capture. Each mode keeps its existing restrictions.
 Constructor variants require standard mode, not --reproducible. Keep-going and
-checkpoint options compose; subdivided collections do not support recovery.
+checkpoint options compose, including completed subdivided collections and
+their optional final PNGs; every saved artifact is verified before reuse.
 Resume binds the normalized jobs, not the document's spelling or file path.
 """
 

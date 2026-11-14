@@ -70,8 +70,9 @@ PAIRED_HELP = """Animation plus final image:
       directory-name.png. Applies to one scene, named batches, and --write_all.
       --subdivide retains per-call clips and adds a single final image.
       Not combined with -s/--skip_animations, still-only formats, certified
-      output. Non-subdivided batches support checkpoint/resume: a completed
-      pair is reused only after both artifacts are hash-verified. Partial pairs
+      output. Batches support checkpoint/resume: a completed pair is reused
+      only after the primary (every clip when subdivided) and final PNG are
+      hash-verified. Partial pairs
       remain no-clobber failures. Each artifact is independently no-clobber.
       Late still-publication failure retains the primary output and reports
       an incomplete pair, never whole-scene success or destructive rollback.

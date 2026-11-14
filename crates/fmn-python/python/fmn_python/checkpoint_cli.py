@@ -15,11 +15,13 @@ scenes; only failed, cancelled and unattempted scenes render again. Progress is
 saved before observers run. A changed/missing output or an unrecorded existing
 output is an error, never permission to overwrite. Use a new output directory
 and checkpoint for a new input version. Keep the journal outside frame folders.
-With --save-last-frame, non-subdivided batches checkpoint the primary and final
-PNG together. Both must still match before a completed scene is skipped. Keep
+With --save-last-frame, batches checkpoint the primary and final PNG together.
+Both must still match before a completed scene is skipped. Keep
 the journal and its lock outside BOTH outputs. Paired and single-output plans
-are distinct; certification does not support recovery. With --workers,
---subdivide can recover completed whole-scene collections through this journal.
+are distinct; certification does not support recovery. --subdivide can recover
+completed whole-scene collections, with or without --workers: every clip and
+optional final PNG is verified before any unfinished scene starts. Partial
+collections remain no-clobber errors and require within-scene recovery instead.
 With --workers, the parent owns the same durable journal and verifies every
 completed artifact before launching pending jobs. Entry-source bytes and cwd
 must also match; worker count and timeout may change. Reused scene names appear

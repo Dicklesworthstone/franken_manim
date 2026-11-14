@@ -189,9 +189,9 @@ class SubdividedBatchTests(unittest.TestCase):
         self.assertEqual(self.calls, [])
         self.assertFalse((self.root / 'batch/first').exists())
 
-    def test_still_certification_checkpoint_and_budget_modes_fail_before_construction(self):
+    def test_still_certification_missing_recovery_key_and_budgets_fail_before_construction(self):
         for options in ({'format': 'png'}, {'format': 'svg'}, {'reproducible': True},
-                        {'checkpoint': self.root / 'checkpoint.json', 'resume_key': 'v1'},
+                        {'checkpoint': self.root / 'checkpoint.json'},
                         {'subdivide': 1}, {'max_segments': 0}, {'max_segments': True},
                         {'max_jobs': 1}):
             with self.subTest(options=options):

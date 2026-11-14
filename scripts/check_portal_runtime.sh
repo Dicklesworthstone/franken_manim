@@ -224,6 +224,7 @@ python3 crates/fmn-python/tests/test_process_batch.py
 python3 crates/fmn-python/tests/test_parallel_cli.py
 python3 crates/fmn-python/tests/test_parallel_checkpoint.py
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_parallel_batch_native.py
+FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_subdivision_batch_recovery_native.py
 # Native suites that judge the manimlib they would import skip under the discover below, whose
 # protocol suites put the source tree first; each runs here in a clean process (fm-5wq.12).
 FMN_TEST_NATIVE=1 python3 crates/fmn-python/tests/test_parallel_bundle_native.py

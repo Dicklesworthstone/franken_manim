@@ -43,11 +43,12 @@ class NativeSubdivisionRecoveryTests(unittest.TestCase):
         self.output = self.root / "output"
         self.checkpoint = self.root / "progress.json"
 
-    def command(self, *extra):
+    def command(self, *extra, workers=True):
         environment = dict(os.environ)
         environment.pop("PYTHONPATH", None)
         return subprocess.run([sys.executable, "-m", "fmn_python", str(self.source),
-            "First", "Second", "--workers", "2", "--subdivide", "--save-last-frame",
+            "First", "Second", *(["--workers", "2"] if workers else []),
+            "--subdivide", "--save-last-frame",
             "--format", "gif", "--resolution", "64x48", "--fps", "8", "--robot",
             "--video_dir", str(self.output), "--checkpoint", str(self.checkpoint),
             "--resume-key", "native-inputs-v1", "--keep-going", *extra],
@@ -84,6 +85,75 @@ class NativeSubdivisionRecoveryTests(unittest.TestCase):
         self.assertNotEqual(refused.returncode, 0, refused.stdout)
         self.assertEqual(len((self.root / "Second.calls").read_text().splitlines()), 2)
 
+    def test_sequential_cli_reuses_native_clips_and_still_without_reconstructing_success(self):
+        (self.root / "fail").touch()
+        first = self.command(workers=False)
+        self.assertEqual(first.returncode, 5, first.stderr + first.stdout)
+        report = json.loads(first.stdout)["batch"]
+        self.assertEqual(report["execution"], "sequential")
+        self.assertEqual([row["status"] for row in report["outcomes"]], ["succeeded", "failed"])
+        pair = report["outcomes"][0]["result"]
+        self.assertEqual([clip["play_index"] for clip in pair["primary"]["segments"]], [0, 1, 2])
+        samples = [clip["render"] for clip in pair["primary"]["segments"]] + [pair["still"]]
+        saved = {}
+        for receipt in samples:
+            path = Path(receipt["destination"])
+            raw = path.read_bytes()
+            self.assertEqual(hashlib.sha256(raw).hexdigest(), receipt["digest"])
+            self.assertEqual(len(raw), receipt["bytes"])
+            self.assertTrue(raw.startswith(b"GIF") if receipt["format"] == "gif"
+                            else raw.startswith(b"\x89PNG\r\n\x1a\n"))
+            saved[path] = (raw, path.stat().st_mtime_ns)
+        (self.root / "fail").rename(self.root / "repaired")
+        second = self.command("--resume", workers=False)
+        self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+        completed = json.loads(second.stdout)["batch"]
+        self.assertTrue(completed["ok"])
+        self.assertEqual(completed["outcomes"][0], report["outcomes"][0])
+        self.assertEqual((self.root / "First.calls").read_text().splitlines(), ["construct"])
+        self.assertEqual(len((self.root / "Second.calls").read_text().splitlines()), 2)
+        for path, expected in saved.items():
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected)
+        Path(pair["still_destination"]).write_bytes(b"changed final PNG")
+        refused = self.command("--resume", workers=False)
+        self.assertNotEqual(refused.returncode, 0, refused.stderr + refused.stdout)
+        self.assertEqual((self.root / "First.calls").read_text().splitlines(), ["construct"])
+        self.assertEqual(len((self.root / "Second.calls").read_text().splitlines()), 2)
+
+    def test_sequential_api_recovers_native_png_collections_and_empty_selections(self):
+        import manimlib
+        from fmn_python import render_scenes
+        from fmn_python.scene_loading import SceneSource
+
+        with SceneSource(self.source, manimlib.Scene) as source:
+            scenes = {name: source.scenes[name] for name in ("First", "Second")}
+            for selection in ((1, 3), (9, None)):
+                with self.subTest(selection=selection):
+                    destination = self.output / str(selection[0])
+                    options = dict(format="png_sequence", subdivide=True, save_last_frame=True,
+                                   resolution=(64, 48), fps=8, threads=1, animation_range=selection,
+                                   checkpoint=self.root / f"progress-{selection[0]}.json",
+                                   resume_key="native-inputs-v1")
+                    first = render_scenes(scenes, destination, **options)
+                    self.assertTrue(first.ok)
+                    for outcome in first.outcomes:
+                        segments = outcome.result.primary.segments
+                        self.assertEqual([segment.play_index for segment in segments],
+                                         [1, 2] if selection[0] == 1 else [])
+                        for segment in segments:
+                            root = segment.render.destination
+                            self.assertTrue((root / "FMN_COMPLETE").is_file())
+                            frames = sorted(root.glob("*.png"))
+                            self.assertEqual(len(frames), segment.render.frame_count)
+                            self.assertTrue(all(frame.read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
+                                                for frame in frames))
+                        self.assertTrue(outcome.result.still_destination.is_file())
+                    counts = {name: (self.root / (name + ".calls")).read_text()
+                              for name in scenes}
+                    resumed = render_scenes(scenes, destination, resume=True, **options)
+                    self.assertEqual(resumed.as_dict(), first.as_dict())
+                    self.assertEqual({name: (self.root / (name + ".calls")).read_text()
+                                      for name in scenes}, counts)
     def test_native_png_collections_and_still_resume_without_opening_workers(self):
         from unittest.mock import patch
         from fmn_python.parallel_batch import render_source_scenes

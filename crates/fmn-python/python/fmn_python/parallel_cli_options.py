@@ -38,7 +38,7 @@ optional final PNG before reusing a completed scene collection, including an
 empty selection. Incomplete collections retain their files but are not reused;
 retrying them still refuses no-clobber. This is whole-scene recovery, not the
 single-scene --clip-checkpoint prefix-replay mode. Sequential subdivided
-batches still refuse --checkpoint.
+batches support the same whole-scene recovery with their own checkpoint plans.
 --reproducible supports fresh png, png_sequence and wav outputs with a native
 manifest per scene. Each worker captures imports/reads through the guarded
 session and must match the parent's installed runtime. The aggregate remains

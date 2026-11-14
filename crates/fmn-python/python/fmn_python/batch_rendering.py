@@ -240,18 +240,21 @@ def render_scenes(
     through the same native per-call recording owner. max_segments is the
     completed-clip budget per scene. Successful outcomes carry collection
     receipts; failed/cancelled outcomes retain partial collection receipts in
-    result, without claiming whole-scene success. This mode does not accept
-    still-only output, reproducibility, or single-artifact checkpoint/resume. All
-    selection, name/collision and mode checks precede scene construction.
+    result, without claiming whole-scene success. With checkpoint/resume, every
+    clip in a completed collection is hash-verified before its scene is skipped.
+    Incomplete collections retain their files and are not adopted on retry.
+    This mode does not accept still-only output or reproducibility. All selection,
+    name/collision and mode checks precede scene construction.
 
     save_last_frame=True composes each primary with one prepared native PNG,
     including subdivided output. File primaries use stem.png; directories use
     adjacent directory-name.png. Both paths for every job are preflighted.
     Outcomes retain complete/partial paired receipts. With checkpoint/resume,
-    non-subdivided jobs bind and hash-verify BOTH outputs before a completed
-    scene is skipped. Incomplete pairs remain no-clobber failures, not reusable
-    successes. Single-artifact plans cannot be reused as paired plans. Neither
-    mode inherits certification from another output.
+    jobs bind and hash-verify BOTH outputs before a completed scene is skipped,
+    including every clip of a subdivided primary. Incomplete pairs remain
+    no-clobber failures, not reusable successes. Single-artifact plans cannot be
+    reused as paired or subdivided plans. Neither mode inherits certification
+    from another output.
 
     By default the first ordinary failure raises BatchRenderError with partial
     receipts and the original cause. continue_on_error returns a report with
@@ -388,7 +391,10 @@ def render_scenes(
                       or (threads is not None and threads > 96)):
         raise ValueError("subdivision requires at most 16777216 pixels and 1..96 threads")
     if subdivide:
-        validate_subdivided_mode(native, format, reproducible=reproducible, checkpoint=checkpoint)
+        # BatchCheckpoint owns whole-scene collection recovery and verifies
+        # every member through subdivision_checkpoint. The per-scene renderer
+        # still receives no checkpoint: it must never adopt a partial folder.
+        validate_subdivided_mode(native, format, reproducible=reproducible)
     if save_last_frame:
         validate_paired_mode(native, format, reproducible=reproducible, checkpoint=checkpoint)
     validate_batch_mode(native, format, reproducible, checkpoint)
@@ -417,6 +423,7 @@ def render_scenes(
                 "threads": threads, "animation_range": selection,
                 "output_options": _output_options,
                 **({"configuration": _configuration} if _configuration is not None else {}),
+                **({"subdivide": True, "max_segments": max_segments} if subdivide else {}),
                 **({"save_last_frame": True} if save_last_frame else {}),
                 **({"bundle_camera": bundle_camera, "bundle_limits": limits}
                    if format == "fmtl" else {}),
@@ -427,7 +434,18 @@ def render_scenes(
             completed = journal.completed
             for index, job in enumerate(jobs):
                 if job.name in completed:
-                    outcomes[index] = _restored_outcome(completed[job.name])
+                    if subdivide:
+                        from .subdivision_checkpoint import collection_receipt
+
+                        # Restore only the admitted plan's data. Empty selections
+                        # have no clip from which to infer a format; paired
+                        # collections likewise need the collection-aware reader.
+                        receipt = collection_receipt(completed[job.name]["result"],
+                                                     destinations[index], journal.plan["options"])
+                        outcomes[index] = SceneRenderOutcome(job.name, destinations[index],
+                                                             "succeeded", result=receipt)
+                    else:
+                        outcomes[index] = _restored_outcome(completed[job.name])
             _record_checkpoint(journal, outcomes)
         for index, (job, path) in enumerate(zip(jobs, destinations)):
             failure = None

@@ -21145,12 +21145,12 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             Invocation::new(python_parallel_batch_checkpoint_run),
             vec![
                 Assertion::ExitCode(0),
-                counter_eq("parallel_batch_checks", 2),
+                counter_eq("parallel_batch_checks", 7),
             ],
             vec![LogExpect::span_present(
                 "e2e.python.parallel_batch_checkpoint",
                 vec![
-                    FieldPred::u64_eq("checks", 2),
+                    FieldPred::u64_eq("checks", 7),
                     FieldPred::str_eq("clean", "true"),
                 ],
             )],

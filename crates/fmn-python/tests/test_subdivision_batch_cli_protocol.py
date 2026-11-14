@@ -108,9 +108,10 @@ class SubdivisionBatchCliTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), saved)
         self.assertEqual(len(self.attempts("Other")), 1)
 
-    def test_sequential_recovery_is_refused_before_loading_source(self):
+    def test_sequential_per_clip_recovery_is_refused_before_loading_source(self):
         host = self.host
-        self.assertEqual(self.invoke(workers=False, job_file=False, names=("Lesson", "Other")), 2)
+        self.assertEqual(self.invoke("--clip-checkpoint-dir", str(host.root / "clip-state"),
+                                     workers=False, job_file=False, names=("Lesson", "Other")), 2)
         self.assertIn("requires --workers", host.records[-1]["message"])
         host.assert_not_started()
 

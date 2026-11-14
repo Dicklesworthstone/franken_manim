@@ -57,9 +57,13 @@ The single-scene `render_subdivided_scene` function now attaches
 `render_subdivision_result` to the original execution exception when it owned
 a collection. The attribute contains receipts, not a live scene or session.
 
-Checkpoint/resume and certified-output requests are explicitly refused for
-subdivided batches. The existing checkpoint stores single-artifact receipts;
-it must not silently treat a partial directory as a verified scene output.
+`checkpoint=...`, `resume_key=...` and `resume=True` recover completed scenes
+through the existing batch journal. Every clip and optional final PNG must
+match its recorded inventory and hash before a scene is skipped; valid empty
+selections can also be reused. Incomplete collections remain no-clobber
+refusals. See [subdivided batch recovery](subdivided-batch-recovery.md) for API
+and console examples. Certified-output requests remain unsupported for
+subdivided batches.
 Ordinary `render_scenes` behavior is unchanged when `subdivide=False`.
 
 `crates/fmn-python/tests/subdivided_batch.py` exercises actual native frames,
@@ -79,8 +83,9 @@ fmn-python --robot lesson.py --write_all --keep-going --subdivide \
 
 Explicit names retain command-line order; write-all selects locally declared
 classes in sorted order. The output root may already exist, but every selected
-scene's `clips` directory must be new. All names and collection destinations
-are preflighted before any scene is constructed. Source-range selection applies
+scene's `clips` directory must be new or verified by the resumed batch journal.
+All names and collection destinations are preflighted before any scene is
+constructed. Source-range selection applies
 to every job. `--keep-going` cannot suppress Ctrl-C; its ordinary failures
 still produce a nonzero exit status.
 
