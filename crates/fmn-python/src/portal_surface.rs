@@ -6,7 +6,9 @@ use super::*;
 #[path = "portal_surface_init.rs"]
 mod initialization;
 #[cfg(feature = "gauntlet")]
-pub use initialization::run_portal_gauntlet_surface_lifecycle;
+pub use initialization::{
+    run_portal_gauntlet_point_cloud_uniforms, run_portal_gauntlet_surface_lifecycle,
+};
 
 fn grid(entry: &fmn_mobject::Entry) -> PyResult<Option<(usize, usize)>> {
     let RenderPrimitive::SurfaceGrid { resolution } = entry.render_primitive() else {

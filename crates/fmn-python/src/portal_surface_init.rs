@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "portal_point_cloud.rs"]
 mod point_cloud;
+#[cfg(feature = "gauntlet")]
+pub use point_cloud::run_portal_gauntlet_point_cloud_uniforms;
 
 /// Install a native candidate's geometry into the schema initialized by the
 /// authored class, or finalize that class's own point table. This is distinct

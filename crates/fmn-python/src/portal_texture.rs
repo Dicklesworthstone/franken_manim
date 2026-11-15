@@ -6,7 +6,10 @@ use fmn_mobject::RenderPrimitive;
 #[path = "portal_surface.rs"]
 mod surface;
 #[cfg(feature = "gauntlet")]
-pub use surface::{run_portal_gauntlet_surface_holes, run_portal_gauntlet_surface_lifecycle};
+pub use surface::{
+    run_portal_gauntlet_point_cloud_uniforms, run_portal_gauntlet_surface_holes,
+    run_portal_gauntlet_surface_lifecycle,
+};
 
 #[path = "portal_raster.rs"]
 pub(crate) mod raster;

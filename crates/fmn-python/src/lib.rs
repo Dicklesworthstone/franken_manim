@@ -42,8 +42,6 @@ pub use portal_network::run_portal_gauntlet_network_animations;
 #[cfg(feature = "gauntlet")]
 pub use portal_ode::run_portal_gauntlet_ode_solution;
 #[cfg(feature = "gauntlet")]
-pub use portal_point_cloud::run_portal_gauntlet_point_cloud_uniforms;
-#[cfg(feature = "gauntlet")]
 pub use portal_rates::run_portal_gauntlet_exact_rates;
 mod portal_playback;
 mod portal_readback;
@@ -63,8 +61,8 @@ mod portal_video;
 mod structural_parity;
 #[cfg(feature = "gauntlet")]
 pub use portal_texture::{
-    run_portal_gauntlet_surface_holes, run_portal_gauntlet_surface_lifecycle,
-    run_portal_gauntlet_textures,
+    run_portal_gauntlet_point_cloud_uniforms, run_portal_gauntlet_surface_holes,
+    run_portal_gauntlet_surface_lifecycle, run_portal_gauntlet_textures,
 };
 #[cfg(feature = "gauntlet")]
 pub use structural_parity::{

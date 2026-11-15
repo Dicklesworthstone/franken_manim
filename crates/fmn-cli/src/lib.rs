@@ -2923,7 +2923,7 @@ struct VideoArtifactReport {
 
 struct VideoAudioInput {
     path: PathBuf,
-    report: AudioDecodeReport,
+    report: Arc<AudioDecodeReport>,
 }
 
 impl VideoArtifactReport {
