@@ -22,8 +22,15 @@ use core::fmt;
 pub use fmn_core::AaPolicy;
 use fmn_hash::{Schema, SerialError, Writer};
 
-/// Canonical fully-resolved configuration document used by C4 provenance.
-pub const RESOLVED_CONFIG_SCHEMA: Schema = Schema::new(*b"FMNF", 1, 1, 0);
+/// Canonical effective configuration document used by C4 provenance.
+///
+/// Version 2 binds the public typed fields, including changes made after
+/// resolution, rather than their stale source values in [`Config::raw`]. Known
+/// fields have schema order and typed scalar encodings; unknown values retain
+/// their order and representation. This changes closure identity, not rendered
+/// pixels. The major bump makes a version-1 reader refuse the new meaning
+/// explicitly instead of interpreting it as the old source-document format.
+pub const RESOLVED_CONFIG_SCHEMA: Schema = Schema::new(*b"FMNF", 1, 2, 0);
 
 /// Default disk retention ceiling for the persistent typesetting namespace.
 pub const DEFAULT_TYPESET_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -462,10 +469,13 @@ impl Config {
         crate::generated::config_from_value(normalize_layer(root)?)
     }
 
-    /// Serialize the fully merged, closure-relevant document after all
-    /// precedence and CLI overlays. Map order is retained because open maps
-    /// such as directory aliases are observably ordered; scalar spellings
-    /// have already been resolved to their typed meaning. Operational
+    /// Serialize the effective, closure-relevant configuration after all
+    /// precedence, CLI overlays, and direct changes to public typed fields.
+    /// The schema-generated projection is authoritative for known settings;
+    /// [`Self::raw`] supplies only unknown keys. Known fields use schema order
+    /// and typed encodings, so equivalent numeric, tuple, optional, and alias
+    /// spellings have one identity. Open maps such as directory aliases and
+    /// unknown values retain their observable order. Operational
     /// settings are normalized, each to its own structural marker, because
     /// neither can change a certified byte:
     /// - `render.threads`: §16.7 proves scheduler width inert and explicitly
@@ -478,38 +488,191 @@ impl Config {
     ///   reused or recomputed, never its canonical geometry.
     ///
     /// Everything else, the typesetting inputs included (`tex.template`,
-    /// `text.font`), is serialized as resolved.
+    /// `text.font`), is serialized as consumed. This does not mutate the
+    /// configuration or its source document.
     ///
     /// # Errors
     /// Canonical document size/allocation failure.
     pub fn canonical_bytes(&self) -> Result<Vec<u8>, SerialError> {
         let mut writer = Writer::new(RESOLVED_CONFIG_SCHEMA);
-        put_config_value(&mut writer, &self.raw, ConfigLocation::Root);
+        crate::generated::put_canonical_config(&mut writer, self);
         writer.finish()
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum ConfigLocation {
-    Root,
-    Render,
-    Directories,
-    Cache,
-    Other,
+/// A typed leaf in the generated configuration projection. Its implementations
+/// encode types, never key paths: the API schema owns the field inventory.
+pub(crate) trait CanonicalConfigField {
+    fn put(&self, writer: &mut Writer);
+}
+
+/// A schema-owned section plus its unknown source keys. Known entries replace
+/// their raw counterparts entirely, including optional values and open maps;
+/// recursive YAML merging would incorrectly retain removed entries.
+pub(crate) struct CanonicalConfigSection<'a> {
+    pub(crate) section: Option<&'static str>,
+    pub(crate) raw: Option<&'a Value>,
+    pub(crate) fields: &'a [(&'static str, &'a dyn CanonicalConfigField)],
+}
+
+impl CanonicalConfigField for CanonicalConfigSection<'_> {
+    fn put(&self, writer: &mut Writer) {
+        let raw = match self.raw {
+            Some(Value::Map(entries)) => entries.as_slice(),
+            _ => &[],
+        };
+        let unknown = || {
+            raw.iter()
+                .filter(|(name, _)| !self.fields.iter().any(|(key, _)| *key == name))
+        };
+        writer.put_u8(5).put_u64(
+            u64::try_from(self.fields.len().saturating_add(unknown().count())).unwrap_or(u64::MAX),
+        );
+        for &(key, value) in self.fields {
+            writer.put_str(key);
+            if let Some(marker) = inert_marker(self.section, key) {
+                marker.put(writer);
+            } else {
+                value.put(writer);
+            }
+        }
+        for (key, value) in unknown() {
+            writer.put_str(key);
+            put_config_value(writer, value);
+        }
+    }
+}
+
+impl CanonicalConfigField for bool {
+    fn put(&self, writer: &mut Writer) {
+        writer.put_u8(1).put_bool(*self);
+    }
+}
+
+impl CanonicalConfigField for u32 {
+    fn put(&self, writer: &mut Writer) {
+        writer.put_u8(2).put_i64(i64::from(*self));
+    }
+}
+
+impl CanonicalConfigField for u64 {
+    fn put(&self, writer: &mut Writer) {
+        // The public seed spans all of u64, while YAML's signed scalar cannot.
+        // A separate tag preserves that range without a lossy cast or a string
+        // encoding that could collide with an unknown source value.
+        writer.put_u8(6).put_u64(*self);
+    }
+}
+
+impl CanonicalConfigField for f64 {
+    fn put(&self, writer: &mut Writer) {
+        writer.put_u8(3).put_f64(*self);
+    }
+}
+
+impl CanonicalConfigField for str {
+    fn put(&self, writer: &mut Writer) {
+        writer.put_u8(4).put_str(self);
+    }
+}
+
+impl CanonicalConfigField for String {
+    fn put(&self, writer: &mut Writer) {
+        self.as_str().put(writer);
+    }
+}
+
+impl<T: CanonicalConfigField> CanonicalConfigField for Option<T> {
+    fn put(&self, writer: &mut Writer) {
+        if let Some(value) = self {
+            value.put(writer);
+        } else {
+            writer.put_u8(0);
+        }
+    }
+}
+
+impl CanonicalConfigField for (u32, u32) {
+    fn put(&self, writer: &mut Writer) {
+        format!("({}, {})", self.0, self.1).put(writer);
+    }
+}
+
+impl CanonicalConfigField for (i64, i64) {
+    fn put(&self, writer: &mut Writer) {
+        format!("({}, {})", self.0, self.1).put(writer);
+    }
+}
+
+impl CanonicalConfigField for Vec<(String, String)> {
+    fn put(&self, writer: &mut Writer) {
+        writer
+            .put_u8(5)
+            .put_u64(u64::try_from(self.len()).unwrap_or(u64::MAX));
+        for (key, value) in self {
+            writer.put_str(key);
+            value.put(writer);
+        }
+    }
+}
+
+macro_rules! canonical_keywords {
+    ($ty:ty, {$($variant:path => $text:literal),+ $(,)?}) => {
+        impl CanonicalConfigField for $ty {
+            fn put(&self, writer: &mut Writer) {
+                match self {
+                    $($variant => $text),+
+                }.put(writer);
+            }
+        }
+    };
+}
+
+canonical_keywords!(LogLevel, {
+    LogLevel::Debug => "DEBUG",
+    LogLevel::Info => "INFO",
+    LogLevel::Warning => "WARNING",
+    LogLevel::Error => "ERROR",
+    LogLevel::Critical => "CRITICAL",
+});
+canonical_keywords!(DeterminismMode, {
+    DeterminismMode::Standard => "standard",
+    DeterminismMode::Certified => "certified",
+});
+canonical_keywords!(Engine, {
+    Engine::Cpu => "cpu",
+    Engine::Metal => "metal",
+    Engine::Cuda => "cuda",
+});
+canonical_keywords!(AaPolicy, {
+    AaPolicy::Adaptive => "adaptive",
+    AaPolicy::Ssaa2x => "ssaa2x",
+    AaPolicy::Ssaa4x => "ssaa4x",
+});
+
+impl CanonicalConfigField for ThreadPolicy {
+    fn put(&self, writer: &mut Writer) {
+        match self {
+            Self::Auto => "auto".put(writer),
+            Self::Fixed(count) => count.put(writer),
+        }
+    }
 }
 
 /// The structural marker that replaces an operational setting proven inert
 /// for certified output, or `None` for a closure-relevant key.
-fn inert_marker(location: ConfigLocation, key: &str) -> Option<&'static str> {
-    match (location, key) {
-        (ConfigLocation::Render, "threads") => Some("scheduler-width-proven-inert/v1"),
-        (ConfigLocation::Directories, "cache") => Some("cache-location-proven-inert/v1"),
-        (ConfigLocation::Cache, "max_bytes") => Some("cache-retention-proven-inert/v1"),
+fn inert_marker(section: Option<&str>, key: &str) -> Option<&'static str> {
+    match (section, key) {
+        (Some("render"), "threads") => Some("scheduler-width-proven-inert/v1"),
+        (Some("directories"), "cache") => Some("cache-location-proven-inert/v1"),
+        (Some("cache"), "max_bytes") => Some("cache-retention-proven-inert/v1"),
         _ => None,
     }
 }
 
-fn put_config_value(writer: &mut Writer, value: &Value, location: ConfigLocation) {
+/// Preserve an unknown source value exactly; an operational-looking name in an
+/// extension section is not one of the schema's proven-inert settings.
+fn put_config_value(writer: &mut Writer, value: &Value) {
     match value {
         Value::Null => {
             writer.put_u8(0);
@@ -532,17 +695,7 @@ fn put_config_value(writer: &mut Writer, value: &Value, location: ConfigLocation
                 .put_u64(u64::try_from(entries.len()).unwrap_or(u64::MAX));
             for (key, value) in entries {
                 writer.put_str(key);
-                if let Some(marker) = inert_marker(location, key) {
-                    writer.put_u8(4).put_str(marker);
-                } else {
-                    let child_location = match (location, key.as_str()) {
-                        (ConfigLocation::Root, "render") => ConfigLocation::Render,
-                        (ConfigLocation::Root, "directories") => ConfigLocation::Directories,
-                        (ConfigLocation::Root, "cache") => ConfigLocation::Cache,
-                        _ => ConfigLocation::Other,
-                    };
-                    put_config_value(writer, value, child_location);
-                }
+                put_config_value(writer, value);
             }
         }
     }

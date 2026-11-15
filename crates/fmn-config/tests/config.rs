@@ -41,6 +41,276 @@ fn cache_retention_uses_typed_precedence_without_changing_certified_identity() {
     }
 }
 
+#[test]
+fn native_configuration_changes_have_the_same_identity_as_resolved_values() {
+    type Change = fn(&mut Config);
+    let cases: &[(&str, Change)] = &[
+        ("camera:\n  background_color: '#ffffff'\n", |c| {
+            c.camera.background_color = "#ffffff".into();
+        }),
+        ("camera:\n  fps: 60\n", |c| c.camera.fps = 60),
+        ("camera:\n  resolution: '(640,480)'\n", |c| {
+            c.camera.resolution = (640, 480);
+        }),
+        ("camera:\n  background_opacity: 0.5\n", |c| {
+            c.camera.background_opacity = 0.5;
+        }),
+        ("directories:\n  base: project\n", |c| {
+            c.directories.base = "project".into();
+        }),
+        ("directories:\n  removed_mirror_prefix: source\n", |c| {
+            c.directories.removed_mirror_prefix = Some("source".into());
+        }),
+        ("window:\n  full_screen: true\n", |c| {
+            c.window.full_screen = true;
+        }),
+        ("window:\n  position: '(-300,20)'\n", |c| {
+            c.window.position = Some((-300, 20));
+        }),
+        ("window:\n  size: '(640,480)'\n", |c| {
+            c.window.size = Some((640, 480));
+        }),
+        ("file_writer:\n  video_crf: 19\n", |c| {
+            c.file_writer.video_crf = Some(19);
+        }),
+        ("file_writer:\n  video_preset: slow\n", |c| {
+            c.file_writer.video_preset = Some("slow".into());
+        }),
+        ("file_writer:\n  gamma: 1.25\n", |c| {
+            c.file_writer.gamma = 1.25;
+        }),
+        ("scene:\n  default_wait_time: 2\n", |c| {
+            c.scene.default_wait_time = 2.0;
+        }),
+        ("vmobject:\n  default_stroke_width: 3\n", |c| {
+            c.vmobject.default_stroke_width = 3.0;
+        }),
+        ("mobject:\n  default_mobject_color: '#58C4DD'\n", |c| {
+            c.mobject.default_mobject_color = "#58C4DD".into();
+        }),
+        ("style:\n  tex_pack: basic\n", |c| {
+            c.tex.template = "basic".into();
+        }),
+        ("style:\n  font: IBM Plex Sans\n", |c| {
+            c.text.font = "IBM Plex Sans".into();
+        }),
+        ("embed:\n  autoreload: true\n", |c| {
+            c.embed.autoreload = true;
+        }),
+        ("resolution_options:\n  4k: '(4000,2000)'\n", |c| {
+            c.resolution_options.uhd = (4000, 2000);
+        }),
+        ("sizes:\n  frame_height: 4\n", |c| {
+            c.sizes.frame_height = 4.0;
+        }),
+        ("key_bindings:\n  custom: F1\n", |c| {
+            c.key_bindings.push(("custom".into(), "F1".into()));
+        }),
+        ("colors:\n  custom: '#123456'\n", |c| {
+            c.colors.push(("custom".into(), "#123456".into()));
+        }),
+        ("log_level: DEBUG\n", |c| c.log_level = LogLevel::Debug),
+        ("universal_import_line: custom_import\n", |c| {
+            c.universal_import_line = "custom_import".into();
+        }),
+        ("ignore_manimlib_modules_on_reload: false\n", |c| {
+            c.ignore_manimlib_modules_on_reload = false;
+        }),
+        ("determinism:\n  mode: certified\n", |c| {
+            c.determinism.mode = DeterminismMode::Certified;
+        }),
+        ("determinism:\n  seed: 42\n", |c| c.determinism.seed = 42),
+        ("render:\n  engine: metal\n", |c| {
+            c.render.engine = Engine::Metal;
+        }),
+        ("render:\n  aa: ssaa4x\n", |c| {
+            c.render.aa = AaPolicy::Ssaa4x;
+        }),
+        ("output:\n  vcodec: libx265\n  pix_fmt: p010le\n", |c| {
+            c.file_writer.video_codec = "libx265".into();
+            c.file_writer.pixel_format = "p010le".into();
+        }),
+        ("directories:\n  output: frames\n", |c| {
+            c.directories
+                .subdirs
+                .iter_mut()
+                .find(|(key, _)| key == "output")
+                .unwrap()
+                .1 = "frames".into();
+        }),
+    ];
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    let original = defaults.canonical_bytes().unwrap();
+    for &(text, change) in cases {
+        let mut native = defaults.clone();
+        change(&mut native);
+        let resolved = Config::resolve(&[Layer { name: "same", text }], None)
+            .unwrap()
+            .config;
+        let actual = native.canonical_bytes().unwrap();
+        assert_ne!(actual, original, "setting did not enter C4: {text}");
+        assert_eq!(actual, resolved.canonical_bytes().unwrap(), "{text}");
+        assert_eq!(native.raw, defaults.raw, "serialization mutated raw input");
+    }
+}
+
+#[test]
+fn canonical_configuration_normalizes_known_values_but_preserves_extensions() {
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    let equivalent = Config::resolve(
+        &[Layer {
+            name: "different spellings",
+            text: "camera:\n  resolution: ' ( 1920 , 1080 ) '\n  background_opacity: 1\ntex:\n  font_size_for_unit_height: 144.0\nwindow:\n  position: null\n  size: null\nfile_writer:\n  video_crf: null\n",
+        }],
+        None,
+    )
+    .unwrap()
+    .config;
+    assert_eq!(
+        defaults.canonical_bytes().unwrap(),
+        equivalent.canonical_bytes().unwrap()
+    );
+
+    let extension = |text| {
+        Config::resolve(
+            &[Layer {
+                name: "extension",
+                text,
+            }],
+            None,
+        )
+        .unwrap()
+        .config
+        .canonical_bytes()
+        .unwrap()
+    };
+    for (a, b) in [
+        ("custom: 1\n", "custom: 1.0\n"),
+        ("camera:\n  custom: a\n", "camera:\n  custom: b\n"),
+        (
+            "custom:\n  render:\n    threads: 1\n",
+            "custom:\n  render:\n    threads: 16\n",
+        ),
+        (
+            "custom:\n  first: a\n  second: b\n",
+            "custom:\n  second: b\n  first: a\n",
+        ),
+    ] {
+        assert_ne!(extension(a), extension(b), "unknown input was dropped");
+    }
+}
+
+#[test]
+fn typed_removals_replace_stale_options_and_open_map_entries() {
+    let mut config = Config::resolve(
+        &[Layer {
+            name: "original",
+            text: "window:\n  position: '(100,200)'\n  size: '(300,400)'\nfile_writer:\n  video_crf: 20\n  video_preset: slow\ndirectories:\n  removed_mirror_prefix: old\n  subdirs:\n    custom: old\ncolors:\n  custom: '#abcdef'\nkey_bindings:\n  custom: F1\ncustom:\n  marker: keep\ncamera:\n  custom: keep\n",
+        }],
+        None,
+    )
+    .unwrap()
+    .config;
+    config.window.position = None;
+    config.window.size = None;
+    config.file_writer.video_crf = None;
+    config.file_writer.video_preset = None;
+    config.directories.removed_mirror_prefix = None;
+    config
+        .directories
+        .subdirs
+        .retain(|(key, _)| key != "custom");
+    config.colors.retain(|(key, _)| key != "custom");
+    config.key_bindings.retain(|(key, _)| key != "custom");
+    let expected = Config::resolve(
+        &[Layer {
+            name: "remaining extensions",
+            text: "custom:\n  marker: keep\ncamera:\n  custom: keep\n",
+        }],
+        None,
+    )
+    .unwrap()
+    .config;
+    assert_eq!(
+        config.canonical_bytes().unwrap(),
+        expected.canonical_bytes().unwrap()
+    );
+    assert_ne!(
+        config.canonical_bytes().unwrap(),
+        Config::resolve(&[], None)
+            .unwrap()
+            .config
+            .canonical_bytes()
+            .unwrap(),
+        "unknown root and section values must still enter C4"
+    );
+    config.directories.subdirs.swap(0, 1);
+    assert_ne!(
+        config.canonical_bytes().unwrap(),
+        expected.canonical_bytes().unwrap(),
+        "open-map ordering is observable"
+    );
+}
+
+#[test]
+fn native_inert_settings_and_stale_known_raw_values_do_not_change_identity() {
+    let defaults = Config::resolve(&[], None).unwrap().config;
+    let mut changed = defaults.clone();
+    changed.render.threads = ThreadPolicy::Fixed(16);
+    changed.directories.cache = "/another/cache".into();
+    changed.cache.max_bytes = u64::MAX;
+    // `raw` is a dynamic extension source, not a second authority for typed
+    // values. A host may retain only a partial source document after resolving.
+    changed.raw = overlay([("camera.fps", Value::Int(90))]);
+    assert_eq!(
+        defaults.canonical_bytes().unwrap(),
+        changed.canonical_bytes().unwrap()
+    );
+}
+
+#[test]
+fn native_seeds_keep_all_64_bits_in_canonical_identity() {
+    let mut config = Config::resolve(&[], None).unwrap().config;
+    let mut observed = Vec::new();
+    for seed in [0, 1, i64::MAX as u64, (i64::MAX as u64) + 1, u64::MAX] {
+        config.determinism.seed = seed;
+        let bytes = config.canonical_bytes().unwrap();
+        assert!(
+            !observed.contains(&bytes),
+            "seed {seed} collided with another typed seed"
+        );
+        observed.push(bytes);
+    }
+}
+
+#[test]
+fn typed_config_format_declares_a_breaking_identity_revision() {
+    use fmn_hash::{Limits, Reader, Schema, SerialError, UnknownPolicy};
+
+    let bytes = Config::resolve(&[], None)
+        .unwrap()
+        .config
+        .canonical_bytes()
+        .unwrap();
+    let reader = Reader::open(
+        &bytes,
+        fmn_config::config::RESOLVED_CONFIG_SCHEMA,
+        Limits::DEFAULT,
+        UnknownPolicy::Strict,
+    )
+    .unwrap();
+    assert_eq!(reader.version(), (2, 0));
+    assert!(matches!(
+        Reader::open(
+            &bytes,
+            Schema::new(*b"FMNF", 1, 1, 0),
+            Limits::DEFAULT,
+            UnknownPolicy::Lenient,
+        ),
+        Err(SerialError::MajorMismatch { reader: 1, doc: 2 })
+    ));
+}
+
 fn parse(src: &str) -> Value {
     let (value, warnings) = yaml::parse(src).expect("fixture parses");
     assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");

@@ -2556,8 +2556,8 @@ fn banner(comment: Comment, artifact: &str, commit: &str) -> String {
     }
 }
 
-/// Generate `crates/fmn-config/src/generated.rs`: the typed extraction of the
-/// config document, one `cx.<accessor>("<path>")?` per bound key.
+/// Generate `crates/fmn-config/src/generated.rs`: typed extraction and the
+/// effective-config canonical projection, both from the same bound keys.
 ///
 /// W1CONF hand-wrote this body; generating it means the config surface has
 /// exactly one definition (the schema) instead of two that can drift.
@@ -2566,7 +2566,7 @@ pub fn generate_config_rs(schema: &Schema) -> String {
     let mut out = String::new();
     out.push_str(&banner(
         Comment::PerLine("//!"),
-        "The typed config extraction (§16.2, fm-vn6).",
+        "Typed config extraction and canonical projection (§16.2, fm-vn6).",
         schema.reference_commit(),
     ));
     out.push_str(
@@ -2584,6 +2584,8 @@ pub fn generate_config_rs(schema: &Schema) -> String {
         .iter()
         .map(|b| b.struct_name.as_str())
         .collect();
+    structs.push("CanonicalConfigField");
+    structs.push("CanonicalConfigSection");
     structs.push("ConfigError");
     structs.push("Cx");
     structs.sort_unstable();
@@ -2650,6 +2652,76 @@ pub fn generate_config_rs(schema: &Schema) -> String {
          \x20   })\n\
          }\n",
     );
+    out.push_str(
+        "\n/// Serialize the effective typed fields and preserve unknown source keys.\n\
+         /// Field paths and ordering come from the same bindings as extraction.\n\
+         pub(crate) fn put_canonical_config(writer: &mut fmn_hash::Writer, config: &Config) {\n",
+    );
+    // Short borrowed names keep generated tuple entries below rustfmt's tuple
+    // width independently of the schema's Rust field-name lengths.
+    let mut sections: Vec<(&str, Vec<(usize, &Binding)>)> = Vec::new();
+    for (index, binding) in schema.bindings.iter().enumerate() {
+        let path = if binding.is_top_level() {
+            binding.field.clone()
+        } else {
+            format!("{}.{}", binding.outer_field(), binding.field)
+        };
+        let _ = writeln!(out, "    let field_{index} = &config.{path};");
+        if binding.is_top_level() {
+            continue;
+        }
+        let section = binding.outer_field();
+        if let Some((_, bindings)) = sections.iter_mut().find(|(name, _)| *name == section) {
+            bindings.push((index, binding));
+        } else {
+            sections.push((section, vec![(index, binding)]));
+        }
+    }
+    for (section, bindings) in &sections {
+        let _ = writeln!(out, "    let {section} = CanonicalConfigSection {{");
+        let _ = writeln!(out, "        section: Some(\"{section}\"),");
+        let _ = writeln!(out, "        raw: config.raw.get(\"{section}\"),");
+        let fields: Vec<String> = bindings
+            .iter()
+            .map(|(index, binding)| {
+                let key = binding
+                    .path
+                    .split_once('.')
+                    .map_or(binding.path.as_str(), |(_, key)| key);
+                format!("(\"{key}\", field_{index})")
+            })
+            .collect();
+        let inline = fields.join(", ");
+        // rustfmt keeps an array on one line when its bracketed contents
+        // fit its default 60-column array width.
+        if inline.len() + 2 <= 60 {
+            let _ = writeln!(out, "        fields: &[{inline}],");
+            out.push_str("    };\n");
+            continue;
+        }
+        out.push_str("        fields: &[\n");
+        for field in fields {
+            let _ = writeln!(out, "            {field},");
+        }
+        out.push_str("        ],\n    };\n");
+    }
+    out.push_str(
+        "    let root = CanonicalConfigSection {\n\
+         \x20       section: None,\n\
+         \x20       raw: Some(&config.raw),\n\
+         \x20       fields: &[\n",
+    );
+    let mut emitted_sections = Vec::new();
+    for (index, binding) in schema.bindings.iter().enumerate() {
+        if binding.is_top_level() {
+            let _ = writeln!(out, "            (\"{}\", field_{index}),", binding.path);
+        } else if !emitted_sections.contains(&binding.outer_field()) {
+            let section = binding.outer_field();
+            emitted_sections.push(section);
+            let _ = writeln!(out, "            (\"{section}\", &{section}),");
+        }
+    }
+    out.push_str("        ],\n    };\n    root.put(writer);\n}\n");
     out
 }
 
