@@ -4,7 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fmn::prelude::*;
-use fmn::rendering::{NativeFrameError, RenderError};
+use fmn::rendering::{NativeFrameError, RenderError, YuvConversionPolicy};
 use fmn_anim::FramePacket;
 use fmn_codec::{PngLimits, decode_png, decode_y4m};
 use fmn_config::config::{DeterminismMode, ThreadPolicy};
@@ -190,6 +190,119 @@ fn affine_gif_and_y4m_keep_every_sample_at_every_window() {
             } else {
                 expected = Some(bytes);
             }
+        }
+    }
+}
+
+#[test]
+fn persistent_yuv_exports_match_scoped_bytes_for_planar_and_camera_frames() {
+    for camera in [false, true] {
+        let mut reference = None;
+        for (window, threads) in [(1, 1), (2, 4), (4, 16)] {
+            for conversion in [YuvConversionPolicy::Scoped, YuvConversionPolicy::Persistent] {
+                let fs = Arc::new(VirtualFs::new());
+                fs.insert("/sys/devices/system/cpu/online", b"0-15\n".to_vec());
+                let mut options = options("/movie.y4m", RenderFormat::Y4m, window, threads);
+                options.config.camera.resolution = (128, 256);
+                options.yuv_conversion = conversion;
+                if camera {
+                    options.camera = Some(options.camera_config().unwrap());
+                }
+                let report = render_with_fs(&mut Moving, options, fs.clone()).unwrap();
+                let stats = report.frame_pipeline.unwrap();
+                assert_eq!((stats.submitted, stats.converted, stats.emitted), (4, 4, 4));
+                assert_eq!(stats.outstanding_slots, 0);
+                assert!(stats.max_in_flight <= report.execution_plan.frames_in_flight);
+                let bytes = fs.read(Path::new("/movie.y4m")).unwrap();
+                let movie = decode_y4m(&bytes).unwrap();
+                assert_eq!(movie.frames.len(), 4);
+                assert_ne!(movie.frames[0], movie.frames[3]);
+                if let Some(reference) = &reference {
+                    assert_eq!(
+                        &bytes, reference,
+                        "{conversion:?}, camera={camera}, threads={threads}"
+                    );
+                } else {
+                    reference = Some(bytes);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn persistent_yuv_bands_are_admitted_before_scene_construction() {
+    struct MustNotRun;
+    impl SceneConstruct for MustNotRun {
+        fn construct(&mut self, _: &mut Stage<'_>) -> fmn::Result<()> {
+            panic!("YUV-band memory refusal must precede scene construction");
+        }
+    }
+    for camera in [false, true] {
+        for threads in [1, 16] {
+            let make_options = |path: &str| {
+                let mut options = options(path, RenderFormat::Y4m, 2, threads);
+                options.config.camera.resolution = (128, 256);
+                options.yuv_conversion = YuvConversionPolicy::Persistent;
+                if camera {
+                    options.camera = Some(options.camera_config().unwrap());
+                }
+                options
+            };
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert("/sys/devices/system/cpu/online", b"0-15\n".to_vec());
+            let report = render_with_fs(&mut Still, make_options("/measured"), fs.clone()).unwrap();
+            let plan = &report.execution_plan;
+            let raster_bands = plan
+                .render_teams
+                .iter()
+                .filter(|team| team.threads() > 1)
+                .count();
+            let layout = FrameLayout::tight(PixelFormat::Nv12, 128, 256).unwrap();
+            let conversion_bytes: usize = plan
+                .render_teams
+                .iter()
+                .map(|team| YuvConversionPolicy::Persistent.scratch_bytes(&layout, team.threads()))
+                .sum();
+            assert_eq!(conversion_bytes, raster_bands * layout.total_bytes());
+            if cfg!(target_os = "linux") && threads > 1 {
+                assert!(
+                    conversion_bytes > 0,
+                    "the fixture must exercise parallel YUV bands"
+                );
+            }
+            let retained = plan.render_teams.len() + raster_bands + usize::from(camera);
+            let required_bytes = plan.estimated_in_flight_bytes as u64
+                + retained as u64 * 128 * 256 * 8
+                + conversion_bytes as u64
+                + 64 * 1024 * 1024;
+            let mut exact = make_options("/exact");
+            exact.max_resident_bytes = required_bytes;
+            render_with_fs(&mut Still, exact, fs.clone()).unwrap();
+            assert_eq!(
+                fs.read(Path::new("/measured")).unwrap(),
+                fs.read(Path::new("/exact")).unwrap()
+            );
+            let mut short = make_options("/insufficient");
+            short.max_resident_bytes = required_bytes - 1;
+            assert!(matches!(
+                render_with_fs(&mut MustNotRun, short, fs.clone()),
+                Err(RenderError::InvalidOptions(
+                    "render plan exceeds max_resident_bytes"
+                ))
+            ));
+            assert!(!fs.exists(Path::new("/insufficient")));
+
+            // The borrowed route needs no private YUV surface. Its minimum
+            // remains unchanged, even when a persistent team would fan out.
+            let mut scoped = make_options("/scoped");
+            scoped.yuv_conversion = YuvConversionPolicy::Scoped;
+            scoped.max_resident_bytes = required_bytes - conversion_bytes as u64;
+            render_with_fs(&mut Still, scoped, fs.clone()).unwrap();
+            assert_eq!(
+                fs.read(Path::new("/exact")).unwrap(),
+                fs.read(Path::new("/scoped")).unwrap()
+            );
         }
     }
 }

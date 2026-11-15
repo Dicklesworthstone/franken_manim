@@ -10,9 +10,12 @@ use std::sync::{Arc, Mutex, Weak};
 
 use fmn_anim::pure_frame::PureFrameJob;
 use fmn_frame::convert::{
-    rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_threaded, rgba16f_to_rgba8,
+    YuvConversionTeam, rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_threaded,
+    rgba16f_to_rgba8,
 };
-use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, PixelFormat, VideoColorGrade};
+use fmn_frame::{
+    ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat, VideoColorGrade,
+};
 use fmn_mobject::FrozenRenderState;
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
 use fmn_render::{
@@ -28,6 +31,39 @@ use fmn_runtime::{
 use fmn_scene::timeline_bundle::{BundleReadError, TimelineFrameCache, TimelineFrameJob};
 
 use super::RenderError;
+
+/// Worker lifetime policy for native NV12 and P010 output conversion.
+///
+/// Both policies produce the same bytes and use the execution plan's render
+/// team widths. RGBA and BGRA output are unaffected. Persistent teams avoid
+/// per-frame worker creation, but publish their private bands with an extra
+/// output-frame copy; they are not assumed to improve throughput.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum YuvConversionPolicy {
+    /// Borrow the raw raster and convert directly into the reserved output
+    /// slot, creating scoped workers for each sufficiently large frame.
+    #[default]
+    Scoped,
+    /// Retain conversion workers and their bounded bands for the render
+    /// stream. One-thread and small-frame conversions remain inline.
+    Persistent,
+}
+
+impl YuvConversionPolicy {
+    /// Additional pixel storage to admit for one render team.
+    ///
+    /// Add this allowance for every team in the execution plan, alongside
+    /// raster/cache storage and ordinary worker/container overhead. A native
+    /// stream fixes output geometry and format, so the bands never grow beyond
+    /// this bound. Scoped, non-YUV, and inline conversion require no bands.
+    #[must_use]
+    pub fn scratch_bytes(self, layout: &FrameLayout, threads: usize) -> usize {
+        match self {
+            Self::Scoped => 0,
+            Self::Persistent => YuvConversionTeam::scratch_bytes(layout, threads),
+        }
+    }
+}
 
 thread_local! {
     // Created and dropped on the runtime's scoped render worker. No live
@@ -193,6 +229,8 @@ struct RenderWorker {
     // Keep raster workers alive for the entire render stream. Each team owns
     // disjoint reusable bands; only immutable frame inputs cross to them.
     raster_team: Option<RasterTeam>,
+    yuv_conversion: YuvConversionPolicy,
+    conversion_team: Option<YuvConversionTeam>,
     compiled_vector: Option<VectorFrameCompiler>,
     compiled_camera: Option<CameraCompiler>,
     // One raw surface shared by camera and vector frames. Only a vector
@@ -271,7 +309,7 @@ impl RenderWorker {
                 resume,
             )
             .map_err(NativeFrameError::Renderer)?;
-        convert_into(&raster, output, threads)?;
+        let raster = self.convert(raster, output, threads)?;
         self.spare = Some((raster, Some(self.cache.serial())));
         Ok(())
     }
@@ -324,10 +362,43 @@ impl RenderWorker {
                 )
                 .map_err(NativeFrameError::Renderer)?;
         }
-        convert_into(&raster, output, threads)?;
+        let raster = self.convert(raster, output, threads)?;
         self.spare = Some((raster, None));
         self.camera_pixels = Arc::downgrade(frame);
         Ok(reused)
+    }
+
+    // Conversion takes ownership of the recycled raster. Only successful
+    // completion returns it to the cache; a failed conversion cannot publish
+    // either a stale resume token or a camera-pixel identity.
+    fn convert(
+        &mut self,
+        raster: FrameBuffer,
+        output: &mut FrameBuffer,
+        threads: usize,
+    ) -> Result<FrameBuffer, NativeFrameError> {
+        if self.yuv_conversion == YuvConversionPolicy::Persistent
+            && matches!(output.layout().format(), PixelFormat::Nv12 | PixelFormat::P010)
+        {
+            if self
+                .conversion_team
+                .as_ref()
+                .is_none_or(|team| team.threads() != fmn_render::effective_threads(threads))
+            {
+                self.conversion_team =
+                    Some(YuvConversionTeam::new(threads).map_err(NativeFrameError::Frame)?);
+            }
+            self.conversion_team
+                .as_mut()
+                .ok_or(NativeFrameError::WorkerState(
+                    "missing persistent YUV conversion team",
+                ))?
+                .convert(raster, output, ColorRange::Limited, ChromaSiting::Left)
+                .map_err(NativeFrameError::Frame)
+        } else {
+            convert_into(&raster, output, threads)?;
+            Ok(raster)
+        }
     }
 }
 
@@ -352,6 +423,7 @@ impl NativeFrameStages {
         max_prefix_bytes_per_team: usize,
         max_camera_bytes_per_team: usize,
         max_projection_bytes_per_compiler: usize,
+        yuv_conversion: YuvConversionPolicy,
     ) -> Self {
         Self {
             compiler: Mutex::new(compiler),
@@ -359,10 +431,12 @@ impl NativeFrameStages {
             color_grade: VideoColorGrade::default(),
             workers: (0..render_teams)
                 .map(|_| {
-                    Mutex::new(RenderWorker::with_cache_budgets(
+                    let mut worker = RenderWorker::with_cache_budgets(
                         max_prefix_bytes_per_team,
                         max_camera_bytes_per_team,
-                    ))
+                    );
+                    worker.yuv_conversion = yuv_conversion;
+                    Mutex::new(worker)
                 })
                 .collect(),
         }
@@ -678,8 +752,12 @@ fn convert_into(
 /// per team, with additional container/allocator overhead. Call
 /// [`Self::with_prefix_cache_budget`] to lower or disable that optional storage.
 /// Forced-SSAA fast CPU and fixed-camera pipelines disable it.
-/// Output conversion runs directly from the RGBA16F raster into the reserved output
-/// slot; no per-frame intermediate surface is allocated. Frozen graph/record
+/// Scoped output conversion runs directly from the RGBA16F raster into the
+/// reserved output slot. [`YuvConversionPolicy::Persistent`] additionally
+/// retains disjoint YUV bands per render team; callers must admit
+/// [`YuvConversionPolicy::scratch_bytes`] for each team's output layout and
+/// thread count. Neither route allocates a frame-sized intermediate on each
+/// warmed conversion. Frozen graph/record
 /// storage is additional to that pixel budget, with at most one input per
 /// admitted pipeline slot. Worker camera-pixel identities are weak and retain
 /// no additional scene resources. Caller-retained replay packets have their own lifetime.
@@ -847,6 +925,42 @@ impl NativeFramePipeline {
         max_projection_bytes_per_compiler: usize,
         color_grade: VideoColorGrade,
     ) -> Result<Self, RenderError> {
+        Self::with_output_policy(
+            plan,
+            config,
+            camera,
+            output,
+            max_prefix_bytes_per_team,
+            max_camera_bytes_per_team,
+            max_projection_bytes_per_compiler,
+            color_grade,
+            YuvConversionPolicy::Scoped,
+        )
+    }
+
+    /// Compose admitted caches, movie grading and a YUV worker lifetime policy.
+    ///
+    /// Cache and grade behavior match
+    /// [`Self::with_projection_cache_budget_and_color_grade`]. Persistent
+    /// conversion moves the existing raw raster into its team and returns the
+    /// same allocation after successful conversion. It requires an additional
+    /// [`YuvConversionPolicy::scratch_bytes`] allowance for every render team;
+    /// [`super::RenderOptions`] accounts for that storage automatically.
+    ///
+    /// # Errors
+    /// As [`Self::with_projection_cache_budget_and_color_grade`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_output_policy(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        output: EmitterHandle,
+        max_prefix_bytes_per_team: usize,
+        max_camera_bytes_per_team: usize,
+        max_projection_bytes_per_compiler: usize,
+        color_grade: VideoColorGrade,
+        yuv_conversion: YuvConversionPolicy,
+    ) -> Result<Self, RenderError> {
         // Source demand is synchronous. A smaller output ring could block
         // its producer while the coordinator awaits that same next source
         // value instead of processing the completion that frees the ring.
@@ -931,6 +1045,7 @@ impl NativeFramePipeline {
             max_prefix_bytes_per_team,
             max_camera_bytes_per_team.min(camera_cache_budget_bytes(viewport)),
             max_projection_bytes_per_compiler,
+            yuv_conversion,
         );
         stages.color_grade = color_grade;
         let stream = FrameStream::new(plan, stages, |_, output| {
@@ -1326,6 +1441,149 @@ mod handoff_tests {
         let mob = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
         stage.add_to_scene(mob).expect("live triangle root");
         (stage, config, camera)
+    }
+
+
+    fn parallel_conversion_fixture() -> (fmn_mobject::Stage, RetainedFrameRendererConfig, Camera) {
+        let (stage, mut config, _) = camera_fixture();
+        config.frame.viewport = Viewport {
+            width: 128,
+            height: 256,
+        };
+        config.frame.map = fmn_render::ScreenMap {
+            scale: 32.0,
+            origin: [64.0, 128.0],
+            y_up: true,
+        };
+        let mut settings = CameraConfig {
+            resolution: (128, 256),
+            background: config.frame.background,
+            ..CameraConfig::default()
+        };
+        settings.frame.set_shape([4.0, 8.0]).unwrap();
+        (stage, config, Camera::new(settings).unwrap())
+    }
+
+    #[test]
+    fn persistent_yuv_reuses_workers_and_raw_pixels_across_camera_and_vector_jobs() {
+        for format in [PixelFormat::Nv12, PixelFormat::P010] {
+            let (mut stage, config, camera) = parallel_conversion_fixture();
+            let moving = stage.roots()[0];
+            let mut camera_compiler = CameraCompiler::new(config).unwrap();
+            let mut vector_compiler = VectorFrameCompiler::new(config).unwrap();
+            let mut worker = RenderWorker {
+                yuv_conversion: YuvConversionPolicy::Persistent,
+                ..RenderWorker::default()
+            };
+            let layout = FrameLayout::tight(format, 128, 256).unwrap();
+            let mut output = FrameBuffer::new(layout.clone());
+            let mut expected = FrameBuffer::new(layout.clone());
+            let mut allocation = None;
+            let mut started = None;
+            for step in 0..3 {
+                stage.shift(moving, [0.125, 0.0, 0.0]);
+                let frame = camera_compiler.prepare_with_camera(&stage, &camera).unwrap();
+                let raw = frame.render(1).unwrap();
+                convert_into(&raw, &mut expected, 1).unwrap();
+                assert!(!worker.render_camera(&frame, 4, &mut output).unwrap());
+                assert_eq!(output.as_bytes(), expected.as_bytes());
+                let current = worker.spare.as_ref().unwrap().0.as_bytes().as_ptr();
+                assert_eq!(current, *allocation.get_or_insert(current));
+
+                output.as_bytes_mut().fill(0xA5);
+                assert!(worker.render_camera(&frame, 4, &mut output).unwrap());
+                assert_eq!(output.as_bytes(), expected.as_bytes());
+
+                let vector = vector_compiler.capture(&stage, 0).unwrap();
+                let (raw, _) = vector
+                    .render_cached(
+                        1,
+                        &mut FrameArena::default(),
+                        &mut PixelTileCache::with_budgets(0, 0),
+                    )
+                    .unwrap();
+                convert_into(&raw, &mut expected, 1).unwrap();
+                worker.render_vector(&vector, 4, &mut output).unwrap();
+                assert_eq!(output.as_bytes(), expected.as_bytes());
+                let (raster, serial) = worker.spare.as_ref().unwrap();
+                assert_eq!(Some(raster.as_bytes().as_ptr()), allocation);
+                assert!(serial.is_some());
+                assert!(worker.camera_pixels.upgrade().is_none());
+
+                let raw = frame.render(1).unwrap();
+                convert_into(&raw, &mut expected, 1).unwrap();
+                assert!(!worker.render_camera(&frame, 4, &mut output).unwrap());
+                assert_eq!(output.as_bytes(), expected.as_bytes());
+                let (raster, serial) = worker.spare.as_ref().unwrap();
+                assert_eq!(Some(raster.as_bytes().as_ptr()), allocation);
+                assert_eq!(*serial, None);
+                let stats = worker.conversion_team.as_ref().unwrap().stats();
+                assert!(stats.workers_spawned > 0);
+                assert_eq!(
+                    stats.workers_spawned,
+                    *started.get_or_insert(stats.workers_spawned)
+                );
+                assert_eq!(stats.frames_completed, (step + 1) * 4);
+                assert_eq!(stats.band_buffer_bytes, layout.total_bytes());
+                assert_eq!(
+                    stats.band_buffer_bytes,
+                    YuvConversionPolicy::Persistent.scratch_bytes(&layout, 4)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn persistent_yuv_failure_discards_the_recycled_camera_or_vector_surface() {
+        for format in [PixelFormat::Nv12, PixelFormat::P010] {
+            let (stage, config, camera) = parallel_conversion_fixture();
+            let mut camera_compiler = CameraCompiler::new(config).unwrap();
+            let frame = camera_compiler.prepare_with_camera(&stage, &camera).unwrap();
+            let mut worker = RenderWorker {
+                yuv_conversion: YuvConversionPolicy::Persistent,
+                ..RenderWorker::default()
+            };
+            let mut output = FrameBuffer::new(FrameLayout::tight(format, 128, 256).unwrap());
+            worker.render_camera(&frame, 4, &mut output).unwrap();
+            let expected = output.as_bytes().to_vec();
+            let starts = worker
+                .conversion_team
+                .as_ref()
+                .unwrap()
+                .stats()
+                .workers_spawned;
+            let mut wrong_size = FrameBuffer::new(FrameLayout::tight(format, 64, 256).unwrap());
+            wrong_size.as_bytes_mut().fill(0xA5);
+            assert!(matches!(
+                worker.render_camera(&frame, 4, &mut wrong_size),
+                Err(NativeFrameError::Frame(FrameError::DimensionMismatch))
+            ));
+            assert!(worker.spare.is_none());
+            assert!(worker.camera_pixels.upgrade().is_none());
+            assert!(wrong_size.as_bytes().iter().all(|byte| *byte == 0xA5));
+            assert!(!worker.render_camera(&frame, 4, &mut output).unwrap());
+            assert_eq!(output.as_bytes(), expected);
+
+            let vector = VectorFrameCompiler::new(config)
+                .unwrap()
+                .capture(&stage, 0)
+                .unwrap();
+            worker.render_vector(&vector, 4, &mut output).unwrap();
+            let expected = output.as_bytes().to_vec();
+            assert!(worker.spare.as_ref().unwrap().1.is_some());
+            assert!(matches!(
+                worker.render_vector(&vector, 4, &mut wrong_size),
+                Err(NativeFrameError::Frame(FrameError::DimensionMismatch))
+            ));
+            assert!(worker.spare.is_none());
+            assert!(worker.camera_pixels.upgrade().is_none());
+            assert!(wrong_size.as_bytes().iter().all(|byte| *byte == 0xA5));
+            worker.render_vector(&vector, 4, &mut output).unwrap();
+            assert_eq!(output.as_bytes(), expected);
+            let stats = worker.conversion_team.as_ref().unwrap().stats();
+            assert_eq!(stats.workers_spawned, starts);
+            assert_eq!(stats.frames_completed, 4);
+        }
     }
 
     #[test]
@@ -1727,6 +1985,7 @@ mod handoff_tests {
                     budget,
                     0,
                     0,
+                    YuvConversionPolicy::Scoped,
                 );
                 let layout = fmn_frame::FrameLayout::tight(PixelFormat::Rgba8, 16, 16).unwrap();
                 let mut expected = FrameBuffer::new(layout.clone());

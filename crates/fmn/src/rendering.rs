@@ -68,7 +68,7 @@ pub use ffmpeg_limits::{
 };
 pub use pipeline::{
     NativeAdaptiveCamera, NativeAdaptiveRoutes, NativeFrameError, NativeFramePipeline,
-    PlanarCapturePolicy, planar_stage_refusal,
+    PlanarCapturePolicy, YuvConversionPolicy, planar_stage_refusal,
 };
 pub use soundtrack::{
     PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackRenderOptions,
@@ -346,6 +346,12 @@ pub struct RenderOptions {
     /// Upper bound on the output ring and frozen frame-job count; the scheduler
     /// may lower it. Does not change frame sampling or pixels.
     pub frames_in_flight: usize,
+    /// Worker lifetime policy for NV12/P010 conversion in Y4M and opaque video
+    /// output. Persistent conversion reuses workers and bands across frames;
+    /// its extra pixel storage is admitted against [`Self::max_resident_bytes`]
+    /// before scene construction. Both policies preserve the same output bytes.
+    /// The default is scoped conversion; RGBA/BGRA formats are unaffected.
+    pub yuv_conversion: YuvConversionPolicy,
     /// Attach the resolved persistent typeset cache when a scene first needs
     /// TeX. Storage refusals fall back to native layout and appear in the report.
     /// False keeps the bounded memory front without any persistent-cache I/O.
@@ -395,6 +401,7 @@ impl RenderOptions {
             max_output_bytes: 64 * 1024 * 1024 * 1024,
             max_resident_bytes: 512 * 1024 * 1024,
             frames_in_flight: 2,
+            yuv_conversion: YuvConversionPolicy::default(),
             typeset_cache: true,
             typeset_preflight_workers: crate::typesetting::DEFAULT_PREFLIGHT_WORKERS,
             ffmpeg: None,
@@ -968,8 +975,8 @@ impl RenderSink {
         } else {
             HardwareTopology::fallback(logical)
         };
-        // Output conversion writes straight into the reserved ring slot; no
-        // per-stage intermediate surface needs planning.
+        // The output ring is part of the execution plan. Optional persistent
+        // YUV bands are charged separately below, once team widths are known.
         let surface = SurfaceSpec::lumen(width, height);
         let output_format = match pixel_format {
             PixelFormat::Bgra8 => OutputPixelFormat::Bgra8,
@@ -1030,9 +1037,14 @@ impl RenderSink {
                 .checked_mul(8)?
                 .checked_mul(count)
         });
+        let conversion_bytes = plan.render_teams.iter().try_fold(0_u64, |bytes, team| {
+            let scratch = options.yuv_conversion.scratch_bytes(&layout, team.threads());
+            bytes.checked_add(u64::try_from(scratch).ok()?)
+        });
         let planned = u64::try_from(plan.estimated_in_flight_bytes)
             .ok()
             .and_then(|bytes| bytes.checked_add(retained_bytes?))
+            .and_then(|bytes| bytes.checked_add(conversion_bytes?))
             .and_then(|bytes| bytes.checked_add(64 * 1024 * 1024))
             .ok_or(RenderError::InvalidOptions(
                 "render memory budget overflowed",
@@ -1260,7 +1272,7 @@ impl RenderSink {
             vec![binding],
         )
         .map_err(RenderError::Emitter)?;
-        let pipeline = match NativeFramePipeline::with_projection_cache_budget_and_color_grade(
+        let pipeline = match NativeFramePipeline::with_output_policy(
             plan.clone(),
             renderer_config,
             camera,
@@ -1269,6 +1281,7 @@ impl RenderSink {
             camera_cache_bytes,
             projection_cache_bytes,
             color_grade,
+            options.yuv_conversion,
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {

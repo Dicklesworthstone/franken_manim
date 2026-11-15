@@ -13119,6 +13119,147 @@ fn lifecycle_compact_scene_bundle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
         .with_artifact("compact-scene.fmtl", exported.bundle.bytes))
 }
 
+/// Persistent conversion reaches the public Y4M renderer with exact output
+/// parity and a band allowance checked before scene construction.
+fn native_persistent_yuv_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::rendering::YuvConversionPolicy;
+    use fmn_platform::fs::VirtualFs;
+    use std::cell::Cell;
+    use std::path::Path;
+    use std::rc::Rc;
+
+    struct Moving(Rc<Cell<u64>>);
+    impl fmn::SceneConstruct for Moving {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            self.0.set(self.0.get() + 1);
+            let circle = stage.add(Circle::new().radius(0.5).color(BLUE_C))?;
+            stage.set_fill(circle, Some(BLUE_C), Some(0.8), None, true);
+            stage.play(
+                circle
+                    .animate()
+                    .set_anim_args(AnimateArgs {
+                        run_time: Some(0.5),
+                        rate_func: Some(fmn::core::rate::linear),
+                        ..AnimateArgs::default()
+                    })?
+                    .shift(RIGHT)?,
+            )?;
+            Ok(())
+        }
+    }
+
+    ctx.set_fps((8, 1));
+    let options = |path: &str, policy| -> Result<fmn::RenderOptions, ScenarioError> {
+        let mut options = fmn::RenderOptions::with_format(path, fmn::RenderFormat::Y4m)
+            .map_err(|error| fail(error.to_string()))?;
+        options.config.camera.resolution = (128, 256);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.determinism.seed = ctx.seed;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(8);
+        options.yuv_conversion = policy;
+        options.frames_in_flight = 2;
+        options.max_frames = 4;
+        options.max_output_bytes = 1024 * 1024;
+        options.max_resident_bytes = 128 * 1024 * 1024;
+        options.typeset_cache = false;
+        Ok(options)
+    };
+    let fs = Arc::new(VirtualFs::new());
+    fs.insert("/sys/devices/system/cpu/online", b"0-7\n".to_vec());
+    let calls = Rc::new(Cell::new(0));
+    let scoped = fmn::render_with_fs(
+        &mut Moving(calls.clone()),
+        options("/scoped.y4m", YuvConversionPolicy::Scoped)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("scoped native YUV render: {error}")))?;
+    let persistent = fmn::render_with_fs(
+        &mut Moving(calls.clone()),
+        options("/persistent.y4m", YuvConversionPolicy::Persistent)?,
+        fs.clone(),
+    )
+    .map_err(|error| fail(format!("persistent native YUV render: {error}")))?;
+    let plan = &persistent.execution_plan;
+    let layout = FrameLayout::tight(PixelFormat::Nv12, 128, 256)
+        .map_err(|error| fail(error.to_string()))?;
+    let raster_bands = plan
+        .render_teams
+        .iter()
+        .filter(|team| team.threads() > 1)
+        .count();
+    let conversion_bytes: usize = plan
+        .render_teams
+        .iter()
+        .map(|team| YuvConversionPolicy::Persistent.scratch_bytes(&layout, team.threads()))
+        .sum();
+    if cfg!(target_os = "linux") && conversion_bytes == 0 {
+        return Err(fail(
+            "native YUV topology fixture did not admit parallel conversion",
+        ));
+    }
+    let required = plan.estimated_in_flight_bytes as u64
+        + (plan.render_teams.len() + raster_bands) as u64 * 128 * 256 * 8
+        + conversion_bytes as u64
+        + 64 * 1024 * 1024;
+    let mut exact = options("/bounded.y4m", YuvConversionPolicy::Persistent)?;
+    exact.max_resident_bytes = required;
+    let bounded = fmn::render_with_fs(&mut Moving(calls.clone()), exact, fs.clone())
+        .map_err(|error| fail(format!("bounded native YUV render: {error}")))?;
+    let read = |path: &str| {
+        fs.read(Path::new(path))
+            .map_err(|error| fail(error.to_string()))
+    };
+    let bytes = read("/persistent.y4m")?;
+    let exact_bytes = bytes == read("/scoped.y4m")? && bytes == read("/bounded.y4m")?;
+    let movie = fmn_codec::decode_y4m(&bytes).map_err(|error| fail(error.to_string()))?;
+    let visible_motion = movie.frames.len() == 4
+        && movie.frames.windows(2).all(|pair| pair[0] != pair[1]);
+    let before_refusal = calls.get();
+    let mut short = options("/refused.y4m", YuvConversionPolicy::Persistent)?;
+    short.max_resident_bytes = required - 1;
+    let refusal = matches!(
+        fmn::render_with_fs(&mut Moving(calls.clone()), short, fs.clone()),
+        Err(fmn::RenderError::InvalidOptions(
+            "render plan exceeds max_resident_bytes"
+        ))
+    ) && !fs.exists(Path::new("/refused.y4m"));
+    let refused_constructors = calls.get() - before_refusal;
+    let mut frames = 0;
+    let mut slots = 0;
+    for report in [scoped, persistent, bounded] {
+        let stats = report
+            .frame_pipeline
+            .ok_or_else(|| fail("native YUV pipeline bypassed"))?;
+        if report.artifact.frame_count != 4
+            || (stats.submitted, stats.converted, stats.emitted) != (4, 4, 4)
+            || stats.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail("native YUV lost bounded, ordered frame publication"));
+        }
+        frames += stats.emitted;
+        slots += stats.outstanding_slots as u64;
+    }
+    ctx.event(
+        LogEvent::new("e2e.parity.native_persistent_yuv")
+            .field("exact_bytes", truth(exact_bytes))
+            .field("visible_motion", truth(visible_motion))
+            .field("memory_refused", truth(refusal))
+            .field("refused_constructors", refused_constructors)
+            .field("band_bytes", conversion_bytes as u64)
+            .field("frames", frames),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("native_yuv_exact_bytes", u64::from(exact_bytes))
+        .with_counter("native_yuv_visible_motion", u64::from(visible_motion))
+        .with_counter("native_yuv_memory_refused", u64::from(refusal))
+        .with_counter("native_yuv_refused_constructors", refused_constructors)
+        .with_counter("native_yuv_frames", frames)
+        .with_counter("native_yuv_outstanding_slots", slots)
+        .with_artifact("native-persistent.y4m", bytes))
+}
+
 /// Native pole sampling reaches the renderer as absent triangles, including
 /// through a morph to a complete surface. The oracle contains only the one
 /// surviving triangle and is built from an independently sampled finite grid.
@@ -17404,6 +17545,30 @@ fn spec(
 #[must_use]
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
+        spec(
+            "parity.native_persistent_yuv.v1",
+            ScenarioClass::ParityDrill,
+            Surface::RustApi,
+            Invocation::new(native_persistent_yuv_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("native_yuv_exact_bytes", 1),
+                counter_eq("native_yuv_visible_motion", 1),
+                counter_eq("native_yuv_memory_refused", 1),
+                counter_eq("native_yuv_refused_constructors", 0),
+                counter_eq("native_yuv_frames", 12),
+                counter_eq("native_yuv_outstanding_slots", 0),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.native_persistent_yuv",
+                vec![
+                    FieldPred::str_eq("exact_bytes", "true"),
+                    FieldPred::str_eq("memory_refused", "true"),
+                    FieldPred::u64_eq("refused_constructors", 0),
+                    FieldPred::u64_eq("frames", 12),
+                ],
+            )],
+        ),
         spec(
             "parity.retained_path_motion.v1",
             ScenarioClass::ParityDrill,
@@ -23733,6 +23898,16 @@ fn control_panel_frame_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.control_panel_frame.v1")
         .expect("current-frame control panel lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_persistent_yuv_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.native_persistent_yuv.v1")
+        .expect("native persistent YUV conversion scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

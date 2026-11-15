@@ -245,6 +245,7 @@ fn adaptive_workers_replace_camera_tile_policy_without_changing_planar_config() 
         fmn_render::PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES,
         0,
         0,
+        super::super::YuvConversionPolicy::Scoped,
     );
     let emitter = OrderedEmitter::new(
         EmitterConfig::new(
