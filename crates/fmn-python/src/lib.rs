@@ -9620,7 +9620,7 @@ impl PyScene {
             .iter()
             .map(|request| {
                 (
-                    request.sound_file.to_string_lossy().into_owned(),
+                    request.source.identity().into_owned(),
                     request.time.frames(),
                     request.time.fps(),
                     request.time_offset,

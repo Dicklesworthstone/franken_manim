@@ -91,6 +91,22 @@ impl NativeBuildContext<'_> {
         Ok(())
     }
 
+    /// Queue an immutable PCM or file source at this build boundary.
+    ///
+    /// # Errors
+    /// Invalid non-finite offsets or gains; skip mode remains an early no-op.
+    pub fn add_sound_source(
+        &mut self,
+        source: fmn_scene::SoundSource,
+        time_offset: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<(), SceneError> {
+        self.scene
+            .add_sound_source(source, time_offset, gain, gain_to_background)?;
+        Ok(())
+    }
+
     /// Construct a camera transition from the *current* completed rig state.
     /// The existing Transform remains responsible for interpolation/lifecycle.
     pub fn camera_to(

@@ -603,7 +603,7 @@ fn add_sound_keeps_exact_scene_time_and_reference_arguments() {
     assert_eq!(
         scene.sound_requests(),
         &[SoundRequest {
-            sound_file: "click.wav".into(),
+            source: fmn_scene::SoundSource::File("click.wav".into()),
             time: fmn_anim::RationalTime::zero(8) + 2,
             time_offset: -0.125,
             gain: Some(-6.0),
@@ -621,6 +621,77 @@ fn add_sound_keeps_exact_scene_time_and_reference_arguments() {
         scene.add_sound("bad.wav", 0.0, None, Some(f64::NEG_INFINITY)),
         Err(SceneError::InvalidConfig(_))
     ));
+}
+
+#[test]
+fn memory_sound_requests_freeze_pcm_and_preserve_timing_and_skip_semantics() {
+    use fmn_codec::{SampleFormat, WavAudio};
+    use fmn_scene::{SoundData, SoundDataLimits, SoundSource};
+    let mut audio = WavAudio {
+        channels: 1,
+        sample_rate: 8,
+        format: SampleFormat::F32,
+        samples: vec![0.125, 0.25],
+    };
+    let data = SoundData::from_audio(&audio, SoundDataLimits::default()).unwrap();
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        3,
+    )
+    .unwrap();
+    scene.wait(Some(0.25), &mut NullSceneSink).unwrap();
+    scene
+        .add_sound_data(data.clone(), -0.125, Some(-6.0), None)
+        .unwrap();
+    scene
+        .add_sound_source(
+            SoundSource::Memory(data.clone()),
+            0.125,
+            None,
+            Some(-12.0),
+        )
+        .unwrap();
+    audio.samples.fill(1.0);
+    assert_eq!(scene.sound_requests()[0].time.frames(), 2);
+    assert_eq!(scene.sound_requests()[0].time_offset, -0.125);
+    assert_eq!(scene.sound_requests()[1].time.frames(), 2);
+    assert_eq!(scene.sound_requests()[1].time_offset, 0.125);
+    let SoundSource::Memory(frozen) = &scene.sound_requests()[0].source else {
+        panic!("memory cue became a path");
+    };
+    assert!(std::sync::Arc::ptr_eq(data.bytes(), frozen.bytes()));
+    assert_eq!(
+        fmn_codec::decode_wav(frozen.bytes(), &fmn_codec::WavLimits::default())
+            .unwrap()
+            .samples,
+        [0.125, 0.25]
+    );
+    assert_ne!(
+        frozen.digest(),
+        SoundData::from_audio(&audio, SoundDataLimits::default())
+            .unwrap()
+            .digest()
+    );
+    let before = scene.sound_requests().to_vec();
+    assert!(
+        scene
+            .add_sound_data(data.clone(), f64::NAN, None, None)
+            .is_err()
+    );
+    assert!(
+        scene
+            .add_sound_data(data.clone(), 0.0, None, Some(f64::NEG_INFINITY))
+            .is_err()
+    );
+    assert_eq!(scene.sound_requests(), before);
+    scene.force_skipping();
+    scene
+        .add_sound_data(data, f64::NAN, Some(f64::INFINITY), None)
+        .unwrap();
+    assert_eq!(scene.sound_requests(), before);
 }
 
 #[test]

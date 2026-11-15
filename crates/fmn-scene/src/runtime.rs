@@ -459,8 +459,8 @@ pub struct LifecycleEvent {
 /// (BN-02, BN-14).
 #[derive(Debug, Clone, PartialEq)]
 pub struct SoundRequest {
-    /// User asset path; the composition root resolves/decodes it.
-    pub sound_file: PathBuf,
+    /// File asset or frozen native PCM; only file sources require filesystem access.
+    pub source: crate::SoundSource,
     /// Exact Scene time at the call site.
     pub time: RationalTime,
     /// Reference-compatible relative offset in seconds.
@@ -1282,6 +1282,51 @@ impl Scene {
         if self.skipping {
             return Ok(self);
         }
+        self.add_sound_source(
+            crate::SoundSource::File(sound_file.into()),
+            time_offset,
+            gain,
+            gain_to_background,
+        )
+    }
+
+    /// Queue frozen PCM without creating or reading a temporary asset file.
+    ///
+    /// # Errors
+    /// The same offset/gain refusals as [`Self::add_sound`].
+    pub fn add_sound_data(
+        &mut self,
+        data: crate::SoundData,
+        time_offset: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<&mut Self, SceneError> {
+        self.add_sound_source(
+            crate::SoundSource::Memory(data),
+            time_offset,
+            gain,
+            gain_to_background,
+        )
+    }
+
+    /// Queue a typed sound source at the exact current scene time.
+    ///
+    /// The source is retained without filesystem access or decoding. Memory
+    /// cues share the immutable canonical bytes admitted by [`crate::SoundData`].
+    ///
+    /// # Errors
+    /// Non-finite offsets or gains are rejected before mutation. Skip mode
+    /// returns before validation, preserving the file cue's early no-op.
+    pub fn add_sound_source(
+        &mut self,
+        source: crate::SoundSource,
+        time_offset: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<&mut Self, SceneError> {
+        if self.skipping {
+            return Ok(self);
+        }
         if !time_offset.is_finite() {
             return Err(SceneError::InvalidConfig(
                 "sound time_offset must be finite",
@@ -1296,7 +1341,7 @@ impl Scene {
             ));
         }
         self.sound_requests.push(SoundRequest {
-            sound_file: sound_file.into(),
+            source,
             time: self.clock.now(),
             time_offset,
             gain,

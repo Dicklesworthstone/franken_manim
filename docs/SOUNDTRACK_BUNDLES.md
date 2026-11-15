@@ -8,9 +8,10 @@ original bytes and continue refusing authored sound cues.
 
 ## Export a native scene once
 
-Use the explicit APIs in `fmn::exporting::soundtrack`. Source access goes through
-the supplied `FileSystem`, including VirtualFs. The default decodes supported
-WAV audio natively. Compressed sources require an explicit ffmpeg capability
+Use the explicit APIs in `fmn::exporting::soundtrack`. File-source access goes
+through the supplied `FileSystem`, including VirtualFs. Native
+`Scene::add_sound_data` cues instead retain immutable `SoundData` bytes and
+need no source file. Both routes use the same native WAV decoder and mixer. Compressed sources require an explicit ffmpeg capability
 and standard-mode preparation; there is no ambient decoder discovery or silent
 cue omission.
 
@@ -104,10 +105,12 @@ Both `SceneBundleExport` and the published `BundleExportReport` now expose
 authored. A sound-bearing receipt contains the existing native `SoundtrackReport`
 as `mix`, the actual `workers_used`, cue-ordered `SoundtrackInput` records in
 `inputs`, and distinct external `audio_decodes` in first-source-use order.
-Each input retains the original source bytes plus its source/normalized-PCM
-digests and decoder receipt. Repeated cues share their byte allocation. Receipt
-construction never reopens a source path, including when a source changed during
-decoding. Native inputs have no external invocation. These reports accompany
+Each input retains a typed `source`, its exact bytes, source/normalized-PCM
+digests, and decoder receipt. `source.file_path()` returns an actual path only
+for file-backed cues; memory sources expose a `memory:sha256:…` identity and
+canonical F32 WAV bytes. Repeated cues share their byte allocation and decode
+receipt. File and memory cache keys remain distinct. Receipt construction never
+reopens a source path, including when a source changed during decoding. Native inputs have no external invocation. These reports accompany
 the result; original files, paths and decoder instructions are not embedded as
 playback dependencies or presented as a complete certified input closure.
 

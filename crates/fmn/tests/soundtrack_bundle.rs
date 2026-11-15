@@ -517,7 +517,7 @@ fn repeated_sources_are_charged_once_but_prepared_cues_each_consume_their_own_bu
         let mut clock = RationalFrameClock::new(8).unwrap();
         clock.advance_frames(frame).unwrap();
         SoundRequest {
-            sound_file: "/repeat.wav".into(),
+            source: fmn_scene::SoundSource::File("/repeat.wav".into()),
             time: clock.now(),
             time_offset: 0.0,
             gain: None,
@@ -617,7 +617,10 @@ fn native_and_no_cue_exports_never_discover_the_offered_decoder() {
         assert!(receipt.audio_decodes.is_empty());
         assert_eq!(receipt.inputs.len(), 2);
         for input in receipt.inputs {
-            assert_eq!(input.bytes.as_ref(), fs.read(&input.path).unwrap());
+            assert_eq!(
+                input.bytes.as_ref(),
+                fs.read(input.source.file_path().unwrap()).unwrap()
+            );
             assert_eq!(input.report.format, AudioInputFormat::Wav);
             assert!(input.report.invocation.is_none());
         }
@@ -649,11 +652,11 @@ fn compressed_admission_refusals_preserve_assets_and_publication_without_ambient
     assert!(matches!(
         missing,
         BundleExportError::Soundtrack(RenderError::SoundDecode {
-            ref path,
+            source: Some(ref source),
             error: AudioDecodeError::TranscoderRequired {
                 format: AudioInputFormat::Flac,
             },
-        }) if path == Path::new("/background.wav"),
+        }) if matches!(source.as_ref(), fmn_scene::SoundSourceKey::File(path) if path == Path::new("/background.wav")),
     ));
     let (settings, certified_calls) = unavailable_decoder();
     let mut certified = options();

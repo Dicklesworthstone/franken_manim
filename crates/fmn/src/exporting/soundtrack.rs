@@ -82,7 +82,7 @@ impl BundleSoundtrackOptions {
             .min(self.preparation.max_decoded_samples as u64);
         let decode_error = |error| {
             sound(RenderError::SoundDecode {
-                path: Default::default(),
+                source: None,
                 error,
             })
         };

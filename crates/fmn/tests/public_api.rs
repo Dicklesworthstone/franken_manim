@@ -247,8 +247,8 @@ fn sound_cue_scene_records_an_exact_rational_request() {
     assert_eq!(requests.len(), 1);
     let request = &requests[0];
     assert_eq!(
-        request.sound_file,
-        std::path::PathBuf::from(fmn::builtins::SOUND_CUE_ASSET_NAME)
+        request.source.file_path(),
+        Some(std::path::Path::new(fmn::builtins::SOUND_CUE_ASSET_NAME))
     );
     assert_eq!(request.time.frames(), 4, "0.5 s at 8 fps");
     assert_eq!(request.time.fps(), 8);

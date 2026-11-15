@@ -50,6 +50,7 @@ use fmn_anim::{
     AnimError, Animation, IntoAnimation, IntoAnimations, SegmentReport, prepare_animation,
     prepare_animations,
 };
+pub use fmn_codec::{SampleFormat, WavAudio};
 use fmn_config::ConfigError;
 use fmn_geom::{GeomError, SpaceOpsError};
 use fmn_library::{
@@ -67,6 +68,7 @@ use fmn_scene::{
     CaptureReason, IntegrationError, LifecycleEvent, LifecyclePhase, PlayOverrides, RuntimeConfig,
     Scene, SceneError, SceneProgram, SceneRunReport, SceneSink,
 };
+pub use fmn_scene::{SoundData, SoundDataError, SoundDataLimits, SoundSource, SoundSourceKey};
 use fmn_tex::{TexEngine, TexError, TexSession, TypesetRequest, TypesetSessionReport};
 
 pub mod autotune;

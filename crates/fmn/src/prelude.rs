@@ -48,6 +48,7 @@ pub use fmn_anim::{
     transform_matching_parts, turn_inside_out, uncreate, uncreate_surface, v_fade_in,
     v_fade_in_then_out, v_fade_out, write,
 };
+pub use fmn_codec::{SampleFormat, WavAudio};
 pub use fmn_config::Config;
 pub use fmn_config::config::{DeterminismMode, Engine, ThreadPolicy};
 pub use fmn_core::color::Srgb;
@@ -89,7 +90,8 @@ pub use fmn_mobject::{
 };
 pub use fmn_scene::{
     CaptureReason, IntegrationError, NullSceneSink, PlayOverrides, RuntimeConfig, Scene,
-    SceneError, SceneProgram, SceneRunReport, SceneSink,
+    SceneError, SceneProgram, SceneRunReport, SceneSink, SoundData, SoundDataError,
+    SoundDataLimits, SoundSource, SoundSourceKey,
 };
 pub use fmn_tex::{TexEngine, TexSession, TypesetRequest, TypesetSessionReport};
 pub use fmn_text::FontBook;

@@ -353,17 +353,20 @@ fn source_refusals_preserve_typed_causes_and_publication_never_clobbers() {
             (
                 1,
                 RenderError::SoundDecode {
-                    path,
+                    source: Some(identity),
                     error: AudioDecodeError::Native(_),
                 },
             )
             | (
                 2,
                 RenderError::SoundDecode {
-                    path,
+                    source: Some(identity),
                     error: AudioDecodeError::TranscoderRequired { .. },
                 },
-            ) => assert_eq!(path, Path::new(source)),
+            ) => assert_eq!(
+                identity.as_ref(),
+                &fmn_scene::SoundSourceKey::File(source.into())
+            ),
             (_, error) => panic!("source error lost its identity: {error}"),
         }
         assert!(!fs.exists(Path::new("/refused.wav")));

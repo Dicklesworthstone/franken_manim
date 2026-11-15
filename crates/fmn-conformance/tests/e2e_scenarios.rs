@@ -3783,14 +3783,25 @@ fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 
 /// Native scene cues reach canonical WAV bytes at every requested worker count.
 fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    struct Cues;
+    native_soundtrack_run(ctx, false)
+}
+
+/// Synthesized cues use the same public rendering route with no source file.
+fn native_memory_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    native_soundtrack_run(ctx, true)
+}
+
+fn native_soundtrack_run(ctx: &mut RunCtx, in_memory: bool) -> Result<RunOutcome, ScenarioError> {
+    struct Cues(fmn_scene::SoundSource);
     impl fmn::SceneConstruct for Cues {
         fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
-            stage.scene_mut().add_sound("/pulse.wav", 0.0, None, None)?;
+            stage
+                .scene_mut()
+                .add_sound_source(self.0.clone(), 0.0, None, None)?;
             stage.wait(0.25)?;
             stage
                 .scene_mut()
-                .add_sound("/pulse.wav", -0.125, None, None)?;
+                .add_sound_source(self.0.clone(), -0.125, None, None)?;
             stage.wait(0.25)?;
             Ok(())
         }
@@ -3798,7 +3809,16 @@ fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
     let source = fmn_codec::encode_wav(1, 32, fmn_codec::SampleFormat::F32, &[0.25; 12]);
     let source_bytes = source.len();
-    fs.insert("/pulse.wav", source);
+    let source_digest = sha256(&source);
+    let source = if in_memory {
+        fmn_scene::SoundSource::Memory(
+            fmn_scene::SoundData::from_wav_bytes(&source, fmn_scene::SoundDataLimits::default())
+                .map_err(|error| fail(format!("native memory sound: {error}")))?,
+        )
+    } else {
+        fs.insert("/pulse.wav", source);
+        fmn_scene::SoundSource::File("/pulse.wav".into())
+    };
     // First cue occupies samples [0,12), the second [4,16): independently
     // computed overlap on the 32 Hz sample grid, without invoking the mixer.
     let mut expected_samples = vec![0.25_f32; 16];
@@ -3809,7 +3829,12 @@ fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     let mut total_samples = 0;
     let mut first_wav = None;
     for threads in [1, 4, 16] {
-        let path = format!("/native-soundtrack-{threads}.wav");
+        let name = if in_memory {
+            "memory-soundtrack"
+        } else {
+            "native-soundtrack"
+        };
+        let path = format!("/{name}-{threads}.wav");
         let mut options = fmn::SoundtrackRenderOptions::new(&path)
             .map_err(|error| fail(format!("native soundtrack options: {error}")))?;
         options.config.camera.fps = 8;
@@ -3827,7 +3852,8 @@ fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         options.preparation.max_decoded_samples = 12;
         options.preparation.max_prepared_samples = 24;
         options.typeset_cache = false;
-        let report = fmn::render_soundtrack_with_fs(&mut Cues, options, fs.clone())
+        let mut score = Cues(source.clone());
+        let report = fmn::render_soundtrack_with_fs(&mut score, options, fs.clone())
             .map_err(|error| fail(format!("native WAV at {threads} threads: {error}")))?;
         let wav = fs
             .read(std::path::Path::new(&path))
@@ -3841,14 +3867,20 @@ fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
             || report.workers_used != threads
             || report.inputs.len() != 2
             || !Arc::ptr_eq(&report.inputs[0].bytes, &report.inputs[1].bytes)
-            || report
-                .inputs
-                .iter()
-                .any(|input| input.report.invocation.is_some())
+            || report.inputs.iter().any(|input| {
+                input.source != source
+                    || input.report.source_digest != source_digest
+                    || input.report.invocation.is_some()
+            })
         {
             return Err(fail(format!(
                 "native WAV lost cue timing, samples or receipts at {threads} threads"
             )));
+        }
+        if let fmn_scene::SoundSource::Memory(data) = &source
+            && !Arc::ptr_eq(data.bytes(), &report.inputs[0].bytes)
+        {
+            return Err(fail("native memory sound copied its retained source bytes"));
         }
         checked += 1;
         total_cues += report.artifact.cues_mixed as u64;
@@ -3859,6 +3891,7 @@ fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     }
     ctx.event(
         LogEvent::new("e2e.render_matrix.native_soundtrack_wav")
+            .field("source_kind", source.kind())
             .field("thread_counts", checked)
             .field("cues_mixed", total_cues)
             .field("sample_frames", total_samples),
@@ -18052,6 +18085,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![LogExpect::span_present(
             "e2e.render_matrix.native_soundtrack_wav",
             vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("cues_mixed", 6),
+                FieldPred::u64_eq("sample_frames", 48),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "render_matrix.native_memory_soundtrack_wav.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_memory_soundtrack_wav_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_soundtrack_thread_counts", 3),
+            counter_eq("native_soundtrack_cues_mixed", 6),
+            counter_eq("native_soundtrack_sample_frames", 48),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_soundtrack_wav",
+            vec![
+                FieldPred::str_eq("source_kind", "memory-wav"),
                 FieldPred::u64_eq("thread_counts", 3),
                 FieldPred::u64_eq("cues_mixed", 6),
                 FieldPred::u64_eq("sample_frames", 48),

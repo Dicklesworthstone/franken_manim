@@ -39,9 +39,12 @@ use std::time::Duration;
 use std::time::Instant;
 
 use fmn::rendering::{
-    FfmpegLimitsReport, PreparedSceneSoundtrack, SoundtrackReport, SoundtrackTimeline,
+    FfmpegLimitsReport, PreparedSceneSoundtrack, SoundtrackPreparationLimits, SoundtrackReport,
+    SoundtrackTimeline,
 };
-use fmn_codec::{SampleFormat, WavLimits, decode_wav};
+use fmn_codec::SampleFormat;
+#[cfg(test)]
+use fmn_codec::{WavLimits, decode_wav};
 use fmn_core::color::Srgb;
 use fmn_core::rng::{RNG_LAYOUT_VERSION, RngRoot};
 use fmn_frame::convert::rgba16f_to_rgba8;
@@ -2922,7 +2925,7 @@ struct VideoArtifactReport {
 }
 
 struct VideoAudioInput {
-    path: PathBuf,
+    source: fmn_scene::SoundSource,
     report: Arc<AudioDecodeReport>,
 }
 
@@ -2930,8 +2933,13 @@ impl VideoArtifactReport {
     fn audio_inputs_json(&self) -> String {
         let entries = self.audio_inputs.iter().map(|input| {
             format!(
-                "{{\"path\":{},\"source_sha256\":{},\"pcm_sha256\":{},\"container\":{},\"decoder\":{}}}",
-                json_string(&input.path.to_string_lossy()),
+                "{{\"path\":{},\"source\":{},\"source_kind\":{},\"source_sha256\":{},\"pcm_sha256\":{},\"container\":{},\"decoder\":{}}}",
+                input.source.file_path().map_or_else(
+                    || "null".to_owned(),
+                    |path| json_string(&path.to_string_lossy()),
+                ),
+                json_string(&input.source.identity()),
+                json_string(input.source.kind()),
                 json_string(&input.report.source_digest.to_hex()),
                 json_string(&input.report.pcm_digest.to_hex()),
                 json_string(input.report.format.demuxer()),
@@ -4380,12 +4388,12 @@ struct FinishedRender {
     cue_assets: Vec<SoundCueAssetInput>,
 }
 
-/// One sound-cue source retained for FMNP provenance without retaining its
-/// bytes in every subdivision's completed report.
+/// One sound-cue source retained for FMNP provenance. Memory cues share their
+/// immutable canonical allocation across subdivision reports.
 #[derive(Clone, Debug)]
 struct SoundCueAssetInput {
-    /// Composition-root-resolved virtual path.
-    path: String,
+    /// Typed file or memory identity consumed during composition.
+    source: fmn_scene::SoundSource,
     /// SHA-256 of the exact bytes given to the audio decoder.
     digest: fmn_hash::Digest,
 }
@@ -4507,7 +4515,7 @@ impl RenderSoundtrack<'_> {
                 .inputs()
                 .iter()
                 .map(|input| VideoAudioInput {
-                    path: input.path.clone(),
+                    source: input.source.clone(),
                     report: input.report.clone(),
                 })
                 .collect(),
@@ -4539,6 +4547,10 @@ fn prepare_video_soundtrack(
 fn native_render_error(error: fmn::rendering::RenderError) -> CliError {
     let exit_name = match &error {
         fmn::rendering::RenderError::Capability(_) => "capability",
+        fmn::rendering::RenderError::SoundAsset {
+            error: FsError::TooLarge { .. },
+            ..
+        } => "budget",
         fmn::rendering::RenderError::SoundAsset { .. }
         | fmn::rendering::RenderError::SoundDecode { .. }
         | fmn::rendering::RenderError::Sound(_) => "scene",
@@ -5019,7 +5031,7 @@ impl RenderSink {
         let cue_assets = audio_inputs
             .iter()
             .map(|input| SoundCueAssetInput {
-                path: input.path.to_string_lossy().into_owned(),
+                source: input.source.clone(),
                 digest: input.report.source_digest,
             })
             .collect();
@@ -5458,8 +5470,6 @@ const NO_SOUND_CUES_MESSAGE: &str = "scene_has_no_sound_cues: the scene recorded
 /// The certified soundtrack output grid (48 kHz stereo, `S16`, no dither).
 const SOUNDTRACK_SAMPLE_RATE: u32 = 48_000;
 const SOUNDTRACK_CHANNELS: u16 = 2;
-/// Bounded read for one cue asset; the mixer resamples after the budget check.
-const MAX_CUE_ASSET_BYTES: usize = 64 * 1024 * 1024;
 
 /// The execution backend record for a composition-only target.
 ///
@@ -5514,62 +5524,36 @@ fn publish_scene_soundtrack(
         SOUNDTRACK_SAMPLE_RATE,
     )
     .map_err(|error| CliError::new("scene", error.to_string()))?;
-    let mut mixer = fmn_output::SoundMixer::new(fmn_output::MixerConfig {
+    let config = fmn_output::MixerConfig {
         sample_rate: SOUNDTRACK_SAMPLE_RATE,
         channels: SOUNDTRACK_CHANNELS,
         // S16 stereo is four bytes per mixed frame; the artifact budget is
         // the same one the frame sinks publish under.
         max_output_frames: (max_artifact_bytes / 4).max(1),
-    })
-    .map_err(|error| CliError::new("config", error.to_string()))?
+    };
+    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None)
+        .map_err(|error| CliError::new("config", error.to_string()))?;
+    let prepared = PreparedSceneSoundtrack::new_with_limits(
+        fs,
+        requests,
+        &mut decoder,
+        config,
+        None,
+        SoundtrackPreparationLimits::default(),
+    )
+    .map_err(native_render_error)?
     .with_timeline_frames(u64::try_from(timeline_frames.max(0)).unwrap_or(0));
-    let mut cue_assets = Vec::with_capacity(requests.len());
-    for request in requests {
-        let bytes = fs
-            .read_bounded(&request.sound_file, MAX_CUE_ASSET_BYTES)
-            .map_err(|error| {
-                let exit_name = if matches!(error, FsError::TooLarge { .. }) {
-                    "budget"
-                } else {
-                    "scene"
-                };
-                CliError::new(
-                    exit_name,
-                    format!("sound cue asset {}: {error}", request.sound_file.display()),
-                )
-            })?;
-        let audio = decode_wav(&bytes, &WavLimits::default()).map_err(|error| {
-            CliError::new(
-                "scene",
-                format!(
-                    "sound cue asset {} is not decodable PCM WAV: {error}",
-                    request.sound_file.display()
-                ),
-            )
-        })?;
-        mixer
-            .add(fmn_output::SoundCue {
-                audio,
-                frame: request.time.frames(),
-                fps: request.time.fps(),
-                time_offset: request.time_offset,
-                gain: request.gain,
-                gain_to_background: request.gain_to_background,
-            })
-            .map_err(|error| {
-                CliError::new(
-                    "scene",
-                    format!("sound cue {}: {error}", request.sound_file.display()),
-                )
-            })?;
-        cue_assets.push(SoundCueAssetInput {
-            path: request.sound_file.to_string_lossy().into_owned(),
-            digest: fmn_hash::sha256(&bytes),
-        });
-    }
-    let mix = mixer
+    let cue_assets = prepared
+        .inputs()
+        .iter()
+        .map(|input| SoundCueAssetInput {
+            source: input.source.clone(),
+            digest: input.report.source_digest,
+        })
+        .collect();
+    let mix = prepared
         .mix(mix_threads.max(1))
-        .map_err(|error| CliError::new("render", error.to_string()))?;
+        .map_err(native_render_error)?;
     // Create-only publication (issue #4): the earlier absence preflight is
     // advisory only. A competing render can publish the same artifact name
     // after it, so the final commit must be the filesystem's atomic
@@ -6027,7 +6011,7 @@ fn render_manifest(
     } else {
         ClosureItem::structural(
             6,
-            "scene sound-cue asset reads on the native route; bundled fonts listed",
+            "scene sound-cue sources on the native route; bundled fonts listed",
             &[
                 StructuralField::U64(u64::try_from(cue_assets.len()).unwrap_or(u64::MAX)),
                 StructuralField::U64(face_count),
@@ -6142,18 +6126,21 @@ fn render_manifest(
         simd_tier: active_compiled_tier().to_owned(),
         declared_config_digest: c10.digest,
     };
-    // Every decoded cue asset enters the input closure as a C1 byte input
-    // alongside the scene source; the manifest orders byte inputs by virtual
-    // path, so the artifact digest is independent of request order in the
-    // (already insertion-ordered) request list only through those digests.
+    // Every decoded cue enters the input closure as a C1 byte input alongside
+    // the scene source. A source-kind namespace keeps authored file names and
+    // memory content identities distinct even when their display text matches.
+    // The manifest sorts those virtual identities; the mixer keeps cue order.
     let mut cue_items = Vec::with_capacity(cue_assets.len());
     let mut source_digests = BTreeMap::new();
     for asset in cue_assets {
-        if let Some(previous) = source_digests.insert(asset.path.as_str(), asset.digest) {
+        if let Some(previous) = source_digests.insert(asset.source.key(), asset.digest) {
             if previous != asset.digest {
                 return Err(CliError::new(
                     "scene",
-                    format!("sound cue asset {} changed during composition", asset.path),
+                    format!(
+                        "sound cue asset {} changed during composition",
+                        asset.source.identity()
+                    ),
                 ));
             }
             // Reusing a cue is an ordered mixer operation, not a second
@@ -6161,8 +6148,13 @@ fn render_manifest(
             continue;
         }
         cue_items.push(
-            ClosureItem::digest_input(1, asset.path.clone(), asset.digest, "scene sound-cue asset")
-                .map_err(|error| internal(error.to_string()))?,
+            ClosureItem::digest_input(
+                1,
+                format!("sound:{}:{}", asset.source.kind(), asset.source.identity()),
+                asset.digest,
+                "scene sound-cue asset",
+            )
+            .map_err(|error| internal(error.to_string()))?,
         );
     }
     ProvenanceManifest::new(

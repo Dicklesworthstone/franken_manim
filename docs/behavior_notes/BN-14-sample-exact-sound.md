@@ -60,13 +60,44 @@ the named native-alternative capability error when ffmpeg is absent. That
 decoded product, like every ffmpeg product, is outside certification; the
 native mix and certified WAV artifact are inside it.
 
+## Native in-memory sources
+
+Rust callers can freeze synthesized or decoded PCM with
+`fmn_scene::SoundData::from_audio`, or admit existing native WAV bytes with
+`SoundData::from_wav_bytes`. Both constructors take `SoundDataLimits` and
+validate channels, sample alignment, finite values, and byte/sample budgets
+before retaining data. The result stores canonical F32 WAV bytes and their
+SHA-256; cloning a sound shares immutable storage.
+
+Queue the result with `Scene::add_sound_data`, using the same offset, gain,
+and background-ducking arguments as `add_sound`. The typed
+`Scene::add_sound_source` entry point also accepts
+`SoundSource::File` or `SoundSource::Memory`. Native Studio builders accept
+both through `add_sound_source`. This is a Rust API extension; the Python
+writer's pydub-style assembly methods remain outside this change.
+
+Memory cues go through the existing native decoder and mixer without reading
+a source file or invoking ffmpeg. They retain the rational call-site clock,
+skip no-op, insertion order, negative-offset clipping, and resampling rules
+above. Standalone WAV, native video, soundtrack windows, and portable native
+bundle exports consume the same typed requests.
+
+`SoundtrackInput::source` identifies the source explicitly. Use
+`source.file_path()` when a real file is required; memory sources return
+`None`. Their `memory:sha256:…` identity is a provenance label and is never
+opened as a path. File paths and memory digests have distinct cache keys.
+Repeated memory cues share retained source bytes and decode receipts, while
+each cue still counts toward prepared-mix storage. The cumulative decoder
+sample cap is enforced before the decoder allocates.
+
 ## Native video composition
 
 The native Rust rendering API and standalone CLI use the same
-`PreparedSceneSoundtrack` composer. It reads each authored source path once
-under the asset byte cap and retains that immutable source snapshot for all
-uses of the cue. Native WAV decoding, channel conversion, resampling, gain,
-ducking and output quantization remain Reel's operations. Other supported
+`PreparedSceneSoundtrack` composer. It reads each authored file source once
+under the asset byte cap, or retains the canonical bytes of a memory source,
+and shares that immutable snapshot across all uses of the cue. Native WAV
+decoding, channel conversion, resampling, gain, ducking and output quantization
+remain Reel's operations. Other supported
 containers use the injected video boundary for decoding, including its
 ffmpeg fingerprint, timeout, log cap and artifact cap.
 
@@ -115,6 +146,8 @@ encode/mux `ffmpeg` list.
 
 ## Evidence
 
+- `crates/fmn-scene/src/sound.rs`: immutable PCM admission, canonical identity,
+  and distinct file/memory cache keys.
 - `crates/fmn-scene/src/runtime.rs`: the four-argument request surface, exact
   `RationalTime`, skip no-op, and insertion-ordered request queue.
 - `crates/fmn-output/src/sound.rs`: placement arithmetic, resampler, channel

@@ -21,7 +21,34 @@ pub enum SoundSource {
     Memory(SoundData),
 }
 
+/// A preparation-cache key that keeps file names and immutable content separate.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum SoundSourceKey {
+    /// An authored path, read once by the composition root.
+    File(PathBuf),
+    /// The canonical WAV digest of a frozen memory asset.
+    Memory(Digest),
+}
+
+impl fmt::Display for SoundSourceKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::File(path) => write!(f, "{}", path.display()),
+            Self::Memory(digest) => write!(f, "memory:sha256:{digest}"),
+        }
+    }
+}
+
 impl SoundSource {
+    /// Identity used to share source reads and decodes within one preparation.
+    #[must_use]
+    pub fn key(&self) -> SoundSourceKey {
+        match self {
+            Self::File(path) => SoundSourceKey::File(path.clone()),
+            Self::Memory(data) => SoundSourceKey::Memory(data.digest()),
+        }
+    }
+
     /// Stable source discriminator for receipts and provenance.
     #[must_use]
     pub const fn kind(&self) -> &'static str {

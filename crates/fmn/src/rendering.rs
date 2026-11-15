@@ -565,8 +565,8 @@ pub enum RenderError {
     },
     /// A sound cue's asset could not be decoded.
     SoundDecode {
-        /// The authored `add_sound` path.
-        path: PathBuf,
+        /// The actual cue identity, or `None` for decoder-configuration refusals.
+        source: Option<Box<fmn_scene::SoundSourceKey>>,
         /// The decoder refusal.
         error: AudioDecodeError,
     },
@@ -662,9 +662,10 @@ impl fmt::Display for RenderError {
             Self::SoundAsset { path, error } => {
                 write!(f, "sound cue {}: {error}", path.display())
             }
-            Self::SoundDecode { path, error } => {
-                write!(f, "sound cue {}: {error}", path.display())
-            }
+            Self::SoundDecode { source, error } => match source {
+                Some(source) => write!(f, "sound cue {source}: {error}"),
+                None => write!(f, "sound decoder: {error}"),
+            },
             Self::Sound(error) => error.fmt(f),
         }
     }
@@ -1460,7 +1461,7 @@ impl VideoSession {
         .map_err(RenderError::Ffmpeg)?;
         let mut decoder = AudioDecoder::with_boundary(AudioDecodeLimits::default(), boundary)
             .map_err(|error| RenderError::SoundDecode {
-                path: PathBuf::new(),
+                source: None,
                 error,
             })?;
         let prepared = PreparedSceneSoundtrack::new(

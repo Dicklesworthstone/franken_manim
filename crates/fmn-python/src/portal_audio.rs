@@ -8,11 +8,13 @@ use super::*;
 use fmn_output::{
     AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy,
 };
+use fmn_scene::SoundSource;
 use pyo3::exceptions::PyAttributeError;
 use pyo3::types::PyBool;
+use std::borrow::Cow;
 
 pub(crate) struct PortalAudioInput {
-    path: PathBuf,
+    source: SoundSource,
     report: Arc<AudioDecodeReport>,
     channels: u16,
     sample_rate: u32,
@@ -170,23 +172,13 @@ impl PortalAudio {
                 limits.max_input_bytes.min(64 * 1024 * 1024) as usize
             });
         for request in requests {
-            let bytes = fmn_platform::fs::FileSystem::read_bounded(
-                &fs,
-                &request.sound_file,
-                max_input_bytes,
-            )
-            .map_err(|error| {
-                PyOSError::new_err(format!(
-                    "sound cue {}: {error}",
-                    request.sound_file.display()
-                ))
-            })?;
+            let bytes = read_source(&fs, &request.source, max_input_bytes)?;
             let decoded = self.decoder.decode(&bytes).map_err(|error| {
-                let message = format!("sound cue {}: {error}", request.sound_file.display());
+                let message = format!("sound cue {}: {error}", request.source.identity());
                 decode_message(&error, message)
             })?;
             let input = PortalAudioInput {
-                path: request.sound_file.clone(),
+                source: request.source.clone(),
                 channels: decoded.audio.channels,
                 sample_rate: decoded.audio.sample_rate,
                 sample_frames: (decoded.audio.samples.len() / usize::from(decoded.audio.channels))
@@ -277,7 +269,18 @@ pub(crate) fn input_facts(scene: &Bound<'_, PyScene>) -> PyResult<Py<PyList>> {
     let facts = PyList::empty(scene.py());
     for input in &scene.borrow().render_audio_inputs {
         let fact = PyDict::new(scene.py());
-        fact.set_item("path", input.path.to_string_lossy().as_ref())?;
+        match &input.source {
+            SoundSource::File(path) => {
+                // Preserve the existing file receipt schema, including all
+                // checkpoint consumers. Memory sources have no filesystem path.
+                fact.set_item("path", path.to_string_lossy().as_ref())?;
+            }
+            SoundSource::Memory(_) => {
+                fact.set_item("path", scene.py().None())?;
+                fact.set_item("source_kind", input.source.kind())?;
+                fact.set_item("source", input.source.identity().as_ref())?;
+            }
+        }
         fact.set_item("source_sha256", input.report.source_digest.to_hex())?;
         fact.set_item("pcm_sha256", input.report.pcm_digest.to_hex())?;
         fact.set_item("container", input.report.format.demuxer())?;
@@ -303,6 +306,31 @@ pub(crate) fn input_facts(scene: &Bound<'_, PyScene>) -> PyResult<Py<PyList>> {
         facts.append(fact)?;
     }
     Ok(facts.unbind())
+}
+
+/// Read a file through the admitted capability, or borrow frozen native WAV.
+/// The cap applies before decoding in either case. File data keeps its owned
+/// read buffer, while memory data needs neither a copy nor a filesystem call.
+fn read_source<'a>(
+    fs: &dyn fmn_platform::fs::FileSystem,
+    source: &'a SoundSource,
+    limit: usize,
+) -> PyResult<Cow<'a, [u8]>> {
+    match source {
+        SoundSource::File(path) => fs
+            .read_bounded(path, limit)
+            .map(Cow::Owned)
+            .map_err(|error| {
+                PyOSError::new_err(format!("sound cue {}: {error}", path.display()))
+            }),
+        SoundSource::Memory(data) if data.bytes().len() <= limit => {
+            Ok(Cow::Borrowed(data.bytes()))
+        }
+        SoundSource::Memory(_) => Err(PyValueError::new_err(format!(
+            "sound cue {} exceeds the {limit}-byte source budget",
+            source.identity()
+        ))),
+    }
 }
 
 /// Portable export policy. Each byte cap bounds one preparation pool, not
@@ -395,7 +423,7 @@ impl BundleAudioCapture {
         remaining_bytes: usize,
     ) -> PyResult<Option<BundleAudioMix>> {
         use fmn_output::{MixerConfig, SoundCue, SoundMixer, frames_to_samples};
-        use fmn_platform::fs::{FileSystem, StdFs};
+        use fmn_platform::fs::StdFs;
         use std::collections::{BTreeMap, btree_map::Entry};
         let options = self.options.validate()?;
         let requests = scene.sound_requests();
@@ -443,7 +471,7 @@ impl BundleAudioCapture {
         let mut inputs = Vec::new();
         let mut invocations = Vec::new();
         for request in requests {
-            let (audio, report) = match cache.entry(request.sound_file.clone()) {
+            let (audio, report) = match cache.entry(request.source.key()) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
                     let raw_budget = (options.max_bytes - source_bytes)
@@ -459,14 +487,7 @@ impl BundleAudioCapture {
                             "bundle soundtrack source/decode budget exhausted",
                         ));
                     }
-                    let bytes = StdFs
-                        .read_bounded(&request.sound_file, raw_budget)
-                        .map_err(|e| {
-                            PyOSError::new_err(format!(
-                                "sound cue {}: {e}",
-                                request.sound_file.display()
-                            ))
-                        })?;
+                    let bytes = read_source(&StdFs, &request.source, raw_budget)?;
                     source_bytes += bytes.len();
                     let decoded = self
                         .decoder
@@ -480,7 +501,7 @@ impl BundleAudioCapture {
                         .map_err(|e| {
                             decode_message(
                                 &e,
-                                format!("sound cue {}: {e}", request.sound_file.display()),
+                                format!("sound cue {}: {e}", request.source.identity()),
                             )
                         })?;
                     decoded_bytes += decoded.audio.samples.len() * 4;
@@ -493,7 +514,7 @@ impl BundleAudioCapture {
             };
             if options.allow_ffmpeg {
                 inputs.push(PortalAudioInput {
-                    path: request.sound_file.clone(),
+                    source: request.source.clone(),
                     channels: audio.channels,
                     sample_rate: audio.sample_rate,
                     sample_frames: (audio.samples.len() / usize::from(audio.channels)) as u64,

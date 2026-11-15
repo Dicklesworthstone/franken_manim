@@ -993,8 +993,8 @@ mod tests {
             assert_eq!(requests.len(), 1);
             assert_eq!(requests.as_slice(), ordinary.scene().sound_requests());
             assert_eq!(
-                requests[0].sound_file.as_path(),
-                Path::new(fmn::builtins::SOUND_CUE_ASSET_NAME)
+                requests[0].source.file_path(),
+                Some(Path::new(fmn::builtins::SOUND_CUE_ASSET_NAME))
             );
             assert_eq!(
                 requests[0].time,

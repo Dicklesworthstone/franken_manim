@@ -168,24 +168,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 For a standalone WAV soundtrack, call `render_soundtrack(&mut scene, SoundtrackRenderOptions::new("media/soundtrack.wav")?)`. The ordinary scene and its updaters execute once; `scene_mut().add_sound(…)` cues retain their offsets, gains, background ducking, and tails, with skipped time removed from the output clock. A cue-free scene produces silence of the correct duration. This route uses native PCM source decoding and canonical signed 16-bit WAV publication without a pixel renderer or ffmpeg. `SoundtrackRenderOptions` exposes the sample rate/channel matrix, mixer worker ceiling, scene duration, source/decoded/prepared audio budgets, and a 64 MiB default artifact ceiling. Existing destinations are preserved, and the report includes actual sample frames, clipping counts, and the exact inputs decoded. Compressed source files return a named decoder-capability error.
 
+The example below creates a short PCM pulse in memory. `SoundData` freezes the samples as shared canonical WAV bytes; `add_sound_data` uses the same timing and gain semantics as file-backed `add_sound`, without a temporary source file. Soundtrack receipts expose a typed `source` and its content identity.
+
 ```rust,no_run
 use fmn::prelude::*;
 
-struct Narration;
+struct Pulse(SoundData);
 
-impl SceneConstruct for Narration {
+impl SceneConstruct for Pulse {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
-        stage.scene_mut().add_sound("assets/voice.wav", 0.0, None, None)?;
+        stage.scene_mut().add_sound_data(self.0.clone(), 0.0, None, None)?;
         stage.wait(3.0)?;
         Ok(())
     }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pulse = SoundData::from_audio(
+        &WavAudio {
+            channels: 1,
+            sample_rate: 48_000,
+            format: SampleFormat::F32,
+            samples: vec![0.25; 4_800],
+        },
+        SoundDataLimits::default(),
+    )?;
     let mut audio = SoundtrackRenderOptions::new("media/soundtrack.wav")?;
     audio.mixer.sample_rate = 48_000;
     audio.mixer.channels = 2;
-    let report = render_soundtrack(&mut Narration, audio)?;
+    let report = render_soundtrack(&mut Pulse(pulse), audio)?;
     println!("{} sample frames in {}", report.artifact.sample_frames, report.artifact.path.display());
     Ok(())
 }

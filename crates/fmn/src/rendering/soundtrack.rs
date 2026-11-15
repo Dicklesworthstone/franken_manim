@@ -18,7 +18,7 @@ use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_scene::{
     CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig, SceneRunReport, SceneSink,
-    SoundRequest,
+    SoundRequest, SoundSource,
 };
 use fmn_tex::{TexSession, TypesetSessionReport};
 
@@ -104,7 +104,8 @@ impl SoundtrackTimeline {
 /// authored path after decoding.
 #[derive(Clone, Debug)]
 pub struct SoundtrackInput {
-    pub path: PathBuf,
+    /// Actual file or immutable memory identity; memory sources are never paths.
+    pub source: SoundSource,
     pub bytes: Arc<[u8]>,
     pub report: Arc<AudioDecodeReport>,
 }
@@ -116,7 +117,7 @@ pub struct SoundtrackInput {
 pub struct SoundtrackPreparationLimits {
     /// Insertion-ordered requests, checked before reading any source.
     pub max_cues: usize,
-    /// Total bytes retained for distinct source paths, not repeated cues.
+    /// Total bytes retained for distinct source identities, not repeated cues.
     pub max_source_bytes: usize,
     /// Total cached interleaved f32 samples; each decoder has its own limit too.
     pub max_decoded_samples: usize,
@@ -173,8 +174,10 @@ impl PreparedSceneSoundtrack {
     /// Read and decode the exact sound requests through caller capabilities.
     ///
     /// Each distinct authored path is read once, bounded to 64 MiB, and
-    /// decoded once. Repeated cues share that immutable source snapshot even
-    /// if the filesystem changes during preparation. The injected decoder owns
+    /// decoded once. Memory sources share their frozen bytes and never read
+    /// the filesystem; equivalent canonical PCM shares one decode. Repeated
+    /// cues share that immutable source snapshot even if the filesystem changes
+    /// during preparation. The injected decoder owns
     /// native PCM decoding and any governed ffmpeg fallback. `Some(timeline)` rebases
     /// cue call sites after skipped time; `None` retains absolute scene time
     /// for phase-preserving subdivision windows. Relative offsets and gains
@@ -235,31 +238,47 @@ impl PreparedSceneSoundtrack {
                 Some(timeline) => timeline.output_frame(request.time.frames())?,
                 None => request.time.frames(),
             };
-            let (bytes, audio, report) = match sources.entry(request.sound_file.clone()) {
+            let (bytes, audio, report) = match sources.entry(request.source.key()) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let bytes = fs
-                        .read_bounded(
-                            &request.sound_file,
-                            MAX_SOUND_ASSET_BYTES.min(limits.max_source_bytes - source_bytes),
-                        )
-                        .map_err(|error| RenderError::SoundAsset {
-                            path: request.sound_file.clone(),
-                            error,
-                        })?;
+                    let raw_budget =
+                        MAX_SOUND_ASSET_BYTES.min(limits.max_source_bytes - source_bytes);
+                    let bytes: Arc<[u8]> = match &request.source {
+                        SoundSource::File(path) => fs
+                            .read_bounded(path, raw_budget)
+                            .map(Arc::from)
+                            .map_err(|error| RenderError::SoundAsset {
+                                path: path.clone(),
+                                error,
+                            })?,
+                        SoundSource::Memory(data) => {
+                            if data.bytes().len() > raw_budget {
+                                return Err(RenderError::InvalidOptions(
+                                    "soundtrack source-byte budget exceeded",
+                                ));
+                            }
+                            Arc::clone(data.bytes())
+                        }
+                    };
                     charge(
                         &mut source_bytes,
                         bytes.len(),
                         limits.max_source_bytes,
                         "soundtrack source-byte budget exceeded",
                     )?;
-                    let decoded =
-                        decoder
-                            .decode(&bytes)
-                            .map_err(|error| RenderError::SoundDecode {
-                                path: request.sound_file.clone(),
-                                error,
-                            })?;
+                    let decoded = decoder
+                        .decode_with_limits(
+                            &bytes,
+                            &AudioDecodeLimits {
+                                max_input_bytes: raw_budget as u64,
+                                max_samples: (limits.max_decoded_samples - decoded_samples)
+                                    as u64,
+                            },
+                        )
+                        .map_err(|error| RenderError::SoundDecode {
+                            source: Some(Box::new(request.source.key())),
+                            error,
+                        })?;
                     charge(
                         &mut decoded_samples,
                         decoded.audio.samples.len(),
@@ -273,7 +292,7 @@ impl PreparedSceneSoundtrack {
                         })?;
                         invocations.push(invocation.clone());
                     }
-                    entry.insert((Arc::<[u8]>::from(bytes), decoded.audio, report))
+                    entry.insert((bytes, decoded.audio, report))
                 }
             };
             // Budget sizing only: the native mixer's resampler owns the actual
@@ -304,7 +323,7 @@ impl PreparedSceneSoundtrack {
                 })
                 .map_err(RenderError::Sound)?;
             inputs.push(SoundtrackInput {
-                path: request.sound_file.clone(),
+                source: request.source.clone(),
                 bytes: Arc::clone(bytes),
                 report: Arc::clone(report),
             });
@@ -494,7 +513,7 @@ impl SoundtrackRenderOptions {
             .max_samples
             .min(self.preparation.max_decoded_samples as u64);
         AudioDecoder::new(limits, None).map_err(|error| RenderError::SoundDecode {
-            path: PathBuf::new(),
+            source: None,
             error,
         })
     }
@@ -733,7 +752,46 @@ mod tests {
     use fmn_anim::RationalTime;
     use fmn_codec::{SampleFormat, WavAudio, encode_wav};
     use fmn_output::{AudioDecodeLimits, AudioInputFormat, frames_to_samples};
-    use fmn_platform::fs::VirtualFs;
+    use fmn_platform::fs::{FsError, FsNodeKind, VirtualFs};
+    use std::path::Path;
+
+    struct NoFileAccess;
+
+    impl FileSystem for NoFileAccess {
+        fn node_kind_no_follow(&self, _: &Path) -> Result<Option<FsNodeKind>, FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn create_dir(&self, _: &Path) -> Result<bool, FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn read(&self, _: &Path) -> Result<Vec<u8>, FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn read_bounded(&self, _: &Path, _: usize) -> Result<Vec<u8>, FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn write_atomic(&self, _: &Path, _: &[u8]) -> Result<(), FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn create_new(&self, _: &Path, _: &[u8]) -> Result<bool, FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn remove_file(&self, _: &Path) -> Result<(), FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn remove_dir_all(&self, _: &Path) -> Result<(), FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn exists(&self, _: &Path) -> bool {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn list_dir(&self, _: &Path) -> Result<Vec<PathBuf>, FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+        fn count_dir_entries_bounded(&self, _: &Path, _: usize) -> Result<usize, FsError> {
+            panic!("memory sound accessed the filesystem")
+        }
+    }
 
     fn config() -> MixerConfig {
         MixerConfig {
@@ -745,7 +803,7 @@ mod tests {
 
     fn request(path: &str, frame: i64, fps: u32) -> SoundRequest {
         SoundRequest {
-            sound_file: path.into(),
+            source: SoundSource::File(path.into()),
             time: RationalTime::zero(fps) + frame,
             time_offset: 0.0,
             gain: None,
@@ -813,7 +871,10 @@ mod tests {
         let mix = prepared.mix(1).unwrap();
         assert_eq!(mix.audio.samples, [0.0, 0.125, 0.25, 0.375, 0.5, 0.0]);
         assert_eq!(prepared.inputs()[0].bytes.as_ref(), bytes.as_slice());
-        assert_eq!(prepared.inputs()[0].path, PathBuf::from("/tone.wav"));
+        assert_eq!(
+            prepared.inputs()[0].source,
+            SoundSource::File(PathBuf::from("/tone.wav"))
+        );
         assert_eq!(prepared.inputs()[0].report.format, AudioInputFormat::Wav);
         assert!(prepared.invocations().is_empty());
     }
@@ -858,6 +919,127 @@ mod tests {
         assert_eq!(mixed.cues_mixed, 2);
         assert_eq!(mixed.audio.samples, [0.25, 0.5, 0.0, 0.125, 0.25]);
         assert!(prepared.invocations().is_empty());
+    }
+
+    #[test]
+    fn memory_sound_uses_no_files_or_processes_and_shares_decodes_by_content() {
+        use fmn_scene::{SoundData, SoundDataLimits};
+        let mut pcm = WavAudio {
+            channels: 1,
+            sample_rate: 8,
+            format: SampleFormat::F32,
+            samples: vec![0.125, 0.25, 0.375, 0.5],
+        };
+        let first = SoundData::from_audio(&pcm, SoundDataLimits::default()).unwrap();
+        let repeated = SoundData::from_audio(&pcm, SoundDataLimits::default()).unwrap();
+        assert!(!Arc::ptr_eq(first.bytes(), repeated.bytes()));
+        let mut cues = [request("unused", 0, 8), request("unused", 4, 8)];
+        cues[0].source = SoundSource::Memory(first.clone());
+        cues[0].time_offset = -0.125;
+        cues[1].source = SoundSource::Memory(repeated);
+        cues[1].gain = Some(-6.020_599_913_279_624);
+        pcm.samples.fill(1.0);
+        let limits = SoundtrackPreparationLimits {
+            max_cues: 2,
+            max_source_bytes: first.bytes().len(),
+            max_decoded_samples: 4,
+            max_prepared_samples: 8,
+        };
+        let prepare = |limits| {
+            let mut decoder = AudioDecoder::with_boundary_resolver(
+                AudioDecodeLimits::default(),
+                |_| panic!("memory PCM resolved an external decoder"),
+            )
+            .unwrap();
+            PreparedSceneSoundtrack::new_with_limits(
+                &NoFileAccess,
+                &cues,
+                &mut decoder,
+                config(),
+                None,
+                limits,
+            )
+        };
+        let prepared = prepare(limits).unwrap();
+        assert!(Arc::ptr_eq(first.bytes(), &prepared.inputs()[0].bytes));
+        assert!(Arc::ptr_eq(
+            &prepared.inputs()[0].bytes,
+            &prepared.inputs()[1].bytes
+        ));
+        assert!(Arc::ptr_eq(
+            &prepared.inputs()[0].report,
+            &prepared.inputs()[1].report
+        ));
+        assert_eq!(prepared.inputs()[0].report.source_digest, first.digest());
+        assert_eq!(prepared.inputs()[0].source.file_path(), None);
+        assert_eq!(prepared.inputs()[0].source.kind(), "memory-wav");
+        for workers in [1, 4, 16] {
+            assert_eq!(
+                prepared.mix(workers).unwrap().audio.samples,
+                [0.25, 0.375, 0.5, 0.0, 0.0625, 0.125, 0.1875, 0.25]
+            );
+        }
+        assert!(prepared.invocations().is_empty());
+        assert!(matches!(
+            prepare(SoundtrackPreparationLimits {
+                max_source_bytes: first.bytes().len() - 1,
+                ..limits
+            }),
+            Err(RenderError::InvalidOptions(
+                "soundtrack source-byte budget exceeded"
+            ))
+        ));
+        assert!(matches!(
+            prepare(SoundtrackPreparationLimits {
+                max_decoded_samples: 3,
+                ..limits
+            }),
+            Err(RenderError::SoundDecode {
+                source: Some(source),
+                error: fmn_output::AudioDecodeError::Native(fmn_codec::WavError::TooLarge { .. }),
+            }) if matches!(source.as_ref(), fmn_scene::SoundSourceKey::Memory(_))
+        ));
+        assert!(matches!(
+            prepare(SoundtrackPreparationLimits {
+                max_prepared_samples: 7,
+                ..limits
+            }),
+            Err(RenderError::InvalidOptions(
+                "soundtrack prepared-sample budget exceeded"
+            ))
+        ));
+    }
+
+    #[test]
+    fn memory_uri_cannot_alias_an_authored_file_name() {
+        use fmn_scene::{SoundData, SoundDataLimits};
+        let data = SoundData::from_wav_bytes(
+            &encode_wav(1, 8, SampleFormat::F32, &[0.125, 0.25]),
+            SoundDataLimits::default(),
+        )
+        .unwrap();
+        let source = SoundSource::Memory(data);
+        let name = source.identity().into_owned();
+        let fs = VirtualFs::new();
+        fs.insert(&name, encode_wav(1, 8, SampleFormat::F32, &[0.25, 0.5]));
+        let mut memory = request("unused", 0, 8);
+        memory.source = source;
+        let file = request(&name, 0, 8);
+        assert_ne!(memory.source.key(), file.source.key());
+        let prepared = PreparedSceneSoundtrack::new(
+            &fs,
+            &[memory, file],
+            &mut native_decoder(),
+            config(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(prepared.mix(1).unwrap().audio.samples, [0.375, 0.75]);
+        assert_eq!(prepared.inputs()[0].source.file_path(), None);
+        assert_eq!(
+            prepared.inputs()[1].source.file_path(),
+            Some(Path::new(&name))
+        );
     }
 
     #[test]
@@ -977,7 +1159,8 @@ mod tests {
         fs.insert("/invalid.wav", b"invalid media".to_vec());
         assert!(matches!(
             PreparedSceneSoundtrack::new(&fs, &[request("/invalid.wav", 0, 8)], &mut native_decoder(), config(), None),
-            Err(RenderError::SoundDecode { path, .. }) if path.as_path() == std::path::Path::new("/invalid.wav")
+            Err(RenderError::SoundDecode { source: Some(source), .. })
+                if matches!(source.as_ref(), fmn_scene::SoundSourceKey::File(path) if path.as_path() == Path::new("/invalid.wav"))
         ));
         let prepared =
             PreparedSceneSoundtrack::new(&fs, &[], &mut native_decoder(), config(), None).unwrap();
