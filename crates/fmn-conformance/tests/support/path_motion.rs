@@ -1,13 +1,16 @@
-//! Sequential path motion retains exact placements while reusing mover bounds.
+//! Motion preserves exact placements and refuses invalid live samples.
 
 use fmn_anim::animation::Animation as _;
-use fmn_anim::{MoveAlongPath, RateFunc};
+use fmn_anim::{
+    AnimConfig, AnimError, Homotopy, MaintainPositionRelativeTo, MoveAlongPath, PhaseFlow, RateFunc,
+};
 use fmn_conformance::e2e::{LogEvent, RunCtx, RunOutcome, ScenarioError};
 use fmn_core::constants::ORIGIN;
 use fmn_geom::QuadPath;
 use fmn_mobject::bbox::BoxAccum;
 use fmn_mobject::stage::{SURFACE_VALIDITY_FIELD, surface_sample_is_present};
-use fmn_mobject::{BoundingBox, Mob, Mobject, Placement, Stage};
+use fmn_mobject::{BoundingBox, Mob, Mobject, Placement, Stage, StageError};
+use fmn_scene::{PlayOverrides, RuntimeConfig, Scene, SceneError};
 
 fn raw_bounds(stage: &Stage, mob: Mob) -> BoundingBox {
     let mut acc = BoxAccum::new();
@@ -193,4 +196,202 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
             "retained_motion_path_materializations",
             path_materializations,
         ))
+}
+
+/// Reject a later family member's invalid map before publishing any part of
+/// that sample. The previous successful frame remains the recoverable state,
+/// including during skip, where no packets are captured.
+pub(super) fn functional_motion_failures(
+    ctx: &mut RunCtx,
+) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((4, 1));
+    let mut modes = 0_u64;
+    let mut emitted_frames = 0_u64;
+    for flow in [false, true] {
+        for skip in [false, true] {
+            let mut scene = Scene::new(
+                RuntimeConfig {
+                    fps: 4,
+                    skip_animations: skip,
+                    preview_while_skipping: false,
+                    ..RuntimeConfig::default()
+                },
+                123,
+            )
+            .map_err(|error| super::fail(format!("functional motion scene: {error}")))?;
+            let moving = scene.stage_mut().add(Mobject::new());
+            let first = scene
+                .stage_mut()
+                .add(Mobject::from_points(&[[0.25, 0.125, 0.0]]));
+            let later = scene
+                .stage_mut()
+                .add(Mobject::from_points(&[[2.0, 0.25, 0.0]]));
+            for member in [first, later] {
+                scene
+                    .stage_mut()
+                    .attach(moving, member)
+                    .map_err(|error| super::fail(format!("functional motion family: {error}")))?;
+            }
+            scene
+                .add(&[moving])
+                .map_err(|error| super::fail(format!("add functional motion: {error}")))?;
+            let config = AnimConfig {
+                run_time: 1.0,
+                rate_func: RateFunc::linear(),
+                suspend_mobject_updating: true,
+                ..AnimConfig::default()
+            };
+            let animation: Box<dyn fmn_anim::Animation> = if flow {
+                Box::new(
+                    PhaseFlow::try_new(
+                        |point| {
+                            if point[0] > 2.1 {
+                                Ok([f64::NAN, 0.0, 0.0])
+                            } else {
+                                Ok([1.0, 0.0, 0.0])
+                            }
+                        },
+                        moving,
+                        Some(1.0),
+                    )
+                    .with_config(config),
+                )
+            } else {
+                Box::new(
+                    Homotopy::try_new(
+                        |x, y, z, alpha| {
+                            if x > 1.5 && alpha >= 0.5 {
+                                Ok([f64::NAN, y, z])
+                            } else {
+                                Ok([x + alpha, y, z])
+                            }
+                        },
+                        moving,
+                    )
+                    .with_config(config),
+                )
+            };
+            let mut sink = super::PacketSink::default();
+            let result = scene.play(vec![animation], PlayOverrides::default(), &mut sink);
+            if !matches!(
+                result,
+                Err(SceneError::Animation(AnimError::Stage(StageError::InvalidPointMap(_))))
+            ) {
+                return Err(super::fail(format!(
+                    "invalid functional motion lost its typed refusal (flow={flow}, skip={skip}): {result:?}"
+                )));
+            }
+            if scene.time().frames() != 1 || sink.packets.len() != usize::from(!skip) {
+                return Err(super::fail(format!(
+                    "invalid functional sample advanced or captured (flow={flow}, skip={skip}, time={}, captures={})",
+                    scene.time().frames(),
+                    sink.packets.len()
+                )));
+            }
+            for (member, expected) in [
+                (first, [0.5, 0.125, 0.0]),
+                (later, [2.25, 0.25, 0.0]),
+            ] {
+                if scene.stage().get_points(member).as_deref() != Some(&[expected]) {
+                    return Err(super::fail(format!(
+                        "invalid later map partially changed its family (flow={flow}, skip={skip})"
+                    )));
+                }
+            }
+            if scene.stage().is_updating_suspended(moving) {
+                return Err(super::fail("failed functional motion left its family suspended"));
+            }
+            emitted_frames += sink.packets.len() as u64;
+            modes += 1;
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.failure.functional_motion")
+            .field("modes_checked", modes)
+            .field("emitted_frames", emitted_frames)
+            .field("failed_sample_unchanged", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("functional_motion_failure_modes", modes)
+        .with_counter("functional_motion_failure_emitted_frames", emitted_frames))
+}
+
+/// Removing a tracked object between frames must not move its follower to
+/// an invented origin. The stale dependency reaches the real Scene boundary.
+pub(super) fn tracked_position_failure(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.set_fps((4, 1));
+    let mut emitted_frames = 0_u64;
+    for skip in [false, true] {
+        let mut scene = Scene::new(
+            RuntimeConfig {
+                fps: 4,
+                skip_animations: skip,
+                preview_while_skipping: false,
+                ..RuntimeConfig::default()
+            },
+            123,
+        )
+        .map_err(|error| super::fail(format!("tracked motion scene: {error}")))?;
+        let moving = scene
+            .stage_mut()
+            .add(Mobject::from_points(&[[3.0, 2.0, 0.0]]));
+        let tracked = scene
+            .stage_mut()
+            .add(Mobject::from_points(&[[1.0, 1.0, 0.0]]));
+        let controller = scene.stage_mut().add(Mobject::new());
+        scene
+            .add(&[moving, tracked, controller])
+            .map_err(|error| super::fail(format!("add tracked actors: {error}")))?;
+        scene
+            .stage_mut()
+            .add_updater(
+                controller,
+                move |stage, _| {
+                    if stage.time() > 0.0 && stage.contains(tracked) {
+                        stage.delete(tracked).expect("the tracked object is live");
+                    }
+                },
+                false,
+            )
+            .map_err(|error| super::fail(format!("attach tracked removal: {error}")))?;
+        let animation = MaintainPositionRelativeTo::new(scene.stage(), moving, tracked).with_config(
+            AnimConfig {
+                run_time: 1.0,
+                suspend_mobject_updating: true,
+                ..AnimConfig::default()
+            },
+        );
+        let mut sink = super::PacketSink::default();
+        let result = scene.play(vec![Box::new(animation)], PlayOverrides::default(), &mut sink);
+        if !matches!(
+            result,
+            Err(SceneError::Animation(AnimError::StaleHandle(mob))) if mob == tracked
+        ) {
+            return Err(super::fail(format!(
+                "removed tracked input did not reach Scene.play (skip={skip}): {result:?}"
+            )));
+        }
+        if scene.time().frames() != 1 || sink.packets.len() != usize::from(!skip) {
+            return Err(super::fail(format!(
+                "failed follower advanced or captured (skip={skip}, time={}, captures={})",
+                scene.time().frames(),
+                sink.packets.len()
+            )));
+        }
+        if scene.stage().get_center(moving) != [3.0, 2.0, 0.0]
+            || scene.stage().is_updating_suspended(moving)
+        {
+            return Err(super::fail("failed follower moved or retained its suspension"));
+        }
+        emitted_frames += sink.packets.len() as u64;
+    }
+    ctx.event(
+        LogEvent::new("e2e.failure.tracked_position")
+            .field("modes_checked", 2_u64)
+            .field("emitted_frames", emitted_frames)
+            .field("follower_unchanged", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("tracked_position_failure_modes", 2)
+        .with_counter("tracked_position_failure_emitted_frames", emitted_frames))
 }

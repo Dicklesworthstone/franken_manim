@@ -74,6 +74,17 @@ fn mapped_auxiliary_points(
     placement: Placement,
     map: impl Fn(Vec3) -> Vec3,
 ) -> Vec<(String, Vec<f32>)> {
+    try_mapped_auxiliary_points(buffer, placement, |point| {
+        Ok::<_, std::convert::Infallible>(map(point))
+    })
+    .unwrap_or_else(|never| match never {})
+}
+
+fn try_mapped_auxiliary_points<E>(
+    buffer: &RecordBuffer,
+    placement: Placement,
+    map: impl Fn(Vec3) -> Result<Vec3, E>,
+) -> Result<Vec<(String, Vec<f32>)>, E> {
     let mut columns: Vec<(String, Vec<f32>)> = Vec::new();
     let validity = buffer.read_column(SURFACE_VALIDITY_FIELD);
     for key in buffer.schema().pointlike_keys() {
@@ -89,28 +100,24 @@ fn mapped_auxiliary_points(
             continue;
         }
         if let Some(values) = buffer.read_column(key) {
-            #[allow(clippy::cast_possible_truncation)]
-            let mapped = values
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .enumerate()
-                .flat_map(|(index, point)| {
-                    if !surface_sample_is_present(validity.as_deref(), index) {
-                        return [0.0; 3];
-                    }
+            let mut mapped = Vec::with_capacity(values.len());
+            for (index, point) in values.as_chunks::<3>().0.iter().enumerate() {
+                let point = if surface_sample_is_present(validity.as_deref(), index) {
                     map(placement.apply_point([
                         f64::from(point[0]),
                         f64::from(point[1]),
                         f64::from(point[2]),
-                    ]))
-                    .map(|value| value as f32)
-                })
-                .collect();
+                    ]))?
+                } else {
+                    [0.0; 3]
+                };
+                #[allow(clippy::cast_possible_truncation)]
+                mapped.extend(point.map(|value| value as f32));
+            }
             columns.push((key.clone(), mapped));
         }
     }
-    columns
+    Ok(columns)
 }
 
 /// The existing world-space map, prepared without touching record generations.
@@ -773,24 +780,35 @@ impl Stage {
         mob: Mob,
         map: impl Fn(Vec3) -> Vec3,
     ) -> Result<MappedPointlikes, StageError> {
+        self.prepare_world_pointlikes_with(mob, |point| Ok(map(point)))
+    }
+
+    fn prepare_world_pointlikes_with<E: From<StageError>>(
+        &self,
+        mob: Mob,
+        map: impl Fn(Vec3) -> Result<Vec3, E>,
+    ) -> Result<MappedPointlikes, E> {
         let validity = self
             .get(mob)
             .and_then(|entry| entry.buffer.read_column(SURFACE_VALIDITY_FIELD));
-        let points = self.get_points(mob).map(|points| {
-            points
-                .into_iter()
-                .enumerate()
-                .map(|(index, point)| {
-                    if surface_sample_is_present(validity.as_deref(), index) {
-                        map(point)
-                    } else {
-                        ORIGIN
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
+        let points = self
+            .get_points(mob)
+            .map(|points| {
+                points
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, point)| {
+                        if surface_sample_is_present(validity.as_deref(), index) {
+                            map(point)
+                        } else {
+                            Ok(ORIGIN)
+                        }
+                    })
+                    .collect::<Result<Vec<_>, E>>()
+            })
+            .transpose()?;
         let entry = self.get(mob).ok_or(StageError::StaleHandle)?;
-        let columns = mapped_auxiliary_points(&entry.buffer, entry.placement(), &map);
+        let columns = try_mapped_auxiliary_points(&entry.buffer, entry.placement(), &map)?;
         Ok(MappedPointlikes { points, columns })
     }
 
@@ -1064,6 +1082,77 @@ impl Stage {
         about_point: Option<Vec3>,
         about_edge: Option<Vec3>,
     ) -> Result<&mut Self, StageError> {
+        self.try_apply_points_function_with(mob, |point| Ok(f(point)), about_point, about_edge)
+    }
+
+    /// Apply a fallible map with atomic geometry publication.
+    ///
+    /// Callback order is member, field, then record, as in the ordinary map.
+    /// The first callback error stops evaluation immediately. Every member is
+    /// prepared and validated before any record or placement is published.
+    /// Captured views therefore observe the previous published geometry during
+    /// evaluation. External callback effects cannot be rolled back.
+    ///
+    /// # Errors
+    /// A callback error, or geometry/schema/pivot errors converted through E.
+    pub fn try_apply_points_function_with<E: From<StageError>>(
+        &mut self,
+        mob: Mob,
+        f: impl Fn(Vec3) -> Result<Vec3, E>,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> Result<&mut Self, E> {
+        let pivot = self.checked_point_map_pivot(mob, about_point, about_edge)?;
+        let mut prepared = Vec::new();
+        for member in self.family(mob) {
+            let mapped = self.prepare_world_pointlikes_with(member, |point| match pivot {
+                Some(pivot) => f(sub(point, pivot)).map(|point| add(point, pivot)),
+                None => f(point),
+            })?;
+            self.validate_world_pointlikes(member, &mapped)?;
+            prepared.push((member, mapped));
+        }
+        for (member, mapped) in prepared {
+            self.publish_world_pointlikes(member, mapped)?;
+        }
+        Ok(self.refresh_bounding_box(mob, true, true))
+    }
+
+    /// Apply a fallible map in the original live member order.
+    ///
+    /// Each member is published before the next member's callback runs, so
+    /// captured record views retain the observations of apply_points_function.
+    /// A failure stops immediately; previously published members and external
+    /// callback effects remain. Call try_apply_points_function_with when the
+    /// entire sample must be atomic instead.
+    ///
+    /// # Errors
+    /// A callback error, or geometry/schema/pivot errors converted through E.
+    pub fn try_apply_points_function_in_order_with<E: From<StageError>>(
+        &mut self,
+        mob: Mob,
+        f: impl Fn(Vec3) -> Result<Vec3, E>,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> Result<&mut Self, E> {
+        let pivot = self.checked_point_map_pivot(mob, about_point, about_edge)?;
+        for member in self.family(mob) {
+            let mapped = self.prepare_world_pointlikes_with(member, |point| match pivot {
+                Some(pivot) => f(sub(point, pivot)).map(|point| add(point, pivot)),
+                None => f(point),
+            })?;
+            self.validate_world_pointlikes(member, &mapped)?;
+            self.publish_world_pointlikes(member, mapped)?;
+        }
+        Ok(self.refresh_bounding_box(mob, true, true))
+    }
+
+    fn checked_point_map_pivot(
+        &self,
+        mob: Mob,
+        about_point: Option<Vec3>,
+        about_edge: Option<Vec3>,
+    ) -> Result<Option<Vec3>, StageError> {
         self.try_get(mob)?;
         if about_point
             .into_iter()
@@ -1077,19 +1166,7 @@ impl Stage {
         if pivot.is_some_and(|point| point.into_iter().any(|value| !value.is_finite())) {
             return Err(StageError::InvalidPointMap("resolved pivot must be finite"));
         }
-        let mut prepared = Vec::new();
-        for member in self.family(mob) {
-            let mapped = self.prepare_world_pointlikes(member, |point| match pivot {
-                Some(pivot) => add(f(sub(point, pivot)), pivot),
-                None => f(point),
-            })?;
-            self.validate_world_pointlikes(member, &mapped)?;
-            prepared.push((member, mapped));
-        }
-        for (member, mapped) in prepared {
-            self.publish_world_pointlikes(member, mapped)?;
-        }
-        Ok(self.refresh_bounding_box(mob, true, true))
+        Ok(pivot)
     }
 
     /// Translate a family through the ordinary retained-placement path after

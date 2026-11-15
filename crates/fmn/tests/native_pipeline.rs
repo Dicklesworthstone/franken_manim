@@ -622,3 +622,114 @@ fn dynamic_field_and_trace_failures_abort_real_native_publication() {
         assert!(fs.exists(Path::new("/refused-dynamics")));
     }
 }
+
+#[test]
+fn functional_motion_failures_abort_staged_pixels_and_allow_immediate_retry() {
+    use fmn_anim::{Homotopy, MaintainPositionRelativeTo, PhaseFlow};
+    use fmn_mobject::{Mobject, StageError};
+
+    #[derive(Clone, Copy, Debug)]
+    enum RefusedMotion {
+        Homotopy,
+        PhaseFlow,
+        TrackedPosition,
+    }
+
+    impl SceneConstruct for RefusedMotion {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let moving = stage.add(Circle::new().radius(0.3).color(BLUE))?;
+            stage.shift(moving, [2.0, 0.0, 0.0]);
+            // Produce real pixels before the animation's later sample fails.
+            stage.wait(0.125)?;
+            let config = AnimConfig {
+                run_time: 1.0,
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            };
+            match self {
+                Self::Homotopy => stage.play(
+                    Homotopy::new(
+                        |x, y, z, alpha| {
+                            if alpha >= 0.5 {
+                                [f64::NAN, y, z]
+                            } else {
+                                [x + alpha, y, z]
+                            }
+                        },
+                        moving,
+                    )
+                    .with_config(config),
+                )?,
+                Self::PhaseFlow => stage.play(
+                    PhaseFlow::new(
+                        |point| {
+                            if point[0] > 2.35 {
+                                [f64::NAN, 0.0, 0.0]
+                            } else {
+                                [1.0, 0.0, 0.0]
+                            }
+                        },
+                        moving,
+                        Some(1.0),
+                    )
+                    .with_config(config),
+                )?,
+                Self::TrackedPosition => {
+                    let tracked = stage.add(Circle::new().radius(0.1).color(WHITE))?;
+                    let controller = stage.arena_mut().add(Mobject::new());
+                    stage.add_to_scene(controller)?;
+                    stage.arena_mut().add_updater(
+                        controller,
+                        move |arena, _| {
+                            if arena.time() >= 0.3 && arena.contains(tracked) {
+                                arena.delete(tracked).expect("the tracked object is live");
+                            }
+                        },
+                        false,
+                    )?;
+                    let animation = MaintainPositionRelativeTo::new(stage, moving, tracked)
+                        .with_config(config);
+                    stage.play(animation)?;
+                }
+            }
+            panic!("a refused motion sample must not complete the scene")
+        }
+    }
+
+    for mut motion in [
+        RefusedMotion::Homotopy,
+        RefusedMotion::PhaseFlow,
+        RefusedMotion::TrackedPosition,
+    ] {
+        let fs = Arc::new(VirtualFs::new());
+        let error = render_with_fs(
+            &mut motion,
+            options("/refused-motion", RenderFormat::PngSequence, 2, 2),
+            fs.clone(),
+        )
+        .unwrap_err();
+        match (motion, error) {
+            (
+                RefusedMotion::Homotopy | RefusedMotion::PhaseFlow,
+                RenderError::Scene(Error::Animation(AnimError::Stage(
+                    StageError::InvalidPointMap(_),
+                ))),
+            )
+            | (
+                RefusedMotion::TrackedPosition,
+                RenderError::Scene(Error::Animation(AnimError::StaleHandle(_))),
+            ) => {}
+            (motion, other) => panic!("expected typed {motion:?} failure, got {other:?}"),
+        }
+        assert!(!fs.exists(Path::new("/refused-motion")));
+        let retry = render_with_fs(
+            &mut Static,
+            options("/refused-motion", RenderFormat::PngSequence, 2, 2),
+            fs.clone(),
+        )
+        .unwrap();
+        assert_eq!(retry.artifact.frame_count, 1);
+        assert_eq!(retry.frame_pipeline.unwrap().outstanding_slots, 0);
+        assert!(fs.exists(Path::new("/refused-motion")));
+    }
+}

@@ -8,7 +8,7 @@
 //! use this same mechanism, including its fallible callback boundary.
 
 use fmn_core::types::Vec3;
-use fmn_mobject::{Mob, Stage};
+use fmn_mobject::{Mob, Stage, StageError};
 
 use crate::animation::{AnimConfig, AnimError, AnimState, Animation, time_spanned_alpha};
 
@@ -123,29 +123,52 @@ impl Animation for UpdateFromFunc {
     }
 
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        self.error = None;
         let mobject = self.state.mobject();
         if !stage.contains(mobject) {
             return Err(AnimError::StaleHandle(mobject));
         }
-        self.error = None;
         Ok(())
     }
 
     /// update.py:33/49: the plain variant ignores alpha entirely; the
     /// alpha variant passes `rate(time_spanned(α))`. Lag never applies.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        if self.error.is_some() {
+        if self.deferred_error().is_some() || stage.updater_error().is_some() {
+            return;
+        }
+        let mobject = self.state.mobject();
+        if !stage.contains(mobject) {
+            self.error = Some(AnimError::StaleHandle(mobject));
             return;
         }
         let true_alpha = if self.alpha_aware {
             let config = &self.state.config;
-            config
-                .rate_func
-                .eval(time_spanned_alpha(alpha, config.run_time, config.time_span))
+            let spanned = time_spanned_alpha(alpha, config.run_time, config.time_span);
+            if !alpha.is_finite() || !spanned.is_finite() {
+                self.error = Some(AnimError::InvalidPath(
+                    "UpdateFromAlphaFunc requires a finite sample proportion",
+                ));
+                return;
+            }
+            let rated = config.rate_func.eval(spanned);
+            // Exact/preparing rates return a finite placeholder on failure.
+            // That placeholder must never reach an effectful callback.
+            if let Some(error) = config.rate_func.error() {
+                self.error = Some(error);
+                return;
+            }
+            if !rated.is_finite() {
+                self.error = Some(AnimError::InvalidPath(
+                    "UpdateFromAlphaFunc rate returned a non-finite proportion",
+                ));
+                return;
+            }
+            rated
         } else {
             alpha
         };
-        self.error = (self.update)(stage, self.state.mobject(), true_alpha).err();
+        self.error = (self.update)(stage, mobject, true_alpha).err();
     }
 
     fn deferred_error(&self) -> Option<AnimError> {
@@ -166,6 +189,7 @@ pub struct MaintainPositionRelativeTo {
     state: AnimState,
     tracked: Mob,
     diff: Vec3,
+    error: Option<AnimError>,
 }
 
 impl MaintainPositionRelativeTo {
@@ -185,6 +209,7 @@ impl MaintainPositionRelativeTo {
             ),
             tracked,
             diff: [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+            error: None,
         }
     }
 
@@ -206,10 +231,16 @@ impl Animation for MaintainPositionRelativeTo {
     }
 
     fn setup(&mut self, stage: &mut Stage) -> Result<(), AnimError> {
+        self.error = None;
         for mob in [self.state.mobject(), self.tracked] {
             if !stage.contains(mob) {
                 return Err(AnimError::StaleHandle(mob));
             }
+        }
+        if self.diff.iter().any(|coordinate| !coordinate.is_finite()) {
+            return Err(
+                StageError::InvalidPointMap("relative position offset must be finite").into(),
+            );
         }
         Ok(())
     }
@@ -218,23 +249,53 @@ impl Animation for MaintainPositionRelativeTo {
         vec![self.state.mobject(), self.tracked]
     }
 
-    /// update.py:66: shift so the tracked offset holds. Reads the tracked
-    /// mobject *live* — which is the point, and why it stays Unclassified.
+    /// Read the tracked center live and preserve the retained bounds/shift path.
+    /// A removed target or non-finite position refuses before any movement.
     fn interpolate(&mut self, stage: &mut Stage, _alpha: f64) {
+        if self.deferred_error().is_some() || stage.updater_error().is_some() {
+            return;
+        }
+        let mobject = self.state.mobject();
+        for mob in [mobject, self.tracked] {
+            if !stage.contains(mob) {
+                self.error = Some(AnimError::StaleHandle(mob));
+                return;
+            }
+        }
         let target = stage.get_center(self.tracked);
-        let location = stage.get_center(self.state.mobject());
-        stage.shift(
-            self.state.mobject(),
-            [
-                target[0] - location[0] + self.diff[0],
-                target[1] - location[1] + self.diff[1],
-                target[2] - location[2] + self.diff[2],
-            ],
-        );
+        let location = stage.get_center(mobject);
+        if target
+            .iter()
+            .chain(location.iter())
+            .any(|coordinate| !coordinate.is_finite())
+        {
+            self.error = Some(
+                StageError::InvalidPointMap("relative position centers must be finite").into(),
+            );
+            return;
+        }
+        let shift = [
+            target[0] - location[0] + self.diff[0],
+            target[1] - location[1] + self.diff[1],
+            target[2] - location[2] + self.diff[2],
+        ];
+        if shift.iter().any(|coordinate| !coordinate.is_finite()) {
+            self.error = Some(
+                StageError::InvalidPointMap("relative position translation must be finite").into(),
+            );
+            return;
+        }
+        stage.shift(mobject, shift);
+    }
+
+    fn deferred_error(&self) -> Option<AnimError> {
+        self.error
+            .clone()
+            .or_else(|| self.state.config.rate_func.error())
     }
 
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _sub_alpha: f64) {
-        // Unreachable: interpolate is overridden and never zips families.
+        // Interpolate is overridden and never zips families.
     }
 }
 
@@ -245,6 +306,7 @@ mod tests {
     use fmn_mobject::Mobject;
     use std::cell::{Cell, RefCell};
     use std::rc::Rc;
+    use std::sync::Arc;
 
     #[test]
     fn fallible_update_retains_first_failure_and_stops_callback_side_effects() {
@@ -326,11 +388,100 @@ mod tests {
             observed.set(observed.get() + 1);
             Err(AnimError::EmptyMobject)
         });
-        animation.begin(&mut stage).unwrap();
+        assert_eq!(animation.begin(&mut stage), Err(AnimError::EmptyMobject));
         assert_eq!(calls.get(), 1);
         assert_eq!(animation.deferred_error(), Some(AnimError::EmptyMobject));
         animation.interpolate(&mut stage, 1.0);
         assert_eq!(calls.get(), 1);
         animation.abort(&mut stage);
     }
+
+    #[test]
+    fn alpha_update_never_calls_effectful_code_with_a_failed_rate_placeholder() {
+        for preparing in [false, true] {
+            let mut stage = Stage::new();
+            let mob = stage.add(Mobject::new());
+            let calls = Rc::new(Cell::new(0));
+            let observed = Rc::clone(&calls);
+            let sampler = crate::rate_table::RateSampler::new(4, |alpha| {
+                if alpha == 0.0 {
+                    Ok(alpha)
+                } else {
+                    Err("domain refused".to_owned())
+                }
+            });
+            let collecting = RateFunc::Preparing(Arc::clone(&sampler));
+            assert_eq!(collecting.eval(0.0), 0.0);
+            let rate_func = if preparing {
+                collecting
+            } else {
+                sampler.finish().unwrap()
+            };
+            let mut animation = UpdateFromFunc::new_alpha(mob, move |_, _, _| {
+                observed.set(observed.get() + 1);
+            })
+            .with_config(AnimConfig {
+                rate_func,
+                ..AnimConfig::default()
+            });
+            animation.begin(&mut stage).unwrap();
+            animation.interpolate(&mut stage, 0.5);
+            let error = animation.state.config.rate_func.error().unwrap();
+            assert_eq!(animation.deferred_error(), Some(error.clone()));
+            assert_eq!(calls.get(), 1, "only begin's valid zero sample may run");
+            animation.interpolate(&mut stage, 0.0);
+            animation.finish(&mut stage);
+            assert_eq!(calls.get(), 1);
+            assert_eq!(animation.deferred_error(), Some(error));
+        }
+    }
+
+    #[test]
+    fn alpha_update_refuses_nonfinite_samples_before_the_callback() {
+        for (alpha, rate_func) in [
+            (f64::NAN, RateFunc::linear()),
+            (f64::INFINITY, RateFunc::linear()),
+            (0.5, RateFunc::Base(|alpha| if alpha == 0.0 { 0.0 } else { f64::NAN })),
+        ] {
+            let mut stage = Stage::new();
+            let mob = stage.add(Mobject::new());
+            let calls = Rc::new(Cell::new(0));
+            let observed = Rc::clone(&calls);
+            let mut animation = UpdateFromFunc::new_alpha(mob, move |_, _, _| {
+                observed.set(observed.get() + 1);
+            })
+            .with_config(AnimConfig {
+                rate_func,
+                ..AnimConfig::default()
+            });
+            animation.begin(&mut stage).unwrap();
+            animation.interpolate(&mut stage, alpha);
+            assert!(matches!(animation.deferred_error(), Some(AnimError::InvalidPath(_))));
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
+    #[test]
+    fn removed_update_target_is_not_replaced_by_a_recycled_handle() {
+        for alpha_aware in [false, true] {
+            let mut stage = Stage::new();
+            let mob = stage.add(Mobject::new());
+            let calls = Rc::new(Cell::new(0));
+            let observed = Rc::clone(&calls);
+            let mut animation = if alpha_aware {
+                UpdateFromFunc::new_alpha(mob, move |_, _, _| observed.set(observed.get() + 1))
+            } else {
+                UpdateFromFunc::new(mob, move |_, _| observed.set(observed.get() + 1))
+            };
+            animation.begin(&mut stage).unwrap();
+            stage.delete(mob).unwrap();
+            let replacement = stage.add(Mobject::new());
+            assert_ne!(replacement, mob);
+            animation.interpolate(&mut stage, 0.5);
+            assert_eq!(animation.deferred_error(), Some(AnimError::StaleHandle(mob)));
+            animation.interpolate(&mut stage, 1.0);
+            assert_eq!(calls.get(), 1);
+        }
+    }
+
 }

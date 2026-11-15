@@ -908,12 +908,13 @@ pub trait Animation: std::any::Any {
         position: &crate::clock::FramePosition,
         fps: u32,
     ) -> Result<(), AnimError> {
+        check_animation_error(stage, self)?;
         let alpha = self
             .state()
             .frame_alpha_at_position(position, fps)
             .map_err(AnimError::Clock)?;
         self.interpolate(stage, alpha);
-        Ok(())
+        check_animation_error(stage, self)
     }
 
     /// Enter frame-native sampling directly from an integer clock sample.
@@ -924,15 +925,17 @@ pub trait Animation: std::any::Any {
         stage: &mut Stage,
         time: RationalTime,
     ) -> Result<(), AnimError> {
+        check_animation_error(stage, self)?;
         if self.state().frame_units().is_none() {
             self.interpolate_at_frame(stage, time.frames() as f64, time.fps());
-            return Ok(());
+            return check_animation_error(stage, self);
         }
         self.interpolate_at_position(
             stage,
             &crate::clock::FramePosition::from_frame(time.frames()),
             time.fps(),
-        )
+        )?;
+        check_animation_error(stage, self)
     }
 
     /// Append mobjects whose Python/host updater layer must receive the
@@ -1065,13 +1068,13 @@ pub trait Animation: std::any::Any {
         //    alpha-zero frame is ever emitted; this is where alpha zero
         //    happens instead).
         self.interpolate(stage, 0.0);
-        check_updater_error(stage)?;
+        check_animation_error(stage, self)?;
         // 7. Post-begin subclass hook — the Reference's Transform locks
         //    matching data *after* `super().begin()` (transform.py:54);
         //    this slot keeps that order with the canonical sequence
         //    written once.
         self.after_begin(stage);
-        check_updater_error(stage)
+        check_animation_error(stage, self)
     }
 
     /// Subclass slot run at the end of [`Animation::begin`], after the
@@ -1086,13 +1089,13 @@ pub trait Animation: std::any::Any {
     /// removal for removers is the runtime's (`clean_up_from_scene`,
     /// fm-5xm) via [`Animation::is_remover`].
     fn finish(&mut self, stage: &mut Stage) {
-        if stage.updater_error().is_some() {
+        if check_animation_error(stage, self).is_err() {
             self.abort(stage);
             return;
         }
         let final_alpha = self.state().config.final_alpha_value;
         self.interpolate(stage, final_alpha);
-        if stage.updater_error().is_some() {
+        if check_animation_error(stage, self).is_err() {
             self.abort(stage);
             return;
         }
@@ -1139,7 +1142,7 @@ pub trait Animation: std::any::Any {
     /// `interpolate_mobject`). `alpha` is the raw segment alpha — the
     /// pipeline (`time_span` → lag → rate) applies inside, once.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        if stage.updater_error().is_some() {
+        if check_animation_error(stage, self).is_err() {
             return;
         }
         let state = self.state();
@@ -1155,8 +1158,11 @@ pub trait Animation: std::any::Any {
         let spanned = time_spanned_alpha(alpha, run_time, time_span);
         for (index, mobs) in families.iter().enumerate() {
             let sa = sub_alpha(spanned, index, num, lag_ratio, &rate_func);
+            if rate_func.error().is_some() {
+                break;
+            }
             self.interpolate_submobject(stage, mobs, sa);
-            if stage.updater_error().is_some() {
+            if check_animation_error(stage, self).is_err() {
                 break;
             }
         }
@@ -1167,6 +1173,9 @@ pub trait Animation: std::any::Any {
     /// `self.mobject` itself. Step one of the six-step frame order
     /// (fm-x79).
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
+        if check_animation_error(stage, self).is_err() {
+            return;
+        }
         for mob in self.mobjects_to_update() {
             if stage.updater_error().is_some() {
                 break;
@@ -1233,7 +1242,7 @@ pub trait Animation: std::any::Any {
     /// delegate — a `FadeOut` inside a group is still a remover, and the
     /// container it was composed into is not.
     fn clean_up_from_scene(&mut self, stage: &mut Stage) {
-        if self.is_remover() {
+        if check_animation_error(stage, self).is_ok() && self.is_remover() {
             stage.remove_from_scene(self.state().mobject());
         }
     }
@@ -1291,6 +1300,18 @@ pub trait Animation: std::any::Any {
     /// before the next sample. This never repeats a lifecycle callback and
     /// does not make a stateful segment eligible for pure-frame reconstruction.
     fn prepare_interpolation_replay(&mut self) {}
+}
+
+/// Surface the first failure before another lifecycle callback can run.
+pub(crate) fn check_animation_error<A: Animation + ?Sized>(
+    stage: &Stage,
+    animation: &A,
+) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
+    animation
+        .deferred_error()
+        .or_else(|| animation.state().config.rate_func.error())
+        .map_or(Ok(()), Err)
 }
 
 /// The canonical, non-mutating begin checks shared by leaf animations and

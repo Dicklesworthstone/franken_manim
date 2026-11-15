@@ -50,7 +50,7 @@ use std::rc::Rc;
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{Mob, Snapshot, Stage};
 
-use crate::animation::{AnimError, Animation, check_updater_error};
+use crate::animation::{AnimError, Animation, check_animation_error, check_updater_error};
 use crate::clock::{
     Duration, FrameDuration, FrameSample, FrameSegment, RationalFrameClock, RationalTime,
 };
@@ -58,6 +58,17 @@ use crate::pure_frame::PlayCapture;
 use crate::purity::{
     ImpureEffect, Purity, SegmentKind, SegmentReport, classify_play, classify_wait,
 };
+
+fn check_animation_errors(
+    stage: &Stage,
+    animations: &[Box<dyn Animation>],
+) -> Result<(), AnimError> {
+    check_updater_error(stage)?;
+    for animation in animations {
+        check_animation_error(stage, animation.as_ref())?;
+    }
+    Ok(())
+}
 
 /// The allocation-free part of a capture boundary.
 ///
@@ -340,7 +351,7 @@ fn begin_animations(
         for animation in animations.iter_mut() {
             begun += 1;
             let begin = animation.begin(stage);
-            check_updater_error(stage)?;
+            check_animation_error(stage, animation.as_ref())?;
             begin?;
             admit_animation_mobject(stage, animation.as_ref())?;
         }
@@ -349,10 +360,8 @@ fn begin_animations(
     match result {
         Ok(()) => Ok(()),
         Err(error) => {
-            if matches!(error, AnimError::Updater(_)) {
-                for animation in animations.iter_mut().take(begun) {
-                    animation.abort(stage);
-                }
+            for animation in animations.iter_mut().take(begun) {
+                animation.abort(stage);
             }
             stage.restore(&before_begin);
             Err(error)
@@ -449,7 +458,7 @@ fn finish_animation_lifecycles(
     stage: &mut Stage,
     animations: &mut [Box<dyn Animation>],
 ) -> Result<(), AnimError> {
-    if let Err(error) = check_updater_error(stage) {
+    if let Err(error) = check_animation_errors(stage, animations) {
         for animation in animations {
             animation.abort(stage);
         }
@@ -457,7 +466,7 @@ fn finish_animation_lifecycles(
     }
     for index in 0..animations.len() {
         animations[index].finish(stage);
-        if let Err(error) = check_updater_error(stage) {
+        if let Err(error) = check_animation_error(stage, animations[index].as_ref()) {
             for animation in &mut animations[index + 1..] {
                 animation.abort(stage);
             }
@@ -468,7 +477,7 @@ fn finish_animation_lifecycles(
         // their members — a remover composed into a group is still a
         // remover, and the container never is.
         animations[index].clean_up_from_scene(stage);
-        if let Err(error) = check_updater_error(stage) {
+        if let Err(error) = check_animation_error(stage, animations[index].as_ref()) {
             for animation in &mut animations[index + 1..] {
                 animation.abort(stage);
             }
@@ -840,7 +849,7 @@ pub fn begin_play_animation(
     setup.pending_admission = Some(index);
     setup.begun = index + 1;
     let result = animations[index].begin(stage);
-    check_updater_error(stage)?;
+    check_animation_error(stage, animations[index].as_ref())?;
     result?;
     Ok(Some(index))
 }
@@ -865,6 +874,7 @@ pub fn complete_play_animation_begin(
     let index = setup.pending_admission.ok_or(AnimError::InvalidFramePhase(
         "begin an animation before admitting its mobject",
     ))?;
+    check_animation_errors(stage, &animations[..=index])?;
     admit_animation_mobject(stage, animations[index].as_ref())?;
     setup.pending_admission = None;
     setup.next_animation += 1;
@@ -894,7 +904,7 @@ pub fn complete_play_setup(
             "complete every begin admission before opening the original play clock",
         ))
     } else {
-        check_updater_error(stage)
+        check_animation_errors(stage, animations)
     };
     if let Err(error) = validation {
         abort_play_setup(stage, animations, setup);
@@ -1000,12 +1010,7 @@ pub fn prepare_play_animation(
             "complete the prepared frame before advancing another animation",
         ));
     }
-    if let Some(error) = animations
-        .iter()
-        .find_map(|animation| animation.deferred_error())
-    {
-        return Err(error);
-    }
+    check_animation_errors(stage, animations)?;
     if open.current_sample.is_none() {
         if open.stepped >= open.segment.n_frames() {
             return Ok(None);
@@ -1023,10 +1028,10 @@ pub fn prepare_play_animation(
     let dt = clock.dt().to_f64();
     let animation = &mut animations[index];
     animation.update_mobjects(stage, dt);
-    check_updater_error(stage)?;
+    check_animation_error(stage, animation.as_ref())?;
     let alpha = animation.state().sample_alpha(sample.time);
     animation.interpolate_at_time(stage, sample.time)?;
-    check_updater_error(stage)?;
+    check_animation_error(stage, animation.as_ref())?;
     open.next_animation += 1;
     Ok(Some(AnimationBoundary {
         animation_index: index,
@@ -1159,16 +1164,11 @@ pub fn finish_open_play(
     mut open: OpenSegment,
 ) -> Result<SegmentReport, AnimError> {
     finish_open_play_animations(stage, animations, &mut open)?;
+    check_animation_errors(stage, animations)?;
     if !open.final_updaters_completed {
         update_scene_mobjects(stage, 0.0)?;
     }
-    check_updater_error(stage)?;
-    if let Some(error) = animations
-        .iter()
-        .find_map(|animation| animation.deferred_error())
-    {
-        return Err(error);
-    }
+    check_animation_errors(stage, animations)?;
     Ok(open.report)
 }
 
@@ -1187,7 +1187,7 @@ pub fn finish_open_play_animation(
     animations: &mut [Box<dyn Animation>],
     open: &mut OpenSegment,
 ) -> Result<Option<(usize, Vec<Mob>)>, AnimError> {
-    if let Err(error) = check_updater_error(stage) {
+    if let Err(error) = check_animation_errors(stage, animations) {
         abort_unfinished_play_animations(stage, animations, open);
         return Err(error);
     }
@@ -1220,7 +1220,7 @@ pub fn finish_open_play_animation(
     // run its remover cleanup. Only later members still need abort cleanup.
     open.pending_cleanup = Some(index);
     animation.finish(stage);
-    if let Err(error) = check_updater_error(stage) {
+    if let Err(error) = check_animation_errors(stage, animations) {
         abort_unfinished_play_animations(stage, animations, open);
         return Err(error);
     }
@@ -1236,7 +1236,7 @@ pub fn complete_open_play_animation_finish(
     animations: &mut [Box<dyn Animation>],
     open: &mut OpenSegment,
 ) -> Result<(), AnimError> {
-    if let Err(error) = check_updater_error(stage) {
+    if let Err(error) = check_animation_errors(stage, animations) {
         abort_unfinished_play_animations(stage, animations, open);
         return Err(error);
     }
@@ -1249,7 +1249,7 @@ pub fn complete_open_play_animation_finish(
             "the open play's animation list changed",
         ))?;
     animation.clean_up_from_scene(stage);
-    if let Err(error) = check_updater_error(stage) {
+    if let Err(error) = check_animation_errors(stage, animations) {
         abort_unfinished_play_animations(stage, animations, open);
         return Err(error);
     }
@@ -1752,10 +1752,7 @@ fn advance_play_with_boundary_mode(
         ))?;
         complete_play_frame_with_capture(stage, clock, rng, open, capture, boundary, emit)?;
     }
-    match animations.iter().find_map(|a| a.deferred_error()) {
-        Some(err) => Err(err),
-        None => Ok(()),
-    }
+    check_animation_errors(stage, animations)
 }
 
 /// A `wait()` segment run partway — the wait-side seek primitive, matching
@@ -1873,9 +1870,9 @@ pub(crate) fn drive_open_play(
 ) -> Result<SegmentReport, AnimError> {
     let report = open.report.clone();
     let segment = open.segment;
-    // Once begin succeeds, lifecycle cleanup runs exactly once. A native
-    // updater failure aborts without invoking another endpoint callback;
-    // other deferred failures retain the established finish epilogue.
+    // Once begin succeeds, lifecycle cleanup runs exactly once. Any failed
+    // sample aborts without invoking another endpoint, resumed updater, or
+    // remover callback from the success epilogue.
     // Both modes use the exact same stepped driver. Skip changes one thing:
     // `complete_play_frame` suppresses capture/emission. In particular, a
     // composition's deferred error is observed before the same clock advance
@@ -1891,7 +1888,7 @@ pub(crate) fn drive_open_play(
         boundary,
         emit,
     );
-    if matches!(&body, Err(AnimError::Updater(_))) {
+    if body.is_err() {
         let _report = abort_open_play(stage, animations, open);
         return body.map(|()| report);
     }
@@ -1901,9 +1898,7 @@ pub(crate) fn drive_open_play(
     // A composition operator that begins members just in time has no error
     // channel inside `interpolate` (§9.4); the segment surfaces what it
     // recorded, by name, rather than leaving a frozen composition unexplained.
-    if let Some(err) = animations.iter().find_map(|a| a.deferred_error()) {
-        return Err(err);
-    }
+    check_animation_errors(stage, animations)?;
     Ok(report)
 }
 

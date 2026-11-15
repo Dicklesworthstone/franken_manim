@@ -361,3 +361,79 @@ fn checked_map_preserves_earlier_members_on_a_later_native_geometry_error() {
     assert_eq!(stage.get_points(good).unwrap(), points);
     assert_eq!(stage.get(good).unwrap().buffer.revision(), revision);
 }
+
+#[test]
+fn fallible_family_map_stops_at_the_first_custom_error_without_publishing() {
+    #[derive(Debug, PartialEq)]
+    enum MapError {
+        Stage(fmn_mobject::StageError),
+        Domain(usize),
+    }
+    impl From<fmn_mobject::StageError> for MapError {
+        fn from(error: fmn_mobject::StageError) -> Self {
+            Self::Stage(error)
+        }
+    }
+
+    // Refuse an auxiliary field in the first member, then a primary point in
+    // the later member after all of the first member has been prepared.
+    for fail_at in [3, 8] {
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::new());
+        let first = surface(&mut stage);
+        let second = surface(&mut stage);
+        stage.attach(root, first).unwrap();
+        stage.attach(root, second).unwrap();
+        stage.shift(second, [8.0, 0.0, 0.0]);
+        let view = stage.get_mut(first).unwrap().buffer.export_view(false);
+        let before: Vec<_> = [first, second].into_iter().map(|mob| {
+            (
+                stage.get_points(mob).unwrap(),
+                column(&stage, mob, "d_normal_point"),
+                column(&stage, mob, "anchor"),
+                stage.placement(mob),
+                stage.get(mob).unwrap().buffer.revision(),
+            )
+        }).collect();
+        let calls = std::cell::RefCell::new(Vec::new());
+        let error = stage.try_apply_points_function_with(
+            root,
+            |point| {
+                let mut calls = calls.borrow_mut();
+                calls.push(point);
+                if calls.len() == fail_at {
+                    Err(MapError::Domain(fail_at))
+                } else {
+                    Ok([point[0] + 4.0, point[1] * 2.0, point[2]])
+                }
+            },
+            Some([0.0; 3]),
+            None,
+        ).err().expect("field domain refusal");
+        assert_eq!(error, MapError::Domain(fail_at));
+        assert_eq!(calls.borrow().len(), fail_at);
+        assert_eq!(
+            &calls.borrow()[..3],
+            &[[0.0, 1.0, 0.0], [2.0, 1.0, 0.0], [0.0, 1.0, 0.25]]
+        );
+        for (mob, before) in [first, second].into_iter().zip(before) {
+            assert_eq!(stage.get_points(mob).unwrap(), before.0);
+            assert_eq!(column(&stage, mob, "d_normal_point"), before.1);
+            assert_eq!(column(&stage, mob, "anchor"), before.2);
+            assert_eq!(stage.placement(mob), before.3);
+            assert_eq!(stage.get(mob).unwrap().buffer.revision(), before.4);
+        }
+        assert!(view.is_attached_to(&stage.get(first).unwrap().buffer));
+        assert_eq!(view.read(0, "point").unwrap(), [0.0, 1.0, 0.0]);
+
+        let error = stage.try_apply_points_function_with(
+            root,
+            |_| -> Result<_, MapError> {
+                panic!("invalid pivot must refuse before the callback")
+            },
+            Some([f64::NAN, 0.0, 0.0]),
+            None,
+        ).err().expect("invalid pivot");
+        assert!(matches!(error, MapError::Stage(fmn_mobject::StageError::InvalidPointMap(_))));
+    }
+}

@@ -12,8 +12,8 @@ use fmn_anim::frame::{
     wait_segment_with_boundary,
 };
 use fmn_anim::{
-    AnimConfig, AnimError, AnimState, Animation, FrameSample, RationalFrameClock, RationalTime,
-    prepare_animation,
+    AnimConfig, AnimError, AnimState, Animation, AnimationGroup, FrameSample, RateFunc,
+    RationalFrameClock, RationalTime, Succession, UpdateFromFunc, prepare_animation,
 };
 use fmn_core::rng::RngRoot;
 use fmn_mobject::animate::AnimateArgs;
@@ -1254,6 +1254,446 @@ fn resumed_updater_failure_aborts_later_finish_and_remover_cleanup() {
     assert!(!stage.is_animating(first));
     assert!(!stage.is_animating(second));
     assert!(!stage.is_updating_suspended(first));
+}
+
+#[test]
+fn deferred_final_sample_aborts_callbacks_and_removers_in_both_drivers() {
+    for grouped in [false, true] {
+        for stepped in [false, true] {
+            for skip in [false, true] {
+                let mut stage = Stage::new();
+                let first = square(&mut stage);
+                let second = square(&mut stage);
+                let observer = stage.add(Mobject::new());
+                for mob in [first, second, observer] {
+                    stage.add_to_scene(mob).unwrap();
+                }
+                let resumed = Rc::new(RefCell::new(Vec::new()));
+                for mob in [first, second] {
+                    let calls = Rc::clone(&resumed);
+                    stage
+                        .add_dt_updater(
+                            mob,
+                            move |_, receiver, dt| {
+                                if receiver == mob {
+                                    calls.borrow_mut().push((receiver, dt));
+                                }
+                            },
+                            false,
+                        )
+                        .unwrap();
+                }
+                let scene_ticks = Rc::new(RefCell::new(Vec::new()));
+                let observed_ticks = Rc::clone(&scene_ticks);
+                stage
+                    .add_dt_updater(
+                        observer,
+                        move |_, _, dt| observed_ticks.borrow_mut().push(dt),
+                        false,
+                    )
+                    .unwrap();
+                let expected = AnimError::UpdateFailed {
+                    operation: "finish fixture",
+                    detail: "the final alpha was refused".to_owned(),
+                };
+                let refusal = expected.clone();
+                let failures = Rc::new(RefCell::new(0));
+                let observed_failures = Rc::clone(&failures);
+                let failing = UpdateFromFunc::try_new_alpha(first, move |stage, mob, alpha| {
+                    if alpha > 1.0 {
+                        *observed_failures.borrow_mut() += 1;
+                        return Err(refusal.clone());
+                    }
+                    stage.set_x(mob, alpha);
+                    Ok(())
+                })
+                .with_config(AnimConfig {
+                    run_time: 1.0,
+                    rate_func: RateFunc::linear(),
+                    final_alpha_value: 2.0,
+                    suspend_mobject_updating: true,
+                    remover: true,
+                    ..AnimConfig::default()
+                });
+                let mut later = shift_animation(&mut stage, second, 2.0, 1.0);
+                later.state_mut().config.final_alpha_value = 0.25;
+                later.state_mut().config.suspend_mobject_updating = true;
+                later.state_mut().config.remover = true;
+                let members: Vec<Box<dyn Animation>> = vec![Box::new(failing), later];
+                let mut animations: Vec<Box<dyn Animation>> = if grouped {
+                    vec![Box::new(AnimationGroup::new(&mut stage, members).unwrap())]
+                } else {
+                    members
+                };
+                let mut clock = RationalFrameClock::new(1).unwrap();
+                let mut packets = Vec::new();
+                let error = if stepped {
+                    let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+                    while prepare_play_frame(&mut stage, &mut clock, &mut animations, &mut open)
+                        .unwrap()
+                        .is_some()
+                    {
+                        complete_play_frame(
+                            &mut stage,
+                            &clock,
+                            &rng(),
+                            &mut open,
+                            !skip,
+                            &mut |_, _| {},
+                            &mut |packet| packets.push(packet),
+                        )
+                        .unwrap();
+                    }
+                    let failure = finish_open_play_animations(
+                        &mut stage,
+                        &mut animations,
+                        &mut open,
+                    )
+                    .unwrap_err();
+                    assert_eq!(failure, expected);
+                    // A host that continues after the refused finish must
+                    // receive the same failure before the final updater pass.
+                    finish_open_play(&mut stage, &mut animations, open).unwrap_err()
+                } else {
+                    play_segment(
+                        &mut stage,
+                        &mut clock,
+                        &rng(),
+                        &mut animations,
+                        skip,
+                        &mut |packet| packets.push(packet),
+                    )
+                    .unwrap_err()
+                };
+                assert_eq!(error, expected, "grouped={grouped}, stepped={stepped}");
+                assert_eq!(clock.now().frames(), 1);
+                assert_eq!(stage.time(), 1.0);
+                assert_eq!(packets.len(), usize::from(!skip));
+                assert_eq!(stage.get_center(first)[0], 1.0);
+                assert_eq!(stage.get_center(second)[0], 2.0);
+                assert_eq!(*scene_ticks.borrow(), vec![1.0]);
+                assert!(resumed.borrow().is_empty(), "failure cannot resume callbacks");
+                assert_eq!(*failures.borrow(), 1);
+                for mob in [first, second] {
+                    assert!(stage.roots().contains(&mob), "failure cannot run removers");
+                    assert!(!stage.is_animating(mob));
+                    assert!(!stage.is_updating_suspended(mob));
+                }
+                // Direct lifecycle re-entry cannot retry an already refused
+                // callback or perform cleanup omitted by the driver.
+                animations[0].finish(&mut stage);
+                animations[0].clean_up_from_scene(&mut stage);
+                animations[0].abort(&mut stage);
+                assert_eq!(animations[0].deferred_error(), Some(expected));
+                assert_eq!(*failures.borrow(), 1);
+                assert!(resumed.borrow().is_empty());
+                assert_eq!(*scene_ticks.borrow(), vec![1.0]);
+                assert!(stage.roots().contains(&first));
+                assert!(stage.roots().contains(&second));
+            }
+        }
+    }
+}
+
+#[test]
+fn succession_final_sample_failure_never_begins_the_next_member() {
+    for skip in [false, true] {
+        let mut stage = Stage::new();
+        let first = square(&mut stage);
+        let second = square(&mut stage);
+        stage.add_to_scene(first).unwrap();
+        stage.add_to_scene(second).unwrap();
+        let resumed = Rc::new(RefCell::new(0));
+        let observed_resumed = Rc::clone(&resumed);
+        stage
+            .add_updater(
+                first,
+                move |_, receiver| {
+                    if receiver == first {
+                        *observed_resumed.borrow_mut() += 1;
+                    }
+                },
+                false,
+            )
+            .unwrap();
+        let expected = AnimError::UpdateFailed {
+            operation: "succession finish fixture",
+            detail: "do not begin the next member".to_owned(),
+        };
+        let refusal = expected.clone();
+        let failures = Rc::new(RefCell::new(0));
+        let observed_failures = Rc::clone(&failures);
+        let failing = UpdateFromFunc::try_new_alpha(first, move |stage, mob, alpha| {
+            if alpha > 1.0 {
+                *observed_failures.borrow_mut() += 1;
+                return Err(refusal.clone());
+            }
+            stage.set_x(mob, alpha);
+            Ok(())
+        })
+        .with_config(AnimConfig {
+            run_time: 1.0,
+            rate_func: RateFunc::linear(),
+            final_alpha_value: 2.0,
+            suspend_mobject_updating: true,
+            remover: true,
+            ..AnimConfig::default()
+        });
+        let later_calls = Rc::new(RefCell::new(0));
+        let observed_later = Rc::clone(&later_calls);
+        let later = UpdateFromFunc::new_alpha(second, move |stage, mob, alpha| {
+            *observed_later.borrow_mut() += 1;
+            stage.set_x(mob, 10.0 + alpha);
+        })
+        .with_config(AnimConfig {
+            run_time: 1.0,
+            rate_func: RateFunc::linear(),
+            remover: true,
+            ..AnimConfig::default()
+        });
+        let succession =
+            Succession::new(&mut stage, vec![Box::new(failing), Box::new(later)]).unwrap();
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(succession)];
+        let mut clock = RationalFrameClock::new(4).unwrap();
+        let mut packets = Vec::new();
+        let error = play_segment(
+            &mut stage,
+            &mut clock,
+            &rng(),
+            &mut animations,
+            skip,
+            &mut |packet| packets.push(packet),
+        )
+        .unwrap_err();
+        assert_eq!(error, expected);
+        assert_eq!(clock.now().frames(), 3);
+        assert_eq!(stage.time(), 0.75);
+        assert_eq!(packets.len(), if skip { 0 } else { 3 });
+        assert_eq!(stage.get_center(first)[0], 0.75);
+        assert_eq!(stage.get_center(second)[0], 0.0);
+        assert_eq!(*resumed.borrow(), 0);
+        assert_eq!(*later_calls.borrow(), 0, "even alpha-zero begin is forbidden");
+        assert_eq!(*failures.borrow(), 1);
+        for mob in [first, second] {
+            assert!(stage.roots().contains(&mob));
+            assert!(!stage.is_animating(mob));
+            assert!(!stage.is_updating_suspended(mob));
+        }
+        animations[0].finish(&mut stage);
+        animations[0].clean_up_from_scene(&mut stage);
+        animations[0].abort(&mut stage);
+        assert_eq!(animations[0].deferred_error(), Some(expected));
+        assert_eq!(*later_calls.borrow(), 0);
+        assert_eq!(*resumed.borrow(), 0);
+        assert_eq!(*failures.borrow(), 1);
+        assert!(stage.roots().contains(&first));
+        assert!(stage.roots().contains(&second));
+    }
+}
+
+#[test]
+fn composition_rate_refusal_never_reaches_a_child_with_a_placeholder_alpha() {
+    for sequential in [false, true] {
+        for frame_native in [false, true] {
+            let mut stage = Stage::new();
+            let mob = square(&mut stage);
+            stage.add_to_scene(mob).unwrap();
+            let sampler = fmn_anim::rate_table::RateSampler::new(2, Ok);
+            let preparing = RateFunc::Preparing(sampler.clone());
+            assert_eq!(preparing.eval(0.0), 0.0);
+            assert_eq!(preparing.eval(1.0), 1.0);
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let observed = Rc::clone(&calls);
+            let child = UpdateFromFunc::new_alpha(mob, move |_, _, alpha| {
+                observed.borrow_mut().push(alpha);
+            })
+            .with_config(AnimConfig {
+                run_time: 1.0,
+                run_time_frames: frame_native.then_some(2),
+                rate_func: RateFunc::linear(),
+                suspend_mobject_updating: true,
+                ..AnimConfig::default()
+            });
+            let mut composition: Box<dyn Animation> = if sequential {
+                Box::new(Succession::new(&mut stage, vec![Box::new(child)]).unwrap())
+            } else {
+                Box::new(AnimationGroup::new(&mut stage, vec![Box::new(child)]).unwrap())
+            };
+            composition.state_mut().config.rate_func = sampler.finish().unwrap();
+            let mut animations = vec![composition];
+            let mut clock = RationalFrameClock::new(2).unwrap();
+            let error = play_segment(
+                &mut stage,
+                &mut clock,
+                &rng(),
+                &mut animations,
+                false,
+                &mut |_| panic!("an unprepared composition sample cannot capture"),
+            )
+            .unwrap_err();
+            assert_eq!(
+                Some(error.clone()),
+                animations[0].state().config.rate_func.error()
+            );
+            assert_eq!(animations[0].deferred_error(), Some(error));
+            assert_eq!(*calls.borrow(), vec![0.0], "only the child's begin may run");
+            assert_eq!(clock.now().frames(), 0);
+            assert_eq!(stage.time(), 0.0);
+            assert!(!stage.is_animating(mob));
+            assert!(!stage.is_updating_suspended(mob));
+        }
+    }
+}
+
+#[test]
+fn exact_succession_timed_calls_return_rewind_and_member_finish_errors_directly() {
+    for position_api in [false, true] {
+        for rewind in [false, true] {
+            let mut stage = Stage::new();
+            let first = square(&mut stage);
+            let second = square(&mut stage);
+            stage.add_to_scene(first).unwrap();
+            stage.add_to_scene(second).unwrap();
+            let refusal = AnimError::UpdateFailed {
+                operation: "exact succession finish",
+                detail: "the member endpoint was refused".to_owned(),
+            };
+            let expected = if rewind {
+                AnimError::StatefulSuccessionRewind
+            } else {
+                refusal.clone()
+            };
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            let observed = Rc::clone(&calls);
+            let failing = UpdateFromFunc::try_new_alpha(first, move |stage, mob, alpha| {
+                observed.borrow_mut().push(alpha);
+                if alpha > 1.0 {
+                    return Err(refusal.clone());
+                }
+                stage.set_x(mob, alpha);
+                Ok(())
+            })
+            .with_config(AnimConfig {
+                run_time_frames: Some(4),
+                rate_func: RateFunc::linear(),
+                final_alpha_value: 2.0,
+                suspend_mobject_updating: true,
+                remover: true,
+                ..AnimConfig::default()
+            });
+            let later_calls = Rc::new(RefCell::new(0));
+            let observed_later = Rc::clone(&later_calls);
+            let later = UpdateFromFunc::new_alpha(second, move |_, _, _| {
+                *observed_later.borrow_mut() += 1;
+            })
+            .with_config(AnimConfig {
+                run_time_frames: Some(4),
+                ..AnimConfig::default()
+            });
+            let mut succession =
+                Succession::new(&mut stage, vec![Box::new(failing), Box::new(later)]).unwrap();
+            succession.prepare_timing(4).unwrap();
+            succession.begin(&mut stage).unwrap();
+            let sample = |animation: &mut Succession, stage: &mut Stage, frame: i64| {
+                if position_api {
+                    animation.interpolate_at_position(
+                        stage,
+                        &fmn_anim::FramePosition::from_frame(frame),
+                        4,
+                    )
+                } else {
+                    animation.interpolate_at_time(stage, RationalTime::zero(4) + frame)
+                }
+            };
+            sample(&mut succession, &mut stage, 3).unwrap();
+            assert_eq!(stage.get_center(first)[0], 0.75);
+            assert_eq!(
+                sample(&mut succession, &mut stage, if rewind { 1 } else { 4 }),
+                Err(expected.clone())
+            );
+            assert_eq!(succession.deferred_error(), Some(expected.clone()));
+            let at_failure = calls.borrow().clone();
+            assert_eq!(
+                at_failure,
+                if rewind { vec![0.0, 0.75] } else { vec![0.0, 0.75, 2.0] }
+            );
+            assert_eq!(sample(&mut succession, &mut stage, 8), Err(expected));
+            succession.finish(&mut stage);
+            succession.clean_up_from_scene(&mut stage);
+            assert_eq!(*calls.borrow(), at_failure);
+            assert_eq!(*later_calls.borrow(), 0);
+            assert_eq!(stage.get_center(first)[0], 0.75);
+            assert!(stage.roots().contains(&first));
+            assert!(!stage.is_animating(first));
+            assert!(!stage.is_updating_suspended(first));
+        }
+    }
+}
+
+#[test]
+fn composition_observes_child_rate_errors_even_with_a_custom_deferred_hook() {
+    struct CustomErrorHook {
+        state: AnimState,
+    }
+
+    impl Animation for CustomErrorHook {
+        fn state(&self) -> &AnimState {
+            &self.state
+        }
+
+        fn state_mut(&mut self) -> &mut AnimState {
+            &mut self.state
+        }
+
+        fn interpolate_submobject(&mut self, _: &mut Stage, _: &[Mob], _: f64) {}
+
+        fn deferred_error(&self) -> Option<AnimError> {
+            None
+        }
+    }
+
+    let mut stage = Stage::new();
+    let first = square(&mut stage);
+    let later = square(&mut stage);
+    let sampler = fmn_anim::rate_table::RateSampler::new(2, Ok);
+    let preparing = RateFunc::Preparing(sampler.clone());
+    assert_eq!(preparing.eval(0.0), 0.0);
+    assert_eq!(preparing.eval(1.0), 1.0);
+    let failing = CustomErrorHook {
+        state: AnimState::new(
+            first,
+            AnimConfig {
+                rate_func: sampler.finish().unwrap(),
+                ..AnimConfig::default()
+            },
+        ),
+    };
+    let calls = Rc::new(RefCell::new(0));
+    let observed = Rc::clone(&calls);
+    let later = UpdateFromFunc::new_alpha(later, move |_, _, _| {
+        *observed.borrow_mut() += 1;
+    });
+    let mut group =
+        AnimationGroup::new(&mut stage, vec![Box::new(failing), Box::new(later)]).unwrap();
+    group.prepare_timing(2).unwrap();
+    group.begin(&mut stage).unwrap();
+    group.interpolate(&mut stage, 0.5);
+    let error = group.animations()[0]
+        .state()
+        .config
+        .rate_func
+        .error()
+        .expect("the child midpoint was never prepared");
+    assert_eq!(group.deferred_error(), Some(error.clone()));
+    assert_eq!(*calls.borrow(), 1, "the later child only runs its begin");
+    assert_eq!(
+        group.interpolate_at_time(&mut stage, RationalTime::zero(2) + 1),
+        Err(error)
+    );
+    group.finish(&mut stage);
+    group.clean_up_from_scene(&mut stage);
+    assert_eq!(*calls.borrow(), 1);
+    assert!(!stage.is_animating(first));
 }
 
 struct UpdatingBegin {

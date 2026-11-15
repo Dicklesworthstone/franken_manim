@@ -1145,21 +1145,34 @@ impl AnimationGroup {
         fps: u32,
         timings: &ExactTimings,
     ) -> Result<(), AnimError> {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.updater_error, error) {
+            return Err(self.updater_error.clone().expect("retained animation error"));
+        }
         for (index, animation) in self.animations.iter_mut().enumerate() {
-            if let Some(local) = timings.interior_frame(index, position)? {
-                animation.interpolate_at_position(stage, &local, fps)?;
+            let result = if let Some(local) = timings.interior_frame(index, position)? {
+                animation.interpolate_at_position(stage, &local, fps)
             } else {
                 animation.interpolate(stage, timings.sub_alpha(index, position)?);
+                Ok(())
+            };
+            if let Err(error) = result {
+                self.updater_error.get_or_insert(error);
             }
-            if retain_updater_error(stage, &mut self.updater_error) {
-                break;
+            if retain_animation_error(
+                stage,
+                &mut self.updater_error,
+                child_error(animation.as_ref()),
+            ) {
+                return Err(self.updater_error.clone().expect("retained animation error"));
             }
         }
         Ok(())
     }
 
     fn interpolate_position(&mut self, stage: &mut Stage, time: f64, fps: Option<u32>) {
-        if retain_updater_error(stage, &mut self.updater_error) {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.updater_error, error) {
             return;
         }
         let timings = self.frame_timings.as_deref().unwrap_or(&self.timings);
@@ -1172,7 +1185,11 @@ impl AnimationGroup {
             } else {
                 animation.interpolate(stage, interval.sub_alpha(time));
             }
-            if retain_updater_error(stage, &mut self.updater_error) {
+            if retain_animation_error(
+                stage,
+                &mut self.updater_error,
+                child_error(animation.as_ref()),
+            ) {
                 return;
             }
         }
@@ -1377,12 +1394,17 @@ macro_rules! composite_common {
         /// The Reference's `AnimationGroup.clean_up_from_scene`: removal is
         /// each member's own decision, never the container's.
         fn clean_up_from_scene(&mut self, stage: &mut Stage) {
-            if retain_updater_error(stage, &mut self.$deferred) {
+            let error = self.deferred_error();
+            if retain_animation_error(stage, &mut self.$deferred, error) {
                 return;
             }
             for animation in &mut self.animations {
                 animation.clean_up_from_scene(stage);
-                if retain_updater_error(stage, &mut self.$deferred) {
+                if retain_animation_error(
+                    stage,
+                    &mut self.$deferred,
+                    child_error(animation.as_ref()),
+                ) {
                     return;
                 }
             }
@@ -1433,10 +1455,17 @@ impl Animation for AnimationGroup {
             // Abort owns that attempted lifetime, but never an unbegun sibling.
             self.begun += 1;
             let result = animation.begin(stage);
-            if retain_updater_error(stage, &mut self.updater_error) {
-                return Err(self.updater_error.clone().expect("retained updater error"));
+            if retain_animation_error(
+                stage,
+                &mut self.updater_error,
+                child_error(animation.as_ref()),
+            ) {
+                return Err(self.updater_error.clone().expect("retained animation error"));
             }
-            result?;
+            if let Err(error) = result {
+                self.updater_error = Some(error.clone());
+                return Err(error);
+            }
         }
         Ok(())
     }
@@ -1444,7 +1473,8 @@ impl Animation for AnimationGroup {
     /// The Reference's `AnimationGroup.interpolate`, with the group's own
     /// normalized-alpha pipeline in front of it (BN-11).
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        if retain_updater_error(stage, &mut self.updater_error) {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.updater_error, error) {
             return;
         }
         if let Some(timings) = self.exact_timings.clone() {
@@ -1461,7 +1491,8 @@ impl Animation for AnimationGroup {
     }
 
     fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
-        if retain_updater_error(stage, &mut self.updater_error) {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.updater_error, error) {
             return;
         }
         if self.exact_timings.is_some() {
@@ -1483,12 +1514,13 @@ impl Animation for AnimationGroup {
         position: &FramePosition,
         fps: u32,
     ) -> Result<(), AnimError> {
-        if retain_updater_error(stage, &mut self.updater_error) || self.updater_error.is_some() {
-            return Ok(());
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.updater_error, error) {
+            return Err(self.updater_error.clone().expect("retained animation error"));
         }
         let Some(timings) = self.exact_timings.clone() else {
             self.interpolate_at_frame(stage, position.to_f64(), fps);
-            return Ok(());
+            return self.deferred_error().map_or(Ok(()), Err);
         };
         let position = timings.position(&self.state, position, fps)?;
         self.interpolate_exact_position(stage, &position, fps, &timings)
@@ -1497,12 +1529,17 @@ impl Animation for AnimationGroup {
     /// The Reference's `AnimationGroup.update_mobjects`: every member ticks
     /// its own animation-owned mobjects.
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
-        if retain_updater_error(stage, &mut self.updater_error) {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.updater_error, error) {
             return;
         }
         for animation in &mut self.animations {
             animation.update_mobjects(stage, dt);
-            if retain_updater_error(stage, &mut self.updater_error) {
+            if retain_animation_error(
+                stage,
+                &mut self.updater_error,
+                child_error(animation.as_ref()),
+            ) {
                 return;
             }
         }
@@ -1512,13 +1549,18 @@ impl Animation for AnimationGroup {
     /// own `final_alpha_value` (see the module note), then the container
     /// stops animating.
     fn finish(&mut self, stage: &mut Stage) {
-        if !retain_updater_error(stage, &mut self.updater_error) {
+        let error = self.deferred_error();
+        if !retain_animation_error(stage, &mut self.updater_error, error) {
             for (index, animation) in self.animations.iter_mut().enumerate() {
                 animation.finish(stage);
                 // Finish owns its cleanup even when an endpoint or resumed
                 // updater fails. Abort must visit only later begun siblings.
                 self.finished = index + 1;
-                if retain_updater_error(stage, &mut self.updater_error) {
+                if retain_animation_error(
+                    stage,
+                    &mut self.updater_error,
+                    child_error(animation.as_ref()),
+                ) {
                     break;
                 }
             }
@@ -1531,7 +1573,8 @@ impl Animation for AnimationGroup {
     }
 
     fn abort(&mut self, stage: &mut Stage) {
-        retain_updater_error(stage, &mut self.updater_error);
+        let error = self.deferred_error();
+        retain_animation_error(stage, &mut self.updater_error, error);
         for animation in self
             .animations
             .iter_mut()
@@ -1550,7 +1593,7 @@ impl Animation for AnimationGroup {
         self.updater_error
             .clone()
             .or_else(|| self.state.config.rate_func.error())
-            .or_else(|| self.animations.iter().find_map(|a| a.deferred_error()))
+            .or_else(|| self.animations.iter().find_map(|animation| child_error(animation.as_ref())))
     }
 
     fn has_preparing_rate(&self) -> bool {
@@ -1582,11 +1625,10 @@ fn begin_composite(state: &mut AnimState, stage: &mut Stage) -> Result<(), AnimE
     Ok(())
 }
 
-/// A void child callback can fail through Stage's retained updater channel.
-/// Keep that fault sticky in its composition too, without changing the legacy
-/// endpoint handling for unrelated deferred animation errors.
+/// Keep the first composition failure sticky and observe Stage's updater
+/// channel before crossing another callback boundary.
 fn retain_updater_error(stage: &Stage, deferred: &mut Option<AnimError>) -> bool {
-    if matches!(deferred, Some(AnimError::Updater(_))) {
+    if deferred.is_some() {
         return true;
     }
     if let Err(error) = check_updater_error(stage) {
@@ -1596,6 +1638,29 @@ fn retain_updater_error(stage: &Stage, deferred: &mut Option<AnimError>) -> bool
         return true;
     }
     false
+}
+
+/// A custom deferred-error hook may omit its configured rate's failure.
+/// Both channels must stop the composition before another child runs.
+fn child_error(animation: &dyn Animation) -> Option<AnimError> {
+    animation
+        .deferred_error()
+        .or_else(|| animation.state().config.rate_func.error())
+}
+
+/// Void animation hooks may retain their own failure independently of Stage.
+/// Record it before visiting the next sibling, resuming updaters or removing
+/// objects; a later callback must never replace the first refusal.
+fn retain_animation_error(
+    stage: &Stage,
+    deferred: &mut Option<AnimError>,
+    error: Option<AnimError>,
+) -> bool {
+    if retain_updater_error(stage, deferred) {
+        return true;
+    }
+    *deferred = error;
+    deferred.is_some()
 }
 
 // --------------------------------------------------------------- Succession
@@ -1810,7 +1875,7 @@ impl Succession {
         let begin = self.animations[index].begin(stage);
         check_updater_error(stage)?;
         begin?;
-        if let Some(error) = self.animations[index].deferred_error() {
+        if let Some(error) = child_error(self.animations[index].as_ref()) {
             return Err(error);
         }
         // A setup hook may have installed updaters on an auxiliary object.
@@ -1847,6 +1912,9 @@ impl Succession {
 
     fn finish_member(&mut self, stage: &mut Stage, index: usize) -> Result<(), AnimError> {
         check_updater_error(stage)?;
+        if let Some(error) = child_error(self.animations[index].as_ref()) {
+            return Err(error);
+        }
         if self.playback[index].finished {
             if let Some(completed) = &self.playback[index].completed {
                 stage.restore_family_checkpoint(completed)?;
@@ -1858,7 +1926,7 @@ impl Succession {
         // its partial content, but never cache that fault as a completed frame.
         self.playback[index].finished = true;
         check_updater_error(stage)?;
-        if let Some(error) = self.animations[index].deferred_error() {
+        if let Some(error) = child_error(self.animations[index].as_ref()) {
             return Err(error);
         }
         if self.replayable {
@@ -1890,10 +1958,8 @@ impl Succession {
     }
 
     fn interpolate_position(&mut self, stage: &mut Stage, time: f64, fps: Option<u32>) {
-        if retain_updater_error(stage, &mut self.deferred)
-            || self.deferred.is_some()
-            || self.playback.is_empty()
-        {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.deferred, error) || self.playback.is_empty() {
             return;
         }
         let time = clip(time, 0.0, self.max_frame_end.unwrap_or(self.max_end_time));
@@ -1926,7 +1992,11 @@ impl Succession {
         } else {
             self.animations[self.active].interpolate(stage, interval.sub_alpha(time));
         }
-        if retain_updater_error(stage, &mut self.deferred) {
+        if retain_animation_error(
+            stage,
+            &mut self.deferred,
+            child_error(self.animations[self.active].as_ref()),
+        ) {
             return;
         }
         self.last_time = Some(time);
@@ -1940,10 +2010,11 @@ impl Succession {
         fps: u32,
         timings: &ExactTimings,
     ) -> Result<(), AnimError> {
-        if retain_updater_error(stage, &mut self.deferred)
-            || self.deferred.is_some()
-            || self.playback.is_empty()
-        {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.deferred, error) {
+            return Err(self.deferred.clone().expect("retained animation error"));
+        }
+        if self.playback.is_empty() {
             return Ok(());
         }
         let position = timings.clamp_position(position)?;
@@ -1956,7 +2027,7 @@ impl Succession {
         {
             if !self.replayable {
                 self.deferred = Some(AnimError::StatefulSuccessionRewind);
-                return Ok(());
+                return Err(AnimError::StatefulSuccessionRewind);
             }
             self.replaying = true;
         }
@@ -1964,24 +2035,32 @@ impl Succession {
             .member_at(&position)?
             .ok_or(AnimError::EmptyComposition)?;
         self.advance_to(stage, target);
-        if self.deferred.is_some() {
-            return Ok(());
+        if let Some(error) = &self.deferred {
+            return Err(error.clone());
         }
         if self.replayable && self.replaying {
             if let Err(error) = self.restore_member(stage, target) {
-                self.deferred = Some(error);
-                return Ok(());
+                self.deferred = Some(error.clone());
+                return Err(error);
             }
             self.animations[target].prepare_interpolation_replay();
         }
         self.active = target;
-        if let Some(local) = timings.interior_frame(target, &position)? {
-            self.animations[target].interpolate_at_position(stage, &local, fps)?;
+        let result = if let Some(local) = timings.interior_frame(target, &position)? {
+            self.animations[target].interpolate_at_position(stage, &local, fps)
         } else {
             self.animations[target].interpolate(stage, timings.sub_alpha(target, &position)?);
+            Ok(())
+        };
+        if let Err(error) = result {
+            self.deferred.get_or_insert(error);
         }
-        if retain_updater_error(stage, &mut self.deferred) {
-            return Ok(());
+        if retain_animation_error(
+            stage,
+            &mut self.deferred,
+            child_error(self.animations[target].as_ref()),
+        ) {
+            return Err(self.deferred.clone().expect("retained animation error"));
         }
         self.last_time = Some(position.to_f64());
         self.last_exact_position = Some(position);
@@ -2015,17 +2094,19 @@ impl Animation for Succession {
         self.last_time = None;
         self.last_exact_position = None;
         self.replayable = self.replay_sources_are_static(stage);
-        self.begin_member(stage, 0)
+        let result = self.begin_member(stage, 0);
+        if let Err(error) = &result {
+            self.deferred.get_or_insert(error.clone());
+        }
+        result
     }
 
     /// Locate the member the timeline is inside, walking (and running) any
     /// members passed on the way, then interpolate it at its window
     /// position.
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        if retain_updater_error(stage, &mut self.deferred)
-            || self.deferred.is_some()
-            || self.playback.is_empty()
-        {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.deferred, error) || self.playback.is_empty() {
             return;
         }
         if let Some(timings) = self.exact_timings.clone() {
@@ -2043,7 +2124,8 @@ impl Animation for Succession {
     }
 
     fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
-        if retain_updater_error(stage, &mut self.deferred) || self.deferred.is_some() {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.deferred, error) {
             return;
         }
         if self.exact_timings.is_some() {
@@ -2066,9 +2148,13 @@ impl Animation for Succession {
         position: &FramePosition,
         fps: u32,
     ) -> Result<(), AnimError> {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.deferred, error) {
+            return Err(self.deferred.clone().expect("retained animation error"));
+        }
         let Some(timings) = self.exact_timings.clone() else {
             self.interpolate_at_frame(stage, position.to_f64(), fps);
-            return Ok(());
+            return self.deferred_error().map_or(Ok(()), Err);
         };
         let position = timings.position(&self.state, position, fps)?;
         self.interpolate_exact_position(stage, &position, fps, &timings)
@@ -2077,9 +2163,14 @@ impl Animation for Succession {
     /// The Reference's `Succession.update_mobjects`: only the active member
     /// ticks — the others own no live state yet, or no longer do.
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
-        if !retain_updater_error(stage, &mut self.deferred) && self.deferred.is_none() {
+        let error = self.deferred_error();
+        if !retain_animation_error(stage, &mut self.deferred, error) {
             self.animations[self.active].update_mobjects(stage, dt);
-            retain_updater_error(stage, &mut self.deferred);
+            retain_animation_error(
+                stage,
+                &mut self.deferred,
+                child_error(self.animations[self.active].as_ref()),
+            );
         }
     }
 
@@ -2087,7 +2178,8 @@ impl Animation for Succession {
     /// members through `interpolate`), finish the member left active, and
     /// stop the container animating.
     fn finish(&mut self, stage: &mut Stage) {
-        if retain_updater_error(stage, &mut self.deferred) {
+        let error = self.deferred_error();
+        if retain_animation_error(stage, &mut self.deferred, error) {
             self.abort(stage);
             return;
         }
@@ -2115,19 +2207,18 @@ impl Animation for Succession {
             if let Err(error) = self.finish_member(stage, self.active) {
                 self.deferred = Some(error);
             }
-        } else {
-            // A named reverse refusal must not leave the active family's
-            // updaters suspended after the segment driver reports the error.
-            self.abort(stage);
         }
         if retain_updater_error(stage, &mut self.deferred) {
+            // Failed interpolation or finish must release every remaining
+            // lifetime without retrying endpoints or resumed callbacks.
             self.abort(stage);
         }
         stage.set_animating_status(self.state.mobject(), false, true);
     }
 
     fn abort(&mut self, stage: &mut Stage) {
-        retain_updater_error(stage, &mut self.deferred);
+        let error = self.deferred_error();
+        retain_animation_error(stage, &mut self.deferred, error);
         for (animation, playback) in self.animations.iter_mut().zip(&mut self.playback) {
             if !playback.finished {
                 animation.abort(stage);
@@ -2146,7 +2237,7 @@ impl Animation for Succession {
                 self.animations
                     .iter()
                     .take(self.active + 1)
-                    .find_map(|a| a.deferred_error())
+                    .find_map(|animation| child_error(animation.as_ref()))
             })
     }
 

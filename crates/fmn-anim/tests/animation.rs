@@ -214,6 +214,92 @@ impl Animation for Probe {
 // ------------------------------------------------------------- lifecycle
 
 #[test]
+fn exact_rate_failure_never_reaches_a_family_callback_or_final_endpoint() {
+    for mode in 0..4 {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage);
+        let child = square(&mut stage);
+        stage.attach(mob, child).unwrap();
+        let updates = Rc::new(RefCell::new(0));
+        let observed = Rc::clone(&updates);
+        stage
+            .add_dt_updater(mob, move |_, _, _| *observed.borrow_mut() += 1, false)
+            .unwrap();
+        let collector = fmn_anim::rate_table::RateSampler::new(4, Ok);
+        let preparing = RateFunc::Preparing(std::sync::Arc::clone(&collector));
+        assert_eq!(preparing.eval(0.0), 0.0);
+        assert_eq!(preparing.eval(1.0), 1.0);
+        let (mut probe, rows) = Probe::new(
+            mob,
+            AnimConfig {
+                rate_func: collector.finish().unwrap(),
+                run_time_frames: (mode == 3).then_some(2),
+                suspend_mobject_updating: true,
+                ..AnimConfig::default()
+            },
+        );
+        probe.prepare_timing(2).unwrap();
+        probe.begin(&mut stage).unwrap();
+        rows.borrow_mut().clear();
+
+        let result = match mode {
+            0 => {
+                probe.interpolate(&mut stage, 0.5);
+                probe.deferred_error().map_or(Ok(()), Err)
+            }
+            1 | 3 => probe.interpolate_at_time(&mut stage, fmn_anim::RationalTime::zero(2) + 1),
+            _ => probe.interpolate_at_position(
+                &mut stage,
+                &fmn_anim::FramePosition::from_frame(1),
+                2,
+            ),
+        };
+        let error = result.expect_err("the midpoint was not prepared");
+        assert!(error.to_string().contains("unprepared rate input"));
+        assert!(rows.borrow().is_empty(), "no placeholder-alpha callbacks");
+
+        probe.update_mobjects(&mut stage, 0.5);
+        assert_eq!(*updates.borrow(), 0, "failed samples stop copy updaters");
+        assert_eq!(
+            probe.interpolate_at_time(&mut stage, fmn_anim::RationalTime::zero(2) + 2),
+            Err(error.clone()),
+            "a later valid table key cannot clear the first failure"
+        );
+        probe.finish(&mut stage);
+        assert!(rows.borrow().is_empty(), "finish must not run the endpoint");
+        assert_eq!(*updates.borrow(), 0, "abort resumes without callbacks");
+        assert!(!stage.is_animating(mob));
+        assert!(!stage.is_updating_suspended(mob));
+        assert_eq!(probe.deferred_error(), Some(error));
+    }
+}
+
+#[test]
+fn begin_reports_rate_preparation_failure_before_interpolating_any_row() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    let collector = fmn_anim::rate_table::RateSampler::new(4, |_| {
+        Err("authored rate refused its initial sample".to_owned())
+    });
+    let (mut probe, rows) = Probe::new(
+        mob,
+        AnimConfig {
+            rate_func: RateFunc::Preparing(collector),
+            suspend_mobject_updating: true,
+            ..AnimConfig::default()
+        },
+    );
+    let error = probe.begin(&mut stage).expect_err("failed initial sample");
+    assert!(error.to_string().contains("authored rate refused"));
+    assert_eq!(probe.deferred_error(), Some(error));
+    assert!(rows.borrow().is_empty());
+    // The owner of a begin transaction performs its one abort cleanup.
+    probe.abort(&mut stage);
+    assert!(!stage.is_animating(mob));
+    assert!(!stage.is_updating_suspended(mob));
+}
+
+#[test]
 fn begin_interpolates_at_zero_exactly_once() {
     let mut stage = Stage::new();
     let mob = square(&mut stage);

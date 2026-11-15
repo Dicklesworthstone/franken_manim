@@ -20831,6 +20831,44 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "failure_path.functional_motion_atomic_sample.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(path_motion::functional_motion_failures),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("functional_motion_failure_modes", 4),
+            counter_eq("functional_motion_failure_emitted_frames", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.functional_motion",
+            vec![
+                FieldPred::u64_eq("modes_checked", 4),
+                FieldPred::u64_eq("emitted_frames", 2),
+                FieldPred::str_eq("failed_sample_unchanged", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
+        "failure_path.tracked_position_live_input.v1",
+        ScenarioClass::FailurePath,
+        Surface::RustApi,
+        Invocation::new(path_motion::tracked_position_failure),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("tracked_position_failure_modes", 2),
+            counter_eq("tracked_position_failure_emitted_frames", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.failure.tracked_position",
+            vec![
+                FieldPred::u64_eq("modes_checked", 2),
+                FieldPred::u64_eq("emitted_frames", 1),
+                FieldPred::str_eq("follower_unchanged", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "failure_path.cli_quality_exclusive_named.v1",
         ScenarioClass::FailurePath,
         Surface::CliInProcess,
@@ -23107,6 +23145,26 @@ fn move_along_path_live_input_failure_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "failure_path.move_along_path_live_input.v1")
         .expect("motion-path failure scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn functional_motion_atomic_failure_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.functional_motion_atomic_sample.v1")
+        .expect("functional motion failure scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn tracked_position_live_input_failure_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "failure_path.tracked_position_live_input.v1")
+        .expect("tracked position failure scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
