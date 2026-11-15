@@ -106,7 +106,14 @@ impl Stage {
         let (Some(ea), Some(eb)) = (self.get(a), self.get(b)) else {
             return false;
         };
-        ea.render_primitive() == eb.render_primitive()
+        let same_topology = match (
+            ea.render_primitive().surface_resolution(),
+            eb.render_primitive().surface_resolution(),
+        ) {
+            (Some(left), Some(right)) => left == right,
+            _ => ea.render_primitive() == eb.render_primitive(),
+        };
+        same_topology
             && ea.buffer.schema() == eb.buffer.schema()
             && ea.buffer.len() == eb.buffer.len()
             && ea.submobjects().len() == eb.submobjects().len()
@@ -309,13 +316,17 @@ impl Stage {
         b: Mob,
         tolerance: f64,
     ) -> Result<(), StageError> {
-        if matches!(
-            self.try_get(a)?.render_primitive(),
-            crate::RenderPrimitive::SurfaceGrid { .. }
-        ) || matches!(
-            self.try_get(b)?.render_primitive(),
-            crate::RenderPrimitive::SurfaceGrid { .. }
-        ) {
+        if self
+            .try_get(a)?
+            .render_primitive()
+            .surface_resolution()
+            .is_some()
+            || self
+                .try_get(b)?
+                .render_primitive()
+                .surface_resolution()
+                .is_some()
+        {
             return self.align_surface_points(a, b);
         }
         match (is_vmobject_schema(self, a)?, is_vmobject_schema(self, b)?) {

@@ -85,7 +85,9 @@ impl RenderPrimitive {
     const fn program_kind(self) -> ProgramKind {
         match self {
             Self::Vector => ProgramKind::Vector,
-            Self::SurfaceGrid { .. } | Self::TriangleMesh => ProgramKind::Surface,
+            Self::SurfaceGrid { .. }
+            | Self::CameraSortedSurfaceGrid { .. }
+            | Self::TriangleMesh => ProgramKind::Surface,
             Self::DotCloud => ProgramKind::DotCloud,
             Self::ImageQuad => ProgramKind::Image,
         }

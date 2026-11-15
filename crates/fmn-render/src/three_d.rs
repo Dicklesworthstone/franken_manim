@@ -295,6 +295,8 @@ pub struct SurfaceMesh {
     vertices: Vec<SurfaceVertex>,
     indices: Vec<u32>,
     resolution: Option<(u32, u32)>,
+    camera_sort_faces: bool,
+    camera_sort_center: Option<Vec3>,
 }
 
 /// Mesh/job construction refusal.
@@ -763,6 +765,8 @@ impl SurfaceMesh {
             vertices,
             indices,
             resolution: None,
+            camera_sort_faces: false,
+            camera_sort_center: None,
         })
     }
 
@@ -800,6 +804,8 @@ impl SurfaceMesh {
             vertices,
             indices,
             resolution: Some(resolution),
+            camera_sort_faces: false,
+            camera_sort_center: None,
         })
     }
 
@@ -839,6 +845,45 @@ impl SurfaceMesh {
     pub const fn resolution(&self) -> Option<(u32, u32)> {
         self.resolution
     }
+
+    /// Sort this mesh's faces for each immutable camera projection. Indices and
+    /// vertex attributes remain in their authored order; only the compiled draw
+    /// sequence changes. Equal-depth faces use their original triangle ordinal.
+    /// The direction runs from the bounds center of all valid vertices toward
+    /// the camera, including vertices that belong to no surviving triangle.
+    #[must_use]
+    pub fn always_sort_to_camera(mut self) -> Self {
+        self.camera_sort_faces = true;
+        if self.camera_sort_center.is_none() {
+            self.camera_sort_center = Some(surface_bounds_center(
+                self.vertices.iter().map(|vertex| vertex.point),
+            ));
+        }
+        self
+    }
+
+    // Retained masked surfaces keep inert placeholders in the UV grid. Their
+    // valid geometry center must be supplied before camera sorting is enabled.
+    pub(crate) fn set_camera_sort_center(&mut self, center: Vec3) {
+        self.camera_sort_center = Some(center);
+    }
+}
+
+fn surface_bounds_center(points: impl IntoIterator<Item = Vec3>) -> Vec3 {
+    let mut points = points.into_iter();
+    let Some(first) = points.next() else {
+        return [0.0; 3];
+    };
+    let mut low = first;
+    let mut high = first;
+    for point in points {
+        for axis in 0..3 {
+            low[axis] = low[axis].min(point[axis]);
+            high[axis] = high[axis].max(point[axis]);
+        }
+    }
+    // Half first keeps the center finite even for large same-sign bounds.
+    std::array::from_fn(|axis| low[axis] * 0.5 + high[axis] * 0.5)
 }
 
 fn validate_vertices(vertices: &[SurfaceVertex]) -> Result<(), ThreeDError> {
@@ -3522,8 +3567,11 @@ fn compile_surface<'a>(
     }
     let light = camera.light_source_position();
     let camera_position = camera.location();
+    let face_order = surface_face_order(draw.mesh, camera_position, budget)?;
+    let faces = draw.mesh.indices.as_chunks::<3>().0;
     let mut triangles = Vec::new();
-    for triangle in draw.mesh.indices.as_chunks::<3>().0 {
+    for index in 0..faces.len() {
+        let triangle = &faces[face_order.get(index).map_or(index, |&(_, ordinal)| ordinal)];
         let vertices = [
             draw.mesh.vertices[triangle[0] as usize],
             draw.mesh.vertices[triangle[1] as usize],
@@ -3583,6 +3631,38 @@ fn compile_surface<'a>(
         },
         depth_test: draw.depth_test,
     })
+}
+
+// Keep the camera-dependent order out of the immutable world mesh. Its
+// projection cache already keys the complete frozen camera and source identity,
+// so an orbit recompiles the order while an unchanged capture reuses it.
+fn surface_face_order(
+    mesh: &SurfaceMesh,
+    camera_position: Vec3,
+    budget: &mut PreparationBudget,
+) -> Result<Vec<(f64, usize)>, ThreeDError> {
+    let mut order = Vec::new();
+    if !mesh.camera_sort_faces || mesh.indices.len() <= 3 {
+        return Ok(order);
+    }
+    let faces = mesh.indices.as_chunks::<3>().0;
+    reserve_temporary(budget, &mut order, "surface face ordering", faces.len())?;
+    let center = mesh.camera_sort_center.unwrap_or([0.0; 3]);
+    let direction = sub(camera_position, center);
+    if !finite3(direction) {
+        return Err(ThreeDError::NonFinite);
+    }
+    for (ordinal, triangle) in faces.iter().enumerate() {
+        let depth = dot(mesh.vertices[triangle[0] as usize].point, direction);
+        if !depth.is_finite() {
+            return Err(ThreeDError::NonFinite);
+        }
+        order.push((if depth == 0.0 { 0.0 } else { depth }, ordinal));
+    }
+    // The explicit ordinal tie-break gives stable painter order without the
+    // unbudgeted scratch allocation of a stable comparison sort.
+    order.sort_unstable_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    Ok(order)
 }
 
 /// A run of fewer consecutive dots than this compiles on the calling thread:
@@ -5714,6 +5794,133 @@ mod tests {
             ..crate::camera::CameraConfig::default()
         })
         .expect("camera")
+    }
+
+    #[test]
+    fn camera_sorted_faces_match_explicit_painter_order_from_both_sides() {
+        let mut vertices = Vec::new();
+        for (z, tint) in [(0.5, "#ff0000"), (-0.5, "#0000ff")] {
+            vertices.extend(full_triangle(z, color(tint, 0.5)).vertices);
+        }
+        let authored = SurfaceMesh::new(vertices.clone(), vec![0, 1, 2, 3, 4, 5]).unwrap();
+        let sorted = authored.clone().always_sort_to_camera();
+        let render = |camera: &Camera, mesh: &SurfaceMesh, threads| {
+            let draws = [ThreeDDraw::Surface(SurfaceDraw {
+                shading: [0.0; 3],
+                depth_test: false,
+                ..SurfaceDraw::new(mesh)
+            })];
+            ThreeDJob::new(camera, &draws, Tiling::default())
+                .unwrap()
+                .render(threads)
+                .unwrap()
+                .as_bytes()
+                .to_vec()
+        };
+        for (phi, indices) in [
+            (0.0, vec![3, 4, 5, 0, 1, 2]),
+            (std::f64::consts::PI, vec![0, 1, 2, 3, 4, 5]),
+        ] {
+            let mut camera = camera();
+            camera
+                .frame_mut()
+                .set_euler_angles(None, Some(phi), None)
+                .unwrap();
+            let oracle = SurfaceMesh::new(vertices.clone(), indices).unwrap();
+            let expected = render(&camera, &oracle, 1);
+            for threads in [1, 4, 16] {
+                assert_eq!(render(&camera, &sorted, threads), expected);
+            }
+            if phi == 0.0 {
+                assert_ne!(
+                    render(&camera, &authored, 1),
+                    expected,
+                    "the control must expose reversed translucent compositing"
+                );
+            }
+        }
+        assert_eq!(
+            sorted.indices(),
+            authored.indices(),
+            "sorting never rewrites the mesh"
+        );
+    }
+
+    #[test]
+    fn camera_face_order_has_stable_ties_and_admits_its_scratch_before_allocating() {
+        let mut mesh = SurfaceMesh::new(
+            full_triangle(0.0, color("#ffffff", 0.5)).vertices,
+            vec![0, 1, 2, 2, 0, 1, 1, 2, 0],
+        )
+        .unwrap()
+        .always_sort_to_camera();
+        let bytes = 3 * std::mem::size_of::<(f64, usize)>() as u64;
+        let mut exact = PreparationBudget::new(ThreeDPreparationLimits {
+            max_working_bytes: bytes,
+            ..ThreeDPreparationLimits::default()
+        });
+        let order = surface_face_order(&mesh, [0.0, 0.0, 10.0], &mut exact).unwrap();
+        assert_eq!(order.iter().map(|row| row.1).collect::<Vec<_>>(), [0, 1, 2]);
+        assert_eq!(exact.working_bytes, bytes);
+        let mut below = PreparationBudget::new(ThreeDPreparationLimits {
+            max_working_bytes: bytes - 1,
+            ..ThreeDPreparationLimits::default()
+        });
+        assert!(matches!(
+            surface_face_order(&mesh, [0.0, 0.0, 10.0], &mut below),
+            Err(ThreeDError::PreparationLimitExceeded { .. })
+        ));
+        mesh.camera_sort_faces = false;
+        let mut no_sort = PreparationBudget::new(ThreeDPreparationLimits {
+            max_working_bytes: 0,
+            ..ThreeDPreparationLimits::default()
+        });
+        assert!(
+            surface_face_order(&mesh, [0.0, 0.0, 10.0], &mut no_sort)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(no_sort.working_bytes, 0);
+    }
+
+    #[test]
+    fn camera_face_order_includes_valid_unreferenced_vertices_in_its_center() {
+        let points = [
+            [0.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+            [0.25, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.75, -1.0, 0.0],
+            [1.0, 1.0, 0.0],
+        ];
+        let mut vertices: Vec<_> = points
+            .into_iter()
+            .map(|point| vertex(point, [0.0, 0.0, 1.0], color("#ffffff", 0.5)))
+            .collect();
+        let without_isolated = SurfaceMesh::new(vertices.clone(), vec![0, 1, 2, 3, 4, 5])
+            .unwrap()
+            .always_sort_to_camera();
+        vertices.push(vertex(
+            [-9.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            color("#ffffff", 0.5),
+        ));
+        let with_isolated = SurfaceMesh::new(vertices, vec![0, 1, 2, 3, 4, 5])
+            .unwrap()
+            .always_sort_to_camera();
+        let order = |mesh: &SurfaceMesh| {
+            surface_face_order(
+                mesh,
+                [0.0, 0.0, 10.0],
+                &mut PreparationBudget::new(ThreeDPreparationLimits::default()),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(_, ordinal)| ordinal)
+            .collect::<Vec<_>>()
+        };
+        assert_eq!(order(&without_isolated), [1, 0]);
+        assert_eq!(order(&with_isolated), [0, 1]);
     }
 
     fn pixel(frame: &FrameBuffer, x: u32, y: u32) -> [f64; 4] {

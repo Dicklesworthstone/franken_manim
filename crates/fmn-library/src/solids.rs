@@ -82,11 +82,12 @@
 //!   are ported. The pin has **no procedural checkerboard helper** —
 //!   textured examples reference image assets — so there is nothing
 //!   further to port; this note is the documented omission.
-//! * **Other-tier operations.** `sort_faces_back_to_front` /
-//!   `always_sort_to_camera` remain camera-coupled W9/Lumen behavior (the
-//!   triangle data they permute is here). Surface partial reveal lives in
-//!   Marionette's typed UV-grid operation and Choreo's `ShowPartial` driver;
-//!   this crate supplies their `preferred_creation_axis` constructor data.
+//! * **Camera-relative face order.** [`Surface::always_sort_to_camera`]
+//!   and [`TexturedSurface::always_sort_to_camera`] opt into Lumen's stable
+//!   face ordering against the camera frozen for each frame. The UV grid
+//!   stays intact for Marionette's partial-surface operation and Choreo's
+//!   `ShowPartial` driver. Sorting orders faces within one surface; it does
+//!   not resolve intersections or order separate objects.
 //! * **`ShapeTag`.** Surfaces are not paths, so they enter the arena as
 //!   [`ShapeTag::General`]; the semantic raster hints of §10.8 do not
 //!   apply to UV grids.
@@ -569,6 +570,7 @@ impl SurfaceSpec {
             epsilon: self.epsilon,
             normal_nudge: self.normal_nudge,
             preferred_creation_axis: self.preferred_creation_axis,
+            camera_sort_faces: false,
             triangle_indices,
             validity,
             uniforms,
@@ -673,6 +675,7 @@ pub struct Surface {
     epsilon: f64,
     normal_nudge: f64,
     preferred_creation_axis: usize,
+    camera_sort_faces: bool,
     triangle_indices: Vec<u32>,
     validity: Vec<bool>,
     uniforms: Uniforms,
@@ -763,6 +766,23 @@ impl Surface {
     #[must_use]
     pub fn triangle_indices(&self) -> &[u32] {
         &self.triangle_indices
+    }
+
+    /// Sort this surface's faces back to front for the camera frozen per frame.
+    ///
+    /// Lumen projects each triangle's first vertex toward the camera from
+    /// the valid points' bounding-box center; equal depths retain grid order.
+    /// All valid vertices contribute to that center, including vertices no
+    /// drawable triangle references. Missing samples do not contribute.
+    /// Sorting changes only draw order, preserving the UV grid for partial
+    /// reveals and texture coordinates.
+    ///
+    /// This orders faces within one surface. It does not resolve intersecting
+    /// triangles or order separate objects.
+    #[must_use]
+    pub fn always_sort_to_camera(mut self) -> Self {
+        self.camera_sort_faces = true;
+        self
     }
 
     /// The uniform inventory (shading, depth test).
@@ -1030,8 +1050,14 @@ impl From<Surface> for Mobject {
             buffer,
             uniforms: s.uniforms,
             shape: ShapeTag::General,
-            render_primitive: RenderPrimitive::SurfaceGrid {
-                resolution: s.resolution,
+            render_primitive: if s.camera_sort_faces {
+                RenderPrimitive::CameraSortedSurfaceGrid {
+                    resolution: s.resolution,
+                }
+            } else {
+                RenderPrimitive::SurfaceGrid {
+                    resolution: s.resolution,
+                }
             },
             image: None,
             defaults_row: None,
@@ -2720,7 +2746,9 @@ impl From<SurfaceMesh> for Mobject {
 ///
 /// Points and `d_normal_point` are copied from `uv_surface`; `im_coords`
 /// run `u: 0→1`, `v: 1→0` (the Reference's reversed y); `opacity` is the
-/// surface's per-point alpha. The shading triple is the uv surface's.
+/// surface's per-point alpha. The shading triple and
+/// [camera-relative face order](Surface::always_sort_to_camera) policy are
+/// inherited from the uv surface.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TexturedSurface {
     points: Vec<Vec3>,
@@ -2732,6 +2760,7 @@ pub struct TexturedSurface {
     u_range: (f64, f64),
     v_range: (f64, f64),
     preferred_creation_axis: usize,
+    camera_sort_faces: bool,
     light_texture: String,
     dark_texture: String,
     num_textures: u8,
@@ -2787,6 +2816,7 @@ impl TexturedSurface {
             u_range: uv_surface.u_range(),
             v_range: uv_surface.v_range(),
             preferred_creation_axis: uv_surface.preferred_creation_axis(),
+            camera_sort_faces: uv_surface.camera_sort_faces,
             light_texture,
             dark_texture,
             num_textures,
@@ -2803,6 +2833,20 @@ impl TexturedSurface {
             let (u, v) = f(coord[0], coord[1]);
             *coord = [u, v];
         }
+        self
+    }
+
+    /// Sort this textured surface's faces for the camera frozen per frame.
+    ///
+    /// Uses [`Surface::always_sort_to_camera`]'s stable back-to-front order
+    /// without changing the UV grid or image coordinates. The policy is
+    /// also inherited when texturing a surface that has it enabled.
+    ///
+    /// This orders faces within one surface. It does not resolve intersecting
+    /// triangles or order separate objects.
+    #[must_use]
+    pub fn always_sort_to_camera(mut self) -> Self {
+        self.camera_sort_faces = true;
         self
     }
 
@@ -2923,8 +2967,14 @@ impl From<TexturedSurface> for Mobject {
             buffer,
             uniforms: t.uniforms,
             shape: ShapeTag::General,
-            render_primitive: RenderPrimitive::SurfaceGrid {
-                resolution: t.resolution,
+            render_primitive: if t.camera_sort_faces {
+                RenderPrimitive::CameraSortedSurfaceGrid {
+                    resolution: t.resolution,
+                }
+            } else {
+                RenderPrimitive::SurfaceGrid {
+                    resolution: t.resolution,
+                }
             },
             image: None,
             defaults_row: None,

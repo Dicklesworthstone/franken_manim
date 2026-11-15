@@ -2255,8 +2255,8 @@ impl Stage {
             if e1.submobjects.len() != e2.submobjects.len() {
                 return Err(StageError::FamilyShapeMismatch);
             }
-            let surface_pair = matches!(e1.render_primitive, RenderPrimitive::SurfaceGrid { .. })
-                || matches!(e2.render_primitive, RenderPrimitive::SurfaceGrid { .. });
+            let surface_pair = e1.render_primitive.surface_resolution().is_some()
+                || e2.render_primitive.surface_resolution().is_some();
             if e1.buffer.schema() != e2.buffer.schema()
                 && !(surface_pair
                     && surface_grid::compatible_surface_schemas(

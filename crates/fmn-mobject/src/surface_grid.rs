@@ -174,7 +174,7 @@ fn grid_count(resolution: (usize, usize)) -> Result<usize, StageError> {
 }
 
 fn resolution(entry: &Entry) -> Result<(usize, usize), StageError> {
-    let RenderPrimitive::SurfaceGrid { resolution } = entry.render_primitive() else {
+    let Some(resolution) = entry.render_primitive().surface_resolution() else {
         return Err(StageError::SurfaceGrid(
             "alignment requires two UV-grid surfaces",
         ));
@@ -502,6 +502,35 @@ pub fn prepare_surface_grid_alignment(
 }
 
 impl Stage {
+    /// Enable or disable camera-following painter order for a live UV surface.
+    ///
+    /// This changes only durable renderer metadata. Point records, live views,
+    /// material, family membership and updater ownership are preserved. The
+    /// renderer derives the ordering from the immutable camera for each frame.
+    ///
+    /// # Errors
+    /// A stale handle or a non-surface primitive is refused without mutation.
+    pub fn set_surface_camera_sorting(
+        &mut self,
+        mob: Mob,
+        enabled: bool,
+    ) -> Result<(), StageError> {
+        let entry = self.get_mut(mob).ok_or(StageError::StaleHandle)?;
+        let resolution =
+            entry
+                .render_primitive
+                .surface_resolution()
+                .ok_or(StageError::SurfaceGrid(
+                    "face ordering requires a UV-grid surface",
+                ))?;
+        entry.render_primitive = if enabled {
+            RenderPrimitive::CameraSortedSurfaceGrid { resolution }
+        } else {
+            RenderPrimitive::SurfaceGrid { resolution }
+        };
+        Ok(())
+    }
+
     /// Publish prepared records, placement and UV topology together. Preserve
     /// live views when record count is unchanged; resized generations detach.
     /// Refuse stale preparation rather than overwrite later record/placement edits.
@@ -533,9 +562,12 @@ impl Stage {
             }
             entry.buffer = update.buffer;
         }
-        entry.render_primitive = RenderPrimitive::SurfaceGrid {
-            resolution: update.resolution,
-        };
+        entry.render_primitive = entry
+            .render_primitive
+            .with_surface_resolution(update.resolution)
+            .ok_or(StageError::SurfaceGrid(
+                "alignment requires a UV-grid surface",
+            ))?;
         entry.set_placement(update.placement);
         Ok(())
     }
@@ -624,6 +656,59 @@ mod dense_grid_tests {
         assert_eq!(station(65_535, 131_072, 131_071), (65_535, 65_536, 0.5));
         assert_eq!(station(0, 131_072, 131_071), (0, 1, 0.0));
         assert_eq!(station(1, 131_072, 131_071), (1, 2, 1.0 / 131_070.0));
+    }
+
+    #[test]
+    fn camera_face_order_survives_live_regridding_alignment_and_partial_reveal() {
+        let mut stage = Stage::new();
+        let rgba_surface = |shape| {
+            let mut value = surface(shape);
+            let schema = RecordSchema::new(
+                &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
+                &["point"],
+                &["point", "d_normal_point"],
+            )
+            .unwrap();
+            let mut buffer = RecordBuffer::new(schema, value.buffer.len()).unwrap();
+            for field in ["point", "d_normal_point"] {
+                buffer.write_range(field, 0, &value.buffer.read_column(field).unwrap());
+            }
+            buffer.write_color_lanes("rgba", Some([0.25, 0.5, 0.75]), Some(0.5));
+            value.buffer = buffer;
+            value
+        };
+        let sorted = stage.add(rgba_surface((2, 2)));
+        let ordinary = stage.add(rgba_surface((3, 4)));
+        stage.set_surface_camera_sorting(sorted, true).unwrap();
+        assert!(!stage.is_aligned_with(sorted, ordinary));
+        stage.align_points(sorted, ordinary).unwrap();
+        assert!(stage.is_aligned_with(sorted, ordinary));
+        assert_eq!(
+            stage.get(sorted).unwrap().render_primitive(),
+            RenderPrimitive::CameraSortedSurfaceGrid { resolution: (3, 4) }
+        );
+        assert_eq!(
+            stage.get(ordinary).unwrap().render_primitive(),
+            RenderPrimitive::SurfaceGrid { resolution: (3, 4) }
+        );
+        stage.resample_surface_grid(sorted, (5, 6)).unwrap();
+        assert_eq!(
+            stage.get(sorted).unwrap().render_primitive(),
+            RenderPrimitive::CameraSortedSurfaceGrid { resolution: (5, 6) }
+        );
+        let source = stage.copy_family(sorted).unwrap();
+        stage
+            .surface_pointwise_become_partial(sorted, source, (5, 6), 1, 0.25, 0.75)
+            .unwrap();
+        assert_eq!(
+            stage.get(sorted).unwrap().render_primitive(),
+            RenderPrimitive::CameraSortedSurfaceGrid { resolution: (5, 6) }
+        );
+        stage.set_surface_camera_sorting(sorted, false).unwrap();
+        assert_eq!(
+            stage.get(sorted).unwrap().render_primitive(),
+            RenderPrimitive::SurfaceGrid { resolution: (5, 6) }
+        );
     }
 
     #[test]

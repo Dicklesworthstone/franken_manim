@@ -140,6 +140,11 @@ fn render_primitive_survives_add_copy_become_snapshot_and_fmna_round_trip() {
         }),
     );
     let triangle = stage.add(Mobject::new().with_render_primitive(RenderPrimitive::TriangleMesh));
+    let sorted_surface = stage.add(Mobject::new().with_render_primitive(
+        RenderPrimitive::CameraSortedSurfaceGrid {
+            resolution: (7, 11),
+        },
+    ));
     let dots = stage.add(Mobject::new().with_render_primitive(RenderPrimitive::DotCloud));
     let image_resource = ImageResource::rgba8(
         2,
@@ -159,6 +164,12 @@ fn render_primitive_survives_add_copy_become_snapshot_and_fmna_round_trip() {
             },
         ),
         (triangle, RenderPrimitive::TriangleMesh),
+        (
+            sorted_surface,
+            RenderPrimitive::CameraSortedSurfaceGrid {
+                resolution: (7, 11),
+            },
+        ),
         (dots, RenderPrimitive::DotCloud),
         (image, RenderPrimitive::ImageQuad),
     ];

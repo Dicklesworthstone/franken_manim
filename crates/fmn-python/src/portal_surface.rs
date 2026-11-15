@@ -11,7 +11,7 @@ pub use initialization::{
 };
 
 fn grid(entry: &fmn_mobject::Entry) -> PyResult<Option<(usize, usize)>> {
-    let RenderPrimitive::SurfaceGrid { resolution } = entry.render_primitive() else {
+    let Some(resolution) = entry.render_primitive().surface_resolution() else {
         return Ok(None);
     };
     let (nu, nv) = resolution;
@@ -63,13 +63,11 @@ fn _surface_sample_validity(target: &Bound<'_, BridgeMobject>) -> PyResult<Vec<b
             .ok_or_else(|| StaleHandleError::new_err("surface is stale"))?;
         let count = entry.buffer.len();
         let limit = fmn_library::SURFACE_SAMPLING_BUDGET.max_samples();
-        match entry.render_primitive() {
-            RenderPrimitive::SurfaceGrid {
-                resolution: (nu, nv),
-            } if nu <= limit && nv <= limit && nu.checked_mul(nv) == Some(count) => {}
+        match entry.render_primitive().surface_resolution() {
+            Some((nu, nv)) if nu <= limit && nv <= limit && nu.checked_mul(nv) == Some(count) => {}
             // Empty Surface and SGroup roots deliberately have no drawable
-            // topology; constructor-admitted strips still use SurfaceGrid.
-            RenderPrimitive::Vector if count == 0 => {}
+            // topology; constructor-admitted strips still use UV grids.
+            None if entry.render_primitive() == RenderPrimitive::Vector && count == 0 => {}
             _ => {
                 return Err(PyTypeError::new_err(
                     "sample validity requires native UV surface topology",
@@ -102,10 +100,7 @@ fn _become_schema_compatible(
                 .ok_or_else(|| StaleHandleError::new_err("become endpoint is stale"))?;
             Ok::<_, PyErr>((
                 entry.buffer.schema().clone(),
-                matches!(
-                    entry.render_primitive(),
-                    RenderPrimitive::SurfaceGrid { .. }
-                ),
+                entry.render_primitive().surface_resolution().is_some(),
             ))
         })?
     };

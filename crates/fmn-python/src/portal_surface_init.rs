@@ -49,7 +49,7 @@ fn _initialize_surface_grid(
                 let entry = stage
                     .get(mob)
                     .ok_or_else(|| StaleHandleError::new_err("surface candidate is stale"))?;
-                if entry.render_primitive() != (RenderPrimitive::SurfaceGrid { resolution })
+                if entry.render_primitive().surface_resolution() != Some(resolution)
                     || entry.buffer.len() != count
                 {
                     return Err(PyValueError::new_err(
@@ -100,10 +100,9 @@ fn _initialize_surface_grid(
                 "surface initialization cannot replace an arena family",
             ));
         }
-        if !matches!(
-            original.render_primitive(),
-            RenderPrimitive::Vector | RenderPrimitive::SurfaceGrid { .. }
-        ) {
+        if original.render_primitive() != RenderPrimitive::Vector
+            && original.render_primitive().surface_resolution().is_none()
+        {
             return Err(PyTypeError::new_err(
                 "surface initialization cannot replace another render primitive",
             ));
@@ -156,7 +155,10 @@ fn _initialize_surface_grid(
         let primitive = if count == 0 {
             RenderPrimitive::Vector
         } else {
-            RenderPrimitive::SurfaceGrid { resolution }
+            entry
+                .render_primitive()
+                .with_surface_resolution(resolution)
+                .unwrap_or(RenderPrimitive::SurfaceGrid { resolution })
         };
         let value = Mobject::from_buffer(buffer)
             .with_uniforms(*entry.uniforms())

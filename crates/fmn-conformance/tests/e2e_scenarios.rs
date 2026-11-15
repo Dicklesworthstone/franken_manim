@@ -13354,6 +13354,196 @@ fn native_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("native_surface_hole_endpoint", u64::from(endpoint_exact)))
 }
 
+/// Camera-following face order remains native grid metadata through snapshots,
+/// camera changes and immutable frame replay. Two colored translucent panels
+/// share one folded UV strip, making an ignored ordering policy visibly wrong.
+fn native_camera_sorted_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_mobject::{RenderPrimitive, Snapshot};
+    use fmn_render::{Camera, CameraConfig, RetainedFrameRenderer, RetainedFrameRendererConfig};
+
+    let spec = fmn_library::SurfaceSpec {
+        u_range: (0.0, 3.0),
+        v_range: (-1.0, 1.0),
+        resolution: (4, 2),
+        opacity: 0.5,
+        shading: [0.0; 3],
+        depth_test: false,
+        ..fmn_library::SurfaceSpec::default()
+    };
+    let strip = spec
+        .sample(|u, v| {
+            if u <= 1.0 {
+                [-1.0 + 2.0 * u, v, 0.5]
+            } else if u <= 2.0 {
+                [1.0, v, 1.5 - u]
+            } else {
+                [5.0 - 2.0 * u, v, -0.5]
+            }
+        })
+        .always_sort_to_camera();
+    let mut stage = Stage::new();
+    let surface = stage.add(strip);
+    stage
+        .add_to_scene(surface)
+        .map_err(|error| fail(error.to_string()))?;
+    let entry = stage
+        .get_mut(surface)
+        .ok_or_else(|| fail("camera-sorted surface was not admitted"))?;
+    for row in 0..entry.buffer.len() {
+        let rgba = if row < 4 {
+            [1.0, 0.0, 0.0, 0.5]
+        } else {
+            [0.0, 0.0, 1.0, 0.5]
+        };
+        entry.buffer.write(row, "rgba", &rgba);
+    }
+    let primitive = RenderPrimitive::CameraSortedSurfaceGrid { resolution: (4, 2) };
+    if entry.render_primitive() != primitive || entry.buffer.len() != 8 {
+        return Err(fail("camera ordering lost the native UV-grid identity"));
+    }
+    let saved = stage
+        .snapshot_bytes()
+        .map_err(|error| fail(format!("serialize sorted surface: {error}")))?;
+    let mut restored = Stage::new();
+    let decoded = Snapshot::from_bytes(&saved, &restored)
+        .map_err(|error| fail(format!("decode sorted surface: {error}")))?;
+    restored.restore(&decoded.snapshot);
+    let restored_surface = *restored
+        .roots()
+        .first()
+        .ok_or_else(|| fail("restored surface has no scene root"))?;
+    if restored
+        .get(restored_surface)
+        .is_none_or(|entry| entry.render_primitive() != primitive)
+        || restored
+            .snapshot_bytes()
+            .map_err(|error| fail(error.to_string()))?
+            != saved
+    {
+        return Err(fail("camera ordering did not round-trip canonically"));
+    }
+    let mut ordinary = stage.snapshot().materialize();
+    ordinary
+        .set_surface_camera_sorting(surface, false)
+        .map_err(|error| fail(error.to_string()))?;
+
+    let background = Srgb::from_hex("#101820")
+        .map_err(|error| fail(error.to_string()))?
+        .to_linear(1.0);
+    let config = RetainedFrameRendererConfig {
+        frame: FrameConfig::new(
+            Viewport {
+                width: 64,
+                height: 48,
+            },
+            ScreenMap {
+                scale: 16.0,
+                origin: [32.0, 24.0],
+                y_up: true,
+            },
+            background,
+        ),
+        tiling: TILING,
+        engine: EngineIdentity::certified(),
+        threads: 1,
+    };
+    let mut camera_config = CameraConfig {
+        resolution: (64, 48),
+        background,
+        ..CameraConfig::default()
+    };
+    camera_config
+        .frame
+        .set_shape([4.0, 3.0])
+        .map_err(|error| fail(error.to_string()))?;
+    let mut camera = Camera::new(camera_config).map_err(|error| fail(error.to_string()))?;
+    let mut compiler = RetainedFrameRenderer::new(config)
+        .map_err(|error| fail(error.to_string()))?;
+    let mut restored_compiler = RetainedFrameRenderer::new(config)
+        .map_err(|error| fail(error.to_string()))?;
+    let mut captures = Vec::new();
+    let mut outcome = RunOutcome::ok();
+    for phi in [0.0, std::f64::consts::PI, 0.0] {
+        camera
+            .frame_mut()
+            .set_euler_angles(Some(0.0), Some(phi), Some(0.0))
+            .map_err(|error| fail(error.to_string()))?;
+        let capture = compiler
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(error.to_string()))?;
+        let mut fresh = RetainedFrameRenderer::new(config)
+            .map_err(|error| fail(error.to_string()))?;
+        fresh.set_camera_projection_cache_budget_bytes(0);
+        let expected = fresh
+            .prepare_with_camera(&stage, &camera)
+            .map_err(|error| fail(error.to_string()))?
+            .render(1)
+            .map_err(|error| fail(error.to_string()))?;
+        let restored_frame = restored_compiler
+            .prepare_with_camera(&restored, &camera)
+            .map_err(|error| fail(error.to_string()))?
+            .render(1)
+            .map_err(|error| fail(error.to_string()))?;
+        if restored_frame.as_bytes() != expected.as_bytes() {
+            return Err(fail("restoring camera-sorted surface changed rendered pixels"));
+        }
+        if captures.is_empty() {
+            let unsorted = compiler
+                .prepare_with_camera(&ordinary, &camera)
+                .map_err(|error| fail(error.to_string()))?
+                .render(1)
+                .map_err(|error| fail(error.to_string()))?;
+            if unsorted.as_bytes() == expected.as_bytes() {
+                return Err(fail("surface ordering fixture did not expose translucent overlap"));
+            }
+        }
+        if captures.len() < 2 {
+            outcome = outcome.with_artifact(
+                if captures.is_empty() {
+                    "sorted-front.frame"
+                } else {
+                    "sorted-back.frame"
+                },
+                encode_frame(&expected).map_err(|error| fail(error.to_string()))?,
+            );
+        }
+        captures.push((capture, expected.as_bytes().to_vec()));
+    }
+    if captures[0].1 == captures[1].1 || captures[0].1 != captures[2].1 {
+        return Err(fail("camera orbit did not change and exactly restore the sorted surface"));
+    }
+    let mut replays = 0_u64;
+    for threads in [1, 4, 16] {
+        for (capture, expected) in captures.iter().rev() {
+            let frame = capture
+                .render(threads)
+                .map_err(|error| fail(error.to_string()))?;
+            if frame.as_bytes() != expected.as_slice() {
+                return Err(fail("sorted surface replay changed across camera history or threads"));
+            }
+            replays += 1;
+        }
+    }
+    if stage.snapshot_bytes().map_err(|error| fail(error.to_string()))? != saved {
+        return Err(fail("camera face ordering mutated authoritative grid records"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_camera_sorted_surfaces")
+            .field("poses", captures.len() as u64)
+            .field("replays", replays)
+            .field("snapshot_exact", "true")
+            .field("ordering_visible", "true")
+            .field("records_unchanged", "true"),
+    );
+    Ok(outcome
+        .with_counter("native_sorted_surface_poses", captures.len() as u64)
+        .with_counter("native_sorted_surface_replays", replays)
+        .with_counter("native_sorted_surface_snapshot", 1)
+        .with_counter("native_sorted_surface_ordering_visible", 1)
+        .with_counter("native_sorted_surface_records_unchanged", 1)
+        .with_artifact("camera-sorted-surface.fmna", saved))
+}
+
 /// Live 3D helpers feed ordinary native surface and curve primitives through
 /// the same renderer as independently translated owning-chart constructions.
 fn live_coordinate_surface_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -18344,6 +18534,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_camera_sorted_surfaces.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_camera_sorted_surfaces_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_sorted_surface_poses", 3),
+            counter_eq("native_sorted_surface_replays", 9),
+            counter_eq("native_sorted_surface_snapshot", 1),
+            counter_eq("native_sorted_surface_ordering_visible", 1),
+            counter_eq("native_sorted_surface_records_unchanged", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_camera_sorted_surfaces",
+            vec![
+                FieldPred::str_eq("snapshot_exact", "true"),
+                FieldPred::str_eq("ordering_visible", "true"),
+                FieldPred::str_eq("records_unchanged", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.live_coordinate_surface.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -22003,6 +22215,16 @@ fn native_surface_holes_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_surface_holes.v1")
         .expect("the native surface hole scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_camera_sorted_surfaces_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_camera_sorted_surfaces.v1")
+        .expect("the native camera-sorted surface scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

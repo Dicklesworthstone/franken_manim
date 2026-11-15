@@ -1250,7 +1250,9 @@ fn prepare_camera_scene(
                     },
                 )?;
             }
-            RenderPrimitive::SurfaceGrid { .. } | RenderPrimitive::TriangleMesh => {
+            RenderPrimitive::SurfaceGrid { .. }
+            | RenderPrimitive::CameraSortedSurfaceGrid { .. }
+            | RenderPrimitive::TriangleMesh => {
                 // Raster resources do not change a surface's topology.
                 let image = entry
                     .image_resource()
@@ -1329,6 +1331,9 @@ fn camera_world_resource(
         RenderPrimitive::SurfaceGrid { resolution } => {
             CameraWorldGeometry::Mesh(surface_mesh(stage, mob, Some(resolution))?)
         }
+        RenderPrimitive::CameraSortedSurfaceGrid { resolution } => CameraWorldGeometry::Mesh(
+            surface_mesh(stage, mob, Some(resolution))?.always_sort_to_camera(),
+        ),
         RenderPrimitive::TriangleMesh => CameraWorldGeometry::Mesh(surface_mesh(stage, mob, None)?),
         RenderPrimitive::DotCloud => CameraWorldGeometry::Dots(dot_draws(stage, mob)?),
         RenderPrimitive::ImageQuad => {
@@ -1480,6 +1485,11 @@ fn surface_mesh(
         })?;
     let records = entry.buffer.len();
     let placement = entry.placement();
+    let camera_sorted = matches!(
+        entry.render_primitive(),
+        RenderPrimitive::CameraSortedSurfaceGrid { .. }
+    );
+    let mut sorting_bounds: Option<(Vec3, Vec3)> = None;
     let validity = fmn_mobject::stage::surface_validity(&entry.buffer).map_err(|_| {
         RetainedFrameRendererError::InvalidPrimitive {
             mob,
@@ -1516,6 +1526,14 @@ fn surface_mesh(
             d_normal[1] - point[1],
             d_normal[2] - point[2],
         ]));
+        let position = placement.apply_point(point);
+        if camera_sorted {
+            let (low, high) = sorting_bounds.get_or_insert((position, position));
+            for axis in 0..3 {
+                low[axis] = low[axis].min(position[axis]);
+                high[axis] = high[axis].max(position[axis]);
+            }
+        }
         let vertex = if entry.image_resource().is_some() {
             let uv = entry
                 .buffer
@@ -1540,14 +1558,14 @@ fn surface_mesh(
                 });
             }
             SurfaceVertex::textured(
-                placement.apply_point(point),
+                position,
                 normal,
                 uv.map(f64::from),
                 f64::from(opacity),
             )
         } else {
             SurfaceVertex::colored(
-                placement.apply_point(point),
+                position,
                 normal,
                 record_rgba(stage, mob, record)?,
             )
@@ -1580,6 +1598,11 @@ fn surface_mesh(
                         .iter()
                         .all(|&index| validity[index as usize] == 1.0)
                 });
+            }
+            if let Some((low, high)) = sorting_bounds {
+                mesh.set_camera_sort_center(std::array::from_fn(|axis| {
+                    low[axis] * 0.5 + high[axis] * 0.5
+                }));
             }
             Ok(mesh)
         }

@@ -38,12 +38,44 @@ pub enum RenderPrimitive {
         /// Sampled points along the u and v axes.
         resolution: (usize, usize),
     },
+    /// The same UV grid, with faces ordered back-to-front for each captured
+    /// camera. Record order and UV topology stay unchanged, so partial reveals,
+    /// live views and grid alignment keep their ordinary surface semantics.
+    CameraSortedSurfaceGrid {
+        /// Sampled points along the u and v axes.
+        resolution: (usize, usize),
+    },
     /// Explicit triangle soup: every three records form one triangle.
     TriangleMesh,
     /// Camera-facing dots, one per record.
     DotCloud,
     /// A six-record textured quad backed by an [`ImageResource`].
     ImageQuad,
+}
+
+impl RenderPrimitive {
+    /// UV resolution of either surface-grid ordering policy.
+    #[must_use]
+    pub const fn surface_resolution(self) -> Option<(usize, usize)> {
+        match self {
+            Self::SurfaceGrid { resolution } | Self::CameraSortedSurfaceGrid { resolution } => {
+                Some(resolution)
+            }
+            _ => None,
+        }
+    }
+
+    /// Replace a surface's grid dimensions while retaining its face-order policy.
+    #[must_use]
+    pub const fn with_surface_resolution(self, resolution: (usize, usize)) -> Option<Self> {
+        match self {
+            Self::SurfaceGrid { .. } => Some(Self::SurfaceGrid { resolution }),
+            Self::CameraSortedSurfaceGrid { .. } => {
+                Some(Self::CameraSortedSurfaceGrid { resolution })
+            }
+            _ => None,
+        }
+    }
 }
 
 /// The storage layout of one durable image resource.

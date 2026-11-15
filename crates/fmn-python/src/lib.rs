@@ -114,8 +114,8 @@ use portal_playback::OutputTimeline;
 
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_mobject::{
-    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, Snapshot, Stage,
-    StageError, Uniforms,
+    JointType, Mob, Mobject, RecordBuffer, RecordError, RecordSchema, RecordView, RenderPrimitive,
+    Snapshot, Stage, StageError, Uniforms,
 };
 use fmn_output::{
     EmitterConfig, GifSink, GifSinkConfig, NativeArtifactReport, OrderedEmitter, PngSink,
@@ -6860,14 +6860,11 @@ impl BridgeMobject {
             let entry = stage
                 .get(mob)
                 .ok_or_else(|| StaleHandleError::new_err("SurfaceMesh source is stale"))?;
-            let topology_matches = match entry.render_primitive() {
-                fmn_mobject::RenderPrimitive::SurfaceGrid { resolution } => {
-                    resolution == source_resolution
-                }
+            let topology_matches = match entry.render_primitive().surface_resolution() {
+                Some(resolution) => resolution == source_resolution,
                 // Empty constructors remain native containers; they yield no
                 // wires rather than acquiring a drawable triangle topology.
-                fmn_mobject::RenderPrimitive::Vector => count == 0,
-                _ => false,
+                None => entry.render_primitive() == RenderPrimitive::Vector && count == 0,
             };
             if !topology_matches || entry.buffer.len() != count {
                 return Err(PyValueError::new_err(

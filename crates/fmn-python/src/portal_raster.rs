@@ -664,6 +664,7 @@ fn _replace_raster_image(
                 entry.render_primitive(),
                 RenderPrimitive::ImageQuad
                     | RenderPrimitive::SurfaceGrid { .. }
+                    | RenderPrimitive::CameraSortedSurfaceGrid { .. }
                     | RenderPrimitive::TriangleMesh
             )
         {

@@ -73,15 +73,12 @@ fn endpoints(
     match (a, b) {
         (None, None) => Ok(None),
         (Some(a), Some(b))
-            if matches!(
-                (a_kind, b_kind),
-                (RenderPrimitive::ImageQuad, RenderPrimitive::ImageQuad)
-                    | (RenderPrimitive::TriangleMesh, RenderPrimitive::TriangleMesh)
-                    | (
-                        RenderPrimitive::SurfaceGrid { .. },
-                        RenderPrimitive::SurfaceGrid { .. }
-                    )
-            ) =>
+            if (a_kind.surface_resolution().is_some() && b_kind.surface_resolution().is_some())
+                || matches!(
+                    (a_kind, b_kind),
+                    (RenderPrimitive::ImageQuad, RenderPrimitive::ImageQuad)
+                        | (RenderPrimitive::TriangleMesh, RenderPrimitive::TriangleMesh)
+                ) =>
         {
             Ok(Some((a, b)))
         }
@@ -201,6 +198,7 @@ impl RasterTransition {
             primitive,
             RenderPrimitive::ImageQuad
                 | RenderPrimitive::SurfaceGrid { .. }
+                | RenderPrimitive::CameraSortedSurfaceGrid { .. }
                 | RenderPrimitive::TriangleMesh
         ) || (primitive == RenderPrimitive::ImageQuad && end.dark_image().is_some())
         {

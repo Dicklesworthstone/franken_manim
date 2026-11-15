@@ -5,7 +5,7 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.9,
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.10,
 //!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v2.0; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
@@ -54,7 +54,7 @@ use crate::stage::{Mob, Snapshot, SnapshotEntry, SnapshotEntryData, Stage, Updat
 use crate::uniforms::{JointType, Uniforms};
 use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.9.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.10.
 ///
 /// Minor history: 1.1 appended the shape tag; 1.2 appended `z_index`; 1.3
 /// preserves the monotonic updater-id cursor, including identities removed
@@ -71,7 +71,12 @@ use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, 
 /// Older dot clouds' constant glow lanes promote exactly to the uniform.
 /// Heterogeneous legacy lanes refuse: choosing one point's value would lose
 /// the saved material, which cannot be represented by an object-wide uniform.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 9);
+/// **1.10 adds camera-sorted UV-grid primitive identity**; its payload retains
+/// the full 1.9 layout. Writers keep 1.8/1.9 for scenes without this primitive,
+/// preserving the existing canonical bytes. Older readers refuse the new
+/// version rather than silently dropping a surface's ordering semantics.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 10);
+const SNAPSHOT_SCHEMA_WITH_GLOW: Schema = Schema::new(*b"FMNA", 1, 1, 9);
 const SNAPSHOT_SCHEMA_WITHOUT_GLOW: Schema = Schema::new(*b"FMNA", 1, 1, 8);
 
 /// The scene-state envelope: magic `FMNA`, schema id 2, version 2.0.
@@ -398,6 +403,11 @@ fn put_render_primitive(w: &mut Writer, primitive: RenderPrimitive) -> Result<()
         RenderPrimitive::ImageQuad => {
             w.put_u8(4);
         }
+        RenderPrimitive::CameraSortedSurfaceGrid { resolution } => {
+            w.put_u8(5)
+                .put_u64(count_u64(resolution.0)?)
+                .put_u64(count_u64(resolution.1)?);
+        }
     }
     Ok(())
 }
@@ -416,6 +426,14 @@ fn get_render_primitive(r: &mut Reader<'_>) -> Result<RenderPrimitive, PersistEr
         2 => Ok(RenderPrimitive::TriangleMesh),
         3 => Ok(RenderPrimitive::DotCloud),
         4 => Ok(RenderPrimitive::ImageQuad),
+        5 if r.version().1 >= 10 => Ok(RenderPrimitive::CameraSortedSurfaceGrid {
+            resolution: (
+                usize::try_from(r.get_u64()?)
+                    .map_err(|_| PersistError::Malformed("surface u resolution overflows"))?,
+                usize::try_from(r.get_u64()?)
+                    .map_err(|_| PersistError::Malformed("surface v resolution overflows"))?,
+            ),
+        }),
         _ => Err(PersistError::Malformed("unknown render primitive")),
     }
 }
@@ -993,14 +1011,25 @@ impl Snapshot {
             max_total: limits.max_total.min(Limits::DEFAULT.max_total),
             max_field: limits.max_field.min(Limits::DEFAULT.max_field),
         };
-        let has_glow_table = self.slots.iter().any(|(_, entry)| {
+        let has_sorted_surface = self.slots.iter().any(|(_, entry)| {
             entry.as_ref().is_some_and(|entry| {
-                entry.uniforms.glow_factor != 0.0
-                    || entry.render_primitive == RenderPrimitive::DotCloud
+                matches!(
+                    entry.render_primitive,
+                    RenderPrimitive::CameraSortedSurfaceGrid { .. }
+                )
             })
         });
-        let schema = if has_glow_table {
+        let has_glow_table = has_sorted_surface
+            || self.slots.iter().any(|(_, entry)| {
+                entry.as_ref().is_some_and(|entry| {
+                    entry.uniforms.glow_factor != 0.0
+                        || entry.render_primitive == RenderPrimitive::DotCloud
+                })
+            });
+        let schema = if has_sorted_surface {
             SNAPSHOT_SCHEMA
+        } else if has_glow_table {
+            SNAPSHOT_SCHEMA_WITH_GLOW
         } else {
             SNAPSHOT_SCHEMA_WITHOUT_GLOW
         };

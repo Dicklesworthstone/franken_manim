@@ -1,7 +1,6 @@
 //! Texture constructors over Atlas records, Marionette resources, and Lumen sampling.
 //! No new renderer, decoder, or snapshot side channel is introduced.
 use super::*;
-use fmn_mobject::RenderPrimitive;
 
 #[path = "portal_surface.rs"]
 mod surface;
@@ -69,10 +68,7 @@ fn _build_textured_surface<'py>(
         let entry = stage
             .get(mob)
             .ok_or_else(|| StaleHandleError::new_err("source surface is stale"))?;
-        let RenderPrimitive::SurfaceGrid {
-            resolution: (nu, nv),
-        } = entry.render_primitive()
-        else {
+        let Some((nu, nv)) = entry.render_primitive().surface_resolution() else {
             return Err(PyTypeError::new_err(
                 "TexturedSurface requires a native sampled UV surface",
             ));
