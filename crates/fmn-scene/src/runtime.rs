@@ -501,6 +501,16 @@ pub trait SceneSink {
         true
     }
 
+    /// Retain the last nominal frame while keeping earlier captures metadata
+    /// only. The freeze precedes animation cleanup and final zero-dt updates,
+    /// so lazy image readback observes exactly the emitted sample. A sink with
+    /// intermediate observers or host-controlled early termination should use
+    /// [`Self::capture_state_required`] instead. Show/presenter barriers are
+    /// also final samples; skipped and empty segments still produce no frame.
+    fn capture_final_state_required(&self) -> bool {
+        false
+    }
+
     /// Consume capture timing without an arena snapshot, after explicitly
     /// opting out through [`Self::capture_state_required`]. The default discards
     /// metadata; all scene transitions still occur at their nominal times.
@@ -558,7 +568,7 @@ fn capture_barrier(
     clock: &RationalFrameClock,
     rng: &RngRoot,
 ) -> Result<(), IntegrationError> {
-    if sink.capture_state_required() {
+    if sink.capture_state_required() || sink.capture_final_state_required() {
         sink.capture(reason, FramePacket::freeze_barrier(stage, clock, rng))
     } else {
         sink.capture_metadata(reason, FrameMetadata::capture_barrier(clock, rng))

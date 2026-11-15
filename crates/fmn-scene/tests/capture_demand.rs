@@ -15,6 +15,7 @@ use fmn_scene::{
 #[derive(Default)]
 struct Sink {
     metadata_only: bool,
+    final_state: bool,
     samples: Vec<(CaptureReason, FrameMetadata)>,
     packets: Vec<FramePacket>,
     events: Vec<LifecycleEvent>,
@@ -46,12 +47,19 @@ impl SceneSink for Sink {
         !self.metadata_only
     }
 
+    fn capture_final_state_required(&self) -> bool {
+        self.final_state
+    }
+
     fn capture(
         &mut self,
         reason: CaptureReason,
         packet: FramePacket,
     ) -> Result<(), IntegrationError> {
-        assert!(!self.metadata_only, "a discarded frame must not be frozen");
+        assert!(
+            !self.metadata_only || self.final_state,
+            "a discarded frame must not be frozen"
+        );
         let metadata = packet.metadata();
         self.packets.push(packet);
         self.observe(reason, metadata)
@@ -676,4 +684,130 @@ fn custom_sinks_still_receive_frozen_state_unless_they_opt_out() {
     scene.stage_mut().shift(mob, [9.0, 0.0, 0.0]);
     assert_eq!(sink.0.len(), 2);
     assert_eq!(sink.0[0].materialize_stage().get_center(mob), [0.0; 3]);
+}
+
+#[test]
+fn final_capture_precedes_removers_and_zero_dt_cleanup_without_freezing_earlier_frames() {
+    let mut scene = scene();
+    let mob = scene
+        .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+        .unwrap();
+    let marker = scene
+        .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+        .unwrap();
+    scene
+        .stage_mut()
+        .add_dt_updater(
+            marker,
+            |stage, marker, dt| {
+                if dt == 0.0 {
+                    stage.shift(marker, [0.0, 100.0, 0.0]);
+                }
+            },
+            false,
+        )
+        .unwrap();
+    let target = scene.stage_mut().copy_family(mob).unwrap();
+    scene.stage_mut().shift(target, [3.0, 0.0, 0.0]);
+    let animation = Transform::new(mob, target).with_config(AnimConfig {
+        run_time: 0.375,
+        rate_func: RateFunc::linear(),
+        remover: true,
+        ..AnimConfig::default()
+    });
+    let mut sink = Sink {
+        metadata_only: true,
+        final_state: true,
+        ..Sink::default()
+    };
+    scene
+        .play(
+            vec![Box::new(animation)],
+            PlayOverrides::default(),
+            &mut sink,
+        )
+        .unwrap();
+    assert_eq!(sink.samples.len(), 3);
+    assert_eq!(sink.packets.len(), 1);
+    assert_eq!(sink.packets[0].frame_index(), 3);
+    let frozen = sink.packets[0].materialize_stage();
+    assert!(frozen.roots().contains(&mob));
+    assert!(!scene.stage().roots().contains(&mob));
+    assert_eq!(frozen.get_center(mob), [3.0, 0.0, 0.0]);
+    assert_eq!(
+        scene.stage().get_center(marker)[1] - frozen.get_center(marker)[1],
+        100.0
+    );
+    scene.stage_mut().shift(marker, [7.0, 0.0, 0.0]);
+    scene.wait_frames(4, &mut sink).unwrap();
+    assert_eq!(sink.samples.len(), 7);
+    assert_eq!(sink.packets.len(), 2);
+    assert_eq!(sink.packets[1].frame_index(), 7);
+    assert_eq!(sink.packets[0].materialize_stage().get_center(marker)[0], 0.0);
+    assert_eq!(sink.packets[1].materialize_stage().get_center(marker)[0], 7.0);
+
+    scene.wait_frames(0, &mut sink).unwrap();
+    scene.set_skipping(true);
+    scene.wait_frames(3, &mut sink).unwrap();
+    assert_eq!(sink.packets.len(), 2);
+    assert_eq!(sink.samples.len(), 7);
+}
+
+#[test]
+fn final_capture_works_at_stepped_boundaries_and_native_stop_predicates() {
+    let mut scene = scene();
+    let mob = scene
+        .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+        .unwrap();
+    let animation = transform(&mut scene, mob);
+    let mut sink = Sink {
+        metadata_only: true,
+        final_state: true,
+        ..Sink::default()
+    };
+    let mut play = scene
+        .begin_stepped_play(
+            vec![Box::new(animation)],
+            PlayOverrides::default(),
+            &mut sink,
+        )
+        .unwrap()
+        .unwrap();
+    while scene
+        .prepare_stepped_play_frame(&mut play)
+        .unwrap()
+        .is_some()
+    {
+        scene
+            .complete_stepped_play_frame(&mut play, &mut sink)
+            .unwrap();
+    }
+    assert_eq!(sink.packets.len(), 1);
+    assert_eq!(sink.packets[0].frame_index(), 3);
+    scene.finish_stepped_play(play, &mut sink).unwrap();
+    let mut wait = scene.begin_stepped_wait_frames(3, &mut sink).unwrap();
+    while scene
+        .prepare_stepped_wait_frame(&mut wait)
+        .unwrap()
+        .is_some()
+    {
+        scene
+            .complete_stepped_wait_frame(&mut wait, &mut sink)
+            .unwrap();
+    }
+    assert_eq!(sink.packets.len(), 2);
+    assert_eq!(sink.packets[1].frame_index(), 6);
+    scene.finish_stepped_wait(wait, &mut sink).unwrap();
+
+    let report = scene
+        .wait_until_frames(8, &mut |stage| stage.time() >= 1.0, &mut sink)
+        .unwrap();
+    assert_eq!(report.n_frames, 2);
+    assert_eq!(sink.packets.len(), 4);
+    assert_eq!(sink.packets[2].frame_index(), 7);
+    assert_eq!(sink.packets[3].frame_index(), 8);
+    scene.show(&mut sink).unwrap();
+    assert_eq!(sink.packets.len(), 5);
+    assert_eq!(sink.samples.last().unwrap().0, CaptureReason::Show);
+    assert!(!NullSceneSink.capture_final_state_required());
 }

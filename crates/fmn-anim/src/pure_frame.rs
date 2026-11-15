@@ -1121,6 +1121,14 @@ pub trait PlayCapture {
         true
     }
 
+    /// Whether to retain the last nominal sample of an otherwise metadata-only
+    /// segment. This freezes before animation finish, removers and final
+    /// zero-dt updaters can change the visible state. Consumers observing or
+    /// interrupting intermediate frames must request ordinary full captures.
+    fn capture_final_state_required(&self) -> bool {
+        false
+    }
+
     /// Observe one capture for which [`Self::capture_state_required`] was false.
     fn capture_metadata(&mut self, _metadata: crate::FrameMetadata) {}
 

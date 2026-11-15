@@ -141,11 +141,14 @@ fn capture_sample(
     clock: &RationalFrameClock,
     rng: &RngRoot,
     sample: &FrameSample,
+    final_sample: bool,
     capture: &mut dyn PlayCapture,
 ) {
     // Ask only after the boundary: an updater or input event may have attached
     // a render/recording consumer during this very frame.
-    if capture.capture_state_required() {
+    if capture.capture_state_required()
+        || (final_sample && capture.capture_final_state_required())
+    {
         capture.capture(FramePacket::freeze(stage, clock, rng, sample));
     } else {
         capture.capture_metadata(FrameMetadata::capture(clock, rng, sample));
@@ -1129,7 +1132,14 @@ pub fn complete_play_frame_with_capture(
     boundary(stage, clock.now());
     check_updater_error(stage)?;
     if capture {
-        capture_sample(stage, clock, rng, &plan.sample, emit);
+        capture_sample(
+            stage,
+            clock,
+            rng,
+            &plan.sample,
+            plan.sample.frame == open.report.n_frames,
+            emit,
+        );
     }
     open.stepped += 1;
     open.current_sample = None;
@@ -1638,7 +1648,14 @@ pub fn complete_wait_frame_with_capture(
     boundary(stage, clock.now());
     check_updater_error(stage)?;
     if capture {
-        capture_sample(stage, clock, rng, &plan.sample, emit);
+        capture_sample(
+            stage,
+            clock,
+            rng,
+            &plan.sample,
+            plan.sample.frame == open.report.n_frames,
+            emit,
+        );
     }
     open.stepped += 1;
     Ok(())
@@ -1994,7 +2011,17 @@ pub fn wait_segment_with_capture(
         boundary(stage, clock.now());
         check_updater_error(stage)?;
         if !skip {
-            capture_sample(stage, clock, rng, &sample, emit);
+            // A stop predicate observes the just-captured frame and may end
+            // the wait. Its answer is deliberately not evaluated before the
+            // capture boundary, so every candidate can be the last sample.
+            capture_sample(
+                stage,
+                clock,
+                rng,
+                &sample,
+                stop_condition.is_some() || sample.frame == segment.n_frames(),
+                emit,
+            );
         }
         if let Some(condition) = stop_condition.as_deref_mut()
             && condition(stage)

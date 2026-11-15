@@ -22,6 +22,10 @@ impl PlayCapture for NativeSegmentCapture<'_> {
         self.error.is_none() && self.sink.capture_state_required()
     }
 
+    fn capture_final_state_required(&self) -> bool {
+        self.error.is_none() && self.sink.capture_final_state_required()
+    }
+
     fn capture_metadata(&mut self, metadata: FrameMetadata) {
         if self.error.is_none()
             && let Err(error) = self.sink.capture_metadata(CaptureReason::Segment, metadata)
