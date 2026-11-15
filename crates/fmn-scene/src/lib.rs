@@ -18,6 +18,7 @@ pub mod interactive;
 pub mod journal;
 pub mod recording;
 pub mod runtime;
+pub mod sound;
 pub mod timeline_bundle;
 
 pub use camera_rig::CameraRig;
@@ -65,6 +66,7 @@ pub use runtime::{
     SceneSelectionError, SceneSink, SceneStateRestore, SoundRequest, SteppedPlay, SteppedWait,
     ThreeDAddOptions, ThreeDScene,
 };
+pub use sound::{SoundData, SoundDataError, SoundDataLimits, SoundSource};
 pub use timeline_bundle::{
     BundleError, BundleExportLimits, BundleReadError, BundleSegmentKind,
     COMPACT_TIMELINE_BUNDLE_SCHEMA, DEFAULT_MAX_BUNDLE_BYTES, DEFAULT_MAX_BUNDLE_EXPORT_FRAMES,

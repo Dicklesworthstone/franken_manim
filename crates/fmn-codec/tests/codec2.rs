@@ -127,6 +127,20 @@ fn wav_refusals_are_typed() {
     );
 }
 
+#[test]
+fn wav_rejects_partial_samples_and_interleaved_frames_without_truncating() {
+    for (channels, format, data_len) in
+        [(1, SampleFormat::S16, 1_u32), (2, SampleFormat::F32, 4_u32)]
+    {
+        let mut bytes = encode_wav(channels, 8_000, format, &[0.25, -0.5]);
+        bytes[40..44].copy_from_slice(&data_len.to_le_bytes());
+        assert_eq!(
+            decode_wav(&bytes, &WavLimits::default()),
+            Err(WavError::BadFmt("incomplete interleaved sample frame")),
+        );
+    }
+}
+
 // ---- y4m ------------------------------------------------------------
 
 fn nv12_frame(w: u32, h: u32, seed: u8) -> FrameBuffer {

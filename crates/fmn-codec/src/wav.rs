@@ -185,6 +185,12 @@ pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError>
         (1 | 3, other) => return Err(WavError::UnsupportedDepth { bits: other }),
         (other, _) => return Err(WavError::UnsupportedFormat { format_tag: other }),
     };
+    if !payload
+        .len()
+        .is_multiple_of(bytes_per_sample * usize::from(channels))
+    {
+        return Err(WavError::BadFmt("incomplete interleaved sample frame"));
+    }
     let count = payload.len() / bytes_per_sample;
     if count as u64 > limits.max_samples {
         return Err(WavError::TooLarge {

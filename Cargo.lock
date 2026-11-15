@@ -987,6 +987,7 @@ name = "fmn-scene"
 version = "0.5.0"
 dependencies = [
  "fmn-anim",
+ "fmn-codec",
  "fmn-config",
  "fmn-core",
  "fmn-hash",

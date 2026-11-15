@@ -42,7 +42,7 @@ EXPECTED: dict[str, set[str]] = {
     "fmn-text": {"fmn-core", "fmn-geom", "fmn-mobject"},
     "fmn-tex": {"fmn-core", "fmn-config", "fmn-mobject", "fmn-text", "fmn-cache", "fmn-platform"},  # platform: capability-bound native typesetting sessions
     "fmn-library": {"fmn-core", "fmn-dmath", "fmn-geom", "fmn-mobject", "fmn-anim", "fmn-text", "fmn-tex", "fmn-codec"},  # dmath: tip/arc trigonometry (ADR-0014); codec: ImageMobject decode (§10.6, fm-2u6)
-    "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-hash"},  # hash: journal serialization + digests (§13.4, fm-y7u)
+    "fmn-scene": {"fmn-core", "fmn-config", "fmn-platform", "fmn-mobject", "fmn-anim", "fmn-render", "fmn-hash", "fmn-codec"},  # hash: journal serialization + digests (§13.4, fm-y7u); codec: bounded immutable PCM cue admission (§14.5, fm-in-memory-pcm-cues-tvmvm)
     # hash: canonical supervisor/worker IPC; cache: supervisor-owned
     # checkpoints and journals survive scene-worker replacement (§13.3,
     # D-14, fm-39s).
