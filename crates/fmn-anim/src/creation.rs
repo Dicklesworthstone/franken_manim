@@ -47,7 +47,7 @@ use fmn_core::rate;
 use fmn_mobject::{Mob, Stage, StageError};
 
 use crate::animation::{AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc};
-use crate::transform::{PathFunc, interpolate_fields};
+use crate::transform::{FieldInterpolationScratch, PathFunc, interpolate_fields_with_scratch};
 
 /// `integer_interpolate` over a two-piece window — a private copy of
 /// [`fmn_geom::QuadPath::integer_interpolate`]'s formula (fmn-anim's §19
@@ -366,6 +366,7 @@ pub struct DrawBorderThenFill {
     pub(crate) stroke_width: f64,
     pub(crate) stroke_color: Option<[f32; 3]>,
     pub(crate) crossed: Vec<Mob>,
+    interpolation_scratch: FieldInterpolationScratch,
 }
 
 impl DrawBorderThenFill {
@@ -385,6 +386,7 @@ impl DrawBorderThenFill {
             stroke_width: 2.0,
             stroke_color: None,
             crossed: Vec::new(),
+            interpolation_scratch: FieldInterpolationScratch::default(),
         }
     }
 
@@ -621,7 +623,15 @@ impl Animation for DrawBorderThenFill {
         if index == 0 {
             let _ = stage.pointwise_become_partial(submob, outline, 0.0, subalpha);
         } else {
-            interpolate_fields(stage, submob, outline, start, subalpha, PathFunc::Straight);
+            interpolate_fields_with_scratch(
+                stage,
+                submob,
+                outline,
+                start,
+                subalpha,
+                PathFunc::Straight,
+                &mut self.interpolation_scratch,
+            );
         }
     }
 }
@@ -940,4 +950,74 @@ pub fn add_text_letter_by_letter(
     };
     anim.state.config.run_time = run_time;
     Ok(anim)
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::DrawBorderThenFill;
+    use crate::transform::scratch_tests::{
+        allocations, assert_sample_matches_fresh_scratch, styled_path,
+    };
+    use crate::{AnimConfig, Animation, RateFunc};
+    use fmn_mobject::Stage;
+
+    #[test]
+    fn border_fill_reuses_columns_across_reverse_seeks_and_rebegin() {
+        let mut stage = Stage::new();
+        let root = styled_path(&mut stage, 0, 0.75);
+        for len in [3, 17, 5] {
+            let child = styled_path(&mut stage, len, 0.75);
+            stage.attach(root, child).unwrap();
+        }
+        let mut animation = DrawBorderThenFill::new(root).with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+        animation.begin(&mut stage).unwrap();
+        // The drawing half never needs field interpolation. Warm the fill
+        // workspace, then require every buffer to stay put across both halves.
+        animation.interpolate(&mut stage, 0.75);
+        let prepared = allocations(&animation.interpolation_scratch);
+        assert!(prepared.iter().all(|(_, capacity)| *capacity >= 17 * 4));
+        let frozen = animation.clone();
+        for ((owned, capacity), (cloned, clone_capacity)) in prepared
+            .into_iter()
+            .zip(allocations(&frozen.interpolation_scratch))
+        {
+            assert_ne!(owned, cloned, "frame carriers own independent workspaces");
+            assert_eq!(capacity, clone_capacity);
+        }
+        for alpha in [0.875, 0.625, 0.25, 0.75, 0.0, 1.0, 0.125, 0.625] {
+            assert_sample_matches_fresh_scratch(&mut animation, &mut stage, alpha, |anim| {
+                anim.interpolation_scratch = Default::default();
+            });
+            assert_eq!(allocations(&animation.interpolation_scratch), prepared);
+            let fill = stage
+                .get(root)
+                .unwrap()
+                .buffer
+                .default_record_slice("fill_rgba")
+                .unwrap();
+            assert_eq!(f64::from(fill[3]), 0.75 * (2.0 * alpha - 1.0).max(0.0));
+        }
+
+        animation.finish(&mut stage);
+        let large = styled_path(&mut stage, 129, 0.5);
+        stage.attach(root, large).unwrap();
+        animation.begin(&mut stage).unwrap();
+        assert_sample_matches_fresh_scratch(&mut animation, &mut stage, 0.75, |anim| {
+            anim.interpolation_scratch = Default::default();
+        });
+        let grown = allocations(&animation.interpolation_scratch);
+        assert!(grown.iter().all(|(_, capacity)| *capacity >= 129 * 4));
+        animation.finish(&mut stage);
+        stage.detach(root, large);
+        animation.begin(&mut stage).unwrap();
+        for alpha in [0.75, 0.25, 0.875, 1.0] {
+            assert_sample_matches_fresh_scratch(&mut animation, &mut stage, alpha, |anim| {
+                anim.interpolation_scratch = Default::default();
+            });
+            assert_eq!(allocations(&animation.interpolation_scratch), grown);
+        }
+    }
 }

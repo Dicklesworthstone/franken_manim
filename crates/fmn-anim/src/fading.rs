@@ -29,7 +29,10 @@ use fmn_core::types::Vec3;
 use fmn_mobject::{Mob, Mobject, Stage, StageError};
 
 use crate::animation::{AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc};
-use crate::transform::{PathFunc, StartPrep, TargetPrep, Transform, interpolate_fields};
+use crate::transform::{
+    FieldInterpolationScratch, PathFunc, StartPrep, TargetPrep, Transform,
+    interpolate_fields_with_scratch,
+};
 
 fn neg(v: Vec3) -> Vec3 {
     [-v[0], -v[1], -v[2]]
@@ -294,6 +297,7 @@ pub struct FadeTransform {
     stretch: bool,
     dim_to_match: usize,
     pieces: bool,
+    interpolation_scratch: FieldInterpolationScratch,
 }
 
 impl FadeTransform {
@@ -439,7 +443,15 @@ impl Animation for FadeTransform {
         let [submob, start, end] = *mobs else {
             return; // rows are triples once begin has run
         };
-        interpolate_fields(stage, submob, start, end, sub_alpha, PathFunc::Straight);
+        interpolate_fields_with_scratch(
+            stage,
+            submob,
+            start,
+            end,
+            sub_alpha,
+            PathFunc::Straight,
+            &mut self.interpolation_scratch,
+        );
     }
 
     /// fading.py:132 — remove the temporary pair, restore the original
@@ -490,6 +502,7 @@ pub fn fade_transform(
         stretch: true,
         dim_to_match: 1,
         pieces: false,
+        interpolation_scratch: FieldInterpolationScratch::default(),
     })
 }
 
@@ -507,4 +520,101 @@ pub fn fade_transform_pieces(
     anim.state.config.name = "FadeTransformPieces".to_owned();
     anim.pieces = true;
     Ok(anim)
+}
+
+#[cfg(test)]
+mod scratch_tests {
+    use super::{fade_transform, fade_transform_pieces};
+    use crate::transform::scratch_tests::{
+        allocations, assert_sample_matches_fresh_scratch, styled_path,
+    };
+    use crate::{AnimConfig, Animation, RateFunc};
+    use fmn_mobject::Stage;
+
+    #[test]
+    fn fade_transform_reuses_columns_across_families_and_rebegin() {
+        for pieces in [false, true] {
+            let mut stage = Stage::new();
+            let source = styled_path(&mut stage, 0, 0.75);
+            let target = styled_path(&mut stage, 0, 0.5);
+            for (root, lengths, opacity) in
+                [(source, &[3, 17, 5][..], 0.75), (target, &[7, 33][..], 0.5)]
+            {
+                for &len in lengths {
+                    let child = styled_path(&mut stage, len, opacity);
+                    stage.attach(root, child).unwrap();
+                }
+            }
+            let mut animation = if pieces {
+                fade_transform_pieces(&mut stage, source, target)
+            } else {
+                fade_transform(&mut stage, source, target)
+            }
+            .unwrap()
+            .with_config(AnimConfig {
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            });
+            animation.begin(&mut stage).unwrap();
+            let group = animation.state().mobject();
+            let target_copy = stage.get(group).unwrap().submobjects()[1];
+            let prepared = allocations(&animation.interpolation_scratch);
+            assert!(prepared.iter().all(|(_, capacity)| *capacity >= 33 * 4));
+            let frozen = animation.clone();
+            for ((owned, capacity), (cloned, clone_capacity)) in prepared
+                .into_iter()
+                .zip(allocations(&frozen.interpolation_scratch))
+            {
+                assert_ne!(owned, cloned, "frame carriers own independent workspaces");
+                assert_eq!(capacity, clone_capacity);
+            }
+            for alpha in [0.25, 0.75, 0.125, 1.0, 0.0, 0.5] {
+                assert_sample_matches_fresh_scratch(&mut animation, &mut stage, alpha, |anim| {
+                    anim.interpolation_scratch = Default::default();
+                });
+                assert_eq!(allocations(&animation.interpolation_scratch), prepared);
+                for (root, opacity) in [(source, 0.75 * (1.0 - alpha)), (target_copy, 0.5 * alpha)]
+                {
+                    assert_eq!(
+                        f64::from(
+                            stage
+                                .get(root)
+                                .unwrap()
+                                .buffer
+                                .default_record_slice("fill_rgba")
+                                .unwrap()[3]
+                        ),
+                        opacity
+                    );
+                }
+            }
+
+            animation.finish(&mut stage);
+            let large = styled_path(&mut stage, 129, 0.75);
+            stage.attach(source, large).unwrap();
+            animation.begin(&mut stage).unwrap();
+            let grown = allocations(&animation.interpolation_scratch);
+            assert!(grown.iter().all(|(_, capacity)| *capacity >= 129 * 4));
+            assert_sample_matches_fresh_scratch(&mut animation, &mut stage, 0.75, |anim| {
+                anim.interpolation_scratch = Default::default();
+            });
+            assert_eq!(allocations(&animation.interpolation_scratch), grown);
+            animation.finish(&mut stage);
+            // Shrink both aligned halves so Pieces cannot recreate a removed
+            // child from the opposite half on the next begin.
+            for root in [source, target_copy] {
+                let children = stage.get(root).unwrap().submobjects().to_vec();
+                for child in children.into_iter().skip(1) {
+                    stage.detach(root, child);
+                }
+            }
+            animation.begin(&mut stage).unwrap();
+            for alpha in [0.75, 0.125, 1.0] {
+                assert_sample_matches_fresh_scratch(&mut animation, &mut stage, alpha, |anim| {
+                    anim.interpolation_scratch = Default::default();
+                });
+                assert_eq!(allocations(&animation.interpolation_scratch), grown);
+            }
+        }
+    }
 }

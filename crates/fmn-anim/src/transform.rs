@@ -64,7 +64,7 @@ fn same_pointlike_geometry(stage: &Stage, from: Mob, to: Mob) -> bool {
 /// The records remain authoritative: endpoints are reread for each sample,
 /// including live-view writes and changes to a custom schema during playback.
 #[derive(Debug, Default)]
-struct FieldInterpolationScratch {
+pub(crate) struct FieldInterpolationScratch {
     from: Vec<f32>,
     to: Vec<f32>,
     out: Vec<f32>,
@@ -107,7 +107,7 @@ pub fn interpolate_fields(
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn interpolate_fields_with_scratch(
+pub(crate) fn interpolate_fields_with_scratch(
     stage: &mut Stage,
     submob: Mob,
     from: Mob,
@@ -996,17 +996,84 @@ pub fn swap(stage: &mut Stage, a: Mob, b: Mob) -> Result<Vec<Transform>, AnimErr
 }
 
 #[cfg(test)]
-mod scratch_tests {
+pub(crate) mod scratch_tests {
     use super::{FieldInterpolationScratch, Transform};
     use crate::{AnimConfig, Animation, RateFunc};
-    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
+    use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
 
-    fn allocations(scratch: &FieldInterpolationScratch) -> [(*const f32, usize); 3] {
+    pub(crate) fn allocations(scratch: &FieldInterpolationScratch) -> [(*const f32, usize); 3] {
         [
             (scratch.from.as_ptr(), scratch.from.capacity()),
             (scratch.to.as_ptr(), scratch.to.capacity()),
             (scratch.out.as_ptr(), scratch.out.capacity()),
         ]
+    }
+
+
+    pub(crate) fn styled_path(stage: &mut Stage, len: u32, opacity: f64) -> Mob {
+        let points: Vec<_> = (0..len)
+            .map(|x| [f64::from(x), f64::from(x % 3), 0.0])
+            .collect();
+        let mob = stage.add(Mobject::vector_from_points(&points));
+        let entry = stage.get_mut(mob).unwrap();
+        entry.uniforms_mut().shading = [0.13, 0.27, 0.41];
+        entry
+            .buffer
+            .write_color_lanes("fill_rgba", Some([0.25, 0.5, 0.75]), Some(opacity));
+        entry
+            .buffer
+            .write_color_lanes("stroke_rgba", Some([0.75, 0.25, 0.5]), Some(0.5));
+        entry.buffer.write_scalar_lanes("stroke_width", 5.0);
+        mob
+    }
+
+    /// With linear rate and zero lag, compare a retained workspace sample
+    /// against the previous behavior: a fresh workspace for every family row.
+    /// Compare record bits, including point-less style, as well as placement
+    /// and uniforms so capacity reuse cannot conceal stale lanes or state.
+    pub(crate) fn assert_sample_matches_fresh_scratch<A: Animation + Clone>(
+        animation: &mut A,
+        stage: &mut Stage,
+        alpha: f64,
+        reset_scratch: impl Fn(&mut A),
+    ) {
+        let mut expected = animation.clone();
+        let mut reference = stage.snapshot().materialize();
+        for row in expected.state().families().to_vec() {
+            reset_scratch(&mut expected);
+            expected.interpolate_submobject(&mut reference, &row, alpha);
+        }
+        animation.interpolate(stage, alpha);
+        for member in stage.family(animation.state().mobject()) {
+            let actual = stage.get(member).unwrap();
+            let expected = reference.get(member).unwrap();
+            assert_eq!(
+                actual.placement().coefficients().map(f64::to_bits),
+                expected.placement().coefficients().map(f64::to_bits)
+            );
+            assert_eq!(actual.uniforms(), expected.uniforms());
+            assert_eq!(
+                actual
+                    .buffer
+                    .defaults_row()
+                    .map(|row| row.iter().map(|v| v.to_bits()).collect::<Vec<_>>()),
+                expected
+                    .buffer
+                    .defaults_row()
+                    .map(|row| row.iter().map(|v| v.to_bits()).collect::<Vec<_>>())
+            );
+            for field in actual.buffer.schema().fields() {
+                let bits = |buffer: &RecordBuffer| {
+                    buffer
+                        .read_column(&field.name)
+                        .unwrap()
+                        .into_iter()
+                        .map(f32::to_bits)
+                        .collect::<Vec<_>>()
+                };
+                assert_eq!(bits(&actual.buffer), bits(&expected.buffer), "{}", field.name);
+            }
+        }
     }
 
     #[test]
