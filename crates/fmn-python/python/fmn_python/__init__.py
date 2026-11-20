@@ -89,6 +89,11 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name == "SoundData":
+        _ensure_exclusive_manimlib_namespace()
+        import manimlib
+
+        return manimlib._SoundData
     if name == "PureRateFunction":
         _ensure_exclusive_manimlib_namespace()
         import manimlib

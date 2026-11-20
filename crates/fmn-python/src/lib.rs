@@ -9557,7 +9557,7 @@ impl PyScene {
     #[pyo3(signature = (sound_file, time_offset=0.0, gain=None, gain_to_background=None))]
     fn _add_sound(
         slf: &Bound<'_, Self>,
-        sound_file: String,
+        sound_file: &Bound<'_, PyAny>,
         time_offset: f64,
         gain: Option<f64>,
         gain_to_background: Option<f64>,
@@ -9566,32 +9566,7 @@ impl PyScene {
         if portal_playback::requested_skip(slf)? {
             return Ok(());
         }
-        // Reference scene_file_writer.py:171 finds the file as
-        // get_full_sound_file_path does: the name itself, else the configured
-        // sounds directory with .wav, .mp3 or no extension; a URL refuses
-        // toward the AssetFetcher. A name it cannot find is recorded as
-        // authored, and reading it fails by name when the cues are mixed (BN-14).
-        let py = slf.py();
-        let found = py
-            .import("manimlib.utils.sounds")?
-            .getattr("get_full_sound_file_path")?
-            .call1((sound_file.as_str(),));
-        let mut sound_file = match found {
-            Ok(path) => path.extract::<PathBuf>()?,
-            Err(error) if error.is_instance_of::<PyOSError>(py) => PathBuf::from(sound_file),
-            Err(error) => return Err(error),
-        };
-        let active = slf
-            .borrow()
-            .render
-            .lock()
-            .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
-            .is_some();
-        if active && sound_file.is_relative() {
-            sound_file = std::env::current_dir()
-                .map_err(|error| PyOSError::new_err(error.to_string()))?
-                .join(sound_file);
-        }
+        let source = portal_audio::source_from_python(slf, sound_file)?;
         let engine = Rc::clone(&slf.borrow().engine);
         let mut scene = engine.borrow_mut();
         // A cue may follow stop_skipping before the next play/wait. Record it
@@ -9600,11 +9575,71 @@ impl PyScene {
         let skipping = scene.is_skipping();
         scene.set_skipping(false);
         let result = scene
-            .add_sound(sound_file, time_offset, gain, gain_to_background)
+            .add_sound_source(source, time_offset, gain, gain_to_background)
             .map(|_| ())
             .map_err(native_error);
         scene.set_skipping(skipping);
         result
+    }
+
+    #[pyo3(signature = (sound_file, time, gain=None, gain_to_background=None))]
+    fn _add_sound_at(
+        slf: &Bound<'_, Self>,
+        sound_file: &Bound<'_, PyAny>,
+        time: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::Other);
+        if portal_playback::requested_skip(slf)? {
+            return Ok(());
+        }
+        let source = portal_audio::source_from_python(slf, sound_file)?;
+        let engine = Rc::clone(&slf.borrow().engine);
+        let mut scene = engine.borrow_mut();
+        let skipping = scene.is_skipping();
+        scene.set_skipping(false);
+        let result = scene
+            .add_sound_source_at(source, time, gain, gain_to_background)
+            .map(|_| ())
+            .map_err(native_error);
+        scene.set_skipping(skipping);
+        result
+    }
+
+    fn _has_sound_requests(&self) -> bool {
+        !self.engine.borrow().sound_requests().is_empty()
+    }
+
+    fn _soundtrack_snapshot(
+        slf: &Bound<'_, Self>,
+        writer: &Bound<'_, PyAny>,
+    ) -> PyResult<portal_audio::PySoundData> {
+        portal_audio::writer_snapshot(slf, writer)
+    }
+
+    fn _soundtrack_duration(slf: &Bound<'_, Self>, writer: &Bound<'_, PyAny>) -> PyResult<f64> {
+        portal_audio::writer_duration(slf, writer)
+    }
+
+    fn _skip_sound_requests(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        portal_playback::requested_skip(slf)
+    }
+
+    fn _clear_sound_requests(&self) -> PyResult<()> {
+        if !self.engine.borrow().sound_requests().is_empty()
+            && self
+                .render
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+                .is_some()
+        {
+            return Err(PyRuntimeError::new_err(
+                "cannot reset sound cues during an active output generation",
+            ));
+        }
+        self.engine.borrow_mut().clear_sound_requests();
+        Ok(())
     }
 
     /// Engine-truth diagnostics for the permanent bridge acceptance suite.
@@ -13860,6 +13895,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add_class::<PyCameraFrameCore>()?;
     module.add_class::<PyCameraCore>()?;
     module.add_class::<portal_readback::CameraCapture>()?;
+    module.add("_SoundData", py.get_type::<portal_audio::PySoundData>())?;
     module.add_class::<PyFieldProbe>()?;
     module.add_class::<ladder::PyBatchedUpdater>()?;
     module.add_class::<ladder::PyArrayUpdater>()?;
@@ -14275,6 +14311,10 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
         }
     })
 }
+
+/// Native Python soundtrack acceptance, available only to the Gauntlet.
+#[cfg(any(test, feature = "gauntlet"))]
+pub use portal_audio::run_portal_gauntlet_sound_data;
 
 /// Native Python soundtrack acceptance, available only to the Gauntlet.
 #[cfg(feature = "gauntlet")]

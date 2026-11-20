@@ -228,6 +228,23 @@ impl OutputTimeline {
             .sum();
         Ok(frame - self.origin_frame - removed)
     }
+
+    /// Absolute writer timestamps are sample-grid positions, independent of
+    /// the call-site clock. Preserve pre-origin overlap as a negative prefix
+    /// for Reel to clip, and remove exactly the omitted sample intervals.
+    pub(super) fn output_sample(&self, sample: i64, fps: u32, sample_rate: u32) -> PyResult<i64> {
+        let origin = fmn_output::frames_to_samples(self.origin_frame, fps, sample_rate)
+            .map_err(native_error)?;
+        let mut removed = 0_i128;
+        for &(start, end) in &self.omitted {
+            let start =
+                fmn_output::frames_to_samples(start, fps, sample_rate).map_err(native_error)?;
+            let end = fmn_output::frames_to_samples(end, fps, sample_rate).map_err(native_error)?;
+            removed += (i128::from(sample.min(end)) - i128::from(start)).max(0);
+        }
+        i64::try_from(i128::from(sample) - i128::from(origin) - removed)
+            .map_err(|_| PyValueError::new_err("absolute audio timestamp exceeds the sample grid"))
+    }
 }
 
 impl PortalRenderSession {
@@ -299,6 +316,27 @@ pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn absolute_audio_positions_keep_pre_origin_overlap_and_exact_skipped_endpoints() {
+        let mut timeline = OutputTimeline::default();
+        timeline.start_at(3).unwrap();
+        timeline.observe(4, true).unwrap();
+        timeline.observe(6, false).unwrap();
+        let origin = fmn_output::frames_to_samples(3, 29, 48_000).unwrap();
+        let cut_start = fmn_output::frames_to_samples(4, 29, 48_000).unwrap();
+        let cut_end = fmn_output::frames_to_samples(6, 29, 48_000).unwrap();
+        assert_eq!(timeline.output_sample(origin - 3, 29, 48_000).unwrap(), -3);
+        assert_eq!(
+            timeline.output_sample(cut_start + 7, 29, 48_000).unwrap(),
+            cut_start - origin
+        );
+        assert_eq!(
+            timeline.output_sample(cut_end + 11, 29, 48_000).unwrap(),
+            cut_start - origin + 11
+        );
+        assert!(timeline.output_sample(i64::MIN, 29, 48_000).is_err());
+    }
 
     #[test]
     fn frame_authored_camera_progress_uses_local_integer_time() {

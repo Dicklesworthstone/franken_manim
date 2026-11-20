@@ -1,5 +1,6 @@
 """Real Scene.add_sound decoding, native mix, atomic publication and receipts."""
 import contextlib
+import copy
 import hashlib
 import io
 import json
@@ -14,7 +15,7 @@ import wave
 
 import numpy as np
 import manimlib as m
-from fmn_python import render_scene
+from fmn_python import SoundData, export_bundle, record_scene, render_scene, render_session
 from fmn_python.console_rendering import try_render_cli
 
 
@@ -47,8 +48,223 @@ def pcm(path):
         return np.frombuffer(audio.readframes(audio.getnframes()), dtype="<i2").reshape(-1, 2)
 
 
+def memory_sound_inputs(root):
+    """Caller mutations, paths and worker counts cannot change frozen PCM."""
+    samples = np.array([0.125, -0.25, 0.0, -0.0] * 64, dtype=np.float32)
+    source = SoundData(samples, sample_rate=48000, channels=2)
+    expected = samples.copy()
+    samples[:] = 0.75
+    assert (source.channels, source.sample_rate, source.sample_frames) == (2, 48000, 128)
+    assert source.duration_seconds == 128 / 48000
+    assert source.sha256 == hashlib.sha256(source.wav_bytes()).hexdigest()
+    assert SoundData.from_wav_bytes(source.wav_bytes()).sha256 == source.sha256
+    assert copy.copy(source).sha256 == copy.deepcopy(source).sha256 == source.sha256
+    assert SoundData([0.0]).sha256 == SoundData([-0.0]).sha256
+    try:
+        source.sample_rate = 1
+    except AttributeError:
+        pass
+    else:
+        raise AssertionError("frozen sound metadata was writable")
+    for samples, options in (([float('nan')], {}), ([float('inf')], {}),
+                             ([1e300], {}), ([True], {}), ([1], {'channels': 2}),
+                             ([1], {'sample_rate': 0}), ([1], {'channels': 3}),
+                             ([1], {'max_samples': 0}), ([1], {'max_bytes': 44}),
+                             ([1], {'max_bytes': 67_108_865})):
+        try:
+            SoundData(samples, **options)
+        except (ValueError, TypeError):
+            pass
+        else:
+            raise AssertionError(f"invalid sound admitted: {samples!r}, {options!r}")
+
+    class OverBudget:
+        def __len__(self):
+            return 16_777_217
+        def __getitem__(self, index):
+            raise AssertionError("sample read before size admission")
+    try:
+        SoundData(OverBudget())
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("oversized PCM source was admitted")
+
+    # Use independent file-backed PCM as the oracle for timing, gains, ducking
+    # and resampling. Neither memory output may touch any path resolver.
+    file_source = root / 'memory-equivalent.wav'
+    float_wav(file_source, expected, 2, 48000)
+    def cues(scene, asset):
+        scene.wait_frames(1)
+        scene.add_sound(asset, time_offset=-4 / 48000, gain=-3)
+        scene.add_sound(asset, time_offset=60 / 48000, gain=-12, gain_to_background=-6)
+        with scene.temp_skip():
+            scene.add_sound(object(), time_offset=float('nan'))
+        scene.wait_frames(1)
+    class FileSound(m.Scene):
+        def construct(self):
+            cues(self, file_source)
+    reference = root / 'memory-reference.wav'
+    render_scene(FileSound, reference, fps=29, threads=1)
+    sounds = __import__('manimlib.utils.sounds', fromlist=['get_full_sound_file_path'])
+    resolver = sounds.get_full_sound_file_path
+    def no_path(_):
+        raise AssertionError("an in-memory cue called the path resolver")
+    class MemorySound(m.Scene):
+        def construct(self):
+            cues(self, source)
+    sounds.get_full_sound_file_path = no_path
+    try:
+        for threads in (1, 4, 16):
+            destination = root / f'memory-{threads}.wav'
+            scene = MemorySound(file_writer_config={'ffmpeg_bin': str(root / 'missing-memory-decoder')})
+            result = render_scene(scene, destination, fps=29, threads=threads)
+            assert destination.read_bytes() == reference.read_bytes()
+            assert result.ffmpeg_invocations == ()
+            assert len(result.audio_inputs) == 2
+            for receipt in result.audio_inputs:
+                assert receipt['path'] is None and receipt['source_kind'] == 'memory-wav'
+                assert receipt['source'] == 'memory:sha256:' + source.sha256
+                assert receipt['source_sha256'] == source.sha256
+                assert receipt['decoder'] == 'native-wav'
+            assert all(fact[1:3] == (1, 29) for fact in scene._sound_request_facts())
+    finally:
+        sounds.get_full_sound_file_path = resolver
+
+
+def writer_sound_inputs(root):
+    values = np.arange(512, dtype=np.float32) / 4096
+    source = SoundData(values, sample_rate=48000)
+    expected_pcm = np.repeat((np.arange(512, dtype=np.int16) * 8)[:, None], 2, axis=1)
+    scene = m.Scene(file_writer_config={'ffmpeg_bin': str(root / 'missing-writer-decoder')})
+    writer = scene.file_writer
+    assert writer.includes_sound is False and writer.audio_segment is None
+    writer.create_audio_segment()
+    assert writer.audio_segment.sample_frames == 0 and writer.includes_sound is False
+    scene.wait_frames(7)
+    writer.add_audio_segment(source)
+    frozen = writer.audio_segment
+    assert writer.includes_sound and frozen.sample_frames == 512
+    assert frozen.sample_rate == 48000 and frozen.channels == 2
+    writer.add_audio_segment(source)
+    assert writer.audio_segment.sample_frames == 1024 and frozen.sample_frames == 512
+    mixed = np.frombuffer(writer.audio_segment.wav_bytes(), dtype='<f4', offset=44).reshape(-1, 2)
+    np.testing.assert_array_equal(mixed, np.repeat(np.tile(values, 2)[:, None], 2, axis=1))
+    assert scene.get_frame_count() == 7, 'writer audio moved the scene clock'
+    with scene.temp_skip():
+        writer.add_audio_segment(object(), time=float('nan'))
+        writer.add_sound(object(), time=float('nan'), gain=float('inf'))
+    assert len(scene._sound_request_facts()) == 2
+    for operation in (lambda: writer.add_audio_segment(object()),
+                      lambda: writer.add_sound(source, time=float('nan')),
+                      lambda: writer.add_sound(source, time=0, gain=float('inf'))):
+        try:
+            operation()
+        except (TypeError, ValueError):
+            pass
+        else:
+            raise AssertionError('invalid writer cue was admitted')
+    assert len(scene._sound_request_facts()) == 2
+    writer.init_audio()
+    assert writer.audio_segment is None and not writer.includes_sound
+    assert frozen.sample_frames == 512 and scene.get_frame_count() == 7
+
+    # Appending uses native duration metadata, never a full stereo snapshot.
+    # A 180-second 1 Hz source is tiny, but its 48 kHz stereo rendering exceeds
+    # the explicit SoundData snapshot cap. Empty cues cannot extend its end.
+    long_scene = m.Scene(file_writer_config={'ffmpeg_bin': str(root / 'missing-writer-decoder')})
+    long_writer = long_scene.file_writer
+    long_writer.add_audio_segment(SoundData([0.125] * 180, sample_rate=1))
+    long_writer.add_audio_segment(SoundData([]), time=999999)
+    assert long_scene._soundtrack_duration(long_writer) == 180.0
+    long_writer.add_audio_segment(source)
+    assert len(long_scene._sound_request_facts()) == 3
+    assert long_scene._soundtrack_duration(long_writer) == (180 * 48000 + 512) / 48000
+
+    # Absolute timestamps are independent of the nonzero authoring call site.
+    # Inspect real published S16 PCM using source values with exact quantization.
+    for threads in (1, 4):
+        scene = m.Scene(file_writer_config={'ffmpeg_bin': str(root / 'missing-writer-decoder')})
+        target = root / f'writer-absolute-{threads}.wav'
+        with render_session(scene, target, fps=29, threads=threads):
+            scene.wait_frames(3)
+            scene.file_writer.add_audio_segment(source, time=5 / 48000)
+            try:
+                scene.file_writer.init_audio()
+            except RuntimeError as error:
+                assert 'active output' in str(error)
+            else:
+                raise AssertionError('active recording lost its queued audio')
+            scene.wait_frames(1)
+        samples = pcm(target)
+        assert len(samples) == sample_boundary(4, 29)
+        np.testing.assert_array_equal(samples[5:517], expected_pcm)
+        assert not samples[:5].any() and not samples[517:].any()
+
+    # Live insertion keeps a source which starts before the nonzero origin:
+    # three samples are clipped, not the entire overlapping cue.
+    scene = m.Scene()
+    with render_session(scene, root / 'writer-lead-in.y4m', fps=29, resolution=(48, 32)):
+        scene.wait_frames(3)
+    with record_scene(scene, root / 'writer-insert.wav', threads=1) as recorded:
+        scene.file_writer.add_sound(source, time=3 / 29 - 3 / 48000)
+        scene.wait_frames(1)
+    samples = pcm(recorded.result.destination)
+    np.testing.assert_array_equal(samples[:509], expected_pcm[3:])
+    assert not samples[509:].any()
+    assert len(recorded.result.audio_inputs) == 1
+
+    # Explicit writer onsets remove observed skipped sample windows. The
+    # independent expectation uses integer endpoints on the 29-fps grid.
+    scene = m.Scene()
+    target = root / 'writer-skipped.wav'
+    with render_session(scene, target, fps=29):
+        scene.wait_frames(1)
+        with scene.temp_skip():
+            scene.wait_frames(2)
+        scene.file_writer.add_sound(source, time=3 / 29 + 2 / 48000)
+        scene.wait_frames(1)
+    onset = sample_boundary(1, 29) + 2
+    samples = pcm(target)
+    np.testing.assert_array_equal(samples[onset:onset + 512], expected_pcm)
+    assert not samples[:onset].any() and not samples[onset + 512:].any()
+
+    # Native bundle soundtracks consume both timing classes and preserve the
+    # same PCM regardless of whether the asset originated in a file or memory.
+    asset = root / 'writer-file.wav'
+    float_wav(asset, values, 1, 48000)
+    file_scene = m.Scene(file_writer_config={'ffmpeg_bin': str(root / 'missing-writer-decoder')})
+    file_scene.file_writer.add_sound(asset)
+    file_scene.file_writer.add_sound(asset)
+    assert file_scene._soundtrack_duration(file_scene.file_writer) == 1024 / 48000
+    file_mix = np.frombuffer(file_scene.file_writer.audio_segment.wav_bytes(), dtype='<f4', offset=44)
+    np.testing.assert_array_equal(file_mix.reshape(-1, 2), np.repeat(np.tile(values, 2)[:, None], 2, axis=1))
+    def bundled(sound):
+        class Audible(m.Scene):
+            def construct(self):
+                self.wait_frames(1)
+                self.file_writer.add_sound(sound, time=7 / 48000, gain=-3)
+                self.add_sound(sound, time_offset=-2 / 48000, gain=-6)
+                self.wait_frames(1)
+        return Audible
+    memory = root / 'writer-memory.fmtl'
+    file = root / 'writer-file.fmtl'
+    options = dict(audio=True, fps=29, resolution=(48, 32))
+    memory_result = export_bundle(bundled(source), memory, **options)
+    file_result = export_bundle(bundled(asset), file, **options)
+    assert memory.read_bytes() == file.read_bytes()
+    assert all(row['path'] is None for row in memory_result.audio_inputs)
+    assert all(row['path'] is not None for row in file_result.audio_inputs)
+
+
+def sample_boundary(frame, fps):
+    return (2 * frame * 48000 + fps) // (2 * fps)
+
+
 with tempfile.TemporaryDirectory(prefix="fmn sound inputs ") as directory:
     root = Path(directory)
+    memory_sound_inputs(root)
+    writer_sound_inputs(root)
     native_asset = root / "native.wav"
     float_wav(native_asset, [0.125, -0.25] * 128, 2, 48000)
     # A missing optional tool cannot turn PCM-only WAV export into a capability

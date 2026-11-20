@@ -23614,12 +23614,10 @@ _audio = manimlib.SceneFileWriter(_writer_scene)
 _audio.init_audio()
 _check("init audio tracks intent without refused deps",
        _audio.includes_sound is False and _audio.audio_segment is None)
-_audio_refused = False
-try:
-    _audio.add_sound("boom.ogg", 1.0)
-except Exception as error:
-    _audio_refused = "Reel" in str(error)
-_check("add sound refuses toward reel boundary", _audio_refused)
+_audio.add_sound("boom.ogg", 1.0)
+_check("writer sound records a native cue without eagerly reading a file",
+       _audio.includes_sound and len(_writer_scene._sound_request_facts()) == 1)
+_audio.init_audio()
 _mux_refused = False
 try:
     _audio.add_sound_to_video()

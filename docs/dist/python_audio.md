@@ -27,6 +27,48 @@ fmn-python lesson.py NarratedScene --format wav --output narration.wav
 fmn-python lesson.py First Second --format wav --ffmpeg_bin '/opt/media tools/ffmpeg' --video_dir soundtracks
 ```
 
+## Generated and in-memory sound
+
+`fmn_python.SoundData` freezes flat interleaved PCM samples into an immutable
+native asset. It accepts mono or stereo audio, preserves the source sample rate,
+and copies the samples so later NumPy mutations cannot change a queued sound.
+
+```python
+import numpy as np
+from manimlib import Scene
+from fmn_python import SoundData, render_scene
+
+t = np.arange(4800) / 48000
+beep = SoundData(0.2 * np.sin(2 * np.pi * 440 * t), sample_rate=48000)
+
+class GeneratedSound(Scene):
+    def construct(self):
+        self.add_sound(beep, gain=-3)  # Relative to the current scene frame.
+        self.file_writer.add_audio_segment(beep, time=1.0)  # Absolute seconds.
+        self.file_writer.add_audio_segment(beep)  # Append at the soundtrack end.
+        self.wait(2)
+
+render_scene(GeneratedSound, "generated.wav")
+```
+
+For stereo arrays shaped `(frames, 2)`, pass `samples.ravel()` and `channels=2`.
+`SoundData.from_wav_bytes(data)` accepts owned PCM WAV bytes. Neither path needs
+a temporary source file or ffmpeg. Constructors validate finite samples and
+admit at most 16,777,216 interleaved samples and 64 MiB before allocating native
+PCM; `max_samples` and `max_bytes` can set smaller limits.
+
+The writer's `add_sound` accepts file paths or `SoundData`; `add_audio_segment`
+accepts `SoundData`. Both use absolute timestamps, or append when `time` is
+omitted. Append queries native duration metadata without materializing a mixed
+waveform. `writer.audio_segment` explicitly requests an immutable mixed
+`SoundData` snapshot, subject to its 64 MiB and preparation limits. Read
+`sample_rate`, `channels`, `sample_frames`, `duration_seconds`, `sha256`, or
+`wav_bytes()` from a source or snapshot. `init_audio()` clears inactive cue state;
+`create_audio_segment()` clears it and exposes an empty snapshot. Accepted cues
+cannot be cleared during an active output generation.
+
+## File decoding and publication
+
 The decoder uses `SceneFileWriter.ffmpeg_bin`, including explicit paths with
 spaces. Its host search path and temporary-directory root are captured when
 the render generation opens, before authored lifecycle callbacks run. Relative
@@ -52,6 +94,9 @@ native WAV publisher retain ownership of final artifact publication.
 `RenderResult.audio_inputs` contains per-cue source path, source SHA-256,
 normalized PCM SHA-256, recognized container, source sample rate, channels,
 sample-frame count, decoder kind, and optional decoder binary SHA-256.
+Memory inputs use `source_kind="memory-wav"`, `path=None`, and a
+`memory:sha256:...` source identity; their source digest hashes the immutable
+canonical WAV bytes.
 `ffmpeg_invocations` includes compressed audio decoding even for WAV-only
 exports. Movie receipts retain video encoding, audio decoding, and final mux
 facts. `as_dict()` returns independent copies suitable for JSON consumers.

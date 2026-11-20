@@ -6096,6 +6096,15 @@ fn python_bundle_audio_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
         .with_counter("python_bundle_artifact_comparisons", comparisons))
 }
 
+/// Immutable Python PCM preserves exact writer placement and live-insert
+/// clipping through real native WAV output at 1, 4 and 16 workers.
+fn python_sound_data_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let files = manimlib::run_portal_gauntlet_sound_data()
+        .map_err(|error| fail(format!("Python immutable sound data: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.sound_data").field("verified_files", files));
+    Ok(RunOutcome::ok().with_counter("sound_data_verified_files", files))
+}
+
 /// Authored text configurations cross native layout, regeneration and rendering.
 fn python_text_configuration_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let cases = manimlib::run_portal_gauntlet_text_configuration()
@@ -19980,6 +19989,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_sound_data.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_sound_data_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("sound_data_verified_files", 6),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.sound_data",
+            vec![FieldPred::u64_eq("verified_files", 6)],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_text_configuration.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -22661,6 +22684,16 @@ fn python_bundle_audio_capabilities_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_bundle_audio_capabilities.v1")
         .expect("Python bundle audio capabilities are registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_sound_data_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_sound_data.v1")
+        .expect("Python immutable sound data is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

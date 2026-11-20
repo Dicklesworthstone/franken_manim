@@ -18689,32 +18689,52 @@ class SceneFileWriter:
 
     def init_movie_file_path(self):
         return self.get_movie_file_path()
+
     def init_audio(self):
-        # Reference initializes a pyglet-backed silent segment here. Audio
-        # assembly is the Reel boundary (BN-14); the portal tracks intent
-        # without importing a refused dependency.
-        self.includes_sound = False
-        self.audio_segment = None
+        self.scene._clear_sound_requests()
+        self._audio_created = False
+
+    @property
+    def includes_sound(self):
+        return self.scene._has_sound_requests()
+
+    @property
+    def audio_segment(self):
+        # Observe the same queue as native WAV/movie/bundle publication. The
+        # immutable snapshot is materialized only when authored code needs it;
+        # ordinary add_sound calls retain the existing deferred-decode path.
+        if not self.includes_sound and not getattr(self, "_audio_created", False):
+            return None
+        return self.scene._soundtrack_snapshot(self)
 
     def create_audio_segment(self):
-        self.audio_segment = None
+        self.scene._clear_sound_requests()
+        self._audio_created = True
 
     def add_audio_segment(
         self, new_segment, time=None, gain_to_background=None
     ):
-        del new_segment, time, gain_to_background
-        raise _CapabilityError(
-            "SceneFileWriter audio assembly is the Reel boundary; "
-            "Scene.add_sound records through the native scene"
-        )
+        if self.scene._skip_sound_requests():
+            return
+        if not isinstance(new_segment, _SoundData):
+            raise TypeError("add_audio_segment requires fmn_python.SoundData")
+        self.add_sound(new_segment, time=time, gain_to_background=gain_to_background)
 
     def add_sound(
         self, sound_file, time=None, gain=None, gain_to_background=None
     ):
-        del sound_file, time, gain, gain_to_background
-        raise _CapabilityError(
-            "SceneFileWriter audio assembly is the Reel boundary; "
-            "Scene.add_sound records through the native scene"
+        # Explicit writer timestamps are absolute, independent of Scene.time.
+        # Omitted time appends at the real native mixed-soundtrack end. Unlike
+        # pydub's silent placeholder, a new native soundtrack starts at zero.
+        if self.scene._skip_sound_requests():
+            return
+        if time is None:
+            time = self.scene._soundtrack_duration(self)
+        self.scene._add_sound_at(
+            sound_file,
+            float(time),
+            None if gain is None else float(gain),
+            None if gain_to_background is None else float(gain_to_background),
         )
 
     def add_sound_to_video(self):

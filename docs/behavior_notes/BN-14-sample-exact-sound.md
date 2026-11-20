@@ -73,8 +73,45 @@ Queue the result with `Scene::add_sound_data`, using the same offset, gain,
 and background-ducking arguments as `add_sound`. The typed
 `Scene::add_sound_source` entry point also accepts
 `SoundSource::File` or `SoundSource::Memory`. Native Studio builders accept
-both through `add_sound_source`. This is a Rust API extension; the Python
-writer's pydub-style assembly methods remain outside this change.
+both through `add_sound_source`.
+
+Python callers import `SoundData` from `fmn_python` and pass it directly to
+`Scene.add_sound`. `SoundData(samples, sample_rate=48000, channels=1)` freezes a
+finite, indexable sequence of interleaved floating-point PCM; flatten a stereo
+NumPy array before passing it. `SoundData.from_wav_bytes(data)` admits native
+PCM WAV bytes. Both accept smaller `max_samples` and `max_bytes` budgets, with
+hard ceilings of 16,777,216 interleaved samples and 64 MiB. Source data and
+metadata are immutable after construction. `wav_bytes()`, `sha256`, `channels`,
+`sample_rate`, `sample_frames`, and `duration_seconds` expose the frozen asset.
+This extension leaves the Reference's `manimlib` wildcard namespace unchanged.
+
+The Python writer also accepts native sound: `SceneFileWriter.add_sound` accepts
+a path or `SoundData`, and `add_audio_segment` accepts `SoundData`. An explicit
+`time` is an absolute scene timestamp; omitting it appends at the current native
+soundtrack's end. `audio_segment` lazily returns an immutable `SoundData` snapshot
+of the shared scene cue queue, and `includes_sound` observes that queue directly.
+Reading the snapshot can decode queued file assets, but never advances the scene
+clock or opens a render generation. Writer snapshots have the same 64 MiB ceiling,
+plus cumulative preparation limits and a 4096-cue limit.
+Appending queries native cue placement and duration metadata without allocating
+the mixed waveform, so a long soundtrack is not constrained by the snapshot's
+64 MiB ceiling. Memory assets require no decode for this query; distinct file
+assets are decoded once per query within the usual asset limits. Empty sources
+do not extend the soundtrack even when scheduled in the future.
+
+Absolute timestamps are retained separately from frame-relative offsets, then
+rounded once onto the receiving sample grid. A live insert subtracts its sample
+origin; observed skipped intervals remove their independently rounded sample
+windows. A cue overlapping the beginning of an insert retains its audible suffix.
+This does not change the existing two-rounding rule for `Scene.add_sound`.
+
+`init_audio` resets the queued cues; `create_audio_segment` resets them and makes
+an empty native PCM snapshot observable. A new native soundtrack starts at zero,
+without pydub's implicit one-second silent placeholder. Resetting a nonempty queue
+during an active output generation is refused so recording boundaries cannot lose
+accepted cues. Existing frozen snapshots remain valid after a reset. pydub objects
+and pydub-specific processing methods remain outside the portal; convert their
+PCM explicitly into `SoundData`. Video muxing remains owned by native publication.
 
 Memory cues go through the existing native decoder and mixer without reading
 a source file or invoking ffmpeg. They retain the rational call-site clock,
@@ -149,7 +186,11 @@ encode/mux `ffmpeg` list.
 - `crates/fmn-scene/src/sound.rs`: immutable PCM admission, canonical identity,
   and distinct file/memory cache keys.
 - `crates/fmn-scene/src/runtime.rs`: the four-argument request surface, exact
-  `RationalTime`, skip no-op, and insertion-ordered request queue.
+  `RationalTime`, separately retained absolute timestamps, skip no-op, and
+  insertion-ordered request queue.
+- `crates/fmn-python/src/portal_audio.rs`, `tests/audio_inputs.py`: immutable
+  Python PCM, bounded admission, native writer snapshots, absolute/append timing,
+  live overlapping inserts, skipped windows, and file/memory bundle parity.
 - `crates/fmn-output/src/sound.rs`: placement arithmetic, resampler, channel
   matrix, gain/duck order, clipping, dithering, WAV golden, quality bounds, and
   thread-count equivalence.

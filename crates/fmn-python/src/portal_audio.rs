@@ -8,10 +8,285 @@ use super::*;
 use fmn_output::{
     AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy,
 };
-use fmn_scene::SoundSource;
+use fmn_scene::{SoundData, SoundDataLimits, SoundSource};
 use pyo3::exceptions::PyAttributeError;
-use pyo3::types::PyBool;
+use pyo3::types::{PyBool, PyBytes};
 use std::borrow::Cow;
+
+/// Immutable, owned PCM. Construction admits the complete size before reading
+/// samples, and native SoundData owns canonicalization and content identity.
+#[pyclass(frozen, name = "SoundData", module = "fmn_python")]
+#[derive(Clone)]
+pub(crate) struct PySoundData {
+    data: SoundData,
+}
+
+#[pymethods]
+impl PySoundData {
+    /// Freeze a finite, indexable sequence of interleaved mono/stereo samples.
+    /// Samples are normalized floating point PCM; amplitudes outside [-1, 1]
+    /// remain available to the native mixer's gain and clipping policy.
+    #[new]
+    #[pyo3(signature = (samples, sample_rate=48000, channels=1, *, max_samples=16_777_216, max_bytes=67_108_864))]
+    fn new(
+        samples: &Bound<'_, PyAny>,
+        sample_rate: u32,
+        channels: u16,
+        max_samples: usize,
+        max_bytes: usize,
+    ) -> PyResult<Self> {
+        let limits = sound_data_limits(max_samples, max_bytes)?;
+        if !matches!(channels, 1 | 2)
+            || sample_rate == 0
+            || sample_rate.checked_mul(u32::from(channels) * 4).is_none()
+        {
+            return Err(PyValueError::new_err(
+                "SoundData requires mono/stereo channels and a valid nonzero sample rate",
+            ));
+        }
+        let count = samples.len().map_err(|_| {
+            PyTypeError::new_err(
+                "SoundData samples must be a finite, indexable sequence of interleaved numbers",
+            )
+        })?;
+        if count > limits.max_samples
+            || count
+                .checked_mul(4)
+                .and_then(|n| n.checked_add(44))
+                .is_none_or(|bytes| bytes > limits.max_bytes)
+        {
+            return Err(PyValueError::new_err(
+                "SoundData samples exceed the admitted PCM budget",
+            ));
+        }
+        if !count.is_multiple_of(usize::from(channels)) {
+            return Err(PyValueError::new_err(
+                "SoundData has an incomplete interleaved sample frame",
+            ));
+        }
+        let mut values = Vec::new();
+        values.try_reserve_exact(count).map_err(|_| {
+            pyo3::exceptions::PyMemoryError::new_err("SoundData sample allocation failed")
+        })?;
+        for index in 0..count {
+            let sample = samples.get_item(index)?;
+            if sample.is_instance_of::<PyBool>() {
+                return Err(PyTypeError::new_err(
+                    "SoundData samples must be numbers, not bool",
+                ));
+            }
+            let value = sample.extract::<f64>()? as f32;
+            if !value.is_finite() {
+                return Err(PyValueError::new_err(
+                    "SoundData samples must be finite f32 values",
+                ));
+            }
+            values.push(value);
+        }
+        let data = SoundData::from_audio(
+            &fmn_codec::WavAudio {
+                channels,
+                sample_rate,
+                format: fmn_codec::SampleFormat::F32,
+                samples: values,
+            },
+            limits,
+        )
+        .map_err(native_error)?;
+        Ok(Self { data })
+    }
+
+    /// Decode owned PCM WAV bytes without a file, decoder process or tool lookup.
+    #[staticmethod]
+    #[pyo3(signature = (data, *, max_samples=16_777_216, max_bytes=67_108_864))]
+    fn from_wav_bytes(data: &[u8], max_samples: usize, max_bytes: usize) -> PyResult<Self> {
+        let limits = sound_data_limits(max_samples, max_bytes)?;
+        Ok(Self {
+            data: SoundData::from_wav_bytes(data, limits).map_err(native_error)?,
+        })
+    }
+
+    #[getter]
+    fn channels(&self) -> u16 {
+        self.data.channels()
+    }
+
+    #[getter]
+    fn sample_rate(&self) -> u32 {
+        self.data.sample_rate()
+    }
+
+    #[getter]
+    fn sample_frames(&self) -> usize {
+        self.data.sample_frames()
+    }
+
+    #[getter]
+    fn duration_seconds(&self) -> f64 {
+        self.data.sample_frames() as f64 / f64::from(self.data.sample_rate())
+    }
+
+    #[getter]
+    fn sha256(&self) -> String {
+        self.data.digest().to_hex()
+    }
+
+    /// Return independent immutable canonical F32 WAV bytes.
+    fn wav_bytes<'py>(&self, py: Python<'py>) -> Bound<'py, PyBytes> {
+        PyBytes::new(py, self.data.bytes())
+    }
+
+    fn __copy__(&self) -> Self {
+        self.clone()
+    }
+
+    fn __deepcopy__(&self, _memo: &Bound<'_, PyAny>) -> Self {
+        self.clone()
+    }
+
+    fn __repr__(&self) -> String {
+        format!(
+            "SoundData(sample_rate={}, channels={}, sample_frames={}, sha256='{}')",
+            self.data.sample_rate(),
+            self.data.channels(),
+            self.data.sample_frames(),
+            self.data.digest()
+        )
+    }
+}
+
+fn sound_data_limits(max_samples: usize, max_bytes: usize) -> PyResult<SoundDataLimits> {
+    let maximum = SoundDataLimits::default();
+    if max_samples > maximum.max_samples || !(44..=maximum.max_bytes).contains(&max_bytes) {
+        return Err(PyValueError::new_err(
+            "SoundData limits require at most 16777216 samples and 44..67108864 bytes",
+        ));
+    }
+    Ok(SoundDataLimits {
+        max_samples,
+        max_bytes,
+    })
+}
+
+/// Resolve authored paths at the same boundary as file-only Scene.add_sound.
+/// An immutable memory source never invokes a Python path hook or filesystem.
+pub(crate) fn source_from_python(
+    scene: &Bound<'_, PyScene>,
+    value: &Bound<'_, PyAny>,
+) -> PyResult<SoundSource> {
+    if let Ok(data) = value.extract::<PyRef<'_, PySoundData>>() {
+        return Ok(SoundSource::Memory(data.data.clone()));
+    }
+    let py = scene.py();
+    let path = py
+        .import("os")?
+        .getattr("fspath")?
+        .call1((value,))?
+        .extract::<String>()?;
+    let found = py
+        .import("manimlib.utils.sounds")?
+        .getattr("get_full_sound_file_path")?
+        .call1((path.as_str(),));
+    let mut path = match found {
+        Ok(path) => path.extract::<PathBuf>()?,
+        Err(error) if error.is_instance_of::<PyOSError>(py) => PathBuf::from(path),
+        Err(error) => return Err(error),
+    };
+    let active = scene
+        .borrow()
+        .render
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("portal render session lock was poisoned"))?
+        .is_some();
+    if active && path.is_relative() {
+        path = std::env::current_dir()
+            .map_err(|error| PyOSError::new_err(error.to_string()))?
+            .join(path);
+    }
+    Ok(SoundSource::File(path))
+}
+
+/// Observe authored cues through the production composer. No output generation
+/// is acquired and no scene callback or clock step is run. The returned PCM
+/// snapshot cannot alias either the scene queue or caller-owned sample arrays.
+pub(crate) fn writer_snapshot(
+    scene: &Bound<'_, PyScene>,
+    writer: &Bound<'_, PyAny>,
+) -> PyResult<PySoundData> {
+    let mut audio = PortalAudio::from_writer(Some(writer), &PortalOutputFormat::Wav, None)?;
+    let engine = Rc::clone(&scene.borrow().engine);
+    let requests = {
+        let scene = engine.try_borrow().map_err(|_| {
+            PyRuntimeError::new_err("audio snapshot cannot read a mutably borrowed Scene")
+        })?;
+        if scene.sound_requests().len() > 4096 {
+            return Err(PyValueError::new_err("audio snapshot exceeds 4096 cues"));
+        }
+        scene.sound_requests().to_vec()
+    };
+    let limits = SoundDataLimits::default();
+    let config = fmn_output::MixerConfig {
+        max_output_frames: (limits.max_bytes.saturating_sub(44) / 8) as u64,
+        ..fmn_output::MixerConfig::default()
+    };
+    let preparation = fmn::rendering::SoundtrackPreparationLimits {
+        max_cues: 4096,
+        max_source_bytes: limits.max_bytes,
+        max_decoded_samples: limits.max_samples,
+        max_prepared_samples: limits.max_samples,
+    };
+    let mixed = scene
+        .py()
+        .detach(move || {
+            fmn::rendering::PreparedSceneSoundtrack::new_with_limits(
+                &fmn_platform::fs::StdFs,
+                &requests,
+                &mut audio.decoder,
+                config,
+                None,
+                preparation,
+            )?
+            .mix(1)
+        })
+        .map_err(native_error)?;
+    Ok(PySoundData {
+        data: SoundData::from_audio(&mixed.audio, limits).map_err(native_error)?,
+    })
+}
+
+/// Appending needs only the native soundtrack's end. In particular, a valid
+/// long low-rate source must not allocate an upsampled stereo snapshot merely
+/// to determine where its successor starts.
+pub(crate) fn writer_duration(
+    scene: &Bound<'_, PyScene>,
+    writer: &Bound<'_, PyAny>,
+) -> PyResult<f64> {
+    let mut audio = PortalAudio::from_writer(Some(writer), &PortalOutputFormat::Wav, None)?;
+    let engine = Rc::clone(&scene.borrow().engine);
+    let requests = {
+        let scene = engine.try_borrow().map_err(|_| {
+            PyRuntimeError::new_err("audio duration cannot read a mutably borrowed Scene")
+        })?;
+        if scene.sound_requests().len() > 4096 {
+            return Err(PyValueError::new_err("audio duration exceeds 4096 cues"));
+        }
+        scene.sound_requests().to_vec()
+    };
+    let config = fmn_output::MixerConfig::default();
+    let frames = scene
+        .py()
+        .detach(move || {
+            fmn::rendering::PreparedSceneSoundtrack::end_frame(
+                &fmn_platform::fs::StdFs,
+                &requests,
+                &mut audio.decoder,
+                config,
+                4096,
+            )
+        })
+        .map_err(native_error)?;
+    Ok(frames as f64 / f64::from(config.sample_rate))
+}
 
 pub(crate) struct PortalAudioInput {
     source: SoundSource,
@@ -45,6 +320,14 @@ impl PortalAudio {
             Err(error) if error.is_instance_of::<PyAttributeError>(scene.py()) => None,
             Err(error) => return Err(error),
         };
+        Self::from_writer(writer.as_ref(), format, video)
+    }
+
+    fn from_writer(
+        writer: Option<&Bound<'_, PyAny>>,
+        format: &PortalOutputFormat,
+        video: Option<&portal_video::PortalVideoConfig>,
+    ) -> PyResult<Box<Self>> {
         let dither = match &writer {
             Some(writer) => dither_from_writer(writer, format)?,
             None => DitherPolicy::None,
@@ -185,16 +468,33 @@ impl PortalAudio {
                     as u64,
                 report: Arc::new(decoded.report),
             };
-            mixer
-                .add(fmn_output::SoundCue {
-                    audio: decoded.audio,
-                    frame: if window.is_some() {
+            let (frame, fps, time_offset) = match request.absolute_time {
+                Some(time) => {
+                    let sample = fmn_output::seconds_to_samples(time, config.sample_rate)
+                        .map_err(native_error)?;
+                    let sample = if window.is_some() {
+                        sample
+                    } else {
+                        timeline.output_sample(sample, request.time.fps(), config.sample_rate)?
+                    };
+                    (sample, config.sample_rate, 0.0)
+                }
+                None => (
+                    if window.is_some() {
                         request.time.frames()
                     } else {
                         timeline.output_frame(request.time.frames())?
                     },
-                    fps: request.time.fps(),
-                    time_offset: request.time_offset,
+                    request.time.fps(),
+                    request.time_offset,
+                ),
+            };
+            mixer
+                .add(fmn_output::SoundCue {
+                    audio: decoded.audio,
+                    frame,
+                    fps,
+                    time_offset,
                     gain: request.gain,
                     gain_to_background: request.gain_to_background,
                 })
@@ -320,12 +620,8 @@ fn read_source<'a>(
         SoundSource::File(path) => fs
             .read_bounded(path, limit)
             .map(Cow::Owned)
-            .map_err(|error| {
-                PyOSError::new_err(format!("sound cue {}: {error}", path.display()))
-            }),
-        SoundSource::Memory(data) if data.bytes().len() <= limit => {
-            Ok(Cow::Borrowed(data.bytes()))
-        }
+            .map_err(|error| PyOSError::new_err(format!("sound cue {}: {error}", path.display()))),
+        SoundSource::Memory(data) if data.bytes().len() <= limit => Ok(Cow::Borrowed(data.bytes())),
         SoundSource::Memory(_) => Err(PyValueError::new_err(format!(
             "sound cue {} exceeds the {limit}-byte source budget",
             source.identity()
@@ -537,12 +833,25 @@ impl BundleAudioCapture {
                 ));
             }
             prepared_bytes += prepared as usize;
+            let (frame, fps, time_offset) = match request.absolute_time {
+                Some(time) => (
+                    fmn_output::seconds_to_samples(time, options.sample_rate)
+                        .map_err(native_error)?,
+                    options.sample_rate,
+                    0.0,
+                ),
+                None => (
+                    request.time.frames(),
+                    request.time.fps(),
+                    request.time_offset,
+                ),
+            };
             mixer
                 .add(SoundCue {
                     audio: audio.clone(),
-                    frame: request.time.frames(),
-                    fps: request.time.fps(),
-                    time_offset: request.time_offset,
+                    frame,
+                    fps,
+                    time_offset,
                     gain: request.gain,
                     gain_to_background: request.gain_to_background,
                 })
@@ -572,6 +881,69 @@ pub(crate) fn shared_bundle_input_reports(scene: &Bound<'_, PyScene>) -> PyResul
     Ok(inputs.len() == 2 && Arc::ptr_eq(&inputs[0].report, &inputs[1].report))
 }
 
+/// Exercise immutable Python PCM through native writer timing, WAV publication
+/// and overlapping live inserts at three worker counts. Returns verified files.
+///
+/// # Errors
+/// A Python assertion, native audio refusal or publication failure.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_sound_data() -> Result<u64, String> {
+    crate::with_python_test_module("immutable Python sound data", |py, _module, globals| {
+        let source = std::ffi::CString::new(r#"
+from pathlib import Path
+import tempfile
+import wave
+import numpy as np
+import manimlib as m
+from fmn_python import SoundData, render_session, record_scene
+
+def read_pcm(path):
+    with wave.open(str(path), 'rb') as stream:
+        assert (stream.getframerate(), stream.getnchannels(), stream.getsampwidth()) == (48000, 2, 2)
+        return np.frombuffer(stream.readframes(stream.getnframes()), dtype='<i2').reshape(-1, 2)
+
+original = np.array([.25, -.5] * 32, dtype=np.float32)
+sound = SoundData(original, channels=2)
+original[:] = 0
+expected = np.tile(np.array([[8192, -16384]], dtype=np.int16), (32, 1))
+verified_files = 0
+digests = []
+with tempfile.TemporaryDirectory(prefix='fmn sound data e2e ') as directory:
+    root = Path(directory)
+    for threads in (1, 4, 16):
+        scene = m.Scene(file_writer_config={'ffmpeg_bin': str(root / 'no-decoder')})
+        with render_session(scene, root / f'whole-{threads}.wav', fps=29, threads=threads) as whole:
+            scene.wait_frames(1)
+            scene.file_writer.add_audio_segment(sound, time=9 / 48000)
+            scene.wait_frames(1)
+        pcm = read_pcm(whole.result.destination)
+        assert len(pcm) == 3310 and not pcm[:9].any() and not pcm[41:].any()
+        np.testing.assert_array_equal(pcm[9:41], expected)
+        assert whole.result.ffmpeg_invocations == ()
+        assert whole.result.audio_inputs[0]['source_sha256'] == sound.sha256
+        verified_files += 1
+        with record_scene(scene, root / f'insert-{threads}.wav', threads=threads) as insert:
+            scene.file_writer.add_sound(sound, time=2 / 29 - 2 / 48000)
+            scene.wait_frames(1)
+        pcm = read_pcm(insert.result.destination)
+        np.testing.assert_array_equal(pcm[:30], expected[2:])
+        assert not pcm[30:].any() and len(insert.result.audio_inputs) == 1
+        assert insert.result.ffmpeg_invocations == ()
+        verified_files += 1
+        digests.append((whole.result.digest, insert.result.digest))
+assert len(set(digests)) == 1
+"#).map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("verified_files")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "sound data scenario omitted its verification count".to_owned())?
+            .extract()
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use pyo3::types::PyDictMethods as _;
@@ -592,5 +964,10 @@ mod tests {
                 .inspect_err(|error| error.print(py))
                 .expect("real compressed sound and output receipts");
         });
+    }
+
+    #[test]
+    fn immutable_sound_data_wav_and_live_inserts() {
+        assert_eq!(super::run_portal_gauntlet_sound_data().unwrap(), 6);
     }
 }
