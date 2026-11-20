@@ -67,6 +67,7 @@ def install_camera_capture(native: Any) -> None:
                               tuple(self.light_source.get_location()),
                               nodes, rows, indices,
                               getattr(self, "capture_threads", 1))
+            self._core._discard_scene_capture()
             self.__dict__["_fmn_camera_capture"] = capture
         finally:
             self.__dict__["_fmn_capture_busy"] = False
@@ -88,6 +89,9 @@ def install_camera_capture(native: Any) -> None:
         render(self, (), False)
 
     def current(self):
+        captured = self._core._take_scene_capture()
+        if captured is not None:
+            self.__dict__["_fmn_camera_capture"] = captured
         snapshot = self.__dict__.get("_fmn_camera_capture")
         if snapshot is None or snapshot.size != tuple(self.get_pixel_shape()):
             self.clear()
@@ -104,6 +108,17 @@ def install_camera_capture(native: Any) -> None:
     def png(self):
         """Return the last immutable capture as native-encoded PNG bytes."""
         return current(self).png()
+
+    def get_image(self):
+        """Return the last sampled frame as an immutable native image.
+
+        The image supports pixels(), png(), size, save_png() and notebook PNG
+        display. Reading it does not recapture current mobjects or run hooks.
+        """
+        return current(self)
+
+    def scene_image(self):
+        return self.camera.get_image()
 
     def save_png(self, destination, *, threads=1):
         """Publish the last immutable capture through Reel, never recapture it."""
@@ -124,12 +139,19 @@ def install_camera_capture(native: Any) -> None:
     for name, method in {
         "capture": capture, "capture_snapshot": capture_snapshot,
         "clear": clear, "get_pixel_array": pixels, "get_png": png, "save_png": save_png,
+        "get_image": get_image,
         "_repr_png_": repr_png,
     }.items():
         method.__name__ = name
         method.__qualname__ = Camera.__qualname__ + "." + name
         method.__module__ = Camera.__module__
         setattr(Camera, name, method)
+    Scene = g.get("Scene")
+    if Scene is not None:
+        scene_image.__name__ = "get_image"
+        scene_image.__qualname__ = Scene.__qualname__ + ".get_image"
+        scene_image.__module__ = Scene.__module__
+        Scene.get_image = scene_image
     Writer = g.get("SceneFileWriter")
     if Writer is not None:
         save_final_image.__qualname__ = Writer.__qualname__ + ".save_final_image"

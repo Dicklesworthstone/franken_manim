@@ -6484,6 +6484,13 @@ fn python_camera_frame_points_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("camera_frame_point_cases", cases))
 }
 
+fn python_scene_readback_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let cases = manimlib::run_portal_gauntlet_scene_readback()
+        .map_err(|error| fail(format!("Python sampled scene readback: {error}")))?;
+    ctx.event(LogEvent::new("e2e.python.scene_readback").field("cases", cases));
+    Ok(RunOutcome::ok().with_counter("scene_readback_cases", cases))
+}
+
 /// Control panels use the active CLI frame for defaults and native placement,
 /// including composite controls, explicit options and scoped restoration.
 fn python_control_panel_frame_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -20053,6 +20060,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_scene_readback.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_scene_readback_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("scene_readback_cases", 20),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.scene_readback",
+            vec![FieldPred::u64_eq("cases", 20)],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_control_panel_frame.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -23887,6 +23908,16 @@ fn python_camera_frame_points_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_camera_frame_points.v1")
         .expect("live camera frame geometry is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_scene_readback_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_scene_readback.v1")
+        .expect("sampled scene image readback is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

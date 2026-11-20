@@ -228,7 +228,6 @@ fn maintain_position_holds_the_construction_offset() {
     assert!((center[1] - 1.0).abs() < 1e-5, "followed in y");
 }
 
-
 fn plain_family(stage: &mut Stage) -> (Mob, Mob, Mob) {
     let root = stage.add(Mobject::new());
     let first = stage.add(Mobject::from_points(&[[0.0, 1.0, 0.0], [0.5, 1.0, 0.0]]));
@@ -245,9 +244,7 @@ fn homotopy_live_views_keep_original_observations_and_atomic_maps_opt_in() {
         let mob = stage.add(Mobject::from_points(&[[1.0, 0.0, 0.0]]));
         let view = Rc::new(stage.get_mut(mob).unwrap().buffer.export_view(false));
         let observed = Rc::clone(&view);
-        let map = move |x, y, z, _| {
-            [x + f64::from(observed.read(0, "point").unwrap()[0]), y, z]
-        };
+        let map = move |x, y, z, _| [x + f64::from(observed.read(0, "point").unwrap()[0]), y, z];
         let mut anim = if atomic {
             Homotopy::try_new(move |x, y, z, t| Ok(map(x, y, z, t)), mob)
         } else {
@@ -276,9 +273,10 @@ fn homotopy_live_family_callbacks_observe_previously_published_members() {
     stage.attach(root, first).unwrap();
     stage.attach(root, second).unwrap();
     let view = stage.get_mut(first).unwrap().buffer.export_view(false);
-    let mut anim = Homotopy::new(move |x, y, z, _| {
-        [x + f64::from(view.read(0, "point").unwrap()[0]), y, z]
-    }, root);
+    let mut anim = Homotopy::new(
+        move |x, y, z, _| [x + f64::from(view.read(0, "point").unwrap()[0]), y, z],
+        root,
+    );
     anim.begin(&mut stage).unwrap();
     for alpha in [0.25, 0.5, 1.0] {
         anim.interpolate(&mut stage, alpha);
@@ -306,10 +304,16 @@ fn phase_flow_live_and_atomic_fields_have_explicit_view_observation_boundaries()
         anim.begin(&mut stage).unwrap();
         anim.interpolate(&mut stage, 0.5);
         assert_eq!(stage.get_points(first).unwrap()[0][0], 1.5);
-        assert_eq!(stage.get_points(second).unwrap()[0][0], if atomic { 10.5 } else { 10.75 });
+        assert_eq!(
+            stage.get_points(second).unwrap()[0][0],
+            if atomic { 10.5 } else { 10.75 }
+        );
         anim.interpolate(&mut stage, 1.0);
         assert_eq!(stage.get_points(first).unwrap()[0][0], 2.25);
-        assert_eq!(stage.get_points(second).unwrap()[0][0], if atomic { 11.25 } else { 11.875 });
+        assert_eq!(
+            stage.get_points(second).unwrap()[0][0],
+            if atomic { 11.25 } else { 11.875 }
+        );
         assert!(anim.deferred_error().is_none());
     }
 }
@@ -326,15 +330,32 @@ fn fallible_homotopy_retains_the_entire_last_sample_and_attached_views() {
         detail: "singularity".to_owned(),
     };
     let failure = expected.clone();
-    let mut anim = Homotopy::try_new(move |x, y, z, t| {
-        observed.set(observed.get() + 1);
-        if t >= 0.5 && x >= 2.0 { Err(failure.clone()) } else { Ok([x + t, y, z]) }
-    }, root).with_config(AnimConfig { rate_func: RateFunc::linear(), ..AnimConfig::default() });
+    let mut anim = Homotopy::try_new(
+        move |x, y, z, t| {
+            observed.set(observed.get() + 1);
+            if t >= 0.5 && x >= 2.0 {
+                Err(failure.clone())
+            } else {
+                Ok([x + t, y, z])
+            }
+        },
+        root,
+    )
+    .with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
     anim.begin(&mut stage).unwrap();
     anim.interpolate(&mut stage, 0.25);
-    let before: Vec<_> = [first, second].into_iter().map(|mob| {
-        (stage.get_points(mob).unwrap(), stage.get(mob).unwrap().buffer.revision())
-    }).collect();
+    let before: Vec<_> = [first, second]
+        .into_iter()
+        .map(|mob| {
+            (
+                stage.get_points(mob).unwrap(),
+                stage.get(mob).unwrap().buffer.revision(),
+            )
+        })
+        .collect();
     let successful_calls = calls.get();
     anim.interpolate(&mut stage, 0.5);
     assert_eq!(anim.deferred_error(), Some(expected.clone()));
@@ -362,14 +383,16 @@ fn homotopy_names_invalid_numeric_outputs_in_both_publication_modes() {
         for bad in [f64::NAN, f64::INFINITY, f64::MAX] {
             let mut stage = Stage::new();
             let (root, first, second) = plain_family(&mut stage);
-            let map = move |x, y, z, t| {
-                [if t >= 0.5 && x >= 2.0 { bad } else { x + t }, y, z]
-            };
+            let map = move |x, y, z, t| [if t >= 0.5 && x >= 2.0 { bad } else { x + t }, y, z];
             let mut anim = if atomic {
                 Homotopy::try_new(move |x, y, z, t| Ok(map(x, y, z, t)), root)
             } else {
                 Homotopy::new(map, root)
-            }.with_config(AnimConfig { rate_func: RateFunc::linear(), ..AnimConfig::default() });
+            }
+            .with_config(AnimConfig {
+                rate_func: RateFunc::linear(),
+                ..AnimConfig::default()
+            });
             anim.begin(&mut stage).unwrap();
             let second_before = stage.get_points(second);
             anim.interpolate(&mut stage, 0.5);
@@ -377,7 +400,10 @@ fn homotopy_names_invalid_numeric_outputs_in_both_publication_modes() {
                 anim.deferred_error(),
                 Some(AnimError::Stage(StageError::InvalidPointMap(_)))
             ));
-            assert_eq!(stage.get_points(first).unwrap()[0][0], if atomic { 0.0 } else { 0.5 });
+            assert_eq!(
+                stage.get_points(first).unwrap()[0][0],
+                if atomic { 0.0 } else { 0.5 }
+            );
             assert_eq!(stage.get_points(second), second_before);
             let failed = stage.get_points(first);
             anim.interpolate(&mut stage, 0.75);
@@ -412,13 +438,22 @@ fn functional_maps_report_malformed_geometry_and_schema() {
         } else {
             Homotopy::new(|x, y, z, _| [x, y, z], root)
         };
-        assert!(matches!(anim.begin(&mut stage), Err(AnimError::Stage(StageError::Geometry(_)))));
+        assert!(matches!(
+            anim.begin(&mut stage),
+            Err(AnimError::Stage(StageError::Geometry(_)))
+        ));
     }
     let mut stage = Stage::new();
     let schema = RecordSchema::new(&[("point", 2)], &["point"], &["point"]).unwrap();
     let mob = stage.add(Mobject::from_buffer(RecordBuffer::new(schema, 3).unwrap()));
-    let mut anim = Homotopy::new(|_, _, _, _| panic!("malformed schema must refuse first"), mob);
-    assert_eq!(anim.begin(&mut stage), Err(AnimError::Stage(StageError::SchemaMismatch)));
+    let mut anim = Homotopy::new(
+        |_, _, _, _| panic!("malformed schema must refuse first"),
+        mob,
+    );
+    assert_eq!(
+        anim.begin(&mut stage),
+        Err(AnimError::Stage(StageError::SchemaMismatch))
+    );
 
     let (root, first, second) = plain_family(&mut stage);
     stage.get_mut(second).unwrap().buffer = RecordBuffer::new(RecordSchema::vmobject(), 2).unwrap();
@@ -426,7 +461,10 @@ fn functional_maps_report_malformed_geometry_and_schema() {
     let mut flow = PhaseFlow::try_new(|_| Ok([1.0, 0.0, 0.0]), root, Some(1.0));
     flow.begin(&mut stage).unwrap();
     flow.interpolate(&mut stage, 0.5);
-    assert!(matches!(flow.deferred_error(), Some(AnimError::Stage(StageError::Geometry(_)))));
+    assert!(matches!(
+        flow.deferred_error(),
+        Some(AnimError::Stage(StageError::Geometry(_)))
+    ));
     assert_eq!(stage.get_points(first), before);
 }
 
@@ -441,10 +479,14 @@ fn atomic_homotopy_does_not_publish_when_a_later_exact_rate_is_missing() {
     assert_eq!(collecting.eval(1.0), 1.0);
     let calls = Rc::new(Cell::new(0));
     let observed = Rc::clone(&calls);
-    let mut anim = Homotopy::try_new(move |x, y, z, t| {
-        observed.set(observed.get() + 1);
-        Ok([x + t, y, z])
-    }, root).with_config(AnimConfig {
+    let mut anim = Homotopy::try_new(
+        move |x, y, z, t| {
+            observed.set(observed.get() + 1);
+            Ok([x + t, y, z])
+        },
+        root,
+    )
+    .with_config(AnimConfig {
         lag_ratio: 0.5,
         rate_func: sampler.finish().unwrap(),
         ..AnimConfig::default()
@@ -453,9 +495,15 @@ fn atomic_homotopy_does_not_publish_when_a_later_exact_rate_is_missing() {
     let before = [root, first, second].map(|mob| stage.get_points(mob));
     let begin_calls = calls.get();
     anim.interpolate(&mut stage, 0.5);
-    assert!(matches!(anim.deferred_error(), Some(AnimError::UpdateFailed { .. })));
+    assert!(matches!(
+        anim.deferred_error(),
+        Some(AnimError::UpdateFailed { .. })
+    ));
     assert_eq!(calls.get(), begin_calls + 1);
-    assert_eq!([root, first, second].map(|mob| stage.get_points(mob)), before);
+    assert_eq!(
+        [root, first, second].map(|mob| stage.get_points(mob)),
+        before
+    );
 }
 
 #[test]
@@ -465,7 +513,8 @@ fn atomic_homotopy_preserves_inert_auxiliary_rows_in_surface_holes() {
         &[("point", 3), ("normal_seed", 3), ("surface_validity", 1)],
         &["point"],
         &["point", "normal_seed"],
-    ).unwrap();
+    )
+    .unwrap();
     let mut buffer = RecordBuffer::new(schema, 2).unwrap();
     buffer.write(0, "point", &[1.0, 2.0, 3.0]);
     buffer.write(0, "normal_seed", &[1.0, 2.0, 3.25]);
@@ -474,14 +523,21 @@ fn atomic_homotopy_preserves_inert_auxiliary_rows_in_surface_holes() {
     buffer.write(1, "normal_seed", &[f32::NAN; 3]);
     let mob = stage.add(Mobject::from_buffer(buffer));
     let view = stage.get_mut(mob).unwrap().buffer.export_view(false);
-    let mut anim = Homotopy::try_new(|x, y, z, t| Ok([x + t, y, z]), mob)
-        .with_config(AnimConfig { rate_func: RateFunc::linear(), ..AnimConfig::default() });
+    let mut anim = Homotopy::try_new(|x, y, z, t| Ok([x + t, y, z]), mob).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
     anim.begin(&mut stage).unwrap();
     anim.interpolate(&mut stage, 0.5);
     assert!(anim.deferred_error().is_none());
     assert_eq!(stage.get_points(mob).unwrap(), [[1.5, 2.0, 3.0], [0.0; 3]]);
     assert_eq!(view.read(0, "normal_seed").unwrap(), [1.0, 2.0, 3.25]);
-    assert!(view.read(1, "normal_seed").unwrap().iter().all(|value| value.is_nan()));
+    assert!(
+        view.read(1, "normal_seed")
+            .unwrap()
+            .iter()
+            .all(|value| value.is_nan())
+    );
     assert!(view.is_attached_to(&stage.get(mob).unwrap().buffer));
 }
 
@@ -498,10 +554,18 @@ fn fallible_phase_flow_preserves_family_and_restarts_its_euler_history() {
         detail: "undefined velocity".to_owned(),
     };
     let failure = expected.clone();
-    let mut anim = PhaseFlow::try_new(move |point| {
-        observed.set(observed.get() + 1);
-        if fail.get() && point[0] >= 2.0 { Err(failure.clone()) } else { Ok([1.0, 0.0, 0.0]) }
-    }, root, Some(1.0));
+    let mut anim = PhaseFlow::try_new(
+        move |point| {
+            observed.set(observed.get() + 1);
+            if fail.get() && point[0] >= 2.0 {
+                Err(failure.clone())
+            } else {
+                Ok([1.0, 0.0, 0.0])
+            }
+        },
+        root,
+        Some(1.0),
+    );
     let before = [stage.get_points(first), stage.get_points(second)];
     anim.begin(&mut stage).unwrap();
     assert_eq!(calls.get(), 0);
@@ -551,7 +615,10 @@ fn phase_flow_refuses_bad_timing_and_stale_targets_before_callbacks() {
             mob,
             Some(bad),
         );
-        assert!(matches!(anim.begin(&mut stage), Err(AnimError::InvalidPath(_))));
+        assert!(matches!(
+            anim.begin(&mut stage),
+            Err(AnimError::InvalidPath(_))
+        ));
         let mut anim = PhaseFlow::new(
             |_| panic!("invalid alpha must not call the field"),
             mob,
@@ -559,7 +626,10 @@ fn phase_flow_refuses_bad_timing_and_stale_targets_before_callbacks() {
         );
         anim.begin(&mut stage).unwrap();
         anim.interpolate(&mut stage, bad);
-        assert!(matches!(anim.deferred_error(), Some(AnimError::InvalidPath(_))));
+        assert!(matches!(
+            anim.deferred_error(),
+            Some(AnimError::InvalidPath(_))
+        ));
     }
     let mut stage = Stage::new();
     let mob = stage.add(Mobject::from_points(&[[0.0; 3]]));
@@ -570,8 +640,15 @@ fn phase_flow_refuses_bad_timing_and_stale_targets_before_callbacks() {
     );
     anim.begin(&mut stage).unwrap();
     anim.interpolate(&mut stage, 2.0);
-    assert!(matches!(anim.deferred_error(), Some(AnimError::InvalidPath(_))));
-    let mut anim = PhaseFlow::new(|_| panic!("deleted target must not call the field"), mob, None);
+    assert!(matches!(
+        anim.deferred_error(),
+        Some(AnimError::InvalidPath(_))
+    ));
+    let mut anim = PhaseFlow::new(
+        |_| panic!("deleted target must not call the field"),
+        mob,
+        None,
+    );
     anim.begin(&mut stage).unwrap();
     stage.delete(mob).unwrap();
     anim.interpolate(&mut stage, 0.5);
@@ -601,7 +678,11 @@ fn relative_position_refuses_removed_handles_and_nonfinite_centers() {
     let mut anim = MaintainPositionRelativeTo::new(&stage, mob, tracked);
     anim.begin(&mut stage).unwrap();
     let before = stage.get_points(mob);
-    stage.get_mut(tracked).unwrap().buffer.write(0, "point", &[f32::INFINITY, 0.0, 0.0]);
+    stage
+        .get_mut(tracked)
+        .unwrap()
+        .buffer
+        .write(0, "point", &[f32::INFINITY, 0.0, 0.0]);
     anim.interpolate(&mut stage, 0.5);
     assert!(matches!(
         anim.deferred_error(),
@@ -609,7 +690,6 @@ fn relative_position_refuses_removed_handles_and_nonfinite_centers() {
     ));
     assert_eq!(stage.get_points(mob), before);
 }
-
 
 #[test]
 fn functional_homotopy_preserves_historical_geometry_bits_and_style_resize() {
@@ -629,7 +709,13 @@ fn functional_homotopy_preserves_historical_geometry_bits_and_style_resize() {
     ) {
         let spanned = time_spanned_alpha(alpha, config.run_time, config.time_span);
         for (index, &(mob, start)) in rows.iter().enumerate() {
-            let time = sub_alpha(spanned, index, rows.len(), config.lag_ratio, &config.rate_func);
+            let time = sub_alpha(
+                spanned,
+                index,
+                rows.len(),
+                config.lag_ratio,
+                &config.rate_func,
+            );
             stage.match_points(mob, start);
             let points: Vec<_> = stage
                 .get_points(mob)
@@ -669,7 +755,10 @@ fn functional_homotopy_preserves_historical_geometry_bits_and_style_resize() {
             }
             assert_eq!(
                 actual.placement().linear().map(|row| row.map(f64::to_bits)),
-                expected.placement().linear().map(|row| row.map(f64::to_bits))
+                expected
+                    .placement()
+                    .linear()
+                    .map(|row| row.map(f64::to_bits))
             );
             assert_eq!(
                 actual.placement().translation().map(f64::to_bits),
@@ -685,19 +774,22 @@ fn functional_homotopy_preserves_historical_geometry_bits_and_style_resize() {
         let root = stage.add(Mobject::new());
         let left = stage.add(Mobject::new());
         let right = stage.add(Mobject::new());
-        let shared = vmob(&mut stage, &[
-            [0.0, 0.0, 0.0],
-            [0.3, 1.1, 0.2],
-            [1.0, 0.1, 0.3],
-            [1.7, -0.4, 0.8],
-            [2.0, 0.2, 0.4],
-        ]);
+        let shared = vmob(
+            &mut stage,
+            &[
+                [0.0, 0.0, 0.0],
+                [0.3, 1.1, 0.2],
+                [1.0, 0.1, 0.3],
+                [1.7, -0.4, 0.8],
+                [2.0, 0.2, 0.4],
+            ],
+        );
         for (index, red) in [0.0, 0.2, 0.4, 0.6, 0.8].into_iter().enumerate() {
-            assert!(stage
-                .get_mut(shared)
-                .unwrap()
-                .buffer
-                .write(index, "fill_rgba", &[red, 0.2, 0.3, 1.0]));
+            assert!(stage.get_mut(shared).unwrap().buffer.write(
+                index,
+                "fill_rgba",
+                &[red, 0.2, 0.3, 1.0]
+            ));
         }
         stage.attach(root, left).unwrap();
         stage.attach(root, right).unwrap();
@@ -707,7 +799,8 @@ fn functional_homotopy_preserves_historical_geometry_bits_and_style_resize() {
             &[("point", 3), ("normal_seed", 3), ("rgba", 4)],
             &["point"],
             &["point", "normal_seed"],
-        ).unwrap();
+        )
+        .unwrap();
         let mut buffer = RecordBuffer::new(schema, 1).unwrap();
         buffer.write(0, "point", &[0.2, 0.4, 0.6]);
         buffer.write(0, "normal_seed", &[0.3, 0.5, 1.0]);
@@ -717,9 +810,15 @@ fn functional_homotopy_preserves_historical_geometry_bits_and_style_resize() {
         stage.shift(root, [0.125, -0.375, 0.0625]);
         let oracle = stage.copy_family(root).unwrap();
         let starting = stage.copy_family(oracle).unwrap();
-        let rows: Vec<_> = stage.family(oracle).into_iter().zip(stage.family(starting)).collect();
-        let oracle_shared = stage.get(stage.get(oracle).unwrap().submobjects()[0])
-            .unwrap().submobjects()[0];
+        let rows: Vec<_> = stage
+            .family(oracle)
+            .into_iter()
+            .zip(stage.family(starting))
+            .collect();
+        let oracle_shared = stage
+            .get(stage.get(oracle).unwrap().submobjects()[0])
+            .unwrap()
+            .submobjects()[0];
         let config = AnimConfig {
             run_time: 3.0,
             time_span: Some((0.25, 2.75)),
@@ -733,7 +832,8 @@ fn functional_homotopy_preserves_historical_geometry_bits_and_style_resize() {
             smoothed_homotopy(map, root)
         } else {
             Homotopy::new(map, root)
-        }.with_config(config.clone());
+        }
+        .with_config(config.clone());
         anim.begin(&mut stage).unwrap();
         legacy_sample(&mut stage, &rows, &config, 0.0, smooth);
         compare(&stage, root, oracle);

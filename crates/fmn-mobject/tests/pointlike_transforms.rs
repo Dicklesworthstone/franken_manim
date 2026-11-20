@@ -386,30 +386,36 @@ fn fallible_family_map_stops_at_the_first_custom_error_without_publishing() {
         stage.attach(root, second).unwrap();
         stage.shift(second, [8.0, 0.0, 0.0]);
         let view = stage.get_mut(first).unwrap().buffer.export_view(false);
-        let before: Vec<_> = [first, second].into_iter().map(|mob| {
-            (
-                stage.get_points(mob).unwrap(),
-                column(&stage, mob, "d_normal_point"),
-                column(&stage, mob, "anchor"),
-                stage.placement(mob),
-                stage.get(mob).unwrap().buffer.revision(),
-            )
-        }).collect();
+        let before: Vec<_> = [first, second]
+            .into_iter()
+            .map(|mob| {
+                (
+                    stage.get_points(mob).unwrap(),
+                    column(&stage, mob, "d_normal_point"),
+                    column(&stage, mob, "anchor"),
+                    stage.placement(mob),
+                    stage.get(mob).unwrap().buffer.revision(),
+                )
+            })
+            .collect();
         let calls = std::cell::RefCell::new(Vec::new());
-        let error = stage.try_apply_points_function_with(
-            root,
-            |point| {
-                let mut calls = calls.borrow_mut();
-                calls.push(point);
-                if calls.len() == fail_at {
-                    Err(MapError::Domain(fail_at))
-                } else {
-                    Ok([point[0] + 4.0, point[1] * 2.0, point[2]])
-                }
-            },
-            Some([0.0; 3]),
-            None,
-        ).err().expect("field domain refusal");
+        let error = stage
+            .try_apply_points_function_with(
+                root,
+                |point| {
+                    let mut calls = calls.borrow_mut();
+                    calls.push(point);
+                    if calls.len() == fail_at {
+                        Err(MapError::Domain(fail_at))
+                    } else {
+                        Ok([point[0] + 4.0, point[1] * 2.0, point[2]])
+                    }
+                },
+                Some([0.0; 3]),
+                None,
+            )
+            .err()
+            .expect("field domain refusal");
         assert_eq!(error, MapError::Domain(fail_at));
         assert_eq!(calls.borrow().len(), fail_at);
         assert_eq!(
@@ -426,14 +432,20 @@ fn fallible_family_map_stops_at_the_first_custom_error_without_publishing() {
         assert!(view.is_attached_to(&stage.get(first).unwrap().buffer));
         assert_eq!(view.read(0, "point").unwrap(), [0.0, 1.0, 0.0]);
 
-        let error = stage.try_apply_points_function_with(
-            root,
-            |_| -> Result<_, MapError> {
-                panic!("invalid pivot must refuse before the callback")
-            },
-            Some([f64::NAN, 0.0, 0.0]),
-            None,
-        ).err().expect("invalid pivot");
-        assert!(matches!(error, MapError::Stage(fmn_mobject::StageError::InvalidPointMap(_))));
+        let error = stage
+            .try_apply_points_function_with(
+                root,
+                |_| -> Result<_, MapError> {
+                    panic!("invalid pivot must refuse before the callback")
+                },
+                Some([f64::NAN, 0.0, 0.0]),
+                None,
+            )
+            .err()
+            .expect("invalid pivot");
+        assert!(matches!(
+            error,
+            MapError::Stage(fmn_mobject::StageError::InvalidPointMap(_))
+        ));
     }
 }

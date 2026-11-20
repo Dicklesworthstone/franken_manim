@@ -441,7 +441,10 @@ mod tests {
         for (alpha, rate_func) in [
             (f64::NAN, RateFunc::linear()),
             (f64::INFINITY, RateFunc::linear()),
-            (0.5, RateFunc::Base(|alpha| if alpha == 0.0 { 0.0 } else { f64::NAN })),
+            (
+                0.5,
+                RateFunc::Base(|alpha| if alpha == 0.0 { 0.0 } else { f64::NAN }),
+            ),
         ] {
             let mut stage = Stage::new();
             let mob = stage.add(Mobject::new());
@@ -456,7 +459,10 @@ mod tests {
             });
             animation.begin(&mut stage).unwrap();
             animation.interpolate(&mut stage, alpha);
-            assert!(matches!(animation.deferred_error(), Some(AnimError::InvalidPath(_))));
+            assert!(matches!(
+                animation.deferred_error(),
+                Some(AnimError::InvalidPath(_))
+            ));
             assert_eq!(calls.get(), 1);
         }
     }
@@ -478,10 +484,12 @@ mod tests {
             let replacement = stage.add(Mobject::new());
             assert_ne!(replacement, mob);
             animation.interpolate(&mut stage, 0.5);
-            assert_eq!(animation.deferred_error(), Some(AnimError::StaleHandle(mob)));
+            assert_eq!(
+                animation.deferred_error(),
+                Some(AnimError::StaleHandle(mob))
+            );
             animation.interpolate(&mut stage, 1.0);
             assert_eq!(calls.get(), 1);
         }
     }
-
 }

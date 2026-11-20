@@ -743,8 +743,14 @@ fn final_capture_precedes_removers_and_zero_dt_cleanup_without_freezing_earlier_
     assert_eq!(sink.samples.len(), 7);
     assert_eq!(sink.packets.len(), 2);
     assert_eq!(sink.packets[1].frame_index(), 7);
-    assert_eq!(sink.packets[0].materialize_stage().get_center(marker)[0], 0.0);
-    assert_eq!(sink.packets[1].materialize_stage().get_center(marker)[0], 7.0);
+    assert_eq!(
+        sink.packets[0].materialize_stage().get_center(marker)[0],
+        0.0
+    );
+    assert_eq!(
+        sink.packets[1].materialize_stage().get_center(marker)[0],
+        7.0
+    );
 
     scene.wait_frames(0, &mut sink).unwrap();
     scene.set_skipping(true);

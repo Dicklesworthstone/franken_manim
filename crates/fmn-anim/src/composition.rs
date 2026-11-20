@@ -1147,7 +1147,10 @@ impl AnimationGroup {
     ) -> Result<(), AnimError> {
         let error = self.deferred_error();
         if retain_animation_error(stage, &mut self.updater_error, error) {
-            return Err(self.updater_error.clone().expect("retained animation error"));
+            return Err(self
+                .updater_error
+                .clone()
+                .expect("retained animation error"));
         }
         for (index, animation) in self.animations.iter_mut().enumerate() {
             let result = if let Some(local) = timings.interior_frame(index, position)? {
@@ -1164,7 +1167,10 @@ impl AnimationGroup {
                 &mut self.updater_error,
                 child_error(animation.as_ref()),
             ) {
-                return Err(self.updater_error.clone().expect("retained animation error"));
+                return Err(self
+                    .updater_error
+                    .clone()
+                    .expect("retained animation error"));
             }
         }
         Ok(())
@@ -1460,7 +1466,10 @@ impl Animation for AnimationGroup {
                 &mut self.updater_error,
                 child_error(animation.as_ref()),
             ) {
-                return Err(self.updater_error.clone().expect("retained animation error"));
+                return Err(self
+                    .updater_error
+                    .clone()
+                    .expect("retained animation error"));
             }
             if let Err(error) = result {
                 self.updater_error = Some(error.clone());
@@ -1516,7 +1525,10 @@ impl Animation for AnimationGroup {
     ) -> Result<(), AnimError> {
         let error = self.deferred_error();
         if retain_animation_error(stage, &mut self.updater_error, error) {
-            return Err(self.updater_error.clone().expect("retained animation error"));
+            return Err(self
+                .updater_error
+                .clone()
+                .expect("retained animation error"));
         }
         let Some(timings) = self.exact_timings.clone() else {
             self.interpolate_at_frame(stage, position.to_f64(), fps);
@@ -1593,7 +1605,11 @@ impl Animation for AnimationGroup {
         self.updater_error
             .clone()
             .or_else(|| self.state.config.rate_func.error())
-            .or_else(|| self.animations.iter().find_map(|animation| child_error(animation.as_ref())))
+            .or_else(|| {
+                self.animations
+                    .iter()
+                    .find_map(|animation| child_error(animation.as_ref()))
+            })
     }
 
     fn has_preparing_rate(&self) -> bool {

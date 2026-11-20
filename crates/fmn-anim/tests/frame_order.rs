@@ -1344,12 +1344,9 @@ fn deferred_final_sample_aborts_callbacks_and_removers_in_both_drivers() {
                         )
                         .unwrap();
                     }
-                    let failure = finish_open_play_animations(
-                        &mut stage,
-                        &mut animations,
-                        &mut open,
-                    )
-                    .unwrap_err();
+                    let failure =
+                        finish_open_play_animations(&mut stage, &mut animations, &mut open)
+                            .unwrap_err();
                     assert_eq!(failure, expected);
                     // A host that continues after the refused finish must
                     // receive the same failure before the final updater pass.
@@ -1372,7 +1369,10 @@ fn deferred_final_sample_aborts_callbacks_and_removers_in_both_drivers() {
                 assert_eq!(stage.get_center(first)[0], 1.0);
                 assert_eq!(stage.get_center(second)[0], 2.0);
                 assert_eq!(*scene_ticks.borrow(), vec![1.0]);
-                assert!(resumed.borrow().is_empty(), "failure cannot resume callbacks");
+                assert!(
+                    resumed.borrow().is_empty(),
+                    "failure cannot resume callbacks"
+                );
                 assert_eq!(*failures.borrow(), 1);
                 for mob in [first, second] {
                     assert!(stage.roots().contains(&mob), "failure cannot run removers");
@@ -1472,7 +1472,11 @@ fn succession_final_sample_failure_never_begins_the_next_member() {
         assert_eq!(stage.get_center(first)[0], 0.75);
         assert_eq!(stage.get_center(second)[0], 0.0);
         assert_eq!(*resumed.borrow(), 0);
-        assert_eq!(*later_calls.borrow(), 0, "even alpha-zero begin is forbidden");
+        assert_eq!(
+            *later_calls.borrow(),
+            0,
+            "even alpha-zero begin is forbidden"
+        );
         assert_eq!(*failures.borrow(), 1);
         for mob in [first, second] {
             assert!(stage.roots().contains(&mob));
@@ -1615,7 +1619,11 @@ fn exact_succession_timed_calls_return_rewind_and_member_finish_errors_directly(
             let at_failure = calls.borrow().clone();
             assert_eq!(
                 at_failure,
-                if rewind { vec![0.0, 0.75] } else { vec![0.0, 0.75, 2.0] }
+                if rewind {
+                    vec![0.0, 0.75]
+                } else {
+                    vec![0.0, 0.75, 2.0]
+                }
             );
             assert_eq!(sample(&mut succession, &mut stage, 8), Err(expected));
             succession.finish(&mut stage);

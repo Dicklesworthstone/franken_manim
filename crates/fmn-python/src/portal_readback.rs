@@ -7,16 +7,19 @@
 #[path = "portal_capture_output.rs"]
 mod output;
 
+use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::rc::Rc;
+use std::sync::{Arc, OnceLock};
 
 use fmn_core::color::Srgb;
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{FrozenRenderState, Mob, Mobject, Stage};
 use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
     Tiling, Viewport,
 };
+use fmn_scene::studio_bridge::{Camera, FramePacket};
 use fmn_studio::{TerminalPreview, TerminalProtocol, TuiLimits};
 use pyo3::prelude::*;
 #[cfg(any(test, feature = "gauntlet"))]
@@ -33,6 +36,115 @@ const MAX_EDGES: usize = 131_072;
 const MAX_RECORD_BYTES: usize = 256 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_777_216;
 
+/// One camera's latest sampled image, awaiting a pixel consumer. The retained
+/// state has no updater callbacks or Python objects, so it cannot keep a Scene
+/// alive through one of its own updater closures.
+pub(crate) type ReadbackSlot = Rc<RefCell<Option<Arc<PendingCapture>>>>;
+
+pub(crate) struct PendingCapture {
+    state: FrozenRenderState,
+    camera: Camera,
+    frame_points: Option<(Mob, [[f64; 3]; 5])>,
+    light_mob: Option<Mob>,
+    threads: usize,
+}
+
+impl PendingCapture {
+    fn render(&self) -> PyResult<CameraCapture> {
+        let mut stage = self.state.clone().materialize();
+        let mut camera = self.camera.clone();
+        if let Some((mob, previous)) = self.frame_points {
+            // Match the live CameraFrame read protocol, including the f32
+            // placement bake. Only this private captured arena is modified.
+            stage.bake_placement(mob).map_err(stage_error)?;
+            let points: [[f64; 3]; 5] = stage
+                .get_points(mob)
+                .ok_or_else(|| StaleHandleError::new_err("captured camera frame is stale"))?
+                .try_into()
+                .map_err(|_| PyValueError::new_err("CameraFrame requires five control points"))?;
+            *camera.frame_mut() =
+                PyCameraFrameCore::frame_for_points(camera.frame(), Some(previous), points)?;
+        }
+        if let Some(mob) = self.light_mob {
+            if !stage.contains(mob) {
+                return Err(StaleHandleError::new_err("captured camera light is stale"));
+            }
+            camera
+                .set_light_source_position(stage.get_center(mob))
+                .map_err(native_error)?;
+        }
+        CameraCapture::render_stage(&stage, &camera, self.threads)
+    }
+}
+
+/// Camera configuration frozen while the Scene is released to its host. The
+/// next capture adds immutable geometry, before finish/remover callbacks run.
+pub(crate) struct SceneCapture {
+    pub(crate) slot: ReadbackSlot,
+    pub(crate) camera: Camera,
+    pub(crate) frame_points: Option<(Mob, [[f64; 3]; 5])>,
+    pub(crate) light_mob: Option<Mob>,
+    pub(crate) threads: usize,
+}
+
+impl SceneCapture {
+    fn publish(&self, state: FrozenRenderState) {
+        *self.slot.borrow_mut() = Some(Arc::new(PendingCapture {
+            state,
+            camera: self.camera.clone(),
+            frame_points: self.frame_points,
+            light_mob: self.light_mob,
+            threads: self.threads,
+        }));
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct SceneReadback {
+    pub(crate) target: Option<SceneCapture>,
+}
+
+impl SceneReadback {
+    pub(crate) fn required(&self) -> bool {
+        self.target.is_some()
+    }
+
+    pub(crate) fn capture(&self, packet: FramePacket) {
+        if let Some(target) = &self.target {
+            target.publish(packet.into_render_state());
+        }
+    }
+
+    /// The pure renderer already materializes its last nominal sample on the
+    /// owner. Freeze that exact sample without a second animation evaluation.
+    pub(crate) fn capture_state(&self, state: FrozenRenderState) {
+        if let Some(target) = &self.target {
+            target.publish(state);
+        }
+    }
+}
+
+pub(crate) fn take_scene_capture(
+    py: Python<'_>,
+    slot: &ReadbackSlot,
+) -> PyResult<Option<CameraCapture>> {
+    let pending = slot.borrow().clone();
+    let Some(pending) = pending else {
+        return Ok(None);
+    };
+    // Only callback-free, owned data enters the GIL-free renderer. A refusal
+    // preserves both the pending sample and the last successful Python image.
+    let image = py.detach(|| pending.render())?;
+    let mut current = slot.borrow_mut();
+    if current
+        .as_ref()
+        .is_some_and(|value| Arc::ptr_eq(value, &pending))
+    {
+        *current = None;
+    }
+    Ok(Some(image))
+}
+
 /// Immutable RGBA output; no live scene, proxy, callback or renderer is retained.
 #[pyclass(frozen, name = "_CameraCapture")]
 pub(crate) struct CameraCapture {
@@ -40,6 +152,61 @@ pub(crate) struct CameraCapture {
     width: u32,
     height: u32,
     png: OnceLock<Vec<u8>>,
+}
+
+impl CameraCapture {
+    fn render_stage(stage: &Stage, camera: &Camera, threads: usize) -> PyResult<Self> {
+        if !(1..=96).contains(&threads) {
+            return Err(PyValueError::new_err(
+                "camera capture threads must lie in 1..=96",
+            ));
+        }
+        let (width, height) = camera.pixel_shape();
+        if u64::from(width) * u64::from(height) > MAX_PIXELS {
+            return Err(PyValueError::new_err(
+                "camera capture exceeds the 16M-pixel budget",
+            ));
+        }
+        let config = FrameConfig::new(
+            Viewport { width, height },
+            ScreenMap {
+                scale: f64::from(height) / fmn_core::constants::FRAME_HEIGHT,
+                origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
+                y_up: true,
+            },
+            camera.background(),
+        )
+        .with_aa_policy(camera.aa_policy());
+        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            frame: config,
+            tiling: Tiling::default(),
+            engine: EngineIdentity::fast(),
+            threads,
+        })
+        .map_err(native_error)?;
+        let planar_policy = fmn_render::PlanarCapturePolicy::for_output(
+            (width, height),
+            fmn_core::constants::FRAME_HEIGHT,
+        )
+        .map_err(native_error)?;
+        if planar_policy.refusal(stage, camera).is_none() {
+            renderer.render(stage, 0).map_err(native_error)?;
+        } else {
+            renderer
+                .render_with_camera(stage, camera)
+                .map_err(native_error)?;
+        }
+        let mut rgba = FrameBuffer::new(
+            FrameLayout::tight(PixelFormat::Rgba8, width, height).map_err(native_error)?,
+        );
+        fmn_frame::convert::rgba16f_to_rgba8(renderer.frame(), &mut rgba).map_err(native_error)?;
+        Ok(Self {
+            rgba,
+            width,
+            height,
+            png: OnceLock::new(),
+        })
+    }
 }
 
 fn graph(
@@ -205,47 +372,7 @@ impl CameraCapture {
         stage.add_to_scene(slot).map_err(stage_error)?;
         let roots: Vec<Mob> = roots.into_iter().map(|index| handles[index]).collect();
         stage.replace_in_scene(slot, &roots).map_err(stage_error)?;
-        let config = FrameConfig::new(
-            Viewport { width, height },
-            ScreenMap {
-                scale: f64::from(height) / fmn_core::constants::FRAME_HEIGHT,
-                origin: [f64::from(width) / 2.0, f64::from(height) / 2.0],
-                y_up: true,
-            },
-            background,
-        )
-        .with_aa_policy(camera.aa_policy());
-        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
-            frame: config,
-            tiling: Tiling::default(),
-            engine: EngineIdentity::fast(),
-            threads,
-        })
-        .map_err(native_error)?;
-        let planar_policy = fmn_render::PlanarCapturePolicy::for_output(
-            (width, height),
-            fmn_core::constants::FRAME_HEIGHT,
-        )
-        .map_err(native_error)?;
-        // Match file output's retained +Y-up route at every output aspect.
-        // Live camera edits and nonplanar content still require projection.
-        if planar_policy.refusal(&stage, &camera).is_none() {
-            renderer.render(&stage, 0).map_err(native_error)?;
-        } else {
-            renderer
-                .render_with_camera(&stage, &camera)
-                .map_err(native_error)?;
-        }
-        let mut rgba = FrameBuffer::new(
-            FrameLayout::tight(PixelFormat::Rgba8, width, height).map_err(native_error)?,
-        );
-        fmn_frame::convert::rgba16f_to_rgba8(renderer.frame(), &mut rgba).map_err(native_error)?;
-        Ok(Self {
-            rgba,
-            width,
-            height,
-            png: OnceLock::new(),
-        })
+        Self::render_stage(&stage, &camera, threads)
     }
 
     #[getter]
@@ -386,6 +513,70 @@ pub fn run_portal_gauntlet_camera_frame_points() -> Result<u64, String> {
             .extract::<u64>()
             .map_err(|error| error.to_string())
     })
+}
+
+/// Exercise last-sample readback through real Scene playback and Lumen.
+///
+/// # Errors
+/// Reports Python initialization, callback, snapshot or pixel mismatches.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_scene_readback() -> Result<u64, String> {
+    crate::with_python_test_module("sampled scene readback", |py, _module, globals| {
+        globals
+            .set_item(
+                "_install_native_readback_updater",
+                pyo3::wrap_pyfunction!(_install_native_readback_updater, py)
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())?;
+        let source = std::ffi::CString::new(include_str!("../tests/camera_readback.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("scene_readback_cases")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "scene readback acceptance summary is absent".to_owned())?
+            .extract::<u64>()
+            .map_err(|error| error.to_string())
+    })
+}
+
+// Embedded acceptance supplies a real native slot without adding an installed
+// Python API. Wheel-only execution still runs the public readback cases.
+#[cfg(any(test, feature = "gauntlet"))]
+#[pyfunction]
+#[pyo3(signature = (target, fail_at = 0))]
+fn _install_native_readback_updater(
+    target: &Bound<'_, BridgeMobject>,
+    fail_at: u64,
+) -> PyResult<()> {
+    let (engine, original) = crate::bound_parts(&target.borrow())?;
+    let mut ticks = 0;
+    engine
+        .borrow_mut()
+        .stage_mut()
+        .add_try_dt_updater(
+            original,
+            move |stage, target, dt| {
+                if target != original || dt == 0.0 {
+                    return Ok(());
+                }
+                ticks += 1;
+                if ticks == fail_at {
+                    return Err(fmn_mobject::UpdaterError::callback(
+                        "readback native observer",
+                        "intentional native updater failure",
+                    ));
+                }
+                stage.shift(target, [1.0, 0.0, 0.0]);
+                Ok(())
+            },
+            false,
+        )
+        .map_err(native_error)?;
+    Ok(())
 }
 
 /// Exercise native portal rectangles after constructor hooks, scene adoption,
@@ -708,13 +899,9 @@ mod tests {
 
     #[test]
     fn production_camera_readback_acceptance_suite() {
-        crate::with_python_test_module("camera readback", |py, _module, globals| {
-            let source =
-                std::ffi::CString::new(include_str!("../tests/camera_readback.py")).unwrap();
-            py.run(source.as_c_str(), Some(globals), Some(globals))
-                .inspect_err(|error| error.print(py))
-                .expect("native camera readback preserves scene state and pixels");
-        });
+        let cases = run_portal_gauntlet_scene_readback()
+            .expect("native camera readback preserves scene state and pixels");
+        assert_eq!(cases, 20, "native updater observer cases must also run");
     }
 
     /// fm-5wq.46: the semantic witness through the portal's scene render and

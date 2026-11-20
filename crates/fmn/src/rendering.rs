@@ -1038,7 +1038,9 @@ impl RenderSink {
                 .checked_mul(count)
         });
         let conversion_bytes = plan.render_teams.iter().try_fold(0_u64, |bytes, team| {
-            let scratch = options.yuv_conversion.scratch_bytes(&layout, team.threads());
+            let scratch = options
+                .yuv_conversion
+                .scratch_bytes(&layout, team.threads());
             bytes.checked_add(u64::try_from(scratch).ok()?)
         });
         let planned = u64::try_from(plan.estimated_in_flight_bytes)

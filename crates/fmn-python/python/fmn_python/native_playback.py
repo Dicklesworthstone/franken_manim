@@ -65,10 +65,11 @@ def install_native_playback(native):
     def classes_unchanged():
         for cls, expected in baselines.items():
             actual = _class_dict(cls)
-            if (len(actual) != len(expected)
-                    or any(actual.get(name, _MISSING) is not value
-                           for name, value in expected.items())):
+            if len(actual) != len(expected):
                 return False
+            for name, value in expected.items():
+                if actual.get(name, _MISSING) is not value:
+                    return False
         return True
 
     def frozen_light(scene, members=()):
@@ -102,10 +103,12 @@ def install_native_playback(native):
         frame = camera_state.get("frame")
         rgba = camera_state.get("background_rgba")
         light = camera_state.get("light_source")
-        if (type(frame) is not Frame or type(light) is not Point
-                or any(not _static_is(camera, name, value) for name, value in
-                       (("frame", frame), ("background_rgba", rgba), ("light_source", light)))):
+        if type(frame) is not Frame or type(light) is not Point:
             return None
+        for name, value in (("frame", frame), ("background_rgba", rgba),
+                            ("light_source", light)):
+            if not _static_is(camera, name, value):
+                return None
         frame_state, light_state = _plain_state(frame), _plain_state(light)
         if frame_state is None or light_state is None:
             return None
@@ -114,12 +117,14 @@ def install_native_playback(native):
             return None
         # Custom __float__/iteration implementations remain frame observers.
         # Stock Camera owns a list of ordinary numeric values here.
-        if (type(rgba) not in (list, tuple) or len(rgba) != 4
-                or any(type(value) not in numeric_types for value in rgba)):
+        if type(rgba) not in (list, tuple) or len(rgba) != 4:
             return None
-        if any(not _static_is(light, name, method)
-               for name, method in light_methods.items()):
-            return None
+        for value in rgba:
+            if type(value) not in numeric_types:
+                return None
+        for name, method in light_methods.items():
+            if not _static_is(light, name, method):
+                return None
         children = light_state.get("submobjects")
         if (type(children) not in (list, g["_LiveSubmobjects"])
                 or list.__len__(children) != 0
@@ -135,6 +140,23 @@ def install_native_playback(native):
                 return None
         return light
 
+    def readback_needs_host_capture(scene):
+        """Keep authored capture accessors at the stepped frame boundary.
+
+        A stock Scene may not have constructed its capture Camera yet. Its
+        ordinary lazy initializer can run before native playback, after which
+        the caller checks the completed camera again. Inspecting an authored
+        Scene.camera descriptor here must never call it just to select a path.
+        """
+        own = _plain_state(scene)
+        if (own is None or not _static_is(scene, "camera", scene_camera)
+                or not classes_unchanged()):
+            return True
+        if own.get("_camera") is None:
+            return False
+        return frozen_light(scene) is None
+
     g["_fmn_native_playback_light"] = frozen_light
+    g["_fmn_readback_needs_host_capture"] = readback_needs_host_capture
     g["_fmn_finalize_native_playback"] = finalize
     g["_FMN_NATIVE_PLAYBACK_INSTALLED"] = True

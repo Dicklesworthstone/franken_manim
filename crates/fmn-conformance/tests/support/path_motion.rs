@@ -201,9 +201,7 @@ pub(super) fn run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
 /// Reject a later family member's invalid map before publishing any part of
 /// that sample. The previous successful frame remains the recoverable state,
 /// including during skip, where no packets are captured.
-pub(super) fn functional_motion_failures(
-    ctx: &mut RunCtx,
-) -> Result<RunOutcome, ScenarioError> {
+pub(super) fn functional_motion_failures(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     ctx.set_fps((4, 1));
     let mut modes = 0_u64;
     let mut emitted_frames = 0_u64;
@@ -275,7 +273,9 @@ pub(super) fn functional_motion_failures(
             let result = scene.play(vec![animation], PlayOverrides::default(), &mut sink);
             if !matches!(
                 result,
-                Err(SceneError::Animation(AnimError::Stage(StageError::InvalidPointMap(_))))
+                Err(SceneError::Animation(AnimError::Stage(
+                    StageError::InvalidPointMap(_)
+                )))
             ) {
                 return Err(super::fail(format!(
                     "invalid functional motion lost its typed refusal (flow={flow}, skip={skip}): {result:?}"
@@ -288,10 +288,7 @@ pub(super) fn functional_motion_failures(
                     sink.packets.len()
                 )));
             }
-            for (member, expected) in [
-                (first, [0.5, 0.125, 0.0]),
-                (later, [2.25, 0.25, 0.0]),
-            ] {
+            for (member, expected) in [(first, [0.5, 0.125, 0.0]), (later, [2.25, 0.25, 0.0])] {
                 if scene.stage().get_points(member).as_deref() != Some(&[expected]) {
                     return Err(super::fail(format!(
                         "invalid later map partially changed its family (flow={flow}, skip={skip})"
@@ -299,7 +296,9 @@ pub(super) fn functional_motion_failures(
                 }
             }
             if scene.stage().is_updating_suspended(moving) {
-                return Err(super::fail("failed functional motion left its family suspended"));
+                return Err(super::fail(
+                    "failed functional motion left its family suspended",
+                ));
             }
             emitted_frames += sink.packets.len() as u64;
             modes += 1;
@@ -354,15 +353,18 @@ pub(super) fn tracked_position_failure(ctx: &mut RunCtx) -> Result<RunOutcome, S
                 false,
             )
             .map_err(|error| super::fail(format!("attach tracked removal: {error}")))?;
-        let animation = MaintainPositionRelativeTo::new(scene.stage(), moving, tracked).with_config(
-            AnimConfig {
+        let animation = MaintainPositionRelativeTo::new(scene.stage(), moving, tracked)
+            .with_config(AnimConfig {
                 run_time: 1.0,
                 suspend_mobject_updating: true,
                 ..AnimConfig::default()
-            },
-        );
+            });
         let mut sink = super::PacketSink::default();
-        let result = scene.play(vec![Box::new(animation)], PlayOverrides::default(), &mut sink);
+        let result = scene.play(
+            vec![Box::new(animation)],
+            PlayOverrides::default(),
+            &mut sink,
+        );
         if !matches!(
             result,
             Err(SceneError::Animation(AnimError::StaleHandle(mob))) if mob == tracked
@@ -381,7 +383,9 @@ pub(super) fn tracked_position_failure(ctx: &mut RunCtx) -> Result<RunOutcome, S
         if scene.stage().get_center(moving) != [3.0, 2.0, 0.0]
             || scene.stage().is_updating_suspended(moving)
         {
-            return Err(super::fail("failed follower moved or retained its suspension"));
+            return Err(super::fail(
+                "failed follower moved or retained its suspension",
+            ));
         }
         emitted_frames += sink.packets.len() as u64;
     }

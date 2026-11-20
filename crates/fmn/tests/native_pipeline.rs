@@ -687,8 +687,8 @@ fn functional_motion_failures_abort_staged_pixels_and_allow_immediate_retry() {
                         },
                         false,
                     )?;
-                    let animation = MaintainPositionRelativeTo::new(stage, moving, tracked)
-                        .with_config(config);
+                    let animation =
+                        MaintainPositionRelativeTo::new(stage, moving, tracked).with_config(config);
                     stage.play(animation)?;
                 }
             }

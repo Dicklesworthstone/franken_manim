@@ -203,7 +203,9 @@ impl Animation for Homotopy {
         let config = &self.state.config;
         let spanned = time_spanned_alpha(alpha, config.run_time, config.time_span);
         if !alpha.is_finite() || !spanned.is_finite() || !config.lag_ratio.is_finite() {
-            self.error = Some(AnimError::InvalidPath("Homotopy sample timing must be finite"));
+            self.error = Some(AnimError::InvalidPath(
+                "Homotopy sample timing must be finite",
+            ));
             return;
         }
         let lag_ratio = config.lag_ratio;
@@ -280,9 +282,7 @@ fn map_homotopy_member(
     let mut mapped = Vec::with_capacity(points.len());
     for point in points {
         if point.iter().any(|coordinate| !coordinate.is_finite()) {
-            return Err(
-                StageError::InvalidPointMap("Homotopy input points must be finite").into(),
-            );
+            return Err(StageError::InvalidPointMap("Homotopy input points must be finite").into());
         }
         let point = homotopy(point[0], point[1], point[2], time)?;
         validate_mapped_point(point)?;
@@ -310,7 +310,10 @@ impl PointGeometry {
             if entry.buffer.schema().field_width(key) != Some(3) {
                 return Err(StageError::SchemaMismatch.into());
             }
-            let values = entry.buffer.read_column(key).ok_or(StageError::SchemaMismatch)?;
+            let values = entry
+                .buffer
+                .read_column(key)
+                .ok_or(StageError::SchemaMismatch)?;
             columns.push((key.clone(), values));
         }
         Ok(Self {
@@ -344,14 +347,22 @@ impl PointGeometry {
             if width == 0 {
                 return Err(StageError::SchemaMismatch.into());
             }
-            let values = entry.buffer.read_column(key).ok_or(StageError::SchemaMismatch)?;
-            if values.chunks_exact(width).enumerate().any(|(index, record)| {
-                surface_sample_is_present(validity.as_deref(), index)
-                    && record.iter().any(|value| !value.is_finite())
-            }) {
-                return Err(
-                    StageError::InvalidPointMap("mapped geometry must fit finite f32 records").into(),
-                );
+            let values = entry
+                .buffer
+                .read_column(key)
+                .ok_or(StageError::SchemaMismatch)?;
+            if values
+                .chunks_exact(width)
+                .enumerate()
+                .any(|(index, record)| {
+                    surface_sample_is_present(validity.as_deref(), index)
+                        && record.iter().any(|value| !value.is_finite())
+                })
+            {
+                return Err(StageError::InvalidPointMap(
+                    "mapped geometry must fit finite f32 records",
+                )
+                .into());
             }
             columns.push((key.to_owned(), values));
         }
@@ -367,7 +378,8 @@ impl PointGeometry {
         if entry.buffer.schema().field_width("point") != Some(3)
             || self.columns.iter().any(|(key, values)| {
                 entry.buffer.schema().field_width(key).is_none_or(|width| {
-                    width == 0 || values.len() / width != self.len
+                    width == 0
+                        || values.len() / width != self.len
                         || !values.len().is_multiple_of(width)
                 })
             })
@@ -408,7 +420,9 @@ impl HomotopyScratch {
         };
         for row in rows {
             let original = row[0];
-            let entry = stage.get(original).ok_or(AnimError::StaleHandle(original))?;
+            let entry = stage
+                .get(original)
+                .ok_or(AnimError::StaleHandle(original))?;
             let staged = scratch
                 .stage
                 .add(Mobject::from_buffer(entry.buffer.snapshot_clone()));
@@ -427,7 +441,9 @@ impl HomotopyScratch {
 
     fn reset(&mut self, stage: &Stage) -> Result<(), AnimError> {
         for &(original, staged) in &self.members {
-            let entry = stage.get(original).ok_or(AnimError::StaleHandle(original))?;
+            let entry = stage
+                .get(original)
+                .ok_or(AnimError::StaleHandle(original))?;
             self.stage
                 .get_mut(staged)
                 .ok_or(StageError::StaleHandle)?
@@ -565,7 +581,9 @@ impl Animation for PhaseFlow {
             return Err(AnimError::StaleHandle(mobject));
         }
         if !self.virtual_time.is_finite() {
-            return Err(AnimError::InvalidPath("PhaseFlow virtual time must be finite"));
+            return Err(AnimError::InvalidPath(
+                "PhaseFlow virtual time must be finite",
+            ));
         }
         Ok(())
     }
@@ -593,16 +611,17 @@ impl Animation for PhaseFlow {
             let field = &self.function;
             let map = |point: Vec3| -> Result<Vec3, AnimError> {
                 if point.iter().any(|coordinate| !coordinate.is_finite()) {
-                    return Err(
-                        StageError::InvalidPointMap("PhaseFlow input points must be finite").into(),
-                    );
+                    return Err(StageError::InvalidPointMap(
+                        "PhaseFlow input points must be finite",
+                    )
+                    .into());
                 }
                 let velocity = field(point)?;
                 if velocity.iter().any(|coordinate| !coordinate.is_finite()) {
-                    return Err(
-                        StageError::InvalidPointMap("PhaseFlow field must return finite vectors")
-                            .into(),
-                    );
+                    return Err(StageError::InvalidPointMap(
+                        "PhaseFlow field must return finite vectors",
+                    )
+                    .into());
                 }
                 let mapped = [
                     point[0] + dt * velocity[0],

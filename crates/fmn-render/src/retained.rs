@@ -1557,18 +1557,9 @@ fn surface_mesh(
                     reason: "textured surface UV and opacity must be finite",
                 });
             }
-            SurfaceVertex::textured(
-                position,
-                normal,
-                uv.map(f64::from),
-                f64::from(opacity),
-            )
+            SurfaceVertex::textured(position, normal, uv.map(f64::from), f64::from(opacity))
         } else {
-            SurfaceVertex::colored(
-                position,
-                normal,
-                record_rgba(stage, mob, record)?,
-            )
+            SurfaceVertex::colored(position, normal, record_rgba(stage, mob, record)?)
         };
         vertices.push(vertex);
     }

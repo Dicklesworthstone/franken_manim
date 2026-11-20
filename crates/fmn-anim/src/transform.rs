@@ -1009,7 +1009,6 @@ pub(crate) mod scratch_tests {
         ]
     }
 
-
     pub(crate) fn styled_path(stage: &mut Stage, len: u32, opacity: f64) -> Mob {
         let points: Vec<_> = (0..len)
             .map(|x| [f64::from(x), f64::from(x % 3), 0.0])
@@ -1071,7 +1070,12 @@ pub(crate) mod scratch_tests {
                         .map(f32::to_bits)
                         .collect::<Vec<_>>()
                 };
-                assert_eq!(bits(&actual.buffer), bits(&expected.buffer), "{}", field.name);
+                assert_eq!(
+                    bits(&actual.buffer),
+                    bits(&expected.buffer),
+                    "{}",
+                    field.name
+                );
             }
         }
     }

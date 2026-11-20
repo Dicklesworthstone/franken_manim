@@ -157,7 +157,8 @@ fn capture_sample(
 ) {
     // Ask only after the boundary: an updater or input event may have attached
     // a render/recording consumer during this very frame.
-    if capture.capture_state_required() || (final_sample && capture.capture_final_state_required()) {
+    if capture.capture_state_required() || (final_sample && capture.capture_final_state_required())
+    {
         capture.capture(FramePacket::freeze(stage, clock, rng, sample));
     } else {
         capture.capture_metadata(FrameMetadata::capture(clock, rng, sample));

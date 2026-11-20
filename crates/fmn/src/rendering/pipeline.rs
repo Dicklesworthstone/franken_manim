@@ -378,7 +378,10 @@ impl RenderWorker {
         threads: usize,
     ) -> Result<FrameBuffer, NativeFrameError> {
         if self.yuv_conversion == YuvConversionPolicy::Persistent
-            && matches!(output.layout().format(), PixelFormat::Nv12 | PixelFormat::P010)
+            && matches!(
+                output.layout().format(),
+                PixelFormat::Nv12 | PixelFormat::P010
+            )
         {
             if self
                 .conversion_team
@@ -1443,7 +1446,6 @@ mod handoff_tests {
         (stage, config, camera)
     }
 
-
     fn parallel_conversion_fixture() -> (fmn_mobject::Stage, RetainedFrameRendererConfig, Camera) {
         let (stage, mut config, _) = camera_fixture();
         config.frame.viewport = Viewport {
@@ -1482,7 +1484,9 @@ mod handoff_tests {
             let mut started = None;
             for step in 0..3 {
                 stage.shift(moving, [0.125, 0.0, 0.0]);
-                let frame = camera_compiler.prepare_with_camera(&stage, &camera).unwrap();
+                let frame = camera_compiler
+                    .prepare_with_camera(&stage, &camera)
+                    .unwrap();
                 let raw = frame.render(1).unwrap();
                 convert_into(&raw, &mut expected, 1).unwrap();
                 assert!(!worker.render_camera(&frame, 4, &mut output).unwrap());
@@ -1538,7 +1542,9 @@ mod handoff_tests {
         for format in [PixelFormat::Nv12, PixelFormat::P010] {
             let (stage, config, camera) = parallel_conversion_fixture();
             let mut camera_compiler = CameraCompiler::new(config).unwrap();
-            let frame = camera_compiler.prepare_with_camera(&stage, &camera).unwrap();
+            let frame = camera_compiler
+                .prepare_with_camera(&stage, &camera)
+                .unwrap();
             let mut worker = RenderWorker {
                 yuv_conversion: YuvConversionPolicy::Persistent,
                 ..RenderWorker::default()

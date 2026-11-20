@@ -62,6 +62,37 @@ the isolated Studio worker, make offline native `fmn` depend on Python, or claim
 certified input-closure/reload replay for arbitrary Python effects.
 
 
+## Reading the last sampled image
+
+Ordinary `Scene.play()`, `Scene.wait()` and `Scene.wait_frames()` retain their
+last sampled frame for camera readback, including when no output file is open.
+`scene.camera.get_pixel_array()` returns an independent writable RGBA array.
+`scene.get_image()` and `scene.camera.get_image()` return the same immutable
+native image, with `size`, `pixels()`, `png()`, `save_png(path)` and notebook PNG
+display support:
+
+```python
+scene.play(box.animate.shift(RIGHT), run_time_frames=12)
+image = scene.get_image()
+png_bytes = image.png()
+image.save_png("last-sample.png")
+```
+
+The image records the capture boundary before animation removers, finish
+callbacks and final zero-time updates. Changing objects or the camera afterward
+does not change it. Readback rasterizes lazily and does not run an updater or
+advance the clock. A later successful capture replaces the pending image;
+skipped or empty segments leave it intact. Updaters can read the previous
+completed sample, and an early-stop wait retains the sample that preceded its
+stopping predicate. The retained state contains no Python callbacks or live
+scene references.
+
+Use `camera.capture_snapshot(*scene.mobjects)` to explicitly capture current
+geometry. `camera.clear()` replaces the image with its background, and resizing
+invalidates pending pixels from the previous resolution. Native images provide
+the methods above rather than a Pillow object. `SceneFileWriter.save_final_image`
+accepts these native images and publishes their frozen PNG through Reel.
+
 ## Literal IPython embedding
 
 `InteractiveScene.embed(namespace)` now launches an actual managed

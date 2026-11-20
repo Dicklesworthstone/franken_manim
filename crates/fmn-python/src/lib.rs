@@ -90,6 +90,7 @@ pub use tex_preamble::run_portal_gauntlet_tex_preamble;
 pub use portal_readback::{
     run_portal_gauntlet_camera_frame_points, run_portal_gauntlet_disc_recovery,
     run_portal_gauntlet_rectangle_recovery, run_portal_gauntlet_rounded_rectangle_recovery,
+    run_portal_gauntlet_scene_readback,
 };
 #[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
@@ -1028,7 +1029,9 @@ impl PortalFrameSession {
     fn capture_pure(
         &mut self,
         segment: &fmn_anim::pure_frame::PureSegment,
-    ) -> Result<Vec<f64>, fmn_scene::IntegrationError> {
+        retain_last: bool,
+    ) -> Result<(Vec<f64>, Option<fmn_mobject::FrozenRenderState>), fmn_scene::IntegrationError>
+    {
         // Inspect all prepared endpoint materials before any prefix worker
         // can publish a frame, including images decoded before this session.
         self.image_inputs.observe(segment.image_resources())?;
@@ -1052,6 +1055,7 @@ impl PortalFrameSession {
         let had_camera_reason = self.routes.first_camera_reason.is_some();
         let color_grade = self.conversion.color_grade().clone();
         let started = Instant::now();
+        let mut last_capture = None;
         // No Scene borrow, Python handle or authored callback enters the
         // detached closure. Every bounded worker joins before begin/finish-
         // owned authored state can be observed or mutated again.
@@ -1075,7 +1079,11 @@ impl PortalFrameSession {
                         let stage = job.try_materialize().map_err(|error| {
                             fmn_scene::IntegrationError::new("choreo", error.to_string())
                         })?;
-                        self.capture_stage(&stage, preparation_start, reservation)
+                        self.capture_stage(&stage, preparation_start, reservation)?;
+                        if retain_last {
+                            last_capture = Some(stage.freeze_render_state());
+                        }
+                        Ok(())
                     },
                 )
             })
@@ -1096,7 +1104,7 @@ impl PortalFrameSession {
         self.routes.teams_used = self.routes.teams_used.max(completed.teams_used);
         self.routes.performance.pure_play_segments += 1;
         self.routes.performance.pure_play_frames += completed.owner_frames;
-        Ok(completed.alphas)
+        Ok((completed.alphas, last_capture))
     }
 
     const fn frame_count(&self) -> u64 {
@@ -1302,6 +1310,8 @@ struct PyScene {
     roots_projection: RefCell<Option<RootsProjection>>,
     /// Optional production output session shared by every play/wait sink.
     render: Arc<Mutex<Option<PortalRenderSession>>>,
+    /// Lazy image readback shares the capture boundary, not the live Scene.
+    readback: Rc<RefCell<portal_readback::SceneReadback>>,
     /// Output identity, including recordings that keep the same scene arena.
     /// Retaining a token across callbacks prevents allocator-address reuse.
     render_generation: Arc<()>,
@@ -8755,26 +8765,67 @@ fn portal_allows_native_play(
     Ok(true)
 }
 
+/// Initialize a stock lazy capture camera without adding a call to an authored
+/// camera/light protocol. Those observers retain the stepped capture boundary,
+/// even when the only consumer is an eventual in-memory image read.
+fn prepare_portal_readback(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
+    let needs_host = scene
+        .py()
+        .import("manimlib")?
+        .getattr("_fmn_readback_needs_host_capture")?;
+    if needs_host.call1((scene,))?.extract::<bool>()? {
+        return Ok(true);
+    }
+    synchronize_portal_camera(scene)?;
+    // A lazy constructor can install a custom camera or light. Recheck the
+    // completed protocol before allowing the native driver to retain it.
+    needs_host.call1((scene,))?.extract::<bool>()
+}
+
 /// Freeze host camera state while no Scene borrow is live. The existing
 /// stepped release boundary then runs native updaters and captures the frame.
 fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
-    if !portal_has_frame_render(scene)? {
-        return Ok(());
-    }
     let engine = Rc::clone(&scene.borrow().engine);
     let generation = Arc::clone(&scene.borrow().render_generation);
-    let camera = scene.getattr("camera")?;
+    let camera = match scene.getattr("camera") {
+        Ok(camera) => camera,
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(scene.py()) => {
+            scene.borrow().readback.borrow_mut().target = None;
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
     // Use the same validated capture policy as Camera.capture_snapshot.
     // File and Studio sessions start before the scene camera is synchronized.
-    let samples = camera
-        .getattr("_core")?
-        .extract::<PyRef<'_, PyCameraCore>>()?
-        .camera
-        .samples();
-    let core = camera.getattr("frame")?.getattr("_core")?;
+    let camera_core = camera.getattr("_core")?;
+    let (mut captured_camera, readback_slot) = {
+        let core = camera_core.extract::<PyRef<'_, PyCameraCore>>()?;
+        (core.camera.clone(), Rc::clone(&core.readback))
+    };
+    let samples = captured_camera.samples();
+    let frame_object = camera.getattr("frame")?;
+    let core = frame_object.getattr("_core")?;
     let frame = core
         .extract::<PyRef<'_, PyCameraFrameCore>>()?
         .snapshot(scene.py())?;
+    let points = core
+        .extract::<PyRef<'_, PyCameraFrameCore>>()?
+        .points(scene.py())?;
+    let frame_mob = frame_object
+        .extract::<PyRef<'_, BridgeMobject>>()
+        .ok()
+        .and_then(|proxy| {
+            proxy
+                .engine
+                .as_ref()
+                .filter(|owner| Rc::ptr_eq(owner, &engine))
+                .and(proxy.mob)
+        });
+    let threads = match camera.getattr("capture_threads") {
+        Ok(threads) => threads.extract::<usize>()?,
+        Err(error) if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(scene.py()) => 1,
+        Err(error) => return Err(error),
+    };
     let rgba: [f64; 4] = camera.getattr("background_rgba")?.extract()?;
     if !rgba.iter().all(|component| component.is_finite()) {
         return Err(PyValueError::new_err(
@@ -8819,6 +8870,13 @@ fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
                 .filter(|owner| native_center && Rc::ptr_eq(owner, &engine))
                 .and(proxy.mob)
         });
+    *captured_camera.frame_mut() = frame.clone();
+    captured_camera
+        .set_background(background)
+        .map_err(camera_error)?;
+    captured_camera
+        .set_light_source_position(light_position)
+        .map_err(camera_error)?;
     let render = Arc::clone(&scene.borrow().render);
     let mut render = render
         .lock()
@@ -8832,6 +8890,13 @@ fn synchronize_portal_camera(scene: &Bound<'_, PyScene>) -> PyResult<()> {
             Some(samples),
         )?;
     }
+    scene.borrow().readback.borrow_mut().target = Some(portal_readback::SceneCapture {
+        slot: readback_slot,
+        camera: captured_camera,
+        frame_points: frame_mob.map(|mob| (mob, points)),
+        light_mob,
+        threads,
+    });
     Ok(())
 }
 
@@ -8941,6 +9006,7 @@ impl PyScene {
             proxy_generation: Cell::new(0),
             roots_projection: RefCell::new(None),
             render: Arc::new(Mutex::new(None)),
+            readback: Rc::new(RefCell::new(portal_readback::SceneReadback::default())),
             render_generation: Arc::new(()),
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
@@ -9153,6 +9219,7 @@ impl PyScene {
         if needs_final_capture {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&render),
+                readback: Rc::clone(&slf.borrow().readback),
                 ..PortalSceneSink::default()
             };
             engine
@@ -9996,12 +10063,17 @@ impl PyScene {
         // existing release boundary, before updaters/capture, so publishing
         // those points never re-enters an already borrowed Scene.
         let camera_needs_release = camera_lerp.is_some();
-        let release_for_python_updaters =
-            host_updates || camera_needs_release || (render_observes_frames && !pure_play);
+        let readback_needs_release = prepare_portal_readback(slf)?;
+        let release_for_python_updaters = host_updates
+            || camera_needs_release
+            || readback_needs_release
+            || (render_observes_frames && !pure_play);
         let mut sink = PortalSceneSink {
             camera: camera_lerp,
             camera_preapplied: camera_needs_release,
             render: Arc::clone(&slf.borrow().render),
+            readback: Rc::clone(&slf.borrow().readback),
+            readback_every_frame: host_updates || callback_count != 0 || readback_needs_release,
             pure_play,
             ..PortalSceneSink::default()
         };
@@ -10059,11 +10131,12 @@ impl PyScene {
                             break;
                         };
                         sink.apply_camera_before_updaters(slf.py(), release.time)?;
-                        let (python_ns, completed) = portal_playback::run_scene_frame_update_phase(
-                            slf,
-                            release.dt,
-                            release.time.fps(),
-                        )?;
+                        let (python_ns, native_updater_ns, completed) =
+                            portal_playback::run_scene_capture_frame_update_phase(
+                                slf,
+                                release.dt,
+                                release.time.fps(),
+                            )?;
                         if completed {
                             wait.mark_scene_updaters_complete().map_err(scene_error)?;
                         }
@@ -10073,8 +10146,9 @@ impl PyScene {
                             .borrow_mut()
                             .complete_stepped_wait_frame(&mut wait, &mut sink)
                             .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-                        let native_ns =
-                            u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                        let native_ns = u64::try_from(native_start.elapsed().as_nanos())
+                            .unwrap_or(u64::MAX)
+                            .saturating_add(native_updater_ns);
                         crossing::record_phase(python_ns, native_ns);
                     }
                     sink.finish_camera_before_updaters(slf.py())?;
@@ -10192,11 +10266,12 @@ impl PyScene {
                         break;
                     };
                     sink.apply_camera_before_updaters(slf.py(), release.time)?;
-                    let (python_ns, completed) = portal_playback::run_scene_frame_update_phase(
-                        slf,
-                        release.dt,
-                        release.time.fps(),
-                    )?;
+                    let (python_ns, native_updater_ns, completed) =
+                        portal_playback::run_scene_capture_frame_update_phase(
+                            slf,
+                            release.dt,
+                            release.time.fps(),
+                        )?;
                     if completed {
                         play.mark_scene_updaters_complete()
                             .map_err(&map_play_error)?;
@@ -10207,8 +10282,9 @@ impl PyScene {
                         .borrow_mut()
                         .complete_stepped_play_frame(&mut play, &mut sink)
                         .map_err(&map_play_error)?;
-                    let native_ns =
-                        u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                    let native_ns = u64::try_from(native_start.elapsed().as_nanos())
+                        .unwrap_or(u64::MAX)
+                        .saturating_add(native_updater_ns);
                     crossing::record_phase(python_ns, native_ns);
                 }
                 if callback_count != 0 {
@@ -10304,6 +10380,8 @@ impl PyScene {
             camera_preapplied: _,
             camera_finished_before_updaters,
             pure_play: _,
+            readback: _,
+            readback_every_frame: _,
         } = sink;
         if let Some(error) = camera_error {
             return Err(error);
@@ -10430,9 +10508,15 @@ impl PyScene {
         portal_playback::synchronize(slf)?;
         let needs_host_updates =
             portal_playback::requires_public_scene_update(slf)? || has_python_updaters(slf, &[])?;
-        if !needs_host_updates && stop_condition.is_none() && !portal_has_frame_render(slf)? {
+        let readback_needs_release = prepare_portal_readback(slf)?;
+        if !needs_host_updates
+            && !readback_needs_release
+            && stop_condition.is_none()
+            && !portal_has_frame_render(slf)?
+        {
             let mut sink = PortalSceneSink {
                 render: Arc::clone(&slf.borrow().render),
+                readback: Rc::clone(&slf.borrow().readback),
                 ..PortalSceneSink::default()
             };
             let result = if let Some(frames) = duration_frames {
@@ -10458,6 +10542,8 @@ impl PyScene {
         };
         let mut sink = PortalSceneSink {
             render: Arc::clone(&slf.borrow().render),
+            readback: Rc::clone(&slf.borrow().readback),
+            readback_every_frame: true,
             ..PortalSceneSink::default()
         };
         let mut wait = {
@@ -10486,11 +10572,12 @@ impl PyScene {
                 };
                 // Reinspect at every release: a stop condition, callback or
                 // captured-frame observer can install a new update protocol.
-                let (python_ns, completed) = portal_playback::run_scene_frame_update_phase(
-                    slf,
-                    release.dt,
-                    release.time.fps(),
-                )?;
+                let (python_ns, native_updater_ns, completed) =
+                    portal_playback::run_scene_capture_frame_update_phase(
+                        slf,
+                        release.dt,
+                        release.time.fps(),
+                    )?;
                 if completed {
                     wait.mark_scene_updaters_complete().map_err(scene_error)?;
                 }
@@ -10500,8 +10587,9 @@ impl PyScene {
                     .borrow_mut()
                     .complete_stepped_wait_frame(&mut wait, &mut sink)
                     .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
-                let native_ns =
-                    u64::try_from(native_start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+                let native_ns = u64::try_from(native_start.elapsed().as_nanos())
+                    .unwrap_or(u64::MAX)
+                    .saturating_add(native_updater_ns);
                 crossing::record_phase(python_ns, native_ns);
                 // The Reference checks after emitting the frame where the
                 // predicate turns true. Keep the Scene borrow released so a
@@ -11715,6 +11803,8 @@ struct PortalSceneSink {
     camera: Option<CameraLerp>,
     camera_error: Option<PyErr>,
     render: Arc<Mutex<Option<PortalRenderSession>>>,
+    readback: Rc<RefCell<portal_readback::SceneReadback>>,
+    readback_every_frame: bool,
     camera_preapplied: bool,
     camera_finished_before_updaters: bool,
     // Opt in only for callback-free plays. Cached static waits retain their
@@ -11794,14 +11884,24 @@ impl fmn_scene::SceneSink for PortalSceneSink {
                 "native pure plays require an active frame generation",
             ));
         };
-        self.alphas.extend(session.capture_pure(segment)?);
+        let retain_last = self.readback.borrow().required();
+        let (alphas, last_capture) = session.capture_pure(segment, retain_last)?;
+        self.alphas.extend(alphas);
+        if let Some(state) = last_capture {
+            self.readback.borrow().capture_state(state);
+        }
         Ok(())
     }
 
     fn capture_state_required(&self) -> bool {
         // Poison must reach the ordinary capture error path, not silently
         // turn an active renderer into a discarded metadata-only capture.
-        self.render.lock().map_or(true, |render| render.is_some())
+        (self.readback_every_frame && self.readback.borrow().required())
+            || self.render.lock().map_or(true, |render| render.is_some())
+    }
+
+    fn capture_final_state_required(&self) -> bool {
+        self.readback.borrow().required()
     }
 
     fn capture_metadata(
@@ -11823,8 +11923,9 @@ impl fmn_scene::SceneSink for PortalSceneSink {
             fmn_scene::IntegrationError::new("portal-render", "render session lock was poisoned")
         })?;
         if let Some(session) = render.as_mut() {
-            session.capture(packet)?;
+            session.capture(packet.clone())?;
         }
+        self.readback.borrow().capture(packet);
         Ok(())
     }
 }
@@ -12595,29 +12696,44 @@ impl PyCameraFrameCore {
                 // Preserve authored f64 components when their corresponding
                 // f32 controls have not changed: an auxiliary z edit or an
                 // x-only translation must not quantize unrelated camera axes.
-                let mut frame = self.frame.borrow().clone();
-                let mut center = frame.center();
-                for (axis, coordinate) in center.iter_mut().enumerate() {
-                    if previous.is_none_or(|old| old[0][axis] != points[0][axis]) {
-                        *coordinate = points[0][axis];
-                    }
-                }
-                let spans = [points[2][0] - points[1][0], points[4][1] - points[3][1]];
-                let previous_spans =
-                    previous.map(|old| [old[2][0] - old[1][0], old[4][1] - old[3][1]]);
-                let mut shape = frame.shape();
-                for (axis, span) in shape.iter_mut().enumerate() {
-                    if previous_spans.is_none_or(|old| old[axis] != spans[axis]) {
-                        *span = spans[axis];
-                    }
-                }
-                frame.set_center(center).map_err(camera_error)?;
-                frame.set_shape(shape).map_err(camera_error)?;
+                let frame = Self::frame_for_points(&self.frame.borrow(), previous, points)?;
                 *self.frame.borrow_mut() = frame;
                 self.mirrored_points.set(Some(points));
             }
         }
         Ok(self.frame.borrow().clone())
+    }
+
+    /// Reconcile only changed control lanes, identically for live reads and
+    /// lazy reads of a frozen frame. Preserve untouched authored f64 values.
+    fn frame_for_points(
+        frame: &fmn_scene::studio_bridge::CameraFrame,
+        previous: Option<[[f64; 3]; 5]>,
+        points: [[f64; 3]; 5],
+    ) -> PyResult<fmn_scene::studio_bridge::CameraFrame> {
+        if !points.iter().flatten().all(|value| value.is_finite()) {
+            return Err(PyValueError::new_err(
+                "CameraFrame control points must be finite",
+            ));
+        }
+        let mut frame = frame.clone();
+        let mut center = frame.center();
+        for (axis, coordinate) in center.iter_mut().enumerate() {
+            if previous.is_none_or(|old| old[0][axis] != points[0][axis]) {
+                *coordinate = points[0][axis];
+            }
+        }
+        let spans = [points[2][0] - points[1][0], points[4][1] - points[3][1]];
+        let previous_spans = previous.map(|old| [old[2][0] - old[1][0], old[4][1] - old[3][1]]);
+        let mut shape = frame.shape();
+        for (axis, span) in shape.iter_mut().enumerate() {
+            if previous_spans.is_none_or(|old| old[axis] != spans[axis]) {
+                *span = spans[axis];
+            }
+        }
+        frame.set_center(center).map_err(camera_error)?;
+        frame.set_shape(shape).map_err(camera_error)?;
+        Ok(frame)
     }
 
     fn publish(
@@ -12656,6 +12772,7 @@ impl PyCameraFrameCore {
 #[pyclass(unsendable, name = "_CameraCore")]
 struct PyCameraCore {
     camera: Camera,
+    readback: portal_readback::ReadbackSlot,
 }
 
 fn camera_error(error: fmn_scene::studio_bridge::CameraError) -> PyErr {
@@ -12924,7 +13041,10 @@ impl PyCameraCore {
             frame: frame.snapshot(frame.py())?,
         })
         .map_err(camera_error)?;
-        Ok(Self { camera })
+        Ok(Self {
+            camera,
+            readback: Rc::new(RefCell::new(None)),
+        })
     }
 
     fn pixel_shape(&self) -> (u32, u32) {
@@ -12935,7 +13055,19 @@ impl PyCameraCore {
         self.camera
             .set_pixel_shape(width, height)
             .map_err(camera_error)?;
+        self.readback.borrow_mut().take();
         Ok(())
+    }
+
+    fn _take_scene_capture(
+        &self,
+        py: Python<'_>,
+    ) -> PyResult<Option<portal_readback::CameraCapture>> {
+        portal_readback::take_scene_capture(py, &self.readback)
+    }
+
+    fn _discard_scene_capture(&self) {
+        self.readback.borrow_mut().take();
     }
 
     fn fps(&self) -> u32 {

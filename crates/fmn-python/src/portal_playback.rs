@@ -104,14 +104,50 @@ fn with_frame_step<T>(
     result
 }
 
-pub(super) fn run_scene_frame_update_phase(
+/// Complete native slots before an authored capture observer reads their
+/// results. Stock capture state can still be recovered from the frozen packet,
+/// so its ordinary native driver keeps ownership of that phase.
+pub(super) fn run_scene_capture_frame_update_phase(
     scene: &Bound<'_, PyScene>,
     dt: f64,
     fps: u32,
-) -> PyResult<(u64, bool)> {
-    with_frame_step(scene, dt, fps, |delta| {
+) -> PyResult<(u64, u64, bool)> {
+    let (python_ns, mut completed) = with_frame_step(scene, dt, fps, |delta| {
         run_scene_update_phase_with_delta(scene, delta)
-    })
+    })?;
+    let engine = Rc::clone(&scene.borrow().engine);
+    let check_failure = || -> PyResult<()> {
+        if let Some(error) = engine.borrow().stage().updater_error().cloned() {
+            return Err(scene_error(fmn_anim::AnimError::from(error).into()));
+        }
+        Ok(())
+    };
+    check_failure()?;
+    let mut native_ns = 0;
+    // Reinspect after Python updaters: one may have installed a capture
+    // descriptor in this very frame. Admission itself invokes no descriptor.
+    if !completed
+        && scene
+            .py()
+            .import("manimlib")?
+            .getattr("_fmn_readback_needs_host_capture")?
+            .call1((scene,))?
+            .extract::<bool>()?
+    {
+        let started = Instant::now();
+        {
+            let mut runtime = engine.borrow_mut();
+            let time = runtime.time().to_f64();
+            // This is precisely complete_play/wait_frame's native phase:
+            // the clock already advanced, and suspension/root policy remains
+            // Marionette's. The cursor completion marker prevents a repeat.
+            runtime.stage_mut().update_at_time(dt, time);
+        }
+        native_ns = u64::try_from(started.elapsed().as_nanos()).unwrap_or(u64::MAX);
+        check_failure()?;
+        completed = true;
+    }
+    Ok((python_ns, native_ns, completed))
 }
 
 pub(super) fn run_python_frame_updaters(
