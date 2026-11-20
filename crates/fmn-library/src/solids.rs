@@ -2034,15 +2034,27 @@ impl VGroup3D {
     /// `set_joint_type` / `apply_depth_test`).
     #[must_use]
     pub fn build(self) -> VMobject {
-        let (shading, depth_test, joint_type) = (self.shading, self.depth_test, self.joint_type);
-        v_group(self.children.into_iter().map(move |child| {
-            child.map_uniforms(move |mut u| {
-                u.shading = shading;
-                u.depth_test = depth_test;
-                u.joint_type = joint_type;
-                u
-            })
-        }))
+        fn configure(
+            member: VMobject,
+            shading: Vec3,
+            depth_test: bool,
+            joint_type: JointType,
+        ) -> VMobject {
+            member
+                .map_uniforms(|mut uniforms| {
+                    uniforms.shading = shading;
+                    uniforms.depth_test = depth_test;
+                    uniforms.joint_type = joint_type;
+                    uniforms
+                })
+                .map_children(|child| configure(child, shading, depth_test, joint_type))
+        }
+        configure(
+            v_group(self.children),
+            self.shading,
+            self.depth_test,
+            self.joint_type,
+        )
     }
 }
 
@@ -2341,10 +2353,14 @@ impl From<Dodecahedron> for Mobject {
 
 /// `Prismify(vmobject, depth=1.0, direction=IN)`: extrude a flat
 /// vectorized mobject into a prism shell — the base copy, one wall per
-/// adjacent anchor pair, and the reversed top copy.
+/// adjacent anchor pair within each contour, and the reversed top copy.
+/// A source family produces one complete shell per pointful member, in
+/// depth-first family order; point-less containers produce no extra caps.
 ///
 /// As the Reference warns, this assumes straight edges: the walls are
-/// corner-joined quads over the *anchors*.
+/// corner-joined quads over the *anchors*. Unlike the Reference's flat anchor
+/// walk, contour breaks never become sidewalls, and descendant geometry is
+/// extruded rather than copied into two disconnected caps.
 #[derive(Debug, Clone)]
 pub struct Prismify {
     source: VMobject,
@@ -2377,21 +2393,49 @@ impl Prismify {
         self
     }
 
-    /// Build the shell: base, walls, reversed top.
+    /// Build the shell: base, contour walls, reversed top. A source with
+    /// descendants instead returns a group of those shells, one per pointful
+    /// member. Detached child values remain distinct even when equal.
     #[must_use]
     pub fn build(self) -> VMobject {
         let vect = mul(self.direction, self.depth);
-        let mut pieces = Vec::new();
-        pieces.push(self.source.clone());
-        // `get_anchors()`: every second point of the shared-anchor layout.
-        let anchors: Vec<Vec3> = self.source.points().iter().step_by(2).copied().collect();
-        let style = self.source.style();
-        for pair in anchors.windows(2) {
-            let (p1, p2) = (pair[0], pair[1]);
-            let wall = Polygon::polyline([p1, p2, add(p2, vect), add(p1, vect)]).style(style);
-            pieces.push(wall.build());
+        if self.source.children().is_empty() {
+            return Self::build_member(self.source, vect);
         }
-        pieces.push(self.source.shifted(vect).reversed_points());
+        let mut shells = Vec::new();
+        let mut pending = vec![self.source];
+        while let Some(member) = pending.pop() {
+            let (member, children) = member.into_own_and_children();
+            // Reverse only the work stack: shell order remains the source's
+            // depth-first family order, matching the portal's family ingress.
+            pending.extend(children.into_iter().rev());
+            if !member.points().is_empty() {
+                shells.push(Self::build_member(member, vect));
+            }
+        }
+        VGroup3D::new(shells).build()
+    }
+
+    fn build_member(source: VMobject, vect: Vec3) -> VMobject {
+        let mut pieces = Vec::new();
+        pieces.push(source.clone());
+        let style = source.style();
+        let path = source.path();
+        // Chisel owns break detection, including its null-curve tolerance.
+        // An even point run still follows the detached API's old anchor-chord
+        // behavior, just as VMobject::reversed_points keeps its raw fallback.
+        let contours = match &path {
+            Ok(path) => path.subpaths(),
+            Err(_) => vec![source.points()],
+        };
+        for contour in contours {
+            for curve in contour.windows(3).step_by(2) {
+                let (p1, p2) = (curve[0], curve[2]);
+                let wall = Polygon::polyline([p1, p2, add(p2, vect), add(p1, vect)]).style(style);
+                pieces.push(wall.build());
+            }
+        }
+        pieces.push(source.shifted(vect).reversed_points());
         VGroup3D::new(pieces).build()
     }
 }
@@ -3538,6 +3582,57 @@ mod tests {
     }
 
     #[test]
+    fn vgroup3d_settings_reach_nested_visible_members_without_erasing_other_uniforms() {
+        let original_uniforms = Uniforms {
+            is_fixed_in_frame: 0.5,
+            clip_planes: [[1.0, 0.0, 0.0, 0.25]; 4],
+            anti_alias_width: 2.5,
+            flat_stroke: true,
+            stroke_behind: true,
+            depth_test: true,
+            ..Uniforms::default()
+        };
+        let face = Rectangle::square(2.0)
+            .build()
+            .unwrap()
+            .with_uniforms(original_uniforms);
+        for depth_test in [true, false] {
+            let nested = v_group([v_group([face.clone()]), face.clone()]);
+            let group: Mobject = VGroup3D::new([nested])
+                .depth_test(depth_test)
+                .shading([0.1, 0.3, 0.5])
+                .joint_type(JointType::Bevel)
+                .build()
+                .into();
+            let members = [
+                &group,
+                &group.submobjects[0],
+                &group.submobjects[0].submobjects[0],
+                &group.submobjects[0].submobjects[0].submobjects[0],
+                &group.submobjects[0].submobjects[1],
+            ];
+            for member in members {
+                assert_eq!(member.uniforms.shading, [0.1, 0.3, 0.5]);
+                assert_eq!(member.uniforms.depth_test, depth_test);
+                assert_eq!(member.uniforms.joint_type, JointType::Bevel);
+                if !member.buffer.is_empty() {
+                    assert_eq!(
+                        member.uniforms,
+                        Uniforms {
+                            shading: [0.1, 0.3, 0.5],
+                            depth_test,
+                            joint_type: JointType::Bevel,
+                            ..original_uniforms
+                        },
+                        "3D propagation must retain fixed-frame, clipping and stroke policy"
+                    );
+                    assert_eq!(member.buffer.len(), face.points().len());
+                }
+            }
+        }
+    }
+
+    #[test]
     fn dodecahedron_vertex_inventory() {
         let dodeca = Dodecahedron::new().build();
         assert_eq!(dodeca.children().len(), 12);
@@ -3608,6 +3703,28 @@ mod tests {
         let shell = Prismify::new(VMobject::from_path(&source))
             .depth(2.0)
             .build();
+        assert_eq!(
+            shell.children().len(),
+            2 + 4 + 4,
+            "only the eight ring edges have sidewalls; a contour break is not an edge"
+        );
+        let expected_edges = [
+            ([0.0, 0.0, 0.0], [4.0, 0.0, 0.0]),
+            ([4.0, 0.0, 0.0], [4.0, 4.0, 0.0]),
+            ([4.0, 4.0, 0.0], [0.0, 4.0, 0.0]),
+            ([0.0, 4.0, 0.0], [0.0, 0.0, 0.0]),
+            ([1.0, 1.0, 0.0], [1.0, 3.0, 0.0]),
+            ([1.0, 3.0, 0.0], [3.0, 3.0, 0.0]),
+            ([3.0, 3.0, 0.0], [3.0, 1.0, 0.0]),
+            ([3.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+        ];
+        for (wall, (from, to)) in shell.children()[1..9].iter().zip(expected_edges) {
+            assert_eq!(
+                wall.path().unwrap().anchors(),
+                [from, to, [to[0], to[1], -2.0], [from[0], from[1], -2.0]],
+                "wall order and winding follow the authored contour, including its hole"
+            );
+        }
         let near_cap = shell.children().first().unwrap().path().unwrap();
         let far_cap = shell.children().last().unwrap().path().unwrap();
         let near_contours = near_cap.subpaths();
@@ -3625,6 +3742,123 @@ mod tests {
                 .collect();
             assert_eq!(after, expected);
         }
+    }
+
+    #[test]
+    fn prismify_disjoint_open_paths_do_not_close_or_connect() {
+        let mut source = QuadPath::new();
+        source.start_new_path([0.0, 0.0, 0.0]);
+        source.add_line_to([1.0, 0.0, 0.0], true).unwrap();
+        // An isolated point is a contour with no sidewall of its own.
+        source.start_new_path([2.0, 2.0, 0.0]);
+        source.start_new_path([3.0, 0.0, 0.0]);
+        source.add_line_to([4.0, 0.0, 0.0], true).unwrap();
+        let shell = Prismify::new(VMobject::from_path(&source))
+            .depth(2.0)
+            .direction([0.25, -0.5, 1.0])
+            .build();
+        assert_eq!(shell.children().len(), 4);
+        for (wall, x) in shell.children()[1..3].iter().zip([0.0, 3.0]) {
+            assert_eq!(
+                wall.path().unwrap().anchors(),
+                [
+                    [x, 0.0, 0.0],
+                    [x + 1.0, 0.0, 0.0],
+                    [x + 1.5, -1.0, 2.0],
+                    [x + 0.5, -1.0, 2.0],
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn prismify_preserves_single_path_anchor_chords_and_degenerate_inputs() {
+        // Prismify still extrudes anchor chords: it does not turn curved
+        // paths into swept surfaces or reinterpret Chisel's break tolerance.
+        for points in [
+            vec![],
+            vec![[1.0, 2.0, 3.0]],
+            vec![[0.0; 3], [0.0; 3], [0.0; 3]],
+            vec![[0.0; 3], [0.0; 3], [0.00005, 0.0, 0.0]],
+            vec![[0.0; 3], [2.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            vec![[0.0; 3], [1.0, 3.0, 0.0], [2.0, 0.0, 0.0]],
+            // The detached VMobject API permits malformed/even point runs;
+            // retain its existing anchor-chord behavior without panicking.
+            vec![[0.0; 3], [1.0, 0.0, 0.0]],
+        ] {
+            let source = VMobject::from_points(points)
+                .with_style(Style::default().fill(BLUE, 0.7).stroke(GREY, 2.0, 0.6))
+                .with_z_index(7)
+                .with_stroke_profile([0.0, 3.0, 1.0]);
+            let mut expected = vec![source.clone()];
+            let anchors: Vec<_> = source.points().iter().step_by(2).copied().collect();
+            for edge in anchors.windows(2) {
+                expected.push(
+                    Polygon::polyline([edge[0], edge[1], add(edge[1], IN), add(edge[0], IN)])
+                        .style(source.style())
+                        .build(),
+                );
+            }
+            expected.push(source.clone().shifted(IN).reversed_points());
+            assert_eq!(
+                Prismify::new(source).build(),
+                VGroup3D::new(expected).build(),
+                "a path without contour breaks must retain its entire prior shell"
+            );
+        }
+    }
+
+    #[test]
+    fn prismify_family_extrudes_each_pointful_member_without_duplicate_caps() {
+        let parent = Polygon::new([[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+            .style(Style::default().fill(BLUE, 0.8))
+            .build()
+            .with_z_index(4)
+            .with_stroke_profile([1.0, 3.0, 2.0]);
+        let child = Rectangle::new(2.0, 1.0)
+            .style(Style::default().fill(GREY, 0.5).stroke(BLUE_E, 6.0, 0.4))
+            .build()
+            .unwrap()
+            .shifted([3.0, 0.0, 0.0])
+            .with_z_index(11);
+        // Detached children are owned values, not shared arena handles. Two
+        // equal copies both need a shell; point-less group nodes need none.
+        let family = parent.clone().with_children([
+            VMobject::new().with_child(child.clone()),
+            VMobject::new(),
+            child.clone(),
+        ]);
+        let shells = Prismify::new(family.clone()).depth(1.5).build();
+        assert_eq!(shells.children().len(), 3);
+        for (shell, member) in shells.children().iter().zip([parent, child.clone(), child]) {
+            let expected = Prismify::new(member.clone()).depth(1.5).build();
+            assert_eq!(
+                shell, &expected,
+                "family order and complete member metadata"
+            );
+            assert!(
+                shell
+                    .children()
+                    .iter()
+                    .all(|face| face.children().is_empty())
+            );
+            assert_eq!(shell.children()[0].points(), member.points());
+            assert_eq!(shell.children()[0].style(), member.style());
+            assert_eq!(
+                shell.children()[0].stroke_profile(),
+                member.stroke_profile()
+            );
+            let cap: Mobject = shell.children()[0].clone().into();
+            let source: Mobject = member.into();
+            assert_eq!(cap.z_index, source.z_index);
+        }
+        assert_eq!(
+            Prismify::new(VMobject::new().with_children([family]))
+                .depth(1.5)
+                .build(),
+            shells,
+            "an outer point-less container does not change the extruded family"
+        );
     }
 
     #[test]

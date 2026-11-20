@@ -670,6 +670,31 @@ ruling. Coverage:
 `test_become_polygon_then_fade_in_preserves_geometry_and_pixels` in
 `crates/fmn-python/tests/native_arrow_lifecycle.py`.
 
+## C-48 — Prismify follows contours and extrudes the complete source family
+
+The Reference's `Prismify` (`three_dimensions.py:398–412`) treats the
+source's flat anchor list as one continuous boundary. A gap between contours
+therefore gains a wall. It also copies the complete source family into both
+caps while extruding only the root's anchors; a point-less group leaves its
+visible children without sidewalls.
+
+**FrankenManim:** walls connect adjacent anchors within each actual contour.
+Holes keep their own wall orientation, disconnected contours stay separate,
+and open contours gain no closing edge. Each pointful source-family member
+gets a complete shell, in depth-first order. Point-less containers add no
+extra geometry. Curved input retains the existing straight anchor-chord
+approximation. The optional Python portal uses this same native contour
+builder for each of its source members.
+
+**Migration:** a single leaf still has `[near_cap, walls..., far_cap]` as
+its children. For a grouped source, address the individual member shells
+before indexing their caps or walls. Remove manually added walls that only
+compensated for missing child extrusion. Intentionally connecting two
+contours requires authored geometry, rather than a contour-break artifact.
+ADR-0032 records this application of D-05. Coverage includes the native
+`prismify_*` unit tests and the extended
+`render_matrix.prismify_compound_cap.v1` render scenario.
+
 ## `shift` takes a scalar or one 3-vector (fm-mumk)
 
 The Reference's `Mobject.shift` adds its argument to the points with numpy

@@ -13182,8 +13182,8 @@ fn native_persistent_yuv_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     )
     .map_err(|error| fail(format!("persistent native YUV render: {error}")))?;
     let plan = &persistent.execution_plan;
-    let layout = FrameLayout::tight(PixelFormat::Nv12, 128, 256)
-        .map_err(|error| fail(error.to_string()))?;
+    let layout =
+        FrameLayout::tight(PixelFormat::Nv12, 128, 256).map_err(|error| fail(error.to_string()))?;
     let raster_bands = plan
         .render_teams
         .iter()
@@ -13214,8 +13214,8 @@ fn native_persistent_yuv_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     let bytes = read("/persistent.y4m")?;
     let exact_bytes = bytes == read("/scoped.y4m")? && bytes == read("/bounded.y4m")?;
     let movie = fmn_codec::decode_y4m(&bytes).map_err(|error| fail(error.to_string()))?;
-    let visible_motion = movie.frames.len() == 4
-        && movie.frames.windows(2).all(|pair| pair[0] != pair[1]);
+    let visible_motion =
+        movie.frames.len() == 4 && movie.frames.windows(2).all(|pair| pair[0] != pair[1]);
     let before_refusal = calls.get();
     let mut short = options("/refused.y4m", YuvConversionPolicy::Persistent)?;
     short.max_resident_bytes = required - 1;
@@ -13457,10 +13457,10 @@ fn native_camera_sorted_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         .set_shape([4.0, 3.0])
         .map_err(|error| fail(error.to_string()))?;
     let mut camera = Camera::new(camera_config).map_err(|error| fail(error.to_string()))?;
-    let mut compiler = RetainedFrameRenderer::new(config)
-        .map_err(|error| fail(error.to_string()))?;
-    let mut restored_compiler = RetainedFrameRenderer::new(config)
-        .map_err(|error| fail(error.to_string()))?;
+    let mut compiler =
+        RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
+    let mut restored_compiler =
+        RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
     let mut captures = Vec::new();
     let mut outcome = RunOutcome::ok();
     for phi in [0.0, std::f64::consts::PI, 0.0] {
@@ -13471,8 +13471,8 @@ fn native_camera_sorted_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         let capture = compiler
             .prepare_with_camera(&stage, &camera)
             .map_err(|error| fail(error.to_string()))?;
-        let mut fresh = RetainedFrameRenderer::new(config)
-            .map_err(|error| fail(error.to_string()))?;
+        let mut fresh =
+            RetainedFrameRenderer::new(config).map_err(|error| fail(error.to_string()))?;
         fresh.set_camera_projection_cache_budget_bytes(0);
         let expected = fresh
             .prepare_with_camera(&stage, &camera)
@@ -13485,7 +13485,9 @@ fn native_camera_sorted_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
             .render(1)
             .map_err(|error| fail(error.to_string()))?;
         if restored_frame.as_bytes() != expected.as_bytes() {
-            return Err(fail("restoring camera-sorted surface changed rendered pixels"));
+            return Err(fail(
+                "restoring camera-sorted surface changed rendered pixels",
+            ));
         }
         if captures.is_empty() {
             let unsorted = compiler
@@ -13494,7 +13496,9 @@ fn native_camera_sorted_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
                 .render(1)
                 .map_err(|error| fail(error.to_string()))?;
             if unsorted.as_bytes() == expected.as_bytes() {
-                return Err(fail("surface ordering fixture did not expose translucent overlap"));
+                return Err(fail(
+                    "surface ordering fixture did not expose translucent overlap",
+                ));
             }
         }
         if captures.len() < 2 {
@@ -13510,7 +13514,9 @@ fn native_camera_sorted_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         captures.push((capture, expected.as_bytes().to_vec()));
     }
     if captures[0].1 == captures[1].1 || captures[0].1 != captures[2].1 {
-        return Err(fail("camera orbit did not change and exactly restore the sorted surface"));
+        return Err(fail(
+            "camera orbit did not change and exactly restore the sorted surface",
+        ));
     }
     let mut replays = 0_u64;
     for threads in [1, 4, 16] {
@@ -13519,13 +13525,21 @@ fn native_camera_sorted_surfaces_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
                 .render(threads)
                 .map_err(|error| fail(error.to_string()))?;
             if frame.as_bytes() != expected.as_slice() {
-                return Err(fail("sorted surface replay changed across camera history or threads"));
+                return Err(fail(
+                    "sorted surface replay changed across camera history or threads",
+                ));
             }
             replays += 1;
         }
     }
-    if stage.snapshot_bytes().map_err(|error| fail(error.to_string()))? != saved {
-        return Err(fail("camera face ordering mutated authoritative grid records"));
+    if stage
+        .snapshot_bytes()
+        .map_err(|error| fail(error.to_string()))?
+        != saved
+    {
+        return Err(fail(
+            "camera face ordering mutated authoritative grid records",
+        ));
     }
     ctx.event(
         LogEvent::new("e2e.render_matrix.native_camera_sorted_surfaces")
@@ -16493,7 +16507,7 @@ fn lifecycle_family_reversal_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
 /// through the shipping PNG route, with an independently authored point oracle.
 fn prismify_compound_cap_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn_geom::QuadPath;
-    use fmn_library::{Prismify, style::Style};
+    use fmn_library::{Polygon, Prismify, VGroup3D, style::Style};
 
     struct Cap(VMobject);
     impl fmn::SceneConstruct for Cap {
@@ -16534,8 +16548,8 @@ fn prismify_compound_cap_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     }
     let style = Style::default().fill(WHITE, 1.0).stroke(WHITE, 12.0, 1.0);
     let shell = Prismify::new(VMobject::from_path(&source).with_style(style)).build();
-    // Sidewalls have their own Reference behavior; this regression renders
-    // the actual far cap rather than allowing a sidewall to hide its seam.
+    // First isolate the far cap so a sidewall cannot hide its seam. The
+    // complete shell is checked independently below, including its walls.
     let cap = shell
         .children()
         .last()
@@ -16556,7 +16570,7 @@ fn prismify_compound_cap_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     broken_points.reverse();
     let broken = cap.clone().with_points(broken_points);
     let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
-    let render = |name: &str, mob: VMobject, threads| -> Result<Vec<u8>, ScenarioError> {
+    let render = |name: &str, mob: VMobject, threads, oblique| -> Result<Vec<u8>, ScenarioError> {
         let path = format!("/{name}.png");
         let mut options = fmn::RenderOptions::with_format(&path, fmn::RenderFormat::Png)
             .map_err(|e| fail(e.to_string()))?;
@@ -16571,16 +16585,22 @@ fn prismify_compound_cap_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
             .frame
             .set_center([0.0, 0.0, -1.0])
             .map_err(|e| fail(e.to_string()))?;
+        if oblique {
+            camera
+                .frame
+                .set_euler_angles(Some(0.3), Some(0.8), None)
+                .map_err(|e| fail(e.to_string()))?;
+        }
         options.camera = Some(camera);
         fmn::render_with_fs(&mut Cap(mob), options, fs.clone())
             .map_err(|e| fail(format!("compound cap render: {e}")))?;
         fs.read(&PathBuf::from(path))
             .map_err(|e| fail(e.to_string()))
     };
-    let expected_png = render("cap-oracle", oracle, 1)?;
-    let broken_png = render("cap-raw-reversal", broken, 1)?;
+    let expected_png = render("cap-oracle", oracle.clone(), 1, false)?;
+    let broken_png = render("cap-raw-reversal", broken, 1, false)?;
     for threads in [1, 4, 16] {
-        let actual = render(&format!("cap-{threads}"), cap.clone(), threads)?;
+        let actual = render(&format!("cap-{threads}"), cap.clone(), threads, false)?;
         if contours != 2 || actual != expected_png || actual == broken_png {
             return Err(fail(format!(
                 "compound cap lost a contour or disagrees with independent pixels at {threads} threads"
@@ -16603,18 +16623,82 @@ fn prismify_compound_cap_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     if planted.rgba[(44 * 128 + 64) * 4 + 3] == 0 {
         return Err(fail("planted raw reversal must visibly bridge the gap"));
     }
+    // Author every real boundary edge separately. This oracle deliberately
+    // does not use Prismify, get_anchors, or the subpath iterator under test.
+    // There are eight walls; the shared-anchor contour break is not an edge.
+    let mut faces = vec![VMobject::from_path(&source).with_style(style)];
+    for x in [-2.0, 1.0] {
+        let corners = [
+            [x, -0.75, 0.0],
+            [x + 1.0, -0.75, 0.0],
+            [x + 1.0, 0.75, 0.0],
+            [x, 0.75, 0.0],
+            [x, -0.75, 0.0],
+        ];
+        for edge in corners.windows(2) {
+            let [a, b] = [edge[0], edge[1]];
+            faces.push(
+                Polygon::polyline([a, b, [b[0], b[1], -1.0], [a[0], a[1], -1.0]])
+                    .style(style)
+                    .build(),
+            );
+        }
+    }
+    faces.push(oracle);
+    let shell_oracle = VGroup3D::new(faces.clone()).build();
+    // The outer 3D group must reach visible grandchildren. Nest raw faces,
+    // not a preconfigured shell, so direct-child-only propagation is caught.
+    let nested_shell = VGroup3D::new([fmn_library::vmobject::v_group([
+        fmn_library::vmobject::v_group(faces.clone()),
+    ])])
+    .build();
+    let bridge = Polygon::polyline([
+        [-2.0, -0.75, 0.0],
+        [1.0, -0.75, 0.0],
+        [1.0, -0.75, -1.0],
+        [-2.0, -0.75, -1.0],
+    ])
+    .style(style)
+    .build();
+    faces.insert(5, bridge);
+    let bridged_shell = VGroup3D::new(faces).build();
+    let shell_png = render("shell-oracle", shell_oracle, 1, true)?;
+    let bridged_png = render("shell-bridge", bridged_shell, 1, true)?;
+    if render("shell-nested", nested_shell, 4, true)? != shell_png {
+        return Err(fail(
+            "nested 3D groups lost their leaf shading or depth policy",
+        ));
+    }
+    if shell.children().len() != 10 || shell_png == bridged_png {
+        return Err(fail(
+            "compound shell must have eight walls and expose a planted bridge",
+        ));
+    }
+    for threads in [1, 4, 16] {
+        if render(&format!("shell-{threads}"), shell.clone(), threads, true)? != shell_png {
+            return Err(fail(format!(
+                "compound shell differs from independently authored walls at {threads} threads"
+            )));
+        }
+    }
     ctx.event(
         LogEvent::new("e2e.render_matrix.prismify_compound_cap")
             .field("contours", contours as u64)
             .field("thread_counts", 3_u64)
             .field("gap_alpha", u64::from(alpha(64, 44)))
             .field("planted_pixels_differ", 1_u64)
+            .field("sidewalls", 8_u64)
+            .field("nested_uniform_pixels_equal", 1_u64)
+            .field("shell_sha256", sha256(&shell_png).to_hex())
             .field("sha256", sha256(&expected_png).to_hex()),
     );
     Ok(RunOutcome::ok()
         .with_counter("prismify_cap_thread_counts", 3)
+        .with_counter("prismify_shell_thread_counts", 3)
         .with_artifact("compound-cap.png", expected_png)
-        .with_artifact("compound-cap-raw-reversal.png", broken_png))
+        .with_artifact("compound-cap-raw-reversal.png", broken_png)
+        .with_artifact("compound-shell.png", shell_png)
+        .with_artifact("compound-shell-bridge.png", bridged_png))
 }
 
 /// fm-0byq: authored AMS glyphs survive native Tex construction, source
@@ -21548,6 +21632,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("prismify_cap_thread_counts", 3),
+            counter_eq("prismify_shell_thread_counts", 3),
         ],
         vec![LogExpect::span_present(
             "e2e.render_matrix.prismify_compound_cap",
@@ -21556,6 +21641,8 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("thread_counts", 3),
                 FieldPred::u64_eq("gap_alpha", 0),
                 FieldPred::u64_eq("planted_pixels_differ", 1),
+                FieldPred::u64_eq("sidewalls", 8),
+                FieldPred::u64_eq("nested_uniform_pixels_equal", 1),
             ],
         )],
     ));

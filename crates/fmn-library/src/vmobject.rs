@@ -341,6 +341,13 @@ impl VMobject {
         &self.submobjects
     }
 
+    /// Separate one detached member from its owned descendants without
+    /// rebuilding or losing any of its geometry/style metadata.
+    pub(crate) fn into_own_and_children(mut self) -> (Self, Vec<Self>) {
+        let children = std::mem::take(&mut self.submobjects);
+        (self, children)
+    }
+
     /// Read the point run back as a [`QuadPath`] — the builder-side
     /// equivalent of reading the arena's records, for classes that
     /// measure their own geometry while still detached (tips, dashes).
