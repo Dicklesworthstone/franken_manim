@@ -461,10 +461,14 @@ pub struct LifecycleEvent {
 pub struct SoundRequest {
     /// File asset or frozen native PCM; only file sources require filesystem access.
     pub source: crate::SoundSource,
-    /// Exact Scene time at the call site.
+    /// Exact Scene time at the call site, including for explicitly scheduled cues.
     pub time: RationalTime,
     /// Reference-compatible relative offset in seconds.
     pub time_offset: f64,
+    /// Explicit absolute scene timestamp, when scheduled through
+    /// [`Scene::add_sound_source_at`]. It is rounded directly on the receiving
+    /// sample grid; the call-site frame and `time_offset` do not place this cue.
+    pub absolute_time: Option<f64>,
     /// Foreground gain in dB.
     pub gain: Option<f64>,
     /// Existing-background gain in dB during the overlay.
@@ -1324,12 +1328,52 @@ impl Scene {
         gain: Option<f64>,
         gain_to_background: Option<f64>,
     ) -> Result<&mut Self, SceneError> {
+        self.queue_sound_source(source, time_offset, None, gain, gain_to_background)
+    }
+
+    /// Queue a source at an absolute number of seconds without converting the
+    /// current scene clock to f64 or moving that clock. The explicit timestamp
+    /// keeps Reel's one sample-grid rounding independent of call time.
+    /// Negative starts retain the usual sample-prefix clipping policy.
+    ///
+    /// # Errors
+    /// The same offset/gain refusals and skip no-op as [`Self::add_sound_source`].
+    pub fn add_sound_source_at(
+        &mut self,
+        source: crate::SoundSource,
+        time: f64,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<&mut Self, SceneError> {
+        self.queue_sound_source(source, 0.0, Some(time), gain, gain_to_background)
+    }
+
+    /// Reset authored audio without changing scene geometry or clock state.
+    /// Hosts must refuse this during a recording that retains cue indices.
+    pub fn clear_sound_requests(&mut self) -> &mut Self {
+        self.sound_requests.clear();
+        self
+    }
+
+    fn queue_sound_source(
+        &mut self,
+        source: crate::SoundSource,
+        time_offset: f64,
+        absolute_time: Option<f64>,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<&mut Self, SceneError> {
         if self.skipping {
             return Ok(self);
         }
         if !time_offset.is_finite() {
             return Err(SceneError::InvalidConfig(
                 "sound time_offset must be finite",
+            ));
+        }
+        if absolute_time.is_some_and(|time| !time.is_finite()) {
+            return Err(SceneError::InvalidConfig(
+                "sound absolute time must be finite",
             ));
         }
         if gain.is_some_and(|value| !value.is_finite()) {
@@ -1344,6 +1388,7 @@ impl Scene {
             source,
             time: self.clock.now(),
             time_offset,
+            absolute_time,
             gain,
             gain_to_background,
         });

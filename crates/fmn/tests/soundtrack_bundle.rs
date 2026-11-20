@@ -520,6 +520,7 @@ fn repeated_sources_are_charged_once_but_prepared_cues_each_consume_their_own_bu
             source: fmn_scene::SoundSource::File("/repeat.wav".into()),
             time: clock.now(),
             time_offset: 0.0,
+            absolute_time: None,
             gain: None,
             gain_to_background: None,
         }

@@ -606,6 +606,7 @@ fn add_sound_keeps_exact_scene_time_and_reference_arguments() {
             source: fmn_scene::SoundSource::File("click.wav".into()),
             time: fmn_anim::RationalTime::zero(8) + 2,
             time_offset: -0.125,
+            absolute_time: None,
             gain: Some(-6.0),
             gain_to_background: Some(-12.0),
         }]
@@ -647,12 +648,7 @@ fn memory_sound_requests_freeze_pcm_and_preserve_timing_and_skip_semantics() {
         .add_sound_data(data.clone(), -0.125, Some(-6.0), None)
         .unwrap();
     scene
-        .add_sound_source(
-            SoundSource::Memory(data.clone()),
-            0.125,
-            None,
-            Some(-12.0),
-        )
+        .add_sound_source(SoundSource::Memory(data.clone()), 0.125, None, Some(-12.0))
         .unwrap();
     audio.samples.fill(1.0);
     assert_eq!(scene.sound_requests()[0].time.frames(), 2);
@@ -692,6 +688,57 @@ fn memory_sound_requests_freeze_pcm_and_preserve_timing_and_skip_semantics() {
         .add_sound_data(data, f64::NAN, Some(f64::INFINITY), None)
         .unwrap();
     assert_eq!(scene.sound_requests(), before);
+}
+
+#[test]
+fn absolute_sound_timestamps_remain_distinct_from_call_site_time() {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 29,
+            ..RuntimeConfig::default()
+        },
+        3,
+    )
+    .unwrap();
+    scene.wait(Some(0.25), &mut NullSceneSink).unwrap();
+    let before = scene.time();
+    scene
+        .add_sound_source_at(
+            fmn_scene::SoundSource::File("click.wav".into()),
+            5.0 / 48_000.0,
+            Some(-3.0),
+            Some(-6.0),
+        )
+        .unwrap();
+    let request = &scene.sound_requests()[0];
+    assert_eq!(request.time, before);
+    assert_eq!(request.absolute_time, Some(5.0 / 48_000.0));
+    assert_eq!(request.time_offset, 0.0);
+    assert_eq!(scene.time(), before);
+    assert!(
+        scene
+            .add_sound_source_at(
+                fmn_scene::SoundSource::File("bad.wav".into()),
+                f64::NAN,
+                None,
+                None
+            )
+            .is_err()
+    );
+    assert_eq!(scene.sound_requests().len(), 1);
+    scene.force_skipping();
+    scene
+        .add_sound_source_at(
+            fmn_scene::SoundSource::File("skip.wav".into()),
+            f64::INFINITY,
+            Some(f64::NAN),
+            None,
+        )
+        .unwrap();
+    assert_eq!(scene.sound_requests().len(), 1);
+    scene.clear_sound_requests();
+    assert!(scene.sound_requests().is_empty());
+    assert_eq!(scene.time(), before);
 }
 
 #[test]

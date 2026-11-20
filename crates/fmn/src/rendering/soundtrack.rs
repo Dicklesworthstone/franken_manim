@@ -12,7 +12,7 @@ use fmn_config::Config;
 use fmn_output::{
     AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy, InvocationReport, MixReport,
     MixerConfig, SoundCue, SoundMixer, WavPublicationConfig, WavPublicationReport,
-    frames_to_samples, publish_wav_new,
+    frames_to_samples, publish_wav_new, seconds_to_samples,
 };
 use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};
@@ -94,6 +94,29 @@ impl SoundtrackTimeline {
             .sum();
         Ok(frame - removed)
     }
+
+    /// Rebase an absolute sample-grid position through observed skipped frame
+    /// intervals. Endpoints are rounded independently on the receiving grid;
+    /// a position inside an omitted interval maps to that interval's start.
+    /// Negative prefixes and future cue tails remain representable.
+    ///
+    /// # Errors
+    /// A frame/sample conversion or signed placement overflow.
+    pub fn output_sample(
+        &self,
+        sample: i64,
+        fps: u32,
+        sample_rate: u32,
+    ) -> Result<i64, RenderError> {
+        let mut removed = 0_i128;
+        for &(start, end) in &self.omitted {
+            let start = frames_to_samples(start, fps, sample_rate).map_err(RenderError::Sound)?;
+            let end = frames_to_samples(end, fps, sample_rate).map_err(RenderError::Sound)?;
+            removed += (i128::from(sample.min(end)) - i128::from(start)).max(0);
+        }
+        i64::try_from(i128::from(sample) - removed)
+            .map_err(|_| RenderError::Sound(fmn_output::SoundError::PlacementOutOfRange))
+    }
 }
 
 /// Exact source bytes and native decode identity of one insertion-ordered cue.
@@ -146,6 +169,33 @@ impl Default for SoundtrackPreparationLimits {
     }
 }
 
+fn request_placement(
+    request: &SoundRequest,
+    sample_rate: u32,
+    timeline: Option<&SoundtrackTimeline>,
+) -> Result<(i64, u32, f64), RenderError> {
+    match request.absolute_time {
+        Some(time) => {
+            let sample = seconds_to_samples(time, sample_rate).map_err(RenderError::Sound)?;
+            let sample = match timeline {
+                Some(timeline) => {
+                    timeline.output_sample(sample, request.time.fps(), sample_rate)?
+                }
+                None => sample,
+            };
+            Ok((sample, sample_rate, 0.0))
+        }
+        None => Ok((
+            match timeline {
+                Some(timeline) => timeline.output_frame(request.time.frames())?,
+                None => request.time.frames(),
+            },
+            request.time.fps(),
+            request.time_offset,
+        )),
+    }
+}
+
 fn charge(
     current: &mut usize,
     additional: usize,
@@ -171,6 +221,71 @@ pub struct PreparedSceneSoundtrack {
 }
 
 impl PreparedSceneSoundtrack {
+    /// Observe the authored soundtrack's end without materializing its mixed
+    /// PCM. Frozen memory assets use admitted metadata directly; distinct file
+    /// paths are read and decoded once, within the ordinary per-asset limits,
+    /// then only their frame count and sample rate are retained.
+    ///
+    /// This is the unrebased scene timeline, suitable for writer append
+    /// operations. Reel supplies the same placement, resampling length,
+    /// negative-prefix clipping and output budget policy as a real mix.
+    ///
+    /// # Errors
+    /// Too many cues, bounded source/decode failures, or invalid placement and
+    /// output budgets. No channel-mapped or resampled PCM is allocated.
+    pub fn end_frame(
+        fs: &dyn FileSystem,
+        requests: &[SoundRequest],
+        decoder: &mut AudioDecoder,
+        config: MixerConfig,
+        max_cues: usize,
+    ) -> Result<u64, RenderError> {
+        if requests.len() > max_cues {
+            return Err(RenderError::InvalidOptions(
+                "soundtrack cue-count budget exceeded",
+            ));
+        }
+        let mixer = SoundMixer::new(config).map_err(RenderError::Sound)?;
+        let mut sources = BTreeMap::new();
+        let mut end = 0;
+        for request in requests {
+            let (frames, rate) = *match sources.entry(request.source.key()) {
+                Entry::Occupied(entry) => entry.into_mut(),
+                Entry::Vacant(entry) => {
+                    let metadata = match &request.source {
+                        SoundSource::Memory(data) => (data.sample_frames(), data.sample_rate()),
+                        SoundSource::File(path) => {
+                            let bytes =
+                                fs.read_bounded(path, MAX_SOUND_ASSET_BYTES)
+                                    .map_err(|error| RenderError::SoundAsset {
+                                        path: path.clone(),
+                                        error,
+                                    })?;
+                            let decoded = decoder.decode(&bytes).map_err(|error| {
+                                RenderError::SoundDecode {
+                                    source: Some(Box::new(request.source.key())),
+                                    error,
+                                }
+                            })?;
+                            (
+                                decoded.audio.samples.len() / usize::from(decoded.audio.channels),
+                                decoded.audio.sample_rate,
+                            )
+                        }
+                    };
+                    entry.insert(metadata)
+                }
+            };
+            let (frame, fps, time_offset) = request_placement(request, config.sample_rate, None)?;
+            end = end.max(
+                mixer
+                    .cue_end_frame(frames, rate, frame, fps, time_offset)
+                    .map_err(RenderError::Sound)?,
+            );
+        }
+        Ok(end)
+    }
+
     /// Read and decode the exact sound requests through caller capabilities.
     ///
     /// Each distinct authored path is read once, bounded to 64 MiB, and
@@ -234,10 +349,8 @@ impl PreparedSceneSoundtrack {
         let mut sources = BTreeMap::new();
         let mut invocations = Vec::new();
         for request in requests {
-            let frame = match timeline {
-                Some(timeline) => timeline.output_frame(request.time.frames())?,
-                None => request.time.frames(),
-            };
+            let (frame, fps, time_offset) =
+                request_placement(request, config.sample_rate, timeline)?;
             let (bytes, audio, report) = match sources.entry(request.source.key()) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
@@ -271,8 +384,7 @@ impl PreparedSceneSoundtrack {
                             &bytes,
                             &AudioDecodeLimits {
                                 max_input_bytes: raw_budget as u64,
-                                max_samples: (limits.max_decoded_samples - decoded_samples)
-                                    as u64,
+                                max_samples: (limits.max_decoded_samples - decoded_samples) as u64,
                             },
                         )
                         .map_err(|error| RenderError::SoundDecode {
@@ -316,8 +428,8 @@ impl PreparedSceneSoundtrack {
                 .add(SoundCue {
                     audio: audio.clone(),
                     frame,
-                    fps: request.time.fps(),
-                    time_offset: request.time_offset,
+                    fps,
+                    time_offset,
                     gain: request.gain,
                     gain_to_background: request.gain_to_background,
                 })
@@ -806,6 +918,7 @@ mod tests {
             source: SoundSource::File(path.into()),
             time: RationalTime::zero(fps) + frame,
             time_offset: 0.0,
+            absolute_time: None,
             gain: None,
             gain_to_background: None,
         }
@@ -880,6 +993,84 @@ mod tests {
     }
 
     #[test]
+    fn absolute_cues_ignore_call_site_float_precision_and_rebase_sample_windows() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/absolute.wav",
+            encode_wav(1, 8, SampleFormat::F32, &[0.125, 0.25]),
+        );
+        let mut cue = request("/absolute.wav", 1_i64 << 60, 29);
+        cue.absolute_time = Some(0.25);
+        let prepare = |cue: &SoundRequest, timeline: Option<&SoundtrackTimeline>| {
+            PreparedSceneSoundtrack::new(
+                &fs,
+                std::slice::from_ref(cue),
+                &mut native_decoder(),
+                config(),
+                timeline,
+            )
+            .unwrap()
+            .mix(1)
+            .unwrap()
+            .audio
+            .samples
+        };
+        assert_eq!(prepare(&cue, None), [0.0, 0.0, 0.125, 0.25]);
+        let mut timeline = SoundtrackTimeline::default();
+        timeline.observe(0, true).unwrap();
+        timeline.observe(2, false).unwrap();
+        // The omitted [0, 2/29) interval ends at sample one on the 8 Hz grid.
+        assert_eq!(prepare(&cue, Some(&timeline)), [0.0, 0.125, 0.25]);
+        cue.absolute_time = Some(-0.125);
+        assert_eq!(prepare(&cue, Some(&timeline)), [0.25]);
+        cue.absolute_time = Some(0.0);
+        assert_eq!(prepare(&cue, Some(&timeline)), [0.125, 0.25]);
+        cue.absolute_time = Some(1.0);
+        let future = prepare(&cue, Some(&timeline));
+        assert_eq!(&future[..7], &[0.0; 7]);
+        assert_eq!(&future[7..], &[0.125, 0.25]);
+    }
+
+    #[test]
+    fn soundtrack_end_reads_frozen_metadata_without_materializing_long_pcm() {
+        use fmn_scene::{SoundData, SoundDataLimits};
+
+        let data = SoundData::from_audio(
+            &fmn_codec::WavAudio {
+                channels: 1,
+                sample_rate: 1,
+                format: SampleFormat::F32,
+                samples: vec![0.125; 180],
+            },
+            SoundDataLimits::default(),
+        )
+        .unwrap();
+        let mut cue = request("unused.wav", 1_i64 << 60, 29);
+        cue.source = SoundSource::Memory(data);
+        cue.absolute_time = Some(0.0);
+        let mut decoder =
+            AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
+                panic!("memory duration resolved an external decoder")
+            })
+            .unwrap();
+        let query = |cues: &[SoundRequest], decoder: &mut AudioDecoder| {
+            PreparedSceneSoundtrack::end_frame(
+                &NoFileAccess,
+                cues,
+                decoder,
+                MixerConfig::default(),
+                4,
+            )
+            .unwrap()
+        };
+        assert_eq!(query(&[cue.clone()], &mut decoder), 180 * 48_000);
+        cue.absolute_time = Some(-30.0);
+        assert_eq!(query(&[cue.clone()], &mut decoder), 150 * 48_000);
+        cue.absolute_time = Some(-200.0);
+        assert_eq!(query(&[cue], &mut decoder), 0);
+    }
+
+    #[test]
     fn repeated_cues_share_one_snapshot_without_losing_their_placements_or_gains() {
         let fs = VirtualFs::new();
         fs.insert(
@@ -946,11 +1137,11 @@ mod tests {
             max_prepared_samples: 8,
         };
         let prepare = |limits| {
-            let mut decoder = AudioDecoder::with_boundary_resolver(
-                AudioDecodeLimits::default(),
-                |_| panic!("memory PCM resolved an external decoder"),
-            )
-            .unwrap();
+            let mut decoder =
+                AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
+                    panic!("memory PCM resolved an external decoder")
+                })
+                .unwrap();
             PreparedSceneSoundtrack::new_with_limits(
                 &NoFileAccess,
                 &cues,

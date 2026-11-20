@@ -525,6 +525,38 @@ impl SoundMixer {
         self.cues.is_empty()
     }
 
+    /// Query a cue's positive timeline end from validated source metadata,
+    /// without mapping channels, resampling PCM or allocating a mixed waveform.
+    /// Empty sources and sources ending before sample zero contribute no time.
+    /// This uses exactly the placement and duration policy of [`Self::add`].
+    ///
+    /// # Errors
+    /// Invalid source/frame rates, non-finite offsets, placement overflow or
+    /// the same output-frame budget refusal as [`Self::add`].
+    pub fn cue_end_frame(
+        &self,
+        input_frames: usize,
+        input_rate: u32,
+        frame: i64,
+        fps: u32,
+        time_offset: f64,
+    ) -> Result<u64, SoundError> {
+        let (start, frames) = cue_placement(
+            self.config,
+            input_frames,
+            input_rate,
+            frame,
+            fps,
+            time_offset,
+        )?;
+        if frames == 0 {
+            return Ok(0);
+        }
+        let end = i128::from(start)
+            + i128::try_from(frames).map_err(|_| SoundError::SampleCountOverflow)?;
+        u64::try_from(end.max(0)).map_err(|_| SoundError::SampleCountOverflow)
+    }
+
     /// Validate, map, resample, and append one cue.
     ///
     /// Resampling occurs once, before any timeline workers are selected; the
@@ -540,34 +572,15 @@ impl SoundMixer {
         }
         let gain = db_amplitude(cue.gain, "gain")?;
         let background_gain = db_amplitude_optional(cue.gain_to_background, "gain_to_background")?;
-        let frame_start = round_ratio(
-            i128::from(cue.frame) * i128::from(self.config.sample_rate),
-            u128::from(cue.fps),
-        )?;
-        let offset = seconds_to_samples(cue.time_offset, self.config.sample_rate)?;
-        let start = frame_start
-            .checked_add(offset)
-            .ok_or(SoundError::PlacementOutOfRange)?;
-
         let input_frames = cue.audio.samples.len() / usize::from(cue.audio.channels);
-        let frames =
-            resampled_frame_count(input_frames, cue.audio.sample_rate, self.config.sample_rate)?;
-        let frame_count = u64::try_from(frames).map_err(|_| SoundError::SampleCountOverflow)?;
-        let end = i128::from(start)
-            + i128::try_from(frames).map_err(|_| SoundError::SampleCountOverflow)?;
-        if frame_count > self.config.max_output_frames {
-            return Err(SoundError::OutputTooLong {
-                frames: frame_count,
-                max_frames: self.config.max_output_frames,
-            });
-        }
-        if frames > 0 && end > i128::from(self.config.max_output_frames) {
-            let required = u64::try_from(end).map_err(|_| SoundError::SampleCountOverflow)?;
-            return Err(SoundError::OutputTooLong {
-                frames: required,
-                max_frames: self.config.max_output_frames,
-            });
-        }
+        let (start, frames) = cue_placement(
+            self.config,
+            input_frames,
+            cue.audio.sample_rate,
+            cue.frame,
+            cue.fps,
+            cue.time_offset,
+        )?;
         let mapped = map_channels(&cue.audio, self.config.channels)?;
         let samples = if cue.audio.sample_rate == self.config.sample_rate {
             mapped
@@ -753,6 +766,44 @@ impl SoundMixer {
             kernel,
         })
     }
+}
+
+fn cue_placement(
+    config: MixerConfig,
+    input_frames: usize,
+    input_rate: u32,
+    frame: i64,
+    fps: u32,
+    time_offset: f64,
+) -> Result<(i64, usize), SoundError> {
+    if input_rate == 0 {
+        return Err(SoundError::InvalidConfig(
+            "source sample_rate must be nonzero",
+        ));
+    }
+    let frame_start = frames_to_samples(frame, fps, config.sample_rate)?;
+    let offset = seconds_to_samples(time_offset, config.sample_rate)?;
+    let start = frame_start
+        .checked_add(offset)
+        .ok_or(SoundError::PlacementOutOfRange)?;
+    let frames = resampled_frame_count(input_frames, input_rate, config.sample_rate)?;
+    let frame_count = u64::try_from(frames).map_err(|_| SoundError::SampleCountOverflow)?;
+    let end =
+        i128::from(start) + i128::try_from(frames).map_err(|_| SoundError::SampleCountOverflow)?;
+    if frame_count > config.max_output_frames {
+        return Err(SoundError::OutputTooLong {
+            frames: frame_count,
+            max_frames: config.max_output_frames,
+        });
+    }
+    if frames > 0 && end > i128::from(config.max_output_frames) {
+        let required = u64::try_from(end).map_err(|_| SoundError::SampleCountOverflow)?;
+        return Err(SoundError::OutputTooLong {
+            frames: required,
+            max_frames: config.max_output_frames,
+        });
+    }
+    Ok((start, frames))
 }
 
 fn validate_audio(audio: &WavAudio) -> Result<(), SoundError> {
@@ -1212,7 +1263,15 @@ fn round_ratio(numerator: i128, denominator: u128) -> Result<i64, SoundError> {
     signed_i64(rounded, negative)
 }
 
-fn seconds_to_samples(seconds: f64, sample_rate: u32) -> Result<i64, SoundError> {
+/// Round the exact received f64 timestamp onto a sample grid, with ties away
+/// from zero. No intermediate floating-point multiplication is performed.
+///
+/// # Errors
+/// A zero sample rate, non-finite timestamp or unrepresentable signed sample position.
+pub fn seconds_to_samples(seconds: f64, sample_rate: u32) -> Result<i64, SoundError> {
+    if sample_rate == 0 {
+        return Err(SoundError::InvalidConfig("sample_rate must be nonzero"));
+    }
     if !seconds.is_finite() {
         return Err(SoundError::PlacementOutOfRange);
     }
@@ -1380,6 +1439,35 @@ mod tests {
             Err(SoundError::InvalidConfig(_))
         ));
     }
+
+    #[test]
+    fn cue_end_metadata_matches_resampled_and_clipped_mix_lengths() {
+        let mut mixer = SoundMixer::new(config(8, 1)).unwrap();
+        // Two frames at 3 Hz become ceil(16/3) = six frames. Start at
+        // round(1*8/2) + round(-.125*8) = three, so the end is nine.
+        assert_eq!(mixer.cue_end_frame(2, 3, 1, 2, -0.125).unwrap(), 9);
+        mixer
+            .add(SoundCue {
+                audio: audio(3, 1, SampleFormat::F32, &[0.25, 0.5]),
+                frame: 1,
+                fps: 2,
+                time_offset: -0.125,
+                gain: None,
+                gain_to_background: None,
+            })
+            .unwrap();
+        assert_eq!(mixer.mix(1).unwrap().audio.samples.len(), 9);
+        assert_eq!(mixer.cue_end_frame(2, 3, -1, 2, 0.0).unwrap(), 2);
+        assert_eq!(mixer.cue_end_frame(2, 3, -2, 2, 0.0).unwrap(), 0);
+        assert_eq!(mixer.cue_end_frame(0, 3, 999_999, 1, 0.0).unwrap(), 0);
+        assert!(mixer.cue_end_frame(1, 0, 0, 1, 0.0).is_err());
+        assert!(mixer.cue_end_frame(1, 3, 0, 0, 0.0).is_err());
+        assert!(matches!(
+            mixer.cue_end_frame(2, 3, 999_999, 1, 0.0),
+            Err(SoundError::OutputTooLong { .. })
+        ));
+    }
+
     #[test]
     fn golden_offsets_overlaps_negative_clip_and_past_end() {
         let mut mixer = SoundMixer::new(config(8, 1)).expect("mixer");

@@ -92,5 +92,5 @@ pub use sinks::{
 };
 pub use sound::{
     COMPILED_MIX_LANES, COMPILED_MIX_TIER, DitherPolicy, MixKernel, MixReport, MixerConfig,
-    RESAMPLER_NAME, SoundCue, SoundError, SoundMixer, frames_to_samples,
+    RESAMPLER_NAME, SoundCue, SoundError, SoundMixer, frames_to_samples, seconds_to_samples,
 };
