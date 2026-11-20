@@ -60,7 +60,15 @@ PCM; `max_samples` and `max_bytes` can set smaller limits.
 The writer's `add_sound` accepts file paths or `SoundData`; `add_audio_segment`
 accepts `SoundData`. Both use absolute timestamps, or append when `time` is
 omitted. Append queries native duration metadata without materializing a mixed
-waveform. `writer.audio_segment` explicitly requests an immutable mixed
+waveform. The append position is the current end on the writer's 48 kHz sample
+grid and is retained as an exact rational timestamp when exporting at another
+rate. Resampling rounds source lengths up on this canonical grid, so append
+does not promise gap-free concatenation at every export rate: a one-sample
+44.1 kHz source occupies two 48 kHz writer frames, and its successor starts at
+sample two in a 44.1 kHz export. An explicit `time` retains the supplied float
+and is rounded once on the export sample grid.
+
+`writer.audio_segment` explicitly requests an immutable mixed
 `SoundData` snapshot, subject to its 64 MiB and preparation limits. Read
 `sample_rate`, `channels`, `sample_frames`, `duration_seconds`, `sha256`, or
 `wav_bytes()` from a source or snapshot. `init_audio()` clears inactive cue state;

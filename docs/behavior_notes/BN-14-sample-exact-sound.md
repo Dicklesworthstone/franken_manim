@@ -99,8 +99,20 @@ the mixed waveform, so a long soundtrack is not constrained by the snapshot's
 assets are decoded once per query within the usual asset limits. Empty sources
 do not extend the soundtrack even when scheduled in the future.
 
+The append end is computed on the canonical 48 kHz writer grid and retained as
+an exact rational position. Changing the output rate converts that position
+using integer arithmetic with ties away from zero. For example, an end at
+400/48000 seconds becomes sample 368 at 44.1 kHz; converting through a float
+would put this half-sample tie one sample early. This is a fixed writer-grid
+policy, not deferred concatenation at each output rate. Source durations round
+up when resampled: a one-sample 44.1 kHz source occupies two 48 kHz writer frames,
+and an appended successor begins at sample two when exporting at 44.1 kHz.
+
 Absolute timestamps are retained separately from frame-relative offsets, then
-rounded once onto the receiving sample grid. A live insert subtracts its sample
+rounded once onto the receiving sample grid. Explicit caller-supplied seconds
+retain their exact received f64 value; they are not replaced by an inferred
+rational number. Native callers can preserve a known grid position through
+`Scene::add_sound_source_at_rational`. A live insert subtracts its sample
 origin; observed skipped intervals remove their independently rounded sample
 windows. A cue overlapping the beginning of an insert retains its audible suffix.
 This does not change the existing two-rounding rule for `Scene.add_sound`.

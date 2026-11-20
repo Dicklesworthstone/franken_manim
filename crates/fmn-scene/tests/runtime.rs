@@ -712,7 +712,10 @@ fn absolute_sound_timestamps_remain_distinct_from_call_site_time() {
         .unwrap();
     let request = &scene.sound_requests()[0];
     assert_eq!(request.time, before);
-    assert_eq!(request.absolute_time, Some(5.0 / 48_000.0));
+    assert_eq!(
+        request.absolute_time,
+        Some(fmn_scene::SoundTime::Seconds(5.0 / 48_000.0))
+    );
     assert_eq!(request.time_offset, 0.0);
     assert_eq!(scene.time(), before);
     assert!(
@@ -739,6 +742,45 @@ fn absolute_sound_timestamps_remain_distinct_from_call_site_time() {
     scene.clear_sound_requests();
     assert!(scene.sound_requests().is_empty());
     assert_eq!(scene.time(), before);
+    scene.set_skipping(false);
+    let position = fmn_anim::RationalTime::zero(48_000) + 400;
+    scene
+        .add_sound_source_at_rational(
+            fmn_scene::SoundSource::File("exact.wav".into()),
+            position,
+            None,
+            None,
+        )
+        .unwrap();
+    let request = &scene.sound_requests()[0];
+    assert_eq!(request.time, before);
+    assert_eq!(
+        request.absolute_time,
+        Some(fmn_scene::SoundTime::Rational(position))
+    );
+    assert_eq!(request.time_offset, 0.0);
+    assert_eq!(scene.time(), before);
+    assert!(
+        scene
+            .add_sound_source_at_rational(
+                fmn_scene::SoundSource::File("zero-rate.wav".into()),
+                fmn_anim::RationalTime::zero(0),
+                None,
+                None,
+            )
+            .is_err()
+    );
+    assert_eq!(scene.sound_requests().len(), 1);
+    scene.force_skipping();
+    scene
+        .add_sound_source_at_rational(
+            fmn_scene::SoundSource::File("skip-zero-rate.wav".into()),
+            fmn_anim::RationalTime::zero(0),
+            Some(f64::NAN),
+            None,
+        )
+        .unwrap();
+    assert_eq!(scene.sound_requests().len(), 1);
 }
 
 #[test]

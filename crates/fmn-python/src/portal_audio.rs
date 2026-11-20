@@ -8,7 +8,7 @@ use super::*;
 use fmn_output::{
     AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy,
 };
-use fmn_scene::{SoundData, SoundDataLimits, SoundSource};
+use fmn_scene::{SoundData, SoundDataLimits, SoundSource, SoundTime};
 use pyo3::exceptions::PyAttributeError;
 use pyo3::types::{PyBool, PyBytes};
 use std::borrow::Cow;
@@ -168,6 +168,18 @@ fn sound_data_limits(max_samples: usize, max_bytes: usize) -> PyResult<SoundData
     })
 }
 
+fn absolute_sample_position(
+    time: SoundTime,
+    sample_rate: u32,
+) -> Result<i64, fmn_output::SoundError> {
+    match time {
+        SoundTime::Seconds(seconds) => fmn_output::seconds_to_samples(seconds, sample_rate),
+        SoundTime::Rational(position) => {
+            fmn_output::frames_to_samples(position.frames(), position.fps(), sample_rate)
+        }
+    }
+}
+
 /// Resolve authored paths at the same boundary as file-only Scene.add_sound.
 /// An immutable memory source never invokes a Python path hook or filesystem.
 pub(crate) fn source_from_python(
@@ -261,6 +273,15 @@ pub(crate) fn writer_duration(
     scene: &Bound<'_, PyScene>,
     writer: &Bound<'_, PyAny>,
 ) -> PyResult<f64> {
+    Ok(writer_end(scene, writer)?.to_f64())
+}
+
+/// Preserve the canonical writer sample grid when scheduling an append.
+/// Floating-point seconds are an observation API, not an intermediate clock.
+pub(crate) fn writer_end(
+    scene: &Bound<'_, PyScene>,
+    writer: &Bound<'_, PyAny>,
+) -> PyResult<fmn_anim::RationalTime> {
     let mut audio = PortalAudio::from_writer(Some(writer), &PortalOutputFormat::Wav, None)?;
     let engine = Rc::clone(&scene.borrow().engine);
     let requests = {
@@ -285,7 +306,8 @@ pub(crate) fn writer_duration(
             )
         })
         .map_err(native_error)?;
-    Ok(frames as f64 / f64::from(config.sample_rate))
+    Ok(fmn_anim::RationalTime::zero(config.sample_rate)
+        + i64::try_from(frames).map_err(native_error)?)
 }
 
 pub(crate) struct PortalAudioInput {
@@ -470,8 +492,8 @@ impl PortalAudio {
             };
             let (frame, fps, time_offset) = match request.absolute_time {
                 Some(time) => {
-                    let sample = fmn_output::seconds_to_samples(time, config.sample_rate)
-                        .map_err(native_error)?;
+                    let sample =
+                        absolute_sample_position(time, config.sample_rate).map_err(native_error)?;
                     let sample = if window.is_some() {
                         sample
                     } else {
@@ -835,8 +857,7 @@ impl BundleAudioCapture {
             prepared_bytes += prepared as usize;
             let (frame, fps, time_offset) = match request.absolute_time {
                 Some(time) => (
-                    fmn_output::seconds_to_samples(time, options.sample_rate)
-                        .map_err(native_error)?,
+                    absolute_sample_position(time, options.sample_rate).map_err(native_error)?,
                     options.sample_rate,
                     0.0,
                 ),

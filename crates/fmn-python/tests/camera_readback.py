@@ -215,6 +215,19 @@ def run_scene_readback_acceptance():
     stopping.wait_frames(1)
     stopping.camera.clear()
     assert not stopping.camera.get_pixel_array().any()
+    # Repeated same-size resize notifications preserve the newer unread
+    # sample, rather than exposing an older cached image of the same size.
+    previous_pixels = stopping.camera.get_pixel_array()
+    for reset in (lambda: stopping.camera.reset_pixel_shape(),
+                  lambda: stopping.camera.reset_pixel_shape(96, 54),
+                  lambda: stopping.on_resize(96, 54)):
+        stopped.shift(.5 * m.RIGHT)
+        next_pixels = expected(stopping.camera, stopped)
+        assert not np.array_equal(previous_pixels, next_pixels)
+        stopping.wait_frames(1)
+        reset()
+        previous_pixels = stopping.camera.get_pixel_array()
+        np.testing.assert_array_equal(previous_pixels, next_pixels)
     stopping.wait_frames(1)
     stopping.camera.reset_pixel_shape(48, 27)
     assert stopping.camera.get_pixel_array().shape == (27, 48, 4)

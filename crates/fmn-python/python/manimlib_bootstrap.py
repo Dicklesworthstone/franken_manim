@@ -18729,7 +18729,13 @@ class SceneFileWriter:
         if self.scene._skip_sound_requests():
             return
         if time is None:
-            time = self.scene._soundtrack_duration(self)
+            self.scene._append_sound(
+                sound_file,
+                self,
+                None if gain is None else float(gain),
+                None if gain_to_background is None else float(gain_to_background),
+            )
+            return
         self.scene._add_sound_at(
             sound_file,
             float(time),

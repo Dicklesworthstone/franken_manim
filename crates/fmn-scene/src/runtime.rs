@@ -451,6 +451,17 @@ pub struct LifecycleEvent {
     pub skipping: bool,
 }
 
+/// An absolute sound position without conflating authored seconds and an
+/// already exact frame/sample-grid position.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum SoundTime {
+    /// Preserve the exact received f64 value and round it on the output grid.
+    Seconds(f64),
+    /// Convert this rational position directly to the output grid. Appending
+    /// at a mixed soundtrack's end must retain this form across sample rates.
+    Rational(RationalTime),
+}
+
 /// One insertion-ordered request from `Scene.add_sound`.
 ///
 /// Reel converts [`Self::time`] from the rational frame grid to its output
@@ -466,9 +477,10 @@ pub struct SoundRequest {
     /// Reference-compatible relative offset in seconds.
     pub time_offset: f64,
     /// Explicit absolute scene timestamp, when scheduled through
-    /// [`Scene::add_sound_source_at`]. It is rounded directly on the receiving
-    /// sample grid; the call-site frame and `time_offset` do not place this cue.
-    pub absolute_time: Option<f64>,
+    /// [`Scene::add_sound_source_at`] or [`Scene::add_sound_source_at_rational`].
+    /// It is rounded directly on the receiving sample grid; the call-site
+    /// frame and `time_offset` do not place this cue.
+    pub absolute_time: Option<SoundTime>,
     /// Foreground gain in dB.
     pub gain: Option<f64>,
     /// Existing-background gain in dB during the overlay.
@@ -1345,7 +1357,36 @@ impl Scene {
         gain: Option<f64>,
         gain_to_background: Option<f64>,
     ) -> Result<&mut Self, SceneError> {
-        self.queue_sound_source(source, 0.0, Some(time), gain, gain_to_background)
+        self.queue_sound_source(
+            source,
+            0.0,
+            Some(SoundTime::Seconds(time)),
+            gain,
+            gain_to_background,
+        )
+    }
+
+    /// Queue an exact absolute position on a rational frame or sample grid.
+    /// Conversion to any receiving sample rate uses integer arithmetic; the
+    /// authoring call-site clock remains separate in [`SoundRequest::time`].
+    ///
+    /// # Errors
+    /// Rejects a zero frame/sample rate. The same gain refusals and skip no-op
+    /// as [`Self::add_sound_source`] apply.
+    pub fn add_sound_source_at_rational(
+        &mut self,
+        source: crate::SoundSource,
+        time: RationalTime,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> Result<&mut Self, SceneError> {
+        self.queue_sound_source(
+            source,
+            0.0,
+            Some(SoundTime::Rational(time)),
+            gain,
+            gain_to_background,
+        )
     }
 
     /// Reset authored audio without changing scene geometry or clock state.
@@ -1359,7 +1400,7 @@ impl Scene {
         &mut self,
         source: crate::SoundSource,
         time_offset: f64,
-        absolute_time: Option<f64>,
+        absolute_time: Option<SoundTime>,
         gain: Option<f64>,
         gain_to_background: Option<f64>,
     ) -> Result<&mut Self, SceneError> {
@@ -1371,9 +1412,14 @@ impl Scene {
                 "sound time_offset must be finite",
             ));
         }
-        if absolute_time.is_some_and(|time| !time.is_finite()) {
+        if matches!(absolute_time, Some(SoundTime::Seconds(time)) if !time.is_finite()) {
             return Err(SceneError::InvalidConfig(
                 "sound absolute time must be finite",
+            ));
+        }
+        if matches!(absolute_time, Some(SoundTime::Rational(time)) if time.fps() == 0) {
+            return Err(SceneError::InvalidConfig(
+                "sound absolute time rate must be positive",
             ));
         }
         if gain.is_some_and(|value| !value.is_finite()) {

@@ -18,7 +18,7 @@ use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_scene::{
     CaptureReason, IntegrationError, LifecycleEvent, RuntimeConfig, SceneRunReport, SceneSink,
-    SoundRequest, SoundSource,
+    SoundRequest, SoundSource, SoundTime,
 };
 use fmn_tex::{TexSession, TypesetSessionReport};
 
@@ -176,7 +176,13 @@ fn request_placement(
 ) -> Result<(i64, u32, f64), RenderError> {
     match request.absolute_time {
         Some(time) => {
-            let sample = seconds_to_samples(time, sample_rate).map_err(RenderError::Sound)?;
+            let sample = match time {
+                SoundTime::Seconds(seconds) => seconds_to_samples(seconds, sample_rate),
+                SoundTime::Rational(position) => {
+                    frames_to_samples(position.frames(), position.fps(), sample_rate)
+                }
+            }
+            .map_err(RenderError::Sound)?;
             let sample = match timeline {
                 Some(timeline) => {
                     timeline.output_sample(sample, request.time.fps(), sample_rate)?
@@ -1000,7 +1006,7 @@ mod tests {
             encode_wav(1, 8, SampleFormat::F32, &[0.125, 0.25]),
         );
         let mut cue = request("/absolute.wav", 1_i64 << 60, 29);
-        cue.absolute_time = Some(0.25);
+        cue.absolute_time = Some(SoundTime::Seconds(0.25));
         let prepare = |cue: &SoundRequest, timeline: Option<&SoundtrackTimeline>| {
             PreparedSceneSoundtrack::new(
                 &fs,
@@ -1021,11 +1027,11 @@ mod tests {
         timeline.observe(2, false).unwrap();
         // The omitted [0, 2/29) interval ends at sample one on the 8 Hz grid.
         assert_eq!(prepare(&cue, Some(&timeline)), [0.0, 0.125, 0.25]);
-        cue.absolute_time = Some(-0.125);
+        cue.absolute_time = Some(SoundTime::Seconds(-0.125));
         assert_eq!(prepare(&cue, Some(&timeline)), [0.25]);
-        cue.absolute_time = Some(0.0);
+        cue.absolute_time = Some(SoundTime::Seconds(0.0));
         assert_eq!(prepare(&cue, Some(&timeline)), [0.125, 0.25]);
-        cue.absolute_time = Some(1.0);
+        cue.absolute_time = Some(SoundTime::Seconds(1.0));
         let future = prepare(&cue, Some(&timeline));
         assert_eq!(&future[..7], &[0.0; 7]);
         assert_eq!(&future[7..], &[0.125, 0.25]);
@@ -1047,7 +1053,7 @@ mod tests {
         .unwrap();
         let mut cue = request("unused.wav", 1_i64 << 60, 29);
         cue.source = SoundSource::Memory(data);
-        cue.absolute_time = Some(0.0);
+        cue.absolute_time = Some(SoundTime::Seconds(0.0));
         let mut decoder =
             AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
                 panic!("memory duration resolved an external decoder")
@@ -1064,10 +1070,88 @@ mod tests {
             .unwrap()
         };
         assert_eq!(query(&[cue.clone()], &mut decoder), 180 * 48_000);
-        cue.absolute_time = Some(-30.0);
+        cue.absolute_time = Some(SoundTime::Seconds(-30.0));
         assert_eq!(query(&[cue.clone()], &mut decoder), 150 * 48_000);
-        cue.absolute_time = Some(-200.0);
+        cue.absolute_time = Some(SoundTime::Seconds(-200.0));
         assert_eq!(query(&[cue], &mut decoder), 0);
+    }
+
+    #[test]
+    fn rational_append_preserves_half_sample_ties_on_a_different_output_grid() {
+        use fmn_scene::{SoundData, SoundDataLimits};
+
+        let frozen = |rate, samples| {
+            SoundSource::Memory(
+                SoundData::from_audio(
+                    &WavAudio {
+                        channels: 1,
+                        sample_rate: rate,
+                        format: SampleFormat::F32,
+                        samples,
+                    },
+                    SoundDataLimits::default(),
+                )
+                .unwrap(),
+            )
+        };
+        let mut first = request("unused.wav", 1_i64 << 60, 29);
+        first.source = frozen(48_000, vec![0.0; 400]);
+        first.absolute_time = Some(SoundTime::Rational(RationalTime::zero(48_000)));
+        let end = PreparedSceneSoundtrack::end_frame(
+            &NoFileAccess,
+            std::slice::from_ref(&first),
+            &mut native_decoder(),
+            MixerConfig::default(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(end, 400);
+        let mut appended = request("unused.wav", 1_i64 << 60, 29);
+        appended.source = frozen(44_100, vec![0.5]);
+        appended.absolute_time = Some(SoundTime::Rational(RationalTime::zero(48_000) + 400));
+        let mix = |second: &SoundRequest| {
+            PreparedSceneSoundtrack::new(
+                &NoFileAccess,
+                &[first.clone(), second.clone()],
+                &mut native_decoder(),
+                MixerConfig {
+                    sample_rate: 44_100,
+                    ..config()
+                },
+                None,
+            )
+            .unwrap()
+            .mix(1)
+            .unwrap()
+            .audio
+            .samples
+        };
+        // 400 * 44100 / 48000 = 367.5, so the exact rational tie is sample 368.
+        let exact = mix(&appended);
+        assert_eq!(exact.len(), 369);
+        assert!(exact[..368].iter().all(|&sample| sample == 0.0));
+        assert_eq!(exact[368], 0.5);
+        // An explicitly authored f64 remains the received value. 1/120 is
+        // represented just below the tie, so its existing semantics are 367.
+        appended.absolute_time = Some(SoundTime::Seconds(end as f64 / 48_000.0));
+        let authored = mix(&appended);
+        assert_eq!(authored.len(), 368);
+        assert_eq!(authored[367], 0.5);
+
+        // Append selects the canonical 48 kHz writer end, not a deferred
+        // per-output concatenation. One 44.1 kHz source frame occupies two
+        // 48 kHz writer frames.
+        first.source = frozen(44_100, vec![0.0]);
+        let end = PreparedSceneSoundtrack::end_frame(
+            &NoFileAccess,
+            &[first],
+            &mut native_decoder(),
+            MixerConfig::default(),
+            2,
+        )
+        .unwrap();
+        assert_eq!(end, 2);
+        assert_eq!(frames_to_samples(end as i64, 48_000, 44_100).unwrap(), 2);
     }
 
     #[test]

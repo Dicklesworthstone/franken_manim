@@ -9674,6 +9674,37 @@ impl PyScene {
         result
     }
 
+    #[pyo3(signature = (sound_file, writer, gain=None, gain_to_background=None))]
+    fn _append_sound(
+        slf: &Bound<'_, Self>,
+        sound_file: &Bound<'_, PyAny>,
+        writer: &Bound<'_, PyAny>,
+        gain: Option<f64>,
+        gain_to_background: Option<f64>,
+    ) -> PyResult<()> {
+        crossing::record(CrossingClass::Other);
+        if portal_playback::requested_skip(slf)? {
+            return Ok(());
+        }
+        let position = portal_audio::writer_end(slf, writer)?;
+        // Writer configuration is authored Python and can change the skip
+        // policy while the existing soundtrack's end is being observed.
+        if portal_playback::requested_skip(slf)? {
+            return Ok(());
+        }
+        let source = portal_audio::source_from_python(slf, sound_file)?;
+        let engine = Rc::clone(&slf.borrow().engine);
+        let mut scene = engine.borrow_mut();
+        let skipping = scene.is_skipping();
+        scene.set_skipping(false);
+        let result = scene
+            .add_sound_source_at_rational(source, position, gain, gain_to_background)
+            .map(|_| ())
+            .map_err(native_error);
+        scene.set_skipping(skipping);
+        result
+    }
+
     fn _has_sound_requests(&self) -> bool {
         !self.engine.borrow().sound_requests().is_empty()
     }
@@ -13052,10 +13083,13 @@ impl PyCameraCore {
     }
 
     fn set_pixel_shape(&mut self, width: u32, height: u32) -> PyResult<()> {
+        let resized = self.camera.pixel_shape() != (width, height);
         self.camera
             .set_pixel_shape(width, height)
             .map_err(camera_error)?;
-        self.readback.borrow_mut().take();
+        if resized {
+            self.readback.borrow_mut().take();
+        }
         Ok(())
     }
 

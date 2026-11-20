@@ -17,7 +17,8 @@ class CameraProtocol(unittest.TestCase):
             def __init__(self, *children): self.submobjects = list(children)
         class Camera:
             def __init__(self):
-                self._core = object()
+                self._core = SimpleNamespace(_take_scene_capture=lambda: None,
+                                             _discard_scene_capture=lambda: None)
                 self.frame = SimpleNamespace(_core=object())
                 self.background_rgba = [0, 0, 0, 0]
                 self.light_source = SimpleNamespace(get_location=lambda: (0, 0, 1))

@@ -256,6 +256,28 @@ def writer_sound_inputs(root):
     assert all(row['path'] is None for row in memory_result.audio_inputs)
     assert all(row['path'] is not None for row in file_result.audio_inputs)
 
+    # A default append retains its exact 48 kHz writer-grid position when the
+    # bundle uses another sample rate. At 44.1 kHz, 400/48000 is the half-sample
+    # tie 367.5 -> 368; an explicitly authored float is just below that tie.
+    silence = SoundData([0.0] * 400, sample_rate=48000)
+    tick = SoundData([0.5], sample_rate=44100)
+    def cross_grid(explicit_time):
+        class Appended(m.Scene):
+            def construct(self):
+                self.file_writer.add_audio_segment(silence)
+                self.file_writer.add_audio_segment(tick, time=explicit_time)
+                self.wait_frames(1)
+        return Appended
+    for name, time, expected_frames in (('exact', None, 369),
+                                         ('explicit', 400 / 48000, 368)):
+        result = export_bundle(
+            cross_grid(time), root / f'writer-cross-grid-{name}.fmtl',
+            audio=True, audio_sample_rate=44100, audio_channels=1,
+            fps=120, resolution=(48, 32),
+        )
+        assert result.soundtrack.sample_rate == 44100
+        assert result.soundtrack.sample_frames == expected_frames
+
 
 def sample_boundary(frame, fps):
     return (2 * frame * 48000 + fps) // (2 * fps)
