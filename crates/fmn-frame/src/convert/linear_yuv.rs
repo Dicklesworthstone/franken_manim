@@ -215,7 +215,7 @@ type Band<'a> = (usize, &'a mut [u8], &'a mut [u8]);
 // interleaved chroma rows — each plane exactly `stride * rows` bytes. Splitting
 // the destination at the chroma offset and each plane at whole row pairs gives
 // every worker disjoint storage with no shared writes.
-fn convert<const TEN: bool>(
+pub(super) fn convert<const TEN: bool>(
     src: &FrameBuffer,
     dst: &mut FrameBuffer,
     coef: &Coef,

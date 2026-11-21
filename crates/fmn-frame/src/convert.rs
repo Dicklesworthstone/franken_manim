@@ -15,6 +15,8 @@
 //! - [`rgba16f_to_nv12`] / [`rgba16f_to_p010`] — direct binary16 conversion
 //!   without a frame-sized scratch buffer. NV12 preserves the legacy bytes;
 //!   P010 transfers RGB at 16-bit precision before the final 10-bit rounding.
+//! - [`rgba16f_to_p010_hdr_pq`] — explicit BT.2020/PQ P010 conversion with
+//!   absolute reference-white normalization and preserved highlight headroom.
 //! - [`swap_rb8`] / [`rgba16f_to_bgra8`] — compatibility-channel order,
 //!   including direct linear-light output without an RGBA8 intermediate.
 //! - [`YuvConversionTeam`] — persistent workers for owned NV12/P010 streams,
@@ -60,6 +62,9 @@ pub use linear_yuv::{
     rgba16f_to_p010_threaded,
 };
 
+mod hdr_pq;
+pub use hdr_pq::{HdrPqConfig, rgba16f_to_p010_hdr_pq, rgba16f_to_p010_hdr_pq_threaded};
+
 mod team;
 pub use team::{YuvConversionTeam, YuvConversionTeamStats};
 
@@ -75,7 +80,7 @@ fn convert_rgba16f_pixels(src: &[[u8; 8]], dst: &mut [[u8; 4]], tables: &Transfe
     }
 }
 
-/// One BT.709 RGB → Y′CbCr coefficient set, Q16.16.
+/// One RGB → Y′CbCr coefficient set, Q16.16.
 struct Coef {
     y: [i64; 3],
     cb: [i64; 3],

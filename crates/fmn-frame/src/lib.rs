@@ -18,6 +18,8 @@
 //!   (certified), RGB → BT.709 NV12/P010 in defined-rounding integer
 //!   fixed point (standard-mode, for the ffmpeg boundary), and the
 //!   RGBA⇄BGRA swizzle.
+//! - [`HdrPqConfig`] — explicit BT.2020/PQ P010 output with absolute
+//!   reference-white normalization and retained highlight headroom.
 //! - [`VideoColorGrade`] — native movie-only gamma and saturation after
 //!   transfer, preserving encoded output formats, alpha, and row padding.
 //!
@@ -37,6 +39,7 @@ pub mod transfer;
 pub mod video_color;
 
 pub use buffer::FrameBuffer;
+pub use convert::HdrPqConfig;
 pub use format::{ChromaSiting, ColorRange, FrameLayout, PixelFormat};
 pub use pool::FramePool;
 pub use video_color::VideoColorGrade;
