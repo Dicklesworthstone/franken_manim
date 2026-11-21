@@ -108,12 +108,13 @@ impl WireFormat {
     }
 }
 
-/// Color primaries. BT.709 is the only negotiated space today; the enum
-/// exists so a future BT.2020 lane is a variant, not a rewrite.
+/// Color primaries of the already-converted wire samples.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Primaries {
     /// ITU-R BT.709 primaries.
     Bt709,
+    /// ITU-R BT.2020 primaries.
+    Bt2020,
 }
 
 /// Transfer characteristic declared to the sink. fmn-frame applied the
@@ -124,6 +125,8 @@ pub enum Transfer {
     Srgb,
     /// ITU-R BT.709 — the conventional video declaration.
     Bt709,
+    /// SMPTE ST 2084 (PQ) — absolute-luminance HDR.
+    Pq,
 }
 
 /// The complete color description of the wire bytes.
@@ -150,7 +153,7 @@ impl ColorDescription {
         }
     }
 
-    /// Describe the bytes emitted by fmn-frame's native Lumen converters.
+    /// Describe the bytes emitted by fmn-frame's native SDR Lumen converters.
     ///
     /// Both the 8-bit and direct 10-bit YUV paths apply the sRGB transfer
     /// before a BT.709 *matrix*. The matrix does not change the transfer:
@@ -178,16 +181,31 @@ impl ColorDescription {
             range: ColorRange::Full,
         }
     }
+
+    /// Describe native HDR pixels converted to limited-range BT.2020/PQ.
+    ///
+    /// This is metadata only. The caller must supply P010 samples produced
+    /// with the matching primaries, PQ transfer and BT.2020 nonconstant-
+    /// luminance matrix; changing the description cannot convert SDR bytes.
+    /// It makes no claim about mastering-display or content-light metadata.
+    #[must_use]
+    pub const fn hdr_pq() -> Self {
+        Self {
+            primaries: Primaries::Bt2020,
+            transfer: Transfer::Pq,
+            range: ColorRange::Limited,
+        }
+    }
 }
 
 /// Encoder selection. `Auto` resolves to the documented software
-/// default for the container; hardware encoders are always an explicit,
+/// default for the color profile and container; hardware encoders are always an explicit,
 /// named request (FFMPEG_PROTOCOL.md §5) so acceleration can never be a
 /// silent substitution.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EncoderChoice {
-    /// The container's software default (`libx264`, or `qtrle` for
-    /// transparent MOV).
+    /// The software default (`libx264` for SDR video, `libx265` for PQ HDR,
+    /// or `qtrle` for transparent MOV).
     Auto,
     /// A named encoder (software or hardware), validated against the
     /// installed ffmpeg's capabilities before any spawn.
@@ -277,14 +295,38 @@ impl std::fmt::Display for NegotiationError {
 impl std::error::Error for NegotiationError {}
 
 impl VideoJob {
+    /// Select the native BT.2020/PQ HDR wire profile.
+    ///
+    /// HDR uses limited-range P010 and an opaque MP4 or MOV container. An
+    /// automatic encoder becomes the software `libx265`; explicit encoder
+    /// choices remain explicit and must advertise 10-bit input at the process
+    /// boundary. Apply this before [`Self::with_quality`] when binding quality
+    /// controls to the automatic HDR encoder.
+    ///
+    /// This selects a wire contract, not a color conversion. The producer must
+    /// convert its frames to the matching profile before sending them.
+    ///
+    /// # Errors
+    /// A nonopaque container or any other invalid job/quality setting.
+    pub fn with_hdr_pq(mut self) -> Result<Self, NegotiationError> {
+        self.wire = WireFormat::P010;
+        self.color = ColorDescription::hdr_pq();
+        if self.encoder == EncoderChoice::Auto {
+            self.encoder = EncoderChoice::Named("libx265".to_owned());
+        }
+        self.resolved_encoder()?;
+        Ok(self)
+    }
+
     /// Resolve the encoder name this job will use (`Auto` → the
-    /// container's software default).
+    /// color profile and container's software default).
     ///
     /// # Errors
     /// [`NegotiationError`] when the job's dimensions contradict each
     /// other (alpha container on an opaque wire, zero dimensions or frame
     /// rate), a transparent MOV names an encoder outside its qtrle profile,
-    /// or quality controls contradict the encoder/container/rate mode.
+    /// the PQ profile has incompatible wire/color/container settings, or
+    /// quality controls contradict the encoder/container/rate mode.
     pub fn resolved_encoder(&self) -> Result<Option<String>, NegotiationError> {
         if self.width == 0 || self.height == 0 {
             return Err(NegotiationError("zero frame dimensions"));
@@ -292,12 +334,25 @@ impl VideoJob {
         if self.fps.0 == 0 || self.fps.1 == 0 {
             return Err(NegotiationError("zero frame rate"));
         }
+        if self.color.transfer == Transfer::Pq
+            && (self.color.primaries != Primaries::Bt2020
+                || self.color.range != ColorRange::Limited
+                || self.wire != WireFormat::P010
+                || !matches!(self.container, Container::Mp4 | Container::Mov))
+        {
+            return Err(NegotiationError(
+                "PQ HDR requires BT.2020 primaries, limited-range P010, and opaque MP4/MOV",
+            ));
+        }
         if self.container == Container::MovTransparent && !self.wire.has_alpha() {
             return Err(NegotiationError(
                 "transparent MOV requires an alpha wire format (RGBA8/BGRA8)",
             ));
         }
         let encoder = match &self.encoder {
+            EncoderChoice::Auto if self.color.transfer == Transfer::Pq => {
+                Some("libx265".to_owned())
+            }
             EncoderChoice::Auto => self.container.default_encoder().map(str::to_owned),
             EncoderChoice::Named(name) | EncoderChoice::Configured { name, .. } => {
                 if self.container == Container::Gif {
@@ -337,15 +392,20 @@ const fn transfer_name(transfer: Transfer) -> &'static str {
     match transfer {
         Transfer::Srgb => "iec61966-2-1",
         Transfer::Bt709 => "bt709",
+        Transfer::Pq => "smpte2084",
     }
 }
 
 // Primaries and matrix coefficients are independent: RGB wire bytes have
-// the identity matrix even though their primaries are shared with BT.709.
+// the identity matrix regardless of their primary chromaticities.
 fn push_color_description(argv: &mut Vec<String>, color: ColorDescription, rgb: bool) {
-    push(argv, &["-color_primaries", "bt709"]);
+    let (primaries, matrix) = match color.primaries {
+        Primaries::Bt709 => ("bt709", "bt709"),
+        Primaries::Bt2020 => ("bt2020", "bt2020nc"),
+    };
+    push(argv, &["-color_primaries", primaries]);
     push(argv, &["-color_trc", transfer_name(color.transfer)]);
-    push(argv, &["-colorspace", if rgb { "rgb" } else { "bt709" }]);
+    push(argv, &["-colorspace", if rgb { "rgb" } else { matrix }]);
     push(argv, &["-color_range", range_name(color.range)]);
 }
 
