@@ -80,6 +80,7 @@ pub use svg::{
     render_svg_camera_with_fs, render_svg_with_fs,
 };
 
+pub use fmn_frame::HdrPqConfig;
 pub use fmn_output::negotiate::{AudioQuality, EncoderPreset, EncoderTune, VideoQuality};
 pub use fmn_output::{EmitterReport, JobLimits, NativeArtifactReport};
 pub use fmn_render::{CameraConfig, CameraFrame};
@@ -251,6 +252,10 @@ pub struct RenderArtifact {
     pub video_quality: Option<VideoQuality>,
     /// Effective AAC policy for video outputs; exact mux argv appears in ffmpeg receipts.
     pub audio_quality: Option<AudioQuality>,
+    /// Explicit BT.2020/PQ conversion used for this video. The luminance
+    /// settings describe the native conversion, not mastering-display metadata.
+    /// `None` preserves the ordinary SDR wire contract.
+    pub hdr_pq: Option<HdrPqConfig>,
     /// The soundtrack muxed into a video artifact; `None` when the scene
     /// authored no sound or the format carries no audio.
     pub soundtrack: Option<SoundtrackReport>,
@@ -285,6 +290,7 @@ impl RenderArtifact {
             ffmpeg_limits: None,
             video_quality: None,
             audio_quality: None,
+            hdr_pq: None,
             soundtrack: None,
         })
     }
@@ -305,6 +311,7 @@ impl RenderArtifact {
             ffmpeg_limits: None,
             video_quality: None,
             audio_quality: None,
+            hdr_pq: None,
             soundtrack,
         }
     }
@@ -384,6 +391,14 @@ pub struct RenderOptions {
     /// Opt-in AAC target for the second-stage soundtrack mux. Overrides the
     /// corresponding file_writer key, and never changes the native WAV mix.
     pub audio_quality: AudioQuality,
+    /// Opt into BT.2020/PQ, limited-range 10-bit P010 for opaque MP4/MOV.
+    /// Linear RGB 1.0 maps to the profile's reference-white luminance; values
+    /// above one retain highlight detail up to its clipping ceiling. This
+    /// conversion carries no mastering-display or measured-content metadata.
+    /// Requires standard mode, identity movie gamma/saturation, and scoped YUV
+    /// conversion. An explicit encoder must support 10-bit input; `auto`
+    /// selects software libx265. Native image/audio formats refuse this option.
+    pub hdr_pq: Option<HdrPqConfig>,
 }
 
 impl RenderOptions {
@@ -408,6 +423,7 @@ impl RenderOptions {
             ffmpeg_limits: ffmpeg_limits::default_job_limits(),
             video_quality: VideoQuality::default(),
             audio_quality: AudioQuality::default(),
+            hdr_pq: None,
         })
     }
 
@@ -809,6 +825,7 @@ struct VideoSession {
     max_input_bytes: u64,
     video_quality: VideoQuality,
     audio_quality: AudioQuality,
+    hdr_pq: Option<HdrPqConfig>,
     timeline: SoundtrackTimeline,
     audio_decodes: Vec<InvocationReport>,
 }
@@ -913,6 +930,29 @@ impl RenderSink {
                 "audio_quality requires MP4/MOV output",
             ));
         }
+        if options.hdr_pq.is_some() {
+            let background_alpha = options
+                .camera
+                .as_ref()
+                .map_or(config.camera.background_opacity, |camera| {
+                    camera.background.a
+                });
+            if !options.format.is_video() || background_alpha != 1.0 {
+                return Err(RenderError::InvalidOptions(
+                    "hdr_pq requires opaque MP4/MOV output",
+                ));
+            }
+            if options.yuv_conversion != YuvConversionPolicy::Scoped {
+                return Err(RenderError::InvalidOptions(
+                    "hdr_pq requires scoped YUV conversion",
+                ));
+            }
+            if config.file_writer.gamma != 1.0 || config.file_writer.saturation != 1.0 {
+                return Err(RenderError::InvalidOptions(
+                    "hdr_pq requires identity movie gamma and saturation",
+                ));
+            }
+        }
         let audio_quality = if options.format.is_video() {
             options.effective_audio_quality()?
         } else {
@@ -936,7 +976,11 @@ impl RenderSink {
             }
             // Invalid profiles have the same refusal with or without a host
             // ffmpeg capability. Admission itself needs no process access.
-            let job = negotiate_video(options.format, config, options.camera.as_ref())?
+            let mut job = negotiate_video(options.format, config, options.camera.as_ref())?;
+            if options.hdr_pq.is_some() {
+                job = job.with_hdr_pq().map_err(RenderError::Negotiation)?;
+            }
+            let job = job
                 .with_quality(options.effective_video_quality()?)
                 .map_err(RenderError::Negotiation)?;
             if options.ffmpeg.is_none() {
@@ -1262,6 +1306,7 @@ impl RenderSink {
                     max_input_bytes: options.max_output_bytes,
                     video_quality,
                     audio_quality,
+                    hdr_pq: options.hdr_pq,
                     timeline: SoundtrackTimeline::default(),
                     audio_decodes: Vec::new(),
                 });
@@ -1274,7 +1319,7 @@ impl RenderSink {
             vec![binding],
         )
         .map_err(RenderError::Emitter)?;
-        let pipeline = match NativeFramePipeline::with_output_policy(
+        let pipeline = match NativeFramePipeline::with_output_color_policy(
             plan.clone(),
             renderer_config,
             camera,
@@ -1284,6 +1329,7 @@ impl RenderSink {
             projection_cache_bytes,
             color_grade,
             options.yuv_conversion,
+            options.hdr_pq,
         ) {
             Ok(pipeline) => pipeline,
             Err(error) => {
@@ -1431,6 +1477,7 @@ impl RenderSink {
             .map(|video| FfmpegLimitsReport::new(&video.job_limits, video.max_input_bytes));
         artifact.video_quality = self.video.as_ref().map(|video| video.video_quality);
         artifact.audio_quality = self.video.as_ref().map(|video| video.audio_quality);
+        artifact.hdr_pq = self.video.as_ref().and_then(|video| video.hdr_pq);
         if let Some(video) = self.video.as_mut() {
             artifact.audio_decodes = std::mem::take(&mut video.audio_decodes);
         }

@@ -143,6 +143,28 @@ For Y4M or opaque video output, `options.yuv_conversion = fmn::rendering::YuvCon
 
 For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
 
+Native Rust video can opt into **BT.2020/PQ HDR** with an explicit luminance
+profile:
+
+```rust,no_run
+let mut options = RenderOptions::with_format("media/hdr.mp4", RenderFormat::Mp4)?;
+options.hdr_pq = Some(HdrPqConfig::try_new(203.0, 1_000.0)?);
+options.config.file_writer.video_codec = "auto".into(); // software libx265 for PQ
+let report = render(&mut SquareToCircle, options)?;
+assert_eq!(report.artifact.hdr_pq, Some(HdrPqConfig::default()));
+```
+
+Linear scene white (`1.0`) maps to 203 cd/m² here; brighter linear values retain
+detail up to the explicit 1,000 cd/m² clipping limit. The native conversion
+changes the primaries and transfer before 10-bit P010 quantization, and the
+encoder receives matching BT.2020/PQ tags. Audio muxing preserves the encoded
+video stream and those tags. Ordinary `p010le` output remains 10-bit SDR unless
+this profile is selected. HDR requires standard mode, an opaque MP4/MOV,
+identity gamma/saturation, scoped YUV conversion, and an encoder with verified
+10-bit input support. The profile is recorded in the artifact receipt; it does
+not fabricate HDR10 mastering-display or content-light metadata. See the
+[HDR output contract](docs/FFMPEG_PROTOCOL.md#12-explicit-bt2020pq-hdr-output).
+
 For raster assets, prepare an image once before constructing the scene:
 
 ```rust,no_run

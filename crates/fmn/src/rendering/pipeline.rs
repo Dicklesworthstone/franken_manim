@@ -10,11 +10,12 @@ use std::sync::{Arc, Mutex, Weak};
 
 use fmn_anim::pure_frame::PureFrameJob;
 use fmn_frame::convert::{
-    YuvConversionTeam, rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_threaded,
-    rgba16f_to_rgba8,
+    YuvConversionTeam, rgba16f_to_bgra8, rgba16f_to_nv12_threaded, rgba16f_to_p010_hdr_pq_threaded,
+    rgba16f_to_p010_threaded, rgba16f_to_rgba8,
 };
 use fmn_frame::{
-    ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat, VideoColorGrade,
+    ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, HdrPqConfig, PixelFormat,
+    VideoColorGrade,
 };
 use fmn_mobject::FrozenRenderState;
 use fmn_output::{EmitterError, EmitterHandle, FrameReservation};
@@ -230,6 +231,7 @@ struct RenderWorker {
     // disjoint reusable bands; only immutable frame inputs cross to them.
     raster_team: Option<RasterTeam>,
     yuv_conversion: YuvConversionPolicy,
+    hdr_pq: Option<HdrPqConfig>,
     conversion_team: Option<YuvConversionTeam>,
     compiled_vector: Option<VectorFrameCompiler>,
     compiled_camera: Option<CameraCompiler>,
@@ -377,6 +379,18 @@ impl RenderWorker {
         output: &mut FrameBuffer,
         threads: usize,
     ) -> Result<FrameBuffer, NativeFrameError> {
+        if let Some(profile) = self.hdr_pq {
+            rgba16f_to_p010_hdr_pq_threaded(
+                &raster,
+                output,
+                ColorRange::Limited,
+                ChromaSiting::Left,
+                profile,
+                threads,
+            )
+            .map_err(NativeFrameError::Frame)?;
+            return Ok(raster);
+        }
         if self.yuv_conversion == YuvConversionPolicy::Persistent
             && matches!(
                 output.layout().format(),
@@ -468,6 +482,19 @@ impl NativeFrameStages {
             ))?
             .lock()
             .map_err(|_| NativeFrameError::WorkerState("compiled worker state was poisoned"))?;
+        // A compiled camera track or adaptive capture can replace the camera
+        // admitted at pipeline construction. Validate that effective frame
+        // policy before rasterization, while the output reservation is intact.
+        if worker.hdr_pq.is_some()
+            && camera
+                .as_ref()
+                .map_or(config.frame.background.a, |camera| camera.background().a)
+                != 1.0
+        {
+            return Err(NativeFrameError::Frame(FrameError::UnsupportedConversion(
+                "BT.2020/PQ output requires an opaque background on every frame",
+            )));
+        }
         if let Some(camera) = camera {
             if worker.compiled_camera.is_none() {
                 worker.compiled_camera = Some(
@@ -964,6 +991,70 @@ impl NativeFramePipeline {
         color_grade: VideoColorGrade,
         yuv_conversion: YuvConversionPolicy,
     ) -> Result<Self, RenderError> {
+        Self::with_output_color_policy(
+            plan,
+            config,
+            camera,
+            output,
+            max_prefix_bytes_per_team,
+            max_camera_bytes_per_team,
+            max_projection_bytes_per_compiler,
+            color_grade,
+            yuv_conversion,
+            None,
+        )
+    }
+
+    /// Compose the native pipeline with an explicit output color conversion.
+    ///
+    /// `hdr_pq` converts the linear raw raster directly to BT.2020/PQ P010;
+    /// no eight-bit or SDR-encoded intermediate is involved. The caller must
+    /// pair these bytes with [`fmn_output::ColorDescription::hdr_pq`] at its
+    /// video boundary. Native certified artifacts must retain `None`.
+    ///
+    /// # Errors
+    /// In addition to [`Self::with_output_policy`], refuses PQ with a certified
+    /// execution plan, a non-P010 output, a nonopaque background, SDR grading,
+    /// or persistent conversion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_output_color_policy(
+        plan: ExecutionPlan,
+        config: RetainedFrameRendererConfig,
+        camera: Option<Camera>,
+        output: EmitterHandle,
+        max_prefix_bytes_per_team: usize,
+        max_camera_bytes_per_team: usize,
+        max_projection_bytes_per_compiler: usize,
+        color_grade: VideoColorGrade,
+        yuv_conversion: YuvConversionPolicy,
+        hdr_pq: Option<HdrPqConfig>,
+    ) -> Result<Self, RenderError> {
+        if hdr_pq.is_some() {
+            if plan.determinism == fmn_runtime::Determinism::Certified {
+                return Err(RenderError::Capability(
+                    "BT.2020/PQ video conversion is outside the certified artifact set",
+                ));
+            }
+            if plan.output_format != OutputPixelFormat::P010 {
+                return Err(RenderError::InvalidOptions(
+                    "BT.2020/PQ conversion requires P010 output",
+                ));
+            }
+            if camera
+                .as_ref()
+                .map_or(config.frame.background.a, |camera| camera.background().a)
+                != 1.0
+            {
+                return Err(RenderError::InvalidOptions(
+                    "BT.2020/PQ conversion requires an opaque background",
+                ));
+            }
+            if !color_grade.is_identity() || yuv_conversion != YuvConversionPolicy::Scoped {
+                return Err(RenderError::InvalidOptions(
+                    "BT.2020/PQ conversion requires identity grading and scoped YUV conversion",
+                ));
+            }
+        }
         // Source demand is synchronous. A smaller output ring could block
         // its producer while the coordinator awaits that same next source
         // value instead of processing the completion that frees the ring.
@@ -1051,6 +1142,12 @@ impl NativeFramePipeline {
             yuv_conversion,
         );
         stages.color_grade = color_grade;
+        for worker in &mut stages.workers {
+            worker
+                .get_mut()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .hdr_pq = hdr_pq;
+        }
         let stream = FrameStream::new(plan, stages, |_, output| {
             output.publish().map_err(NativeFrameError::Emitter)
         })
@@ -1464,6 +1561,154 @@ mod handoff_tests {
         };
         settings.frame.set_shape([4.0, 8.0]).unwrap();
         (stage, config, Camera::new(settings).unwrap())
+    }
+
+    #[test]
+    fn hdr_pq_reconstructed_frames_reject_translucent_recorded_backgrounds() {
+        use fmn_output::{EmitterConfig, OrderedEmitter, SinkBinding, SinkWrite};
+
+        let (stage, config, camera) = camera_fixture();
+        let mut stages = NativeFrameStages::new(
+            1,
+            NativeCompiler::Camera(Box::new(CameraCompiler::new(config).unwrap())),
+            0,
+            0,
+            0,
+            YuvConversionPolicy::Scoped,
+        );
+        stages.workers[0].get_mut().unwrap().hdr_pq = Some(HdrPqConfig::default());
+        let emitter = OrderedEmitter::new(
+            EmitterConfig::new(FrameLayout::tight(PixelFormat::P010, 16, 16).unwrap(), 1, 0)
+                .unwrap(),
+            vec![SinkBinding::reliable("hdr", |_, _: &FrameBuffer| {
+                Ok(SinkWrite::Consumed)
+            })],
+        )
+        .unwrap();
+        let mut output = emitter.handle().reserve(0).unwrap();
+        output.frame_mut().as_bytes_mut().fill(0xA5);
+        let team = TeamPlan {
+            role: TeamRole::Render(0),
+            cpu_ids: vec![0],
+            locality_lanes: vec![],
+            scratch_bytes_per_worker: 0,
+            shares_cores: false,
+        };
+        let mut translucent = config;
+        translucent.frame.background.a = 0.5;
+        let mut recorded_camera = camera.clone();
+        recorded_camera
+            .set_background(translucent.frame.background)
+            .unwrap();
+        for (policy, camera) in [(config, Some(recorded_camera)), (translucent, None)] {
+            let error = stages
+                .rasterize_reconstructed(&stage, policy, camera, &team, &mut output)
+                .unwrap_err();
+            assert!(error.to_string().contains("opaque background"));
+            assert!(output.frame().as_bytes().iter().all(|byte| *byte == 0xA5));
+            let worker = stages.workers[0].lock().unwrap();
+            assert!(worker.compiled_camera.is_none());
+            assert!(worker.compiled_vector.is_none());
+        }
+        stages
+            .rasterize_reconstructed(&stage, config, Some(camera), &team, &mut output)
+            .unwrap();
+        output.publish().unwrap();
+        emitter.finish().unwrap();
+    }
+
+    #[test]
+    fn hdr_pq_workers_preserve_highlights_on_fresh_and_cached_camera_and_vector_frames() {
+        let profile = HdrPqConfig::default();
+        let mut oracle_camera = None;
+        let mut oracle_vector = None;
+        for threads in [1, 4, 16] {
+            let (stage, mut config, _) = parallel_conversion_fixture();
+            let background = fmn_core::color::LinearRgba {
+                r: 4.0,
+                g: 4.0,
+                b: 4.0,
+                a: 1.0,
+            };
+            config.frame.background = background;
+            let mut settings = CameraConfig {
+                resolution: (128, 256),
+                background,
+                ..CameraConfig::default()
+            };
+            settings.frame.set_shape([4.0, 8.0]).unwrap();
+            let camera = Camera::new(settings).unwrap();
+            let mut camera_compiler = CameraCompiler::new(config).unwrap();
+            let mut vector_compiler = VectorFrameCompiler::new(config).unwrap();
+            let camera_frame = camera_compiler
+                .prepare_with_camera(&stage, &camera)
+                .unwrap();
+            let vector_frame = vector_compiler.capture(&stage, 0).unwrap();
+            let mut worker = RenderWorker {
+                hdr_pq: Some(profile),
+                ..RenderWorker::default()
+            };
+            let layout = FrameLayout::tight(PixelFormat::P010, 128, 256).unwrap();
+            let mut output = FrameBuffer::new(layout.clone());
+            let mut expected = FrameBuffer::new(layout.clone());
+            for camera_route in [true, false, true, false] {
+                let raw = if camera_route {
+                    camera_frame.render(1).unwrap()
+                } else {
+                    vector_frame
+                        .render_cached(
+                            1,
+                            &mut FrameArena::default(),
+                            &mut PixelTileCache::with_budgets(0, 0),
+                        )
+                        .unwrap()
+                        .0
+                };
+                rgba16f_to_p010_hdr_pq_threaded(
+                    &raw,
+                    &mut expected,
+                    ColorRange::Limited,
+                    ChromaSiting::Left,
+                    profile,
+                    1,
+                )
+                .unwrap();
+                let background_code =
+                    u16::from_le_bytes([expected.as_bytes()[0], expected.as_bytes()[1]]) >> 6;
+                assert!(
+                    (702..=704).contains(&background_code),
+                    "linear 4.0 must reach PQ's 812-nit code, not an SDR white clamp"
+                );
+                for _ in 0..2 {
+                    output.as_bytes_mut().fill(0xA5);
+                    if camera_route {
+                        worker
+                            .render_camera(&camera_frame, threads, &mut output)
+                            .unwrap();
+                    } else {
+                        worker
+                            .render_vector(&vector_frame, threads, &mut output)
+                            .unwrap();
+                    }
+                    assert_eq!(output.as_bytes(), expected.as_bytes());
+                }
+                let oracle = if camera_route {
+                    &mut oracle_camera
+                } else {
+                    &mut oracle_vector
+                };
+                assert_eq!(
+                    output.as_bytes(),
+                    oracle
+                        .get_or_insert_with(|| output.as_bytes().to_vec())
+                        .as_slice(),
+                    "HDR conversion changed at {threads} threads"
+                );
+                let mut sdr = FrameBuffer::new(layout.clone());
+                convert_into(&raw, &mut sdr, 1).unwrap();
+                assert_ne!(output.as_bytes(), sdr.as_bytes());
+            }
+        }
     }
 
     #[test]

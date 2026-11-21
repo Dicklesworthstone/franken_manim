@@ -67,7 +67,7 @@ and intentional difference from the Reference's old `eq` filter are defined in
 [BN-04](behavior_notes/BN-04-color.md#native-movie-gamma-and-saturation).
 These controls apply only to movie generations, not still images or previews.
 
-- **Native transfer ruling (`ColorDescription::for_native_wire`).** Native
+- **Default native transfer ruling (`ColorDescription::for_native_wire`).** Native
   renders convert linear-light `RGBA16F` rasters using the sRGB transfer curve
   (`rgba16f_to_nv12`, `rgba16f_to_p010`, `rgba16f_to_rgba8`,
   `rgba16f_to_bgra8`). Both sides of `-i -` therefore declare
@@ -111,6 +111,59 @@ metadata, frame rate, and quality controls retain their own existing policy.
 The selected encoder input format is recorded in the invocation argv in
 provenance. This removes an unnecessary format conversion when the encoder
 accepts the native planes; no hardware-independent throughput gain is promised.
+
+### 1.2 Explicit BT.2020/PQ HDR output
+
+Ten-bit P010 alone is an SDR format choice. Native Rust callers opt into HDR
+with `RenderOptions::hdr_pq = Some(HdrPqConfig::try_new(203.0, 1000.0)?)`.
+The default profile has the same reference white and clipping limit. Both
+numbers are finite cd/m² values satisfying
+`0 < reference_white_nits <= peak_nits <= 10000`; invalid profiles are refused
+at construction. The exact profile appears in `RenderArtifact::hdr_pq`.
+
+`fmn_frame::convert::rgba16f_to_p010_hdr_pq` and its threaded counterpart
+convert the native linear sRGB/BT.709 working raster in this order:
+
+1. Change linear RGB primaries to BT.2020 using the D65 matrix.
+2. Map linear `1.0` to the configured reference-white luminance, retaining
+   values above one until each BT.2020 component reaches `peak_nits`.
+3. Apply the SMPTE ST 2084/PQ inverse EOTF, retaining 16-bit encoded precision.
+4. Apply BT.2020 nonconstant-luminance Y′CbCr, subsample chroma, and round to
+   limited-range 10-bit P010 (black 64, neutral chroma 512, low six bits zero).
+
+This is a hard luminance clipping policy, not a tone mapper. Source alpha must
+already be composited; the native facade requires an opaque background.
+Negative/NaN source RGB becomes zero and positive infinity reaches the clipping
+limit. Serial and scoped-thread conversion use the same arithmetic and
+preserve source/destination row padding. Existing sRGB/BT.709 conversion tables
+and the certified artifact path are unchanged.
+
+The formulas and integer coding follow
+[ITU-R BT.2100-3](https://www.itu.int/rec/R-REC-BT.2100-3-202502-I/en), tables
+4, 6, 9 and 10. The linear D65 primary transform follows the rational matrices
+in [CSS Color 4](https://www.w3.org/TR/css-color-4/#color-conversion-code).
+
+The corresponding `VideoJob::with_hdr_pq()` selects P010 plus
+`ColorDescription::hdr_pq()`. Both the raw input and encoded output declare:
+
+```text
+-color_primaries bt2020 -color_trc smpte2084 -colorspace bt2020nc -color_range tv
+```
+
+An `auto` encoder selects software `libx265`; explicit codec selections are
+preserved and undergo the same advertised 10-bit-format check as SDR P010.
+Set `options.config.file_writer.video_codec = "auto".into()` to use this HDR
+default. The ordinary configuration's explicit `libx264` setting remains an
+explicit request. Apply low-level `with_hdr_pq()` before `with_quality()` so an
+automatic encoder's quality settings bind to the HDR default. The soundtrack
+stage uses `-c:v copy`, retaining the encoded video and color signalling.
+
+The facade refuses nonvideo sinks, transparent backgrounds, certified mode,
+nonidentity movie gamma/saturation, and persistent YUV conversion before
+scene construction or process work. This initial profile is exposed by the
+native Rust facade and low-level frame/output APIs. It does not add a Python
+render option or a CLI flag. It does not emit mastering-display (ST 2086) or
+measured MaxCLL/MaxFALL metadata and therefore makes no HDR10-delivery claim.
 
 ## 2. The D2 invocation protocol
 

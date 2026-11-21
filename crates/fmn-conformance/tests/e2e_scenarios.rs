@@ -60,6 +60,8 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
+#[path = "support/hdr_pq.rs"]
+mod hdr_pq;
 #[allow(dead_code)]
 #[path = "../../fmn/examples/live_bar_chart.rs"]
 mod live_bar_chart_example;
@@ -17836,6 +17838,32 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "parity.native_hdr_pq.v1",
+            ScenarioClass::ParityDrill,
+            Surface::RustApi,
+            Invocation::new(hdr_pq::run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("hdr_pq_thread_configs", 2),
+                counter_eq("hdr_pq_frames", 16),
+                counter_eq("hdr_pq_direct_pipeline_refusals", 2),
+                counter_eq("hdr_pq_early_refusals", 5),
+                counter_eq("hdr_pq_refused_constructors", 0),
+                counter_eq("hdr_pq_outstanding_slots", 0),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.parity.native_hdr_pq",
+                vec![
+                    FieldPred::str_eq("mode", "standard"),
+                    FieldPred::str_eq("exact_bytes", "true"),
+                    FieldPred::str_eq("highlight_headroom", "true"),
+                    FieldPred::u64_eq("frames", 16),
+                    FieldPred::u64_eq("direct_pipeline_refusals", 2),
+                    FieldPred::u64_eq("early_refusals", 5),
+                ],
+            )],
+        ),
+        spec(
             "parity.native_persistent_yuv.v1",
             ScenarioClass::ParityDrill,
             Surface::RustApi,
@@ -22534,6 +22562,16 @@ fn native_matching_workers_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_matching_workers.v1")
         .expect("native matching workers scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_hdr_pq_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.native_hdr_pq.v1")
+        .expect("native HDR PQ worker and refusal scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

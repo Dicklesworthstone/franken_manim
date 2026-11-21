@@ -137,6 +137,50 @@ fn certified_video_is_refused_instead_of_mislabelled() {
 }
 
 #[test]
+fn hdr_pq_rejects_incompatible_outputs_before_scene_or_process_work() {
+    for format in [
+        RenderFormat::Png,
+        RenderFormat::PngSequence,
+        RenderFormat::Gif,
+        RenderFormat::Y4m,
+    ] {
+        let mut request = options("/movie.mp4", format);
+        request.hdr_pq = Some(HdrPqConfig::default());
+        assert_refused(request, "hdr_pq requires opaque MP4/MOV");
+    }
+    let mut transparent = options("/movie.mp4", RenderFormat::Mov);
+    transparent.hdr_pq = Some(HdrPqConfig::default());
+    transparent.config.camera.background_opacity = 0.5;
+    assert_refused(transparent, "opaque MP4/MOV");
+
+    for format in [RenderFormat::Mp4, RenderFormat::Mov] {
+        let mut transparent_camera = options("/movie.mp4", format);
+        let mut camera = fmn::rendering::CameraConfig::default();
+        camera.background.a = 0.5;
+        transparent_camera.camera = Some(camera);
+        transparent_camera.hdr_pq = Some(HdrPqConfig::default());
+        assert_refused(transparent_camera, "opaque MP4/MOV");
+    }
+
+    for (gamma, saturation) in [(1.2, 1.0), (1.0, 0.5)] {
+        let mut graded = options("/movie.mp4", RenderFormat::Mp4);
+        graded.hdr_pq = Some(HdrPqConfig::default());
+        graded.config.file_writer.gamma = gamma;
+        graded.config.file_writer.saturation = saturation;
+        assert_refused(graded, "identity movie gamma and saturation");
+    }
+    let mut persistent = options("/movie.mp4", RenderFormat::Mp4);
+    persistent.hdr_pq = Some(HdrPqConfig::default());
+    persistent.yuv_conversion = fmn::rendering::YuvConversionPolicy::Persistent;
+    assert_refused(persistent, "scoped YUV conversion");
+
+    let mut certified = options("/movie.mp4", RenderFormat::Mp4);
+    certified.hdr_pq = Some(HdrPqConfig::default());
+    certified.config.determinism.mode = DeterminismMode::Certified;
+    assert_refused(certified, "outside the certified artifact set");
+}
+
+#[test]
 fn incompatible_video_profiles_fail_before_any_process() {
     // These pure refusals must also work when no ffmpeg capability exists.
     // Odd dimensions cannot be 4:2:0.
@@ -230,6 +274,69 @@ fn scratch(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!("fmn-native-video-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     root.canonicalize().unwrap()
+}
+
+#[test]
+fn hdr_pq_native_movie_preserves_color_signalling_through_soundtrack_mux() {
+    const TEST: &str = "hdr_pq_native_movie_preserves_color_signalling_through_soundtrack_mux";
+    let Some(capability) = host_capability() else {
+        fmn_core::test_inputs::skip_or_fail(TEST, "an ffmpeg executable on PATH");
+        return;
+    };
+    let executable = capability
+        .locator
+        .locate_ffmpeg(Path::new("ffmpeg"))
+        .unwrap();
+    let tool = fmn_output::FfmpegTool::resolve(
+        executable,
+        capability.runner.as_ref(),
+        &capability.workdir_root,
+    )
+    .unwrap();
+    let capabilities =
+        fmn_output::EncoderCapabilities::probe(&tool, capability.runner.as_ref()).unwrap();
+    if !capabilities.offers("libx265") {
+        fmn_core::test_inputs::skip_or_fail(TEST, "ffmpeg with the libx265 10-bit encoder");
+        return;
+    }
+    let root = scratch("hdr-pq");
+    let tone = root.join("tone.wav");
+    std::fs::write(&tone, tone_wav()).unwrap();
+    let destination = root.join("native-hdr.mp4");
+    let profile = HdrPqConfig::try_new(203.0, 1000.0).unwrap();
+    let mut request = options(&destination, RenderFormat::Mp4);
+    request.hdr_pq = Some(profile);
+    request.config.file_writer.video_codec = "auto".to_owned();
+    request.video_quality.preset = Some(fmn_output::EncoderPreset::UltraFast);
+    request.ffmpeg = Some(capability);
+    let report =
+        render_with_fs(&mut Chime { sound: Some(tone) }, request, Arc::new(StdFs)).unwrap();
+    assert_eq!(report.artifact.hdr_pq, Some(profile));
+    assert_eq!(report.artifact.ffmpeg.len(), 2);
+    let argv = &report.artifact.ffmpeg[0].provenance.argv;
+    for (flag, value) in [
+        ("-color_primaries", "bt2020"),
+        ("-color_trc", "smpte2084"),
+        ("-colorspace", "bt2020nc"),
+        ("-color_range", "tv"),
+    ] {
+        let tags: Vec<_> = argv.windows(2).filter(|pair| pair[0] == flag).collect();
+        assert_eq!(tags.len(), 2, "{flag}: {argv:?}");
+        assert!(tags.iter().all(|pair| pair[1] == value), "{tags:?}");
+    }
+    assert!(argv.windows(2).any(|pair| pair == ["-c:v", "libx265"]));
+    assert!(argv.windows(2).any(|pair| pair == ["-pix_fmt", "p010le"]));
+    let bytes = std::fs::read(&destination).unwrap();
+    // ISO color description: BT.2020 primaries 9, SMPTE ST2084 transfer 16,
+    // BT.2020 nonconstant-luminance matrix 9, still present after AAC mux.
+    assert!(
+        bytes
+            .windows(14)
+            .any(|window| &window[..8] == b"colrnclx" && window[8..14] == [0, 9, 0, 16, 0, 9]),
+        "published movie lost the BT.2020/PQ description"
+    );
+    let handlers = handler_types(&bytes);
+    assert!(handlers.contains(b"vide") && handlers.contains(b"soun"));
 }
 
 #[test]
