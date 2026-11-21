@@ -97,6 +97,12 @@ impl Area {
     }
 }
 
+/// The same bounded area construction also serves hard faces when their raw
+/// edge cross product underflows or overflows before normal normalization.
+pub(super) fn face_normal(mesh: &ObjMesh, corners: &[ObjCorner]) -> Vec3 {
+    Area::face(mesh, corners).normal()
+}
+
 struct SmoothFace {
     group: u64,
     line: usize,

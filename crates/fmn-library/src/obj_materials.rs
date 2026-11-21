@@ -292,7 +292,7 @@ impl ObjDocument {
                 }
             }
         }
-        let (center, scale) = self.normalization(height)?;
+        let placement = super::obj_model::ObjPlacement::new(&self.mesh.vertices, height);
         let mut children = Vec::new();
         children
             .try_reserve_exact(self.runs.len())
@@ -326,8 +326,7 @@ impl ObjDocument {
             for (local, triangle) in run.triangles.clone().enumerate() {
                 for (k, corner) in self.mesh.triangles[triangle].iter().enumerate() {
                     let vertex = self.mesh.vertices[corner.vertex];
-                    let point =
-                        std::array::from_fn::<_, 3, _>(|dim| (vertex[dim] - center[dim]) * scale);
+                    let point = placement.place(vertex);
                     let normal = self.mesh.corner_normal(triangle, k);
                     let normal_point =
                         std::array::from_fn::<_, 3, _>(|dim| point[dim] + normal[dim]);
@@ -378,29 +377,6 @@ impl ObjDocument {
             children.push(child);
         }
         Ok(Mobject::group(children))
-    }
-
-    fn normalization(&self, height: f64) -> Result<([f64; 3], f64), ObjAssetError> {
-        let Some(&first) = self.mesh.vertices.first() else {
-            return Ok(([0.0; 3], 1.0));
-        };
-        let (mut min, mut max) = (first, first);
-        for point in &self.mesh.vertices {
-            for dim in 0..3 {
-                min[dim] = min[dim].min(point[dim]);
-                max[dim] = max[dim].max(point[dim]);
-            }
-        }
-        let center = std::array::from_fn(|dim| min[dim] * 0.5 + max[dim] * 0.5);
-        let extent = max[1] - min[1];
-        if !extent.is_finite() {
-            return Err(error(0, "model bounds overflow"));
-        }
-        let scale = if extent > 0.0 { height / extent } else { 1.0 };
-        if !scale.is_finite() {
-            return Err(error(0, "model normalization overflow"));
-        }
-        Ok((center, scale))
     }
 }
 

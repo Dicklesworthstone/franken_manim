@@ -398,6 +398,19 @@ fn explicit_degenerate_triangles_keep_their_defined_unlit_behavior() {
     let mesh = ObjMesh::parse(b"v 0 0 0\nv 0 0 0\nv 0 0 0\nf 1 2 3\n").unwrap();
     assert_eq!(mesh.triangle_count(), 1);
     assert_eq!(mesh.face_normal(0), [0.0; 3]);
+    for scale in [f64::from_bits(1), 1e-200, 1.0, 1e200, f64::MAX] {
+        let source = format!("v -{scale:e} -{scale:e} 0\nv 0 0 0\nv {scale:e} {scale:e} 0\n");
+        let triangle = ObjMesh::parse(format!("{source}f 1 2 3\n").as_bytes()).unwrap();
+        assert_eq!(triangle.face_normal(0), [0.0; 3], "{scale:e}");
+        assert_eq!(triangle.corner_normal(0, 1), [0.0; 3], "{scale:e}");
+        // Explicit degenerate triangles stay defined, while polygon admission
+        // still rejects a boundary with no area, regardless of source units.
+        let polygon = format!("{source}v 0 0 0\nf 1 2 3 4\n");
+        assert!(matches!(
+            ObjMesh::parse(polygon.as_bytes()),
+            Err(ObjError::InvalidPolygon { line: 5, .. })
+        ));
+    }
 }
 
 #[test]

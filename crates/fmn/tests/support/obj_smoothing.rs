@@ -167,3 +167,81 @@ pub fn verify() -> Result<Witness, String> {
         frames,
     })
 }
+
+/// Units and a finite source translation must disappear when an imported
+/// model is centered and fitted to its requested height. The oracle authors
+/// each face's normal explicitly, so broken generated normals cannot make the
+/// expected and actual renders agree by both losing their lighting.
+pub fn verify_scale_invariance() -> Result<Witness, String> {
+    const POINTS: [[f64; 3]; 6] = [
+        [-1.0, -1.0, 0.0],
+        [0.0, -1.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [-1.0, 1.0, 0.0],
+        [1.0, -1.0, -1.0],
+        [1.0, 1.0, -1.0],
+    ];
+    let explicit = format!(
+        "{VERTICES}vn 0 0 1\nvn 1 0 1\n\
+         usemtl A\nf 1//1 2//1 3//1 4//1\n\
+         usemtl B\nf 2//2 5//2 6//2 3//2\n"
+    );
+    let cases = [
+        ("subnormal", f64::from_bits(1_u64 << 34), [0.0; 3]),
+        ("tiny", f64::from_bits(423_u64 << 52), [0.0; 3]),
+        ("ordinary", 1.0, [0.0; 3]),
+        ("huge", f64::from_bits(1623_u64 << 52), [0.0; 3]),
+        (
+            "overflowing-extent",
+            f64::from_bits(2046_u64 << 52),
+            [0.0; 3],
+        ),
+        (
+            "overflowing-midpoint",
+            f64::from_bits(2044_u64 << 52),
+            [4.0; 3],
+        ),
+    ];
+    let mut witness = None;
+    let mut frames = 0;
+    for materials in [false, true] {
+        let expected = render(&explicit, materials, 1)?;
+        frames += 3;
+        if expected[0] == expected[2] {
+            return Err("scale fixture failed to animate visible shaded geometry".into());
+        }
+        for (name, scale, offset) in cases {
+            let mut source = String::new();
+            for point in POINTS {
+                let scaled: [f64; 3] =
+                    std::array::from_fn(|axis| (point[axis] + offset[axis]) * scale);
+                if scaled.iter().any(|value| !value.is_finite()) {
+                    return Err(format!("scale fixture {name} authored a non-finite vertex"));
+                }
+                source.push_str(&format!("v {} {} {}\n", scaled[0], scaled[1], scaled[2]));
+            }
+            source.push_str("s off\n");
+            source.push_str(FACES);
+            for threads in [1, 4] {
+                let actual = render(&source, materials, threads).map_err(|error| {
+                    format!("OBJ scale {name}, materials={materials}, threads={threads}: {error}")
+                })?;
+                frames += 3;
+                if actual != expected {
+                    return Err(format!(
+                        "OBJ scale {name} changes normalized shaded frames: materials={materials}, threads={threads}"
+                    ));
+                }
+            }
+        }
+        if materials {
+            witness = Some((expected[0].clone(), expected[2].clone()));
+        }
+    }
+    let (first, last) = witness.ok_or("no scale-invariance witness rendered")?;
+    Ok(Witness {
+        first,
+        last,
+        frames,
+    })
+}

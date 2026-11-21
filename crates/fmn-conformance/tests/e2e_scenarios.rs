@@ -11977,6 +11977,22 @@ fn obj_smoothing_groups_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("obj_smoothing_frames", witness.frames))
 }
 
+fn obj_scale_invariance_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let witness = obj_smoothing::verify_scale_invariance().map_err(fail)?;
+    ctx.event(
+        LogEvent::new("e2e.obj.scale_invariance")
+            .field("frames", witness.frames)
+            .field("scale_cases", 6_u64)
+            .field("import_routes", 2_u64)
+            .field("thread_counts", 2_u64)
+            .field("explicit_normals_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("obj-scale-first.png", witness.first)
+        .with_artifact("obj-scale-last.png", witness.last)
+        .with_counter("obj_scale_frames", witness.frames))
+}
+
 fn obj_texture_options_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use std::collections::BTreeMap;
 
@@ -19086,6 +19102,23 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.obj_scale_invariance.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(obj_scale_invariance_run),
+        vec![Assertion::ExitCode(0), counter_eq("obj_scale_frames", 78)],
+        vec![LogExpect::span_present(
+            "e2e.obj.scale_invariance",
+            vec![
+                FieldPred::u64_eq("frames", 78),
+                FieldPred::u64_eq("scale_cases", 6),
+                FieldPred::u64_eq("import_routes", 2),
+                FieldPred::u64_eq("thread_counts", 2),
+                FieldPred::str_eq("explicit_normals_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.obj_texture_options.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -22682,6 +22715,16 @@ fn obj_smoothing_groups_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.obj_smoothing_groups.v1")
         .expect("OBJ smoothing-groups scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn obj_scale_invariance_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.obj_scale_invariance.v1")
+        .expect("OBJ scale-invariance scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

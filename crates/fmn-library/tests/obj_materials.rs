@@ -168,6 +168,48 @@ fn untextured_models_remain_usable_without_any_library() {
 }
 
 #[test]
+fn extreme_source_units_share_native_and_material_geometry() {
+    let reference: Mobject =
+        fmn_library::ThreeDModel::from_obj(b"v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n")
+            .unwrap()
+            .into();
+    let translation_scale = 2.0_f64.powi(1021);
+    for (scale, offset) in [
+        (f64::from_bits(1), 0.0),
+        (1e-200, 0.0),
+        (1e200, 0.0),
+        (f64::MAX, 0.0),
+        (translation_scale, 4.0 * translation_scale),
+    ] {
+        let low = offset - scale;
+        let high = offset + scale;
+        let source = format!(
+            "v {low:e} {low:e} {offset:e}\nv {high:e} {low:e} {offset:e}\nv {offset:e} {high:e} {offset:e}\nf 1 2 3\n"
+        );
+        let document = ObjDocument::parse(source.as_bytes()).unwrap();
+        let imported = document
+            .to_mobject(3.0, &BTreeMap::new(), &BTreeMap::new())
+            .expect("finite source units must not overflow a representable normalized model");
+        let native: Mobject = fmn_library::ThreeDModel::from_obj(source.as_bytes())
+            .unwrap()
+            .into();
+        for field in ["point", "d_normal_point", "rgba"] {
+            let expected = reference.buffer.read_column(field);
+            assert_eq!(
+                native.buffer.read_column(field),
+                expected,
+                "{scale:e}: {field}"
+            );
+            assert_eq!(
+                imported.submobjects[0].buffer.read_column(field),
+                expected,
+                "{scale:e}: {field}"
+            );
+        }
+    }
+}
+
+#[test]
 fn native_mtl_rgb_opacity_map_precedence_and_spaced_paths() {
     let materials = parse_mtl(b"# appearance\nnewmtl wood\nKd .2 .4 .6\nd .8\nTr .25\nmap_Ka fallback.png\nmap_Kd textures/wood grain.png\nmap_Ka ignored.png\nnewmtl plain\nKd 1 0 0\n", &ObjAssetLimits::default()).unwrap();
     assert_eq!(

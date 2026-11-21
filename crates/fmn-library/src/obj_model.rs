@@ -41,6 +41,9 @@
 //! after all input is parsed, so positive and negative authored normal indices
 //! still refer only to declarations visible at their face. Degenerate or exactly
 //! cancelling smooth neighborhoods retain the existing face-normal fallback.
+//! Face normals and height normalization are independent of the source units:
+//! finite tiny or very large models keep their geometry and lighting after
+//! normalization, without overflowing an intermediate area, center or scale.
 //!
 //! # Untrusted input (§16.5/R14)
 //!
@@ -500,7 +503,46 @@ impl ObjMesh {
         let v0 = self.vertices[corners[0].vertex];
         let v1 = self.vertices[corners[1].vertex];
         let v2 = self.vertices[corners[2].vertex];
-        normalized(cross(sub(v1, v0), sub(v2, v0)))
+        let a = sub(v1, v0);
+        let b = sub(v2, v0);
+        let normal = cross(a, b);
+        let squared = normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2];
+        if squared.is_normal() {
+            // Preserve ordinary meshes' arithmetic and certified output.
+            return normalized(normal);
+        }
+        let represented_products = [
+            (a[1], b[2]),
+            (a[2], b[1]),
+            (a[2], b[0]),
+            (a[0], b[2]),
+            (a[0], b[1]),
+            (a[1], b[0]),
+        ]
+        .into_iter()
+        .all(|(x, y)| x == 0.0 || y == 0.0 || (x * y).is_normal());
+        if represented_products
+            && normal != [0.0; 3]
+            && normal
+                .iter()
+                .all(|value| *value == 0.0 || value.is_normal())
+        {
+            // The cross product itself is still usable when only its squared
+            // length over/underflows. Rescaling anisotropic edges again could
+            // erase a component that the original products represented.
+            return normalized(normal);
+        }
+        if normal == [0.0; 3] && represented_products {
+            // An ordinary exactly collinear face stays degenerate. Rescaling
+            // its independently rounded edges must not invent a tiny normal.
+            // Check every product: a skinny face can lose its area even when
+            // the product of the two largest edge components is normal.
+            return [0.0; 3];
+        }
+        // The smoothing accumulator already keeps areas in scale² units and
+        // handles overflowing edge subtraction. Reuse that same geometry for
+        // hard faces whose unscaled cross product cannot carry the direction.
+        smoothing::face_normal(self, corners)
     }
 
     /// The normal of one corner: its authored or generated normal normalized, falling
@@ -764,17 +806,127 @@ fn cross(a: Vec3, b: Vec3) -> Vec3 {
     ]
 }
 
-/// Normalize, mapping the degenerate zero vector to `[0, 0, 0]` rather
-/// than NaN.
+fn largest_component(v: Vec3) -> f64 {
+    v.into_iter().map(f64::abs).fold(0.0, f64::max)
+}
+
+/// Normalize without interpreting source units as a degeneracy tolerance.
+/// Only a zero vector has no direction; small authored normals still override
+/// the face normal. Keep the ordinary path's operation order unchanged.
 fn normalized(v: Vec3) -> Vec3 {
-    let len = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if len <= f64::EPSILON {
+    let squared = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
+    if squared.is_normal() {
+        let len = squared.sqrt();
+        return [v[0] / len, v[1] / len, v[2] / len];
+    }
+    let largest = largest_component(v);
+    if largest == 0.0 {
         return [0.0; 3];
     }
-    [v[0] / len, v[1] / len, v[2] / len]
+    let bounded = v.map(|value| value / largest);
+    let len = (bounded[0] * bounded[0] + bounded[1] * bounded[1] + bounded[2] * bounded[2]).sqrt();
+    bounded.map(|value| value / len)
 }
 
 // -------------------------------------------------------------- ThreeDModel
+
+/// The shared geometry placement for plain and material-bearing OBJ models.
+/// An affine factor preserves the established arithmetic whenever representable;
+/// otherwise ratios apply the same center/height transform without constructing
+/// an overflowing extent or scale. Validation of requested heights and of the
+/// final f32 record values remains with each front door.
+pub(crate) enum ObjPlacement {
+    Affine {
+        center: Vec3,
+        scale: f64,
+    },
+    Ratio {
+        min: Vec3,
+        max: Vec3,
+        divisor: f64,
+        extent: f64,
+        height: f64,
+    },
+}
+
+impl ObjPlacement {
+    pub(crate) fn new(vertices: &[Vec3], height: f64) -> Self {
+        let Some(&first) = vertices.first() else {
+            return Self::Affine {
+                center: [0.0; 3],
+                scale: 1.0,
+            };
+        };
+        let (mut min, mut max) = (first, first);
+        for point in vertices {
+            for axis in 0..3 {
+                min[axis] = min[axis].min(point[axis]);
+                max[axis] = max[axis].max(point[axis]);
+            }
+        }
+        let center = std::array::from_fn(|axis| {
+            let sum = min[axis] + max[axis];
+            if sum.is_finite() {
+                sum * 0.5
+            } else {
+                min[axis] * 0.5 + max[axis] * 0.5
+            }
+        });
+        let extent = max[1] - min[1];
+        if extent == 0.0 {
+            // A heightless source has always been centered without rescaling.
+            return Self::Affine { center, scale: 1.0 };
+        }
+        let scale = height / extent;
+        if extent.is_finite() && scale.is_finite() && (scale != 0.0 || height == 0.0) {
+            return Self::Affine { center, scale };
+        }
+        let divisor = if extent.is_finite() {
+            extent
+        } else {
+            min[1].abs().max(max[1].abs())
+        };
+        Self::Ratio {
+            min,
+            max,
+            divisor,
+            extent: Self::difference(max[1], min[1], divisor),
+            height,
+        }
+    }
+
+    fn difference(value: f64, origin: f64, divisor: f64) -> f64 {
+        let delta = value - origin;
+        if delta.is_finite() {
+            delta / divisor
+        } else {
+            value / divisor - origin / divisor
+        }
+    }
+
+    pub(crate) fn place(&self, vertex: Vec3) -> Vec3 {
+        match *self {
+            Self::Affine { center, scale } => {
+                std::array::from_fn(|axis| (vertex[axis] - center[axis]) * scale)
+            }
+            Self::Ratio {
+                min,
+                max,
+                divisor,
+                extent,
+                height,
+            } => std::array::from_fn(|axis| {
+                // Translate before dividing where possible: an unrelated
+                // huge coordinate must not swallow a tiny local extent. The
+                // scaled midpoint also centers subnormal source coordinates
+                // whose unscaled midpoint is not representable.
+                let offset = Self::difference(vertex[axis], min[axis], divisor);
+                let span = Self::difference(max[axis], min[axis], divisor);
+                ((offset - span * 0.5) / extent) * height
+            }),
+        }
+    }
+}
 
 /// `ThreeDModel`: an OBJ mesh as a lit, depth-tested triangle-soup mobject
 /// (`surface.py:435`). The Reference's `TexturedGeometry` children carry
@@ -853,48 +1005,11 @@ impl ThreeDModel {
     pub fn mesh(&self) -> &ObjMesh {
         &self.mesh
     }
-
-    /// The transform applied at conversion: uniform scale to `height` and
-    /// re-centering on the origin (Reference `set_height` + `center`),
-    /// over the bounding box of the declared vertices.
-    #[must_use]
-    fn normalization(&self) -> (Vec3, f64) {
-        let mut iter = self.mesh.vertices.iter();
-        let Some(&first) = iter.next() else {
-            return ([0.0; 3], 1.0);
-        };
-        let (mut min, mut max) = (first, first);
-        for v in iter {
-            for dim in 0..3 {
-                min[dim] = min[dim].min(v[dim]);
-                max[dim] = max[dim].max(v[dim]);
-            }
-        }
-        let center = [
-            (min[0] + max[0]) / 2.0,
-            (min[1] + max[1]) / 2.0,
-            (min[2] + max[2]) / 2.0,
-        ];
-        let extent_y = max[1] - min[1];
-        let scale = if extent_y > 0.0 {
-            self.height / extent_y
-        } else {
-            1.0
-        };
-        (center, scale)
-    }
 }
 
 impl From<ThreeDModel> for Mobject {
     fn from(model: ThreeDModel) -> Self {
-        let (center, scale) = model.normalization();
-        let place = |v: Vec3| {
-            [
-                (v[0] - center[0]) * scale,
-                (v[1] - center[1]) * scale,
-                (v[2] - center[2]) * scale,
-            ]
-        };
+        let placement = ObjPlacement::new(&model.mesh.vertices, model.height);
         // The Reference's Surface dtype, field for field:
         // [('point', f32, 3), ('d_normal_point', f32, 3), ('rgba', f32, 4)]
         // — triangle soup, three consecutive records per triangle.
@@ -911,7 +1026,7 @@ impl From<ThreeDModel> for Mobject {
         let rgba = [model.color.r, model.color.g, model.color.b, model.opacity];
         for (triangle, corners) in model.mesh.triangles.iter().enumerate() {
             for (k, corner) in corners.iter().enumerate() {
-                let point = place(model.mesh.vertices[corner.vertex]);
+                let point = placement.place(model.mesh.vertices[corner.vertex]);
                 // `d_normal_point - point` carries the normal direction;
                 // the surface shaders normalize the difference.
                 let normal = model.mesh.corner_normal(triangle, k);
@@ -1024,6 +1139,71 @@ f 2//2 4//4 3//3
         let degenerate = "v 0 0 0\nv 0 0 0\nv 0 0 0\nf 1 2 3\n";
         let mesh = ObjMesh::parse(degenerate.as_bytes()).expect("parses");
         assert_eq!(mesh.face_normal(0), [0.0; 3]);
+    }
+
+    #[test]
+    fn face_normals_are_independent_of_obj_units() {
+        let reference = ObjMesh::parse(b"v 0 0 0\nv 1 0 0\nv 0 1 1\nf 1 2 3\n")
+            .expect("reference mesh")
+            .face_normal(0);
+        for scale in [1e-9, 1e-200, 1e200, f64::from_bits(1)] {
+            let source = format!("v 0 0 0\nv {scale:e} 0 0\nv 0 {scale:e} {scale:e}\nf 1 2 3\n");
+            let mesh = ObjMesh::parse(source.as_bytes()).expect("finite scaled mesh");
+            assert!(
+                close_vec(mesh.face_normal(0), reference),
+                "scale {scale:e}: {:?}",
+                mesh.face_normal(0)
+            );
+            assert!(close_vec(mesh.corner_normal(0, 2), reference));
+        }
+        let spanning = ObjMesh::parse(b"v -1e308 0 0\nv 1e308 0 0\nv 0 1e308 1e308\nf 1 2 3\n")
+            .expect("finite vertices despite overflowing edge subtraction");
+        assert!(close_vec(spanning.face_normal(0), reference));
+    }
+
+    #[test]
+    fn authored_normal_direction_is_independent_of_magnitude() {
+        for scale in [1.0, 1e-200, 1e200, f64::from_bits(1)] {
+            // The authored normal deliberately differs from the +Z face
+            // normal, so mistaking a small normal for zero cannot pass.
+            let source = format!("v 0 0 0\nv 1 0 0\nv 0 1 0\nvn {scale:e} 0 0\nf 1//1 2//1 3//1\n");
+            let mesh = ObjMesh::parse(source.as_bytes()).expect("finite authored normal");
+            assert_eq!(mesh.corner_normal(0, 0), [1.0, 0.0, 0.0], "{scale:e}");
+        }
+        let zero = ObjMesh::parse(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nvn 0 0 0\nf 1//1 2//1 3//1\n")
+            .expect("zero normal retains the face fallback");
+        assert_eq!(zero.corner_normal(0, 0), [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn skinny_face_normal_survives_underflowing_cross_products() {
+        let second = [1e-100, 1e-300, 0.0];
+        let third = [1e-100, 1.000_000_000_000_001e-300, 0.0];
+        for scale in [1.0, 1e100] {
+            let source = format!(
+                "v 0 0 0\nv {:e} {:e} 0\nv {:e} {:e} 0\nf 1 2 3\n",
+                second[0] * scale,
+                second[1] * scale,
+                third[0] * scale,
+                third[1] * scale,
+            );
+            let mesh = ObjMesh::parse(source.as_bytes()).unwrap();
+            // The third vertex is strictly above the second in the XY plane.
+            // Multiplying source units cannot turn this face into zero area.
+            assert_eq!(mesh.face_normal(0), [0.0, 0.0, 1.0], "{scale:e}");
+        }
+    }
+
+    #[test]
+    fn finite_cross_direction_survives_overflowing_or_underflowing_length() {
+        for (wide, narrow) in [(1e300, 1e-100), (1e100, 1e-300)] {
+            let source = format!("v 0 0 0\nv {wide:e} 0 0\nv {wide:e} {narrow:e} 0\nf 1 2 3\n");
+            let mesh = ObjMesh::parse(source.as_bytes()).unwrap();
+            // Each finite cross has a +Z direction, even though squaring its
+            // length over/underflows and dividing edges by `wide` loses Y.
+            assert_eq!(mesh.face_normal(0), [0.0, 0.0, 1.0], "{wide:e}");
+            assert_eq!(mesh.corner_normal(0, 2), [0.0, 0.0, 1.0], "{wide:e}");
+        }
     }
 
     #[test]
@@ -1175,6 +1355,54 @@ f 2//2 4//4 3//3
         // Surface shading and depth test land in the uniform inventory.
         assert_eq!(mob.uniforms.shading, MODEL_SHADING);
         assert!(mob.uniforms.depth_test);
+    }
+
+    #[test]
+    fn three_d_model_normalizes_finite_extreme_scales() {
+        let reference = Mobject::from(
+            ThreeDModel::from_obj(b"v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n")
+                .expect("reference model"),
+        );
+        for scale in [1e-200, 1e200, f64::from_bits(1), f64::MAX] {
+            let source = format!(
+                "v -{scale:e} -{scale:e} 0\nv {scale:e} -{scale:e} 0\nv 0 {scale:e} 0\nf 1 2 3\n"
+            );
+            let model = Mobject::from(
+                ThreeDModel::from_obj(source.as_bytes()).expect("finite scaled model"),
+            );
+            for field in ["point", "d_normal_point"] {
+                assert_eq!(
+                    model.buffer.read_column(field).expect("model field"),
+                    reference
+                        .buffer
+                        .read_column(field)
+                        .expect("reference field"),
+                    "scale {scale:e}, {field}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_normalization_keeps_small_extents_beside_large_translations() {
+        let reference = Mobject::from(
+            ThreeDModel::from_obj(b"v 0 0 0\nv 0 1 0\nv 0 0 1\nf 1 2 3\n")
+                .expect("reference model"),
+        );
+        let translated = Mobject::from(
+            ThreeDModel::from_obj(b"v 1e308 0 0\nv 1e308 1 0\nv 1e308 0 1\nf 1 2 3\n")
+                .expect("translated finite model"),
+        );
+        for field in ["point", "d_normal_point"] {
+            assert_eq!(
+                translated.buffer.read_column(field).expect("model field"),
+                reference
+                    .buffer
+                    .read_column(field)
+                    .expect("reference field"),
+                "{field}"
+            );
+        }
     }
 
     // ---- structure-aware fuzz: the parser never panics -------------------
