@@ -92,6 +92,11 @@ def take_video_options(arguments: list[str], value_flags=frozenset()):
     while index < len(arguments):
         token = arguments[index]
         flag, separator, inline = token.partition("=")
+        if flag == "--hdr-pq":
+            raise ValueError(
+                "--hdr-pq requires the native fmn CPU renderer; "
+                "fmn-python does not yet convert video to BT.2020/PQ"
+            )
         if flag in _VIDEO_FLAGS:
             name = _VIDEO_FLAGS[flag]
             if name in overrides:

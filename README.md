@@ -162,8 +162,19 @@ video stream and those tags. Ordinary `p010le` output remains 10-bit SDR unless
 this profile is selected. HDR requires standard mode, an opaque MP4/MOV,
 identity gamma/saturation, scoped YUV conversion, and an encoder with verified
 10-bit input support. The profile is recorded in the artifact receipt; it does
-not fabricate HDR10 mastering-display or content-light metadata. See the
-[HDR output contract](docs/FFMPEG_PROTOCOL.md#12-explicit-bt2020pq-hdr-output).
+not fabricate HDR10 mastering-display or content-light metadata.
+
+The native CLI exposes the default profile through `--hdr-pq`, including FMTL
+recordings and batch rendering:
+
+```sh
+fmn --hdr-pq --vcodec auto --crf 18 --preset medium \
+  --video_dir media @builtin circle_shift.v1
+```
+
+See the [HDR video guide](docs/HDR_PQ_VIDEO.md) for configuration and receipts,
+and the [output contract](docs/FFMPEG_PROTOCOL.md#12-explicit-bt2020pq-hdr-output)
+for the conversion details.
 
 For raster assets, prepare an image once before constructing the scene:
 

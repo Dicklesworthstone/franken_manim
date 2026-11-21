@@ -14,6 +14,15 @@ _spec.loader.exec_module(v)
 
 
 class VideoCliTests(unittest.TestCase):
+    def test_native_hdr_request_is_refused_without_consuming_legacy_values(self):
+        for token in ("--hdr-pq", "--hdr-pq=true", "--hdr-pq=false"):
+            with self.assertRaisesRegex(ValueError, "native fmn CPU renderer"):
+                v.take_video_options(["scene.py", token])
+        self.assertEqual(
+            v.take_video_options(["--file_name", "--hdr-pq"], {"--file_name"}),
+            (["--file_name", "--hdr-pq"], {}),
+        )
+
     def test_wav_dither_seed_is_explicit_u64_and_not_a_video_control(self):
         for seed in (0, 17, (1 << 64) - 1):
             for tokens in (["--audio-dither-seed", str(seed)], [f"--audio-dither-seed={seed}"]):

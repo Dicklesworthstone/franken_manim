@@ -388,6 +388,8 @@ pub struct RenderCommand {
     pub vcodec: Option<String>,
     /// ffmpeg pixel format.
     pub pix_fmt: Option<String>,
+    /// Native CPU BT.2020/PQ P010 output with the default luminance profile.
+    pub hdr_pq: bool,
     /// Explicit video encoder overrides, layered above `file_writer` settings.
     pub video_quality: VideoQuality,
     /// Optional AAC target, independent of the compressed-video rate mode.
@@ -770,6 +772,7 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "hd"
         | "leave_progress_bars"
         | "pix_fmt"
+        | "hdr_pq"
         | "prerun"
         | "show_animation_progress"
         | "subdivide"
@@ -1198,6 +1201,11 @@ fn build_invocation(
         }
         CommandScope::Studio => {
             let render = build_render(values.clone(), common)?;
+            if render.hdr_pq {
+                return Err(usage(
+                    "--hdr-pq applies to offline video rendering; Studio previews do not support PQ",
+                ));
+            }
             let bind = values
                 .value("bind")
                 .unwrap_or("127.0.0.1")
@@ -1283,6 +1291,7 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         video_dir: values.explicit_value("video_dir").map(PathBuf::from),
         vcodec: values.explicit_value("vcodec").map(str::to_owned),
         pix_fmt: values.explicit_value("pix_fmt").map(str::to_owned),
+        hdr_pq: values.bool("hdr_pq"),
         video_quality: VideoQuality {
             crf,
             preset: values
@@ -1544,6 +1553,12 @@ pub fn resolve_render_config(
         pairs.push((
             "file_writer.pixel_format",
             fmn_config::Value::Str(pix_fmt.clone()),
+        ));
+    }
+    if command.hdr_pq {
+        pairs.push((
+            "file_writer.pixel_format",
+            fmn_config::Value::Str("p010le".to_owned()),
         ));
     }
     if command.video_quality.crf.is_some() || command.video_quality.bitrate.is_some() {
@@ -2867,6 +2882,7 @@ struct FfmpegRenderContext {
     capabilities: EncoderCapabilities,
     job: VideoJob,
     audio_quality: fmn_output::AudioQuality,
+    hdr_pq: Option<fmn::HdrPqConfig>,
     workdir_root: PathBuf,
     job_limits: JobLimits,
     max_input_bytes: u64,
@@ -2916,6 +2932,7 @@ struct VideoArtifactReport {
     process_policy_version: u32,
     argv: Vec<String>,
     ffmpeg_limits: FfmpegLimitsReport,
+    hdr_pq: Option<fmn::HdrPqConfig>,
     /// Encode followed by the optional mux. Audio decodes have their own
     /// receipt list because they can overlap the streaming video encoder.
     ffmpeg_invocations: Vec<InvocationReport>,
@@ -2930,6 +2947,16 @@ struct VideoAudioInput {
 }
 
 impl VideoArtifactReport {
+    fn hdr_pq_json(&self) -> Option<String> {
+        self.hdr_pq.map(|profile| {
+            format!(
+                "{{\"primaries\":\"bt2020\",\"transfer\":\"smpte2084\",\"matrix\":\"bt2020nc\",\"range\":\"limited\",\"reference_white_nits\":{},\"peak_nits\":{}}}",
+                profile.reference_white_nits(),
+                profile.peak_nits(),
+            )
+        })
+    }
+
     fn audio_inputs_json(&self) -> String {
         let entries = self.audio_inputs.iter().map(|input| {
             format!(
@@ -4571,6 +4598,7 @@ struct RenderSink {
     emitter: Option<OrderedEmitter>,
     receipt: RenderReceipt,
     ffmpeg_limits: Option<FfmpegLimitsReport>,
+    hdr_pq: Option<fmn::HdrPqConfig>,
     soundtrack: Option<FfmpegSoundtrack>,
     soundtrack_timeline: SoundtrackTimeline,
     next_sequence: u64,
@@ -4620,6 +4648,24 @@ impl RenderSink {
         camera: Option<fmn_render::Camera>,
     ) -> Result<Self, CliError> {
         let camera_journal = camera.as_ref().map(camera_route::descriptor);
+        let hdr_pq = match target {
+            RenderTarget::Video(context) => context.hdr_pq,
+            _ => None,
+        };
+        if hdr_pq.is_some()
+            && (!matches!(
+                plan.engine,
+                fmn_runtime::ExecutionEngine::CertifiedCpu | fmn_runtime::ExecutionEngine::FastCpu
+            ) || config.camera.background_opacity != 1.0
+                || camera
+                    .as_ref()
+                    .is_some_and(|camera| camera.background().a != 1.0))
+        {
+            return Err(CliError::new(
+                "config",
+                "--hdr-pq requires an opaque native CPU render",
+            ));
+        }
         let color_grade = if matches!(target, RenderTarget::Video(_)) {
             fmn_frame::VideoColorGrade::new(config.file_writer.gamma, config.file_writer.saturation)
                 .map_err(|error| CliError::new("config", error.to_string()))?
@@ -4803,6 +4849,7 @@ impl RenderSink {
                         emitter.handle(),
                         camera,
                         color_grade.clone(),
+                        hdr_pq,
                     )?;
                     let mut backend = BackendAccumulator::cpu(identity, &frame_config, tiling);
                     if let Some(descriptor) = &camera_journal {
@@ -4870,6 +4917,7 @@ impl RenderSink {
             emitter: Some(emitter),
             receipt,
             ffmpeg_limits,
+            hdr_pq,
             soundtrack,
             soundtrack_timeline: SoundtrackTimeline::default(),
             next_sequence: 0,
@@ -5090,6 +5138,7 @@ impl RenderSink {
                     ffmpeg_limits: self.ffmpeg_limits.clone().ok_or_else(|| {
                         internal("ffmpeg publication omitted its admitted resource policy")
                     })?,
+                    hdr_pq: self.hdr_pq,
                     ffmpeg_invocations: report.boundary.invocations,
                     audio_decodes,
                     audio_inputs,
@@ -5670,6 +5719,15 @@ enum RequestedRenderFormat {
 }
 
 fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFormat, CliError> {
+    if command.hdr_pq
+        && (!matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+            || command.transparent
+            || command.common.reproducible)
+    {
+        return Err(usage(
+            "--hdr-pq requires opaque video output in standard mode",
+        ));
+    }
     if command.ffmpeg_limits.has_overrides()
         && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
     {
@@ -5702,6 +5760,7 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
         OutputFormat::Auto
             if command.vcodec.is_some()
                 || command.pix_fmt.is_some()
+                || command.hdr_pq
                 || !command.video_quality.is_default()
                 || command.audio_bitrate.is_some()
                 || command.ffmpeg_limits.has_overrides() =>
@@ -6157,6 +6216,21 @@ fn render_manifest(
             .map_err(|error| internal(error.to_string()))?,
         );
     }
+    let hdr_item = match artifact {
+        RenderArtifactReport::Video(report) => report
+            .hdr_pq_json()
+            .map(|description| {
+                ClosureItem::byte_input(
+                    4,
+                    "native-hdr-pq.json",
+                    description.as_bytes(),
+                    "native BT.2020/PQ conversion and absolute luminance profile",
+                )
+            })
+            .transpose()
+            .map_err(|error| internal(error.to_string()))?,
+        RenderArtifactReport::Native(_) => None,
+    };
     ProvenanceManifest::new(
         mode,
         vec![
@@ -6174,6 +6248,7 @@ fn render_manifest(
             c10,
         ]
         .into_iter()
+        .chain(hdr_item)
         .chain(cue_items)
         .chain(font_items)
         .collect(),
@@ -6201,7 +6276,38 @@ fn ffmpeg_video_job(
     command: &RenderCommand,
     config: &fmn_config::Config,
 ) -> Result<VideoJob, CliError> {
-    if command.common.reproducible {
+    if command.hdr_pq {
+        requested_render_format(command)?;
+        if config.render.engine != fmn_config::config::Engine::Cpu {
+            return Err(CliError::new(
+                "capability",
+                "--hdr-pq requires the native CPU renderer; accelerator video conversion is SDR",
+            ));
+        }
+        if config.camera.background_opacity != 1.0 {
+            return Err(CliError::new(
+                "config",
+                "--hdr-pq requires an opaque background",
+            ));
+        }
+        if config.file_writer.gamma != 1.0 || config.file_writer.saturation != 1.0 {
+            return Err(CliError::new(
+                "config",
+                "--hdr-pq requires identity movie gamma and saturation",
+            ));
+        }
+        if let Some(pixel_format) = &command.pix_fmt
+            && !pixel_format.eq_ignore_ascii_case("auto")
+            && WireFormat::from_config(pixel_format, false)
+                .map_err(|error| usage(error.to_string()))?
+                != WireFormat::P010
+        {
+            return Err(usage("--hdr-pq requires a P010 --pix_fmt"));
+        }
+    }
+    if command.common.reproducible
+        || config.determinism.mode == fmn_config::config::DeterminismMode::Certified
+    {
         return Err(CliError::new(
             "capability",
             "ffmpeg video is outside the certified artifact set; use --format png_sequence or --format y4m with --reproducible",
@@ -6230,7 +6336,7 @@ fn ffmpeg_video_job(
     } else {
         EncoderChoice::Named(codec.to_owned())
     };
-    let job = VideoJob {
+    let mut job = VideoJob {
         width: config.camera.resolution.0,
         height: config.camera.resolution.1,
         fps: (config.camera.fps, 1),
@@ -6244,6 +6350,11 @@ fn ffmpeg_video_job(
         encoder,
         crf: None,
     };
+    if command.hdr_pq {
+        job = job
+            .with_hdr_pq()
+            .map_err(|error| CliError::new("config", error.to_string()))?;
+    }
     let job = job
         .with_quality(
             fmn::rendering::configured_video_quality(&config.file_writer)
@@ -6305,6 +6416,7 @@ fn prepare_ffmpeg_context(
         runner,
         tool,
         capabilities,
+        hdr_pq: (job.color.transfer == fmn_output::Transfer::Pq).then(fmn::HdrPqConfig::default),
         job,
         audio_quality,
         workdir_root,
@@ -7751,6 +7863,9 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         report.audio_inputs_json(),
                         report.soundtrack_json(),
                     );
+                    if let Some(hdr_pq) = report.hdr_pq_json() {
+                        let _ = write!(stdout, ",\"hdr_pq\":{hdr_pq}");
+                    }
                     stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
                     stdout.push_str(&typesetting_json);
@@ -7861,6 +7976,7 @@ fn prepare_batch_locator(
 ) -> Result<FixedBatchFfmpegLocator, CliError> {
     let executable = if requested_render_format(command)? == RequestedRenderFormat::Video {
         let config = resolve_render_config(fs, command)?;
+        ffmpeg_video_job(command, &config)?;
         let configured = Path::new(&config.file_writer.ffmpeg_bin);
         Some(locator.locate_ffmpeg(configured).map_err(|error| {
             CliError::new(
@@ -10066,6 +10182,7 @@ mod tests {
             &["--reproducible"],
             &["--vcodec", "libx264"],
             &["--pix_fmt", "rgba"],
+            &["--hdr-pq"],
             &["--crf", "16"],
             &["--preset", "slow"],
             &["--tune", "animation"],
@@ -10378,6 +10495,156 @@ mod tests {
                 .collect();
             assert_eq!(tags.len(), 2);
             assert!(tags.iter().all(|pair| pair[1] == "iec61966-2-1"));
+        }
+    }
+
+    #[test]
+    fn hdr_pq_flag_selects_ten_bit_video_without_discarding_explicit_codecs() {
+        let fs = VirtualFs::new();
+        for (codec, expected) in [
+            (None, "libx264"),
+            (Some("auto"), "libx265"),
+            (Some("libx265"), "libx265"),
+            (Some("hevc_nvenc"), "hevc_nvenc"),
+        ] {
+            let mut args = vec!["--hdr-pq"];
+            if let Some(codec) = codec {
+                args.extend(["--vcodec", codec]);
+            }
+            let command = render(parse_args(args).unwrap());
+            assert!(command.write_file && command.hdr_pq);
+            assert_eq!(
+                requested_render_format(&command).unwrap(),
+                RequestedRenderFormat::Video
+            );
+            let config = resolve_render_config(&fs, &command).unwrap();
+            assert_eq!(config.file_writer.pixel_format, "p010le");
+            let job = ffmpeg_video_job(&command, &config).unwrap();
+            assert_eq!(job.wire, WireFormat::P010);
+            assert_eq!(job.color, ColorDescription::hdr_pq());
+            assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some(expected));
+            let argv = fmn_output::negotiate::encode_argv(&job, Path::new("/hdr.mp4")).unwrap();
+            assert_eq!(
+                argv.windows(2)
+                    .filter(|pair| pair == &["-color_trc", "smpte2084"])
+                    .count(),
+                2
+            );
+        }
+        let command = render(parse_args(["--hdr-pq", "--vcodec", "auto", "--crf", "18"]).unwrap());
+        let config = resolve_render_config(&fs, &command).unwrap();
+        let job = ffmpeg_video_job(&command, &config).unwrap();
+        assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some("libx265"));
+        assert_eq!(job.quality().unwrap().crf, Some(18));
+
+        fs.insert(
+            "/hdr.yml",
+            b"file_writer:\n  video_codec: hevc_nvenc\n".to_vec(),
+        );
+        let command = render(parse_args(["--hdr-pq", "--config_file", "/hdr.yml"]).unwrap());
+        let config = resolve_render_config(&fs, &command).unwrap();
+        assert_eq!(
+            ffmpeg_video_job(&command, &config)
+                .unwrap()
+                .resolved_encoder()
+                .unwrap()
+                .as_deref(),
+            Some("hevc_nvenc")
+        );
+    }
+
+    #[test]
+    fn hdr_pq_rejects_unsupported_outputs_and_policies_before_tool_discovery() {
+        for args in [
+            &["--hdr-pq", "--format", "png"][..],
+            &["--hdr-pq", "--format", "y4m"],
+            &["--hdr-pq", "--format", "wav"],
+            &["--hdr-pq", "--format", "svg"],
+            &["--hdr-pq", "--gif"],
+            &["--hdr-pq", "--transparent"],
+            &["--hdr-pq", "--reproducible"],
+            &["studio", "--hdr-pq"],
+            &["--hdr-pq=true"],
+        ] {
+            assert_eq!(
+                parse_args(args.iter().copied()).unwrap_err().exit_name(),
+                "usage",
+                "{args:?}"
+            );
+        }
+        let fs = Arc::new(VirtualFs::new());
+        for (document, expected) in [
+            (
+                "determinism:\n  mode: certified\n",
+                "outside the certified artifact set",
+            ),
+            ("camera:\n  background_opacity: 0.5\n", "opaque background"),
+            (
+                "file_writer:\n  gamma: 2\n",
+                "identity movie gamma and saturation",
+            ),
+            (
+                "file_writer:\n  saturation: 0.5\n",
+                "identity movie gamma and saturation",
+            ),
+            ("render:\n  engine: metal\n", "native CPU renderer"),
+        ] {
+            fs.insert("/hdr-refusal.yml", document.as_bytes().to_vec());
+            let output = run_with_capabilities(
+                [
+                    "--robot",
+                    "--hdr-pq",
+                    "--config_file",
+                    "/hdr-refusal.yml",
+                    BUILTIN_SCENE_SOURCE,
+                    "circle_shift.v1",
+                ],
+                fs_capability(&fs),
+                Arc::new(fmn_platform::process::ScriptedRunner::new()),
+                &no_ffmpeg_locator(),
+            );
+            assert_ne!(output.code, 0);
+            assert!(
+                output.stdout.contains(expected),
+                "{}{}",
+                output.stdout,
+                output.stderr
+            );
+        }
+        for pixel_format in ["rgba", "bgra", "nv12", "yuv420p"] {
+            let command = render(parse_args(["--hdr-pq", "--pix_fmt", pixel_format]).unwrap());
+            let config = resolve_render_config(fs.as_ref(), &command).unwrap();
+            assert!(
+                ffmpeg_video_job(&command, &config)
+                    .unwrap_err()
+                    .message()
+                    .contains("P010")
+            );
+        }
+    }
+
+    #[cfg(feature = "batch")]
+    #[test]
+    fn hdr_pq_batch_checks_the_resolved_profile_before_tool_discovery() {
+        let fs = VirtualFs::new();
+        fs.insert(
+            "/certified.yml",
+            b"determinism:\n  mode: certified\n".to_vec(),
+        );
+        for hdr in [false, true] {
+            let mut args = vec!["--format", "video", "--config_file", "/certified.yml"];
+            if hdr {
+                args.push("--hdr-pq");
+            }
+            let command = render(parse_args(args).unwrap());
+            let error = prepare_batch_locator(&fs, &no_ffmpeg_locator(), &command)
+                .err()
+                .expect("certified video must refuse before a missing ffmpeg lookup");
+            assert!(
+                error
+                    .message()
+                    .contains("outside the certified artifact set")
+            );
         }
     }
 
@@ -10997,6 +11264,7 @@ mod tests {
         #[derive(Default)]
         struct AudioRunner {
             mux_inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+            video_inputs: Option<Arc<Mutex<Vec<Vec<u8>>>>>,
             decodes: Mutex<Vec<ProcessSpec>>,
             decoded_wav: Option<Vec<u8>>,
             fail_mux: bool,
@@ -11047,6 +11315,7 @@ mod tests {
                     limits,
                     bytes: 0,
                     mux_inputs: Arc::clone(&self.mux_inputs),
+                    video_inputs: self.video_inputs.clone(),
                     decoded_wav,
                     fail_mux: self.fail_mux,
                 }))
@@ -11059,6 +11328,7 @@ mod tests {
             limits: ProcessStdinLimits,
             bytes: u64,
             mux_inputs: Arc<Mutex<Vec<Vec<u8>>>>,
+            video_inputs: Option<Arc<Mutex<Vec<Vec<u8>>>>>,
             decoded_wav: Option<Vec<u8>>,
             fail_mux: bool,
         }
@@ -11077,6 +11347,9 @@ mod tests {
                 assert!(bytes.len() as u64 <= self.limits.max_chunk_bytes);
                 self.bytes += bytes.len() as u64;
                 assert!(self.bytes <= self.limits.max_total_bytes);
+                if let Some(inputs) = &self.video_inputs {
+                    inputs.lock().unwrap().push(bytes.to_vec());
+                }
                 Ok(())
             }
 
@@ -11147,6 +11420,24 @@ mod tests {
             runner: &Arc<AudioRunner>,
             extra: &[&str],
         ) -> (RunOutput, PathBuf) {
+            render_source(
+                fs,
+                runner,
+                extra,
+                &[BUILTIN_SCENE_SOURCE, fmn::builtins::SOUND_CUE_SCENE_NAME],
+                "sound_cue",
+                false,
+            )
+        }
+
+        fn render_source(
+            fs: &Arc<VirtualFs>,
+            runner: &Arc<AudioRunner>,
+            extra: &[&str],
+            source: &[&str],
+            stem: &str,
+            batch: bool,
+        ) -> (RunOutput, PathBuf) {
             static SEQUENCE: AtomicU64 = AtomicU64::new(0);
             let root = std::env::temp_dir().join(format!(
                 "fmn-cli-audio-{}-{}",
@@ -11175,14 +11466,18 @@ mod tests {
                 output.to_str().unwrap(),
             ];
             let result = run_with_capabilities(
-                args.into_iter()
+                batch
+                    .then_some(["batch", "--max-scenes", "1"])
+                    .into_iter()
+                    .flatten()
+                    .chain(args)
                     .chain(extra.iter().copied())
-                    .chain([BUILTIN_SCENE_SOURCE, fmn::builtins::SOUND_CUE_SCENE_NAME]),
+                    .chain(source.iter().copied()),
                 fs_capability(fs),
                 runner.clone(),
                 &no_ffmpeg_locator(),
             );
-            (result, output.join("sound_cue.mp4"))
+            (result, output.join(format!("{stem}.mp4")))
         }
 
         fn source_wav() -> Vec<u8> {
@@ -11190,6 +11485,95 @@ mod tests {
             // preserve its tail past the one-second picture; partial clips
             // must stop at their own boundaries.
             fmn_codec::encode_wav(1, 48_000, SampleFormat::S16, &vec![0.25; 36_000])
+        }
+
+        #[test]
+        fn hdr_pq_cli_converts_builtin_and_bundle_pixels_and_records_the_profile() {
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, source_wav());
+            let mut stage = fmn_scene::studio_bridge::Stage::new();
+            let mut timeline = fmn::animation::Timeline::new(8).unwrap();
+            timeline.wait(0.25).unwrap();
+            let bundle =
+                fmn_scene::export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(7))
+                    .unwrap();
+            fs.insert("/hdr_bundle.fmtl", bundle);
+            for (source, stem, batch) in [
+                (
+                    &[BUILTIN_SCENE_SOURCE, "circle_shift.v1"][..],
+                    "circle_shift",
+                    false,
+                ),
+                (&["/hdr_bundle.fmtl"][..], "hdr_bundle", false),
+                (
+                    &[BUILTIN_SCENE_SOURCE, fmn::builtins::SOUND_CUE_SCENE_NAME][..],
+                    "sound_cue",
+                    false,
+                ),
+                #[cfg(feature = "batch")]
+                (
+                    &[BUILTIN_SCENE_SOURCE, "circle_shift.v1"][..],
+                    "circle_shift",
+                    true,
+                ),
+            ] {
+                let pixels = Arc::new(Mutex::new(Vec::new()));
+                let runner = Arc::new(AudioRunner {
+                    video_inputs: Some(Arc::clone(&pixels)),
+                    ..AudioRunner::default()
+                });
+                let (result, artifact) = render_source(
+                    &fs,
+                    &runner,
+                    &["--hdr-pq", "--background", "#FFFFFF"],
+                    source,
+                    stem,
+                    batch,
+                );
+                assert_eq!(result.code, 0, "{}{}", result.stdout, result.stderr);
+                let captured = pixels.lock().unwrap();
+                assert!(!captured.is_empty());
+                let luma = u16::from_le_bytes([captured[0][0], captured[0][1]]) >> 6;
+                assert!(
+                    (572..=574).contains(&luma),
+                    "203-nit white must be PQ code 573, not SDR code 940; got {luma}"
+                );
+                assert!(
+                    result
+                        .stdout
+                        .contains("\"hdr_pq\":{\"primaries\":\"bt2020\"")
+                );
+                assert!(
+                    result
+                        .stdout
+                        .contains("\"reference_white_nits\":203,\"peak_nits\":1000")
+                );
+                assert!(result.stdout.contains("\"-color_trc\",\"smpte2084\""));
+                let manifest = ProvenanceManifest::from_bytes(
+                    &fs.read(
+                        &adjacent_manifest_destination(&artifact)
+                            .unwrap()
+                            .join("manifest.fmnp"),
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+                assert!(manifest.items.iter().any(|item| item.item_id == 4
+                    && item.virtual_path.as_deref() == Some("native-hdr-pq.json")));
+                if stem == "hdr_bundle" {
+                    assert!(result.stdout.contains("compiled-cpu"));
+                }
+                if stem == "sound_cue" {
+                    assert_eq!(runner.mux_inputs.lock().unwrap().len(), 1);
+                }
+                if batch {
+                    assert!(
+                        result
+                            .stdout
+                            .contains("\"kind\":\"batch\",\"status\":\"ok\"")
+                    );
+                }
+            }
         }
 
         #[test]

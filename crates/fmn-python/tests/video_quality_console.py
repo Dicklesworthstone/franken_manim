@@ -107,6 +107,8 @@ with tempfile.TemporaryDirectory(prefix="fmn-video-quality-console-") as directo
     target = root / "unchanged.mp4"
     target.write_bytes(b"existing output")
     failures = [
+        ("--format", "mp4", "--hdr-pq"),
+        ("--format", "mp4", "--hdr-pq=true"),
         ("--format", "mp4", "--crf=52"),
         ("--format", "mp4", "--crf", "-1"),
         ("--format", "mp4", "--crf", "1.5"),

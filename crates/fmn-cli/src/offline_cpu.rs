@@ -25,12 +25,24 @@ impl CpuRenderer {
         output: EmitterHandle,
         camera: Option<fmn_render::Camera>,
         color_grade: fmn_frame::VideoColorGrade,
+        hdr_pq: Option<fmn::HdrPqConfig>,
     ) -> Result<Self, CliError> {
-        NativeFramePipeline::new_with_color_grade(plan, config, camera, output, color_grade)
-            .map(|pipeline| Self {
-                pipeline: Some(pipeline),
-            })
-            .map_err(|error| CliError::new("render", error.to_string()))
+        NativeFramePipeline::with_output_color_policy(
+            plan,
+            config,
+            camera,
+            output,
+            fmn_render::PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES,
+            0,
+            0,
+            color_grade,
+            fmn::rendering::YuvConversionPolicy::Scoped,
+            hdr_pq,
+        )
+        .map(|pipeline| Self {
+            pipeline: Some(pipeline),
+        })
+        .map_err(|error| CliError::new("render", error.to_string()))
     }
 
     pub(super) fn capture(

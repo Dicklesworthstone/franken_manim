@@ -392,3 +392,21 @@ this Behavior Note and enforced by `crates/fmn-conformance/tests/api_schema.rs`:
   values, and audio settings without `--bundle-audio`, refuse before any source
   loads. Compressed cues refuse; no transcoder runs during bundle export.
 
+## Native CPU HDR video
+
+The standalone `fmn` command adds `--hdr-pq` as an explicit video profile:
+limited-range BT.2020/PQ P010, with 203 cd/m² reference white and a 1,000 cd/m²
+content limit. Builtin scenes, pure animation jobs, FMTL replay, and soundtrack
+muxes use the shared native CPU conversion. `--vcodec auto` selects software
+libx265; an explicitly configured encoder remains selected and must advertise
+ten-bit support. The profile and luminance mapping appear in the video report
+and configuration input closure.
+
+This flag requires opaque, standard-mode CPU video with identity movie gamma
+and saturation. Native image/audio outputs, transparency, certified output,
+accelerator rendering, and Studio previews refuse it. The Python console
+refuses it before scene import because its HDR converter is not yet wired.
+The authored ledger adds this native flag with status `improved`; existing
+Reference rulings are unchanged. See [Native HDR video](../HDR_PQ_VIDEO.md) for
+commands and the precise color contract.
+

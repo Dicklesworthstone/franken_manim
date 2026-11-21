@@ -121,6 +121,13 @@ numbers are finite cd/m² values satisfying
 `0 < reference_white_nits <= peak_nits <= 10000`; invalid profiles are refused
 at construction. The exact profile appears in `RenderArtifact::hdr_pq`.
 
+The native CPU CLI selects the default profile with `--hdr-pq`; use
+`--vcodec auto` to choose its software HDR encoder. The flag implies durable
+video output and applies to native scenes, compiled FMTL recordings, and
+`fmn batch`. Completed robot reports contain the profile, and the manifest's
+configuration input closure includes `native-hdr-pq.json`. See the
+[HDR video guide](HDR_PQ_VIDEO.md) for complete examples.
+
 `fmn_frame::convert::rgba16f_to_p010_hdr_pq` and its threaded counterpart
 convert the native linear sRGB/BT.709 working raster in this order:
 
@@ -160,10 +167,12 @@ stage uses `-c:v copy`, retaining the encoded video and color signalling.
 
 The facade refuses nonvideo sinks, transparent backgrounds, certified mode,
 nonidentity movie gamma/saturation, and persistent YUV conversion before
-scene construction or process work. This initial profile is exposed by the
-native Rust facade and low-level frame/output APIs. It does not add a Python
-render option or a CLI flag. It does not emit mastering-display (ST 2086) or
-measured MaxCLL/MaxFALL metadata and therefore makes no HDR10-delivery claim.
+scene construction or process work. The native CLI also refuses accelerator
+rendering, Studio previews, and an explicitly conflicting pixel format.
+The Python console refuses this option before importing scene source; its
+render path does not yet provide native HDR conversion. The profile does not
+emit mastering-display (ST 2086) or measured MaxCLL/MaxFALL metadata and
+therefore makes no HDR10-delivery claim.
 
 ## 2. The D2 invocation protocol
 

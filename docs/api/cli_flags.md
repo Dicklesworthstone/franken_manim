@@ -64,6 +64,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--cache-dir` | global | `cache_dir` | improved | BN-15 | store | — | Explicit FrankenManim content-store root |
 | `--engine` | render | `engine` | improved | BN-15 | store | — | Select the CPU engine or a standard-only accelerator annex |
 | `--format` | render | `format` | improved | BN-15 | store | auto | Select auto, png, png_sequence, gif, y4m, wav, svg, or video output; wav refuses scenes without add_sound cues |
+| `--hdr-pq` | render | `hdr_pq` | improved | BN-15 | store_true | False | Render native CPU video in BT.2020/PQ P010 with 203-nit reference white and a 1000-nit content limit |
 | `--crf` | render | `crf` | improved | BN-15 | store | — | Set libx264/libx265 constant rate factor (0 through 51) |
 | `--preset` | render | `preset` | improved | BN-15 | store | — | Set the x264/x265 compression-speed preset |
 | `--tune` | render | `tune` | improved | BN-15 | store | — | Set one supported video encoder tune |
@@ -126,6 +127,7 @@ These rules are emitted into the parser artifact and executed after token collec
 | `certified-writes` | implies | `reproducible`, `write_file` | — | --reproducible implies durable canonical output |
 | `codec-writes` | implies | `vcodec`, `write_file` | — | --vcodec implies durable output |
 | `pixel-format-writes` | implies | `pix_fmt`, `write_file` | — | --pix_fmt implies durable output |
+| `hdr-pq-writes` | implies | `hdr_pq`, `write_file` | — | --hdr-pq implies video output |
 | `crf-writes` | implies | `crf`, `write_file` | — | --crf implies video output |
 | `preset-writes` | implies | `preset`, `write_file` | — | --preset implies video output |
 | `tune-writes` | implies | `tune`, `write_file` | — | --tune implies video output |
@@ -142,6 +144,10 @@ These rules are emitted into the parser artifact and executed after token collec
 | `gif-vs-non-gif-format` | conflicts | `gif`, `format=auto,png,png_sequence,y4m,wav,svg,video` | usage | --gif conflicts with a non-GIF --format |
 | `native-format-vs-codec` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `vcodec` | usage | --vcodec applies only to ffmpeg video output |
 | `native-format-vs-pixel-format` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `pix_fmt` | usage | --pix_fmt applies only to ffmpeg video output |
+| `native-format-vs-hdr-pq` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `hdr_pq` | usage | --hdr-pq requires opaque ffmpeg video output |
+| `gif-vs-hdr-pq` | conflicts | `gif`, `hdr_pq` | usage | --hdr-pq requires opaque ffmpeg video output |
+| `transparent-vs-hdr-pq` | conflicts | `transparent`, `hdr_pq` | usage | --hdr-pq requires opaque ffmpeg video output |
+| `certified-vs-hdr-pq` | conflicts | `reproducible`, `hdr_pq` | usage | --hdr-pq is outside the certified artifact set |
 | `native-format-vs-crf` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `crf` | usage | --crf applies only to ffmpeg video output |
 | `native-format-vs-preset` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `preset` | usage | --preset applies only to ffmpeg video output |
 | `native-format-vs-tune` | conflicts | `format=png,png_sequence,gif,y4m,wav,svg`, `tune` | usage | --tune applies only to ffmpeg video output |
