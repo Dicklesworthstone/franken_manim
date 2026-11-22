@@ -18170,6 +18170,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             )],
         ),
         spec(
+            "lifecycle.captured_path_motion.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(path_observation::run_animation),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("captured_motion_programs", 1),
+                counter_eq("captured_motion_frames", 8),
+                counter_eq("captured_motion_thread_configs", 3),
+                counter_eq("captured_motion_compared_frames", 24),
+                counter_eq("captured_motion_path_materializations", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.lifecycle.captured_path_motion",
+                vec![
+                    FieldPred::str_eq("source_removed", "true"),
+                    FieldPred::str_eq("exact_frames", "true"),
+                    FieldPred::u64_eq("programs", 1),
+                    FieldPred::u64_eq("frames", 8),
+                    FieldPred::u64_eq("comparisons", 24),
+                    FieldPred::u64_eq("path_materializations", 1),
+                ],
+            )],
+        ),
+        spec(
             "lifecycle.documented_config_effects.v1",
             ScenarioClass::LifecycleDrill,
             Surface::CliInProcess,
@@ -23640,6 +23665,16 @@ fn owned_path_observation_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.owned_path_observations.v1")
         .expect("owned path observation scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn captured_path_motion_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.captured_path_motion.v1")
+        .expect("captured path motion scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

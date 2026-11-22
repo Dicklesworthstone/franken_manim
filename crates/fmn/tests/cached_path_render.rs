@@ -10,6 +10,7 @@ use fmn_anim::UpdateFromFunc;
 use fmn_anim::animation::AnimState;
 use fmn_config::config::{DeterminismMode, ThreadPolicy};
 use fmn_geom::QuadPath;
+use fmn_mobject::path_sampling::PathSampler;
 use fmn_mobject::{Placement, Stage as Arena};
 use fmn_platform::fs::{FileSystem, VirtualFs};
 use fmn_scene::timeline_bundle::{BundleSegmentKind, TimelineBundle};
@@ -119,6 +120,35 @@ impl SceneConstruct for FollowingScene {
             let group = AnimationGroup::new(stage.arena_mut(), vec![motion])?;
             stage.play(group)?;
         }
+        Ok(())
+    }
+}
+
+struct CapturedFollowingScene {
+    force_serial: bool,
+}
+
+impl SceneConstruct for CapturedFollowingScene {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let path = stage.arena_mut().add(Mobject::vector_from_points(&[
+            [-2.0, -0.5, 0.0],
+            [-1.9, -0.4, 0.0],
+            [-1.75, -0.25, 0.0],
+            [0.0, 3.0, 0.0],
+            [2.0, -0.5, 0.0],
+        ]));
+        let captured = PathSampler::default().observe(stage.arena(), path)?;
+        stage.arena_mut().delete(path)?;
+        let moving = stage.add(Circle::new().radius(0.18).color(BLUE))?;
+        stage.set_fill(moving, Some(BLUE), Some(1.0), None, true);
+        stage.set_stroke(moving, None, Some(0.0), None, None, true);
+        if self.force_serial {
+            let sentinel = stage.add(Mobject::new())?;
+            stage
+                .arena_mut()
+                .add_dt_updater(sentinel, |_, _, _| {}, false)?;
+        }
+        stage.play(MoveAlongPath::from_observation(moving, captured).with_config(config()))?;
         Ok(())
     }
 }
@@ -234,5 +264,57 @@ fn cached_motion_exports_the_observed_frames_not_its_transient_path_table() {
             assert_eq!(replay.artifact.frame_count, 8);
             assert_eq!(frames(&fs, &directory), expected);
         }
+    }
+}
+
+#[test]
+fn captured_curve_exports_exact_samples_and_replays_across_worker_counts() {
+    let fs = Arc::new(VirtualFs::new());
+    let serial = render_with_fs(
+        &mut CapturedFollowingScene { force_serial: true },
+        render_options("/captured-control", 1),
+        fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(serial.artifact.frame_count, 8);
+    let expected = frames(&fs, "/captured-control");
+    assert!(expected.windows(2).all(|pair| pair[0] != pair[1]));
+
+    let bytes = export_bundle_bytes(
+        &mut CapturedFollowingScene {
+            force_serial: false,
+        },
+        export_options(),
+    )
+    .unwrap()
+    .bundle
+    .bytes;
+    let reader = TimelineBundle::from_bytes(&bytes).unwrap();
+    assert_eq!(reader.frame_count(), 8);
+    // Independent frame evaluation is exact, but endpoint interpolation cannot
+    // describe this curve. FMTL must preserve the actual intermediate samples.
+    assert_eq!(reader.segment_kind(0), Some(BundleSegmentKind::Stateful));
+    for threads in [1, 4, 16] {
+        let direct_directory = format!("/captured-direct-{threads}");
+        let direct = render_with_fs(
+            &mut CapturedFollowingScene {
+                force_serial: false,
+            },
+            render_options(&direct_directory, threads),
+            fs.clone(),
+        )
+        .unwrap();
+        assert_eq!(direct.artifact.frame_count, 8);
+        assert_eq!(frames(&fs, &direct_directory), expected);
+
+        let replay_directory = format!("/captured-replay-{threads}");
+        let replay = render_bundle_with_fs(
+            &bytes,
+            render_options(&replay_directory, threads),
+            fs.clone(),
+        )
+        .unwrap();
+        assert_eq!(replay.artifact.frame_count, 8);
+        assert_eq!(frames(&fs, &replay_directory), expected);
     }
 }

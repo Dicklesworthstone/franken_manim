@@ -14,7 +14,7 @@ use fmn_core::rate::CatalogRate;
 use fmn_core::rng::{Pcg64Dxsm, RngRoot};
 use fmn_mobject::{FrozenRenderState, Mob, Snapshot, Stage};
 
-use crate::animation::check_updater_error;
+use crate::animation::{check_animation_error, check_updater_error};
 use crate::{
     AnimError, AnimState, Animation, FrameMetadata, FramePosition, FrameSample, FrameSegment,
     OpenSegment, OpenWait, RateFunc, RationalFrameClock, RationalTime, Rotating, SegmentKind,
@@ -46,6 +46,7 @@ enum FrozenMechanism {
     StrokeFlash(crate::VShowPassingFlash),
     VectorFade(VFade),
     Rotation(Rotating),
+    PathMotion(Box<crate::MoveAlongPath>),
     Group(FrozenGroup),
 }
 
@@ -188,6 +189,12 @@ impl FrozenAnimation {
         })
     }
 
+    pub(crate) fn path_motion(animation: crate::MoveAlongPath) -> Option<Self> {
+        Some(Self {
+            mechanism: FrozenMechanism::PathMotion(Box::new(Self::prepare(animation, 2)?)),
+        })
+    }
+
     pub(crate) fn group(group: &crate::AnimationGroup) -> Option<Self> {
         let mut state = group.state().clone();
         state.config.rate_func = freeze_rate(&state.config.rate_func)?;
@@ -232,6 +239,7 @@ impl FrozenAnimation {
             FrozenMechanism::CrossFade(animation) => animation.state(),
             FrozenMechanism::VectorFade(animation) => animation.state(),
             FrozenMechanism::Rotation(animation) => animation.state(),
+            FrozenMechanism::PathMotion(animation) => animation.state(),
             FrozenMechanism::Group(group) => &group.state,
         }
     }
@@ -249,6 +257,10 @@ impl FrozenAnimation {
     fn allows_owner_advance(&self) -> bool {
         rate_allows_owner_advance(&self.state().config.rate_func)
             && match &self.mechanism {
+                // Captured paths can refuse a non-finite intermediate sample.
+                // Worker jobs observe every requested sample; owner catch-up
+                // must not skip a refusal merely because the last sample works.
+                FrozenMechanism::PathMotion(_) => false,
                 // Exact composed frame arithmetic has sample-specific typed
                 // failures. Keep its ordinary driver until a whole-interval
                 // admission proof is available, just as for exact rate tables.
@@ -331,22 +343,29 @@ impl FrozenAnimation {
         // Clone only the prepared native carrier; never construct or begin it.
         // This intentionally calls the ordinary interpolation implementation,
         // including lag, time_span, locks, placements, uniforms and trackers.
-        fn evaluate<A: Animation + Clone>(animation: &A, stage: &mut Stage, alpha: f64) {
+        fn evaluate<A: Animation + Clone>(
+            animation: &A,
+            stage: &mut Stage,
+            alpha: f64,
+        ) -> Result<(), AnimError> {
             let mut animation = animation.clone();
+            check_animation_error(stage, &animation)?;
             animation.interpolate(stage, alpha);
+            check_animation_error(stage, &animation)
         }
         match &self.mechanism {
             // The box belongs to the frozen program. Clone only its prepared
             // carrier, preserving the existing per-frame scratch behavior.
-            FrozenMechanism::Transform(animation) => evaluate(animation.as_ref(), stage, alpha),
-            FrozenMechanism::Partial(animation) => evaluate(animation, stage, alpha),
-            FrozenMechanism::BorderFill(animation) => evaluate(animation, stage, alpha),
-            FrozenMechanism::Subsets(animation) => evaluate(animation, stage, alpha),
-            FrozenMechanism::StrokeFlash(animation) => evaluate(animation, stage, alpha),
-            FrozenMechanism::Wiggle(animation) => evaluate(animation, stage, alpha),
-            FrozenMechanism::CrossFade(animation) => evaluate(animation, stage, alpha),
-            FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, alpha),
-            FrozenMechanism::Rotation(animation) => evaluate(animation, stage, alpha),
+            FrozenMechanism::Transform(animation) => evaluate(animation.as_ref(), stage, alpha)?,
+            FrozenMechanism::Partial(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::BorderFill(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::Subsets(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::StrokeFlash(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::Wiggle(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::CrossFade(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::VectorFade(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::Rotation(animation) => evaluate(animation, stage, alpha)?,
+            FrozenMechanism::PathMotion(animation) => evaluate(animation.as_ref(), stage, alpha)?,
             FrozenMechanism::Group(group) => {
                 if let Some(timings) = &group.exact_timings {
                     let (position, fps) = crate::composition::exact_position_from_alpha(

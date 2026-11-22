@@ -6,6 +6,7 @@ use fmn_anim::{
     play_segment_with_boundary,
 };
 use fmn_core::rng::RngRoot;
+use fmn_mobject::path_sampling::PathSampler;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Placement, Stage, StageError};
 
@@ -530,4 +531,87 @@ fn nonowning_storage_witness_preserves_cow_and_survives_generation_replacement()
         let replacement = RecordBuffer::new(RecordSchema::mobject(), 3).unwrap();
         assert!(!witness.matches(&replacement));
     }
+}
+
+#[test]
+fn captured_path_motion_has_absolute_geometry_and_survives_source_removal() {
+    let mut stage = Stage::new();
+    let path = stage.add(Mobject::from_points(&POINTS));
+    stage
+        .set_placement(
+            path,
+            Placement::new(
+                [[1.25, 0.3, 0.0], [0.0, 0.5, 0.0], [0.0, 0.2, 1.5]],
+                [1.5, -2.0, 0.25],
+            ),
+        )
+        .unwrap();
+    let mut sampler = PathSampler::default();
+    let captured = sampler.observe(&stage, path).unwrap();
+    let moving = stage.add(Mobject::new());
+    let first = stage.add(Mobject::from_points(&[[-0.2, -0.1, 0.0], [0.6, 0.4, 0.1]]));
+    let second = stage.add(Mobject::from_points(&[
+        [0.25, 0.5, 0.125],
+        [1.5, 0.75, -0.25],
+    ]));
+    for child in [first, second] {
+        stage.attach(moving, child).unwrap();
+    }
+    stage
+        .set_placement(
+            second,
+            Placement::new(
+                [[0.5, 0.125, 0.0], [0.0, 1.5, 0.0], [0.0, 0.0, 2.0]],
+                [0.1, -0.4, 0.2],
+            ),
+        )
+        .unwrap();
+    let before = stage.snapshot();
+    let mut animation = MoveAlongPath::from_observation(moving, captured.clone());
+    animation.state_mut().config.rate_func = RateFunc::linear();
+    assert_eq!(animation.preflight_mobjects(), vec![moving]);
+    stage.shift(path, [100.0; 3]);
+    stage.delete(path).unwrap();
+    sampler.clear();
+    animation.begin(&mut stage).unwrap();
+    let style = [0.125, 0.25, 0.75, 0.5];
+    stage
+        .get_mut(first)
+        .unwrap()
+        .buffer
+        .write(0, "rgba", &style);
+    for alpha in [0.0, 0.8, 0.25, 1.0, 0.375, -0.25, 1.5, 0.375] {
+        // The oracle positions a fresh authored shape with an ordinary Stage
+        // operation, without animation snapshots or interpolation carriers.
+        let mut expected = before.materialize();
+        expected.move_to(moving, captured.sample(alpha).unwrap(), [0.0; 3]);
+        animation.interpolate(&mut stage, alpha);
+        assert_eq!(animation.deferred_error(), None);
+        for member in [moving, first, second] {
+            assert_eq!(positions(&stage, member), positions(&expected, member));
+            assert_eq!(
+                stage
+                    .get(member)
+                    .unwrap()
+                    .placement()
+                    .coefficients()
+                    .map(f64::to_bits),
+                expected
+                    .get(member)
+                    .unwrap()
+                    .placement()
+                    .coefficients()
+                    .map(f64::to_bits),
+            );
+        }
+        assert_eq!(
+            stage.get(first).unwrap().buffer.read(0, "rgba"),
+            Some(style.to_vec())
+        );
+    }
+    assert_eq!(sampler.materializations(), 1);
+    assert_eq!(animation.path_materializations(), 0);
+    assert_eq!(stage.get(first).unwrap().buffer.live_view_count(), 0);
+    animation.finish(&mut stage);
+    assert_eq!(animation.deferred_error(), None);
 }

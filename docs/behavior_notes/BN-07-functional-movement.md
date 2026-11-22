@@ -116,6 +116,43 @@ sampling mechanism.
 MoveAlongPath continues to rate raw alpha without leaf lag/time-window
 remapping, matching its existing native convention.
 
+## Captured native path motion
+
+Rust scenes can explicitly capture a path for repeatable, independent frame
+evaluation with `MoveAlongPath::from_observation`. A `PathSampler` captures
+world-space geometry, including the guide's placement, and builds its true
+arc-length table once. Cloned observations share that geometry and table across
+moving objects and worker jobs. Editing or deleting the guide afterward does
+not change a captured observation.
+
+Within a native `SceneConstruct::construct`, with `guide` and `moving` handles:
+
+```rust
+use fmn::mobject::path_sampling::PathSampler;
+use fmn::prelude::*;
+
+let observed = PathSampler::default().observe(stage.arena(), guide)?;
+stage.play(MoveAlongPath::from_observation(moving, observed))?;
+```
+
+Each sample restores the moving family's begin point data and placements before
+centering it on the captured path. This absolute operation order makes arbitrary
+frame order bit-identical to serial playback of the captured mode, including
+backward and nonmonotone rates. Style fields remain live. The existing
+`MoveAlongPath::new(moving, guide)` continues to observe the live guide and
+incrementally place the current moving geometry; choose it when those edits
+must remain visible.
+
+Captured motion can enter native frame workers subject to the same updater,
+record-view, rate-function and overlapping-output checks as other pure
+animations. Animation cleanup, removers and final alpha still run on the scene
+owner. A malformed sample returns its typed error through the worker boundary.
+Timeline export preserves actual frame snapshots when endpoint interpolation
+cannot reproduce the curved trajectory. Native Studio continuation payloads do
+not yet encode captured path observations, so they conservatively decline this
+animation. This constructor is a Rust API; Python's live path-motion hooks keep
+their existing contract.
+
 ## Failure ownership and installation
 
 These movement callbacks acquire suspension per family member. Finish restores

@@ -19,6 +19,9 @@
 //!   where the Reference rides `quick_point_from_proportion`'s
 //!   equal-curve-length approximation. Constant speed under the original
 //!   name is the Behavior-Noted improvement this program exists for.
+//!   [`MoveAlongPath::from_observation`] opts into an immutable world-space
+//!   path and absolute begin-state poses, allowing exact frame-parallel work
+//!   while sharing one retained path and arc-length table across animations.
 //!
 //! User-supplied closures are not provable, so every closure-carrying
 //! animation here keeps the default Unclassified signature and the R20
@@ -27,11 +30,13 @@
 use std::sync::Arc;
 
 use fmn_core::types::Vec3;
+use fmn_mobject::path_sampling::PathObservation;
 use fmn_mobject::stage::{surface_sample_is_present, surface_validity};
 use fmn_mobject::{Mob, Mobject, Placement, Stage, StageError};
 
 use crate::animation::{
-    AnimConfig, AnimError, AnimState, Animation, RateFunc, sub_alpha, time_spanned_alpha,
+    AnimConfig, AnimError, AnimState, Animation, AnimationSignature, RateFunc, sub_alpha,
+    time_spanned_alpha,
 };
 
 mod path_cache;
@@ -659,18 +664,69 @@ impl Animation for PhaseFlow {
 
 /// `MoveAlongPath` (movement.py:104): `move_to` the point `α` of the way
 /// along `path` — constant-speed by true arc length (BN-03).
+///
+/// [`Self::new`] observes a live path and preserves incremental placement.
+/// [`Self::from_observation`] follows a captured world-space path and restores
+/// the moving family's begin geometry before every sample. The captured mode
+/// supports independent native frame jobs when the ordinary updater, view,
+/// rate-function and output-alias checks admit the segment.
 #[derive(Debug, Clone)]
 pub struct MoveAlongPath {
     state: AnimState,
-    path: Mob,
+    path: MotionPath,
     path_cache: path_cache::PathCache,
     error: Option<AnimError>,
 }
 
+#[derive(Debug, Clone)]
+enum MotionPath {
+    Live(Mob),
+    Captured(PathObservation),
+}
+
 impl MoveAlongPath {
-    /// `MoveAlongPath(mobject, path)`.
+    /// `MoveAlongPath(mobject, path)`, observing live path edits each sample.
+    ///
+    /// Placement is incremental, including its floating-point operation order,
+    /// so this mode retains the ordinary serial animation driver.
     #[must_use]
     pub fn new(mobject: Mob, path: Mob) -> Self {
+        Self::with_path_source(mobject, MotionPath::Live(path))
+    }
+
+    /// Follow an immutable, shared world-space path using absolute poses.
+    ///
+    /// Capture with [`fmn_mobject::path_sampling::PathSampler::observe`].
+    /// Cloned observations share their geometry and true-arc-length table;
+    /// source edits or removal never change an already captured path. Each
+    /// sample restores the moving family's begin point data and placement,
+    /// then centers it on the sampled point. This makes arbitrary frame order
+    /// bit-identical to serial playback of this mode. Styles remain live.
+    ///
+    /// Use [`Self::new`] when path edits or incremental geometry changes must
+    /// remain observable. The two modes have distinct, explicit contracts.
+    ///
+    /// ```
+    /// use fmn_anim::MoveAlongPath;
+    /// use fmn_mobject::{Mobject, Stage, StageError};
+    /// use fmn_mobject::path_sampling::PathSampler;
+    ///
+    /// let mut stage = Stage::new();
+    /// let path = stage.add(Mobject::vector_from_points(&[
+    ///     [-2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [2.0, 0.0, 0.0],
+    /// ]));
+    /// let captured = PathSampler::default().observe(&stage, path)?;
+    /// let moving = stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+    /// let animation = MoveAlongPath::from_observation(moving, captured);
+    /// # let _ = animation;
+    /// # Ok::<(), StageError>(())
+    /// ```
+    #[must_use]
+    pub fn from_observation(mobject: Mob, path: PathObservation) -> Self {
+        Self::with_path_source(mobject, MotionPath::Captured(path))
+    }
+
+    fn with_path_source(mobject: Mob, path: MotionPath) -> Self {
         let config = AnimConfig {
             name: "MoveAlongPath".to_owned(),
             ..AnimConfig::default()
@@ -691,6 +747,8 @@ impl MoveAlongPath {
     /// This diagnostic is not serialized and resets when the animation is
     /// cloned. Finishing or aborting releases cached geometry but keeps the
     /// count for inspection. It is a work counter, not a timing estimate.
+    /// Captured-path mode reports zero: its shared observation was prepared by
+    /// the caller's sampler and never materialized by this animation.
     #[must_use]
     pub fn path_materializations(&self) -> u64 {
         self.path_cache.materializations()
@@ -704,18 +762,21 @@ impl MoveAlongPath {
     }
 
     fn sample_path(&mut self, stage: &Stage, alpha: f64) -> Result<Vec3, AnimError> {
-        let Some(path) = stage.get(self.path) else {
-            self.path_cache.clear();
-            return Err(AnimError::StaleHandle(self.path));
-        };
-        if path.buffer.is_empty() {
-            self.path_cache.clear();
-            return Err(AnimError::EmptyMobject);
+        let point = match &self.path {
+            MotionPath::Live(mob) => {
+                let Some(path) = stage.get(*mob) else {
+                    self.path_cache.clear();
+                    return Err(AnimError::StaleHandle(*mob));
+                };
+                if path.buffer.is_empty() {
+                    self.path_cache.clear();
+                    return Err(AnimError::EmptyMobject);
+                }
+                self.path_cache.sample(stage, *mob, alpha)
+            }
+            MotionPath::Captured(path) => path.sample(alpha),
         }
-        let point = self
-            .path_cache
-            .sample(stage, self.path, alpha)
-            .map_err(AnimError::Stage)?;
+        .map_err(AnimError::Stage)?;
         if point.iter().any(|coordinate| !coordinate.is_finite()) {
             self.path_cache.clear();
             return Err(AnimError::InvalidPath(
@@ -723,6 +784,25 @@ impl MoveAlongPath {
             ));
         }
         Ok(point)
+    }
+
+    fn restore_begin_geometry(&self, stage: &mut Stage) -> Result<(), AnimError> {
+        // Validate every prepared row before writing: an invalid family must
+        // not leave the earlier members restored and the later ones untouched.
+        for row in self.state.families() {
+            let [output, starting] = row.as_slice() else {
+                return Err(AnimError::UnalignedFamilies);
+            };
+            for &mob in [output, starting] {
+                if !stage.contains(mob) {
+                    return Err(AnimError::StaleHandle(mob));
+                }
+            }
+        }
+        for row in self.state.families() {
+            stage.match_points(row[0], row[1]);
+        }
+        Ok(())
     }
 }
 
@@ -733,6 +813,21 @@ impl Animation for MoveAlongPath {
 
     fn state_mut(&mut self) -> &mut AnimState {
         &mut self.state
+    }
+
+    fn effect_signature(&self) -> AnimationSignature {
+        match &self.path {
+            MotionPath::Live(_) => AnimationSignature::Unclassified,
+            MotionPath::Captured(_) => AnimationSignature::Pure,
+        }
+    }
+
+    fn freeze_interpolation(&self) -> Option<crate::pure_frame::FrozenAnimation> {
+        if matches!(self.path, MotionPath::Captured(_)) && self.error.is_none() {
+            crate::pure_frame::FrozenAnimation::path_motion(self.clone())
+        } else {
+            None
+        }
     }
 
     /// A pointless path is the typed refusal (the Reference indexes into
@@ -749,7 +844,11 @@ impl Animation for MoveAlongPath {
     }
 
     fn preflight_mobjects(&self) -> Vec<Mob> {
-        vec![self.state.mobject(), self.path]
+        let mut mobs = vec![self.state.mobject()];
+        if let MotionPath::Live(path) = &self.path {
+            mobs.push(*path);
+        }
+        mobs
     }
 
     /// movement.py:115 with the BN-03 improvement: the rate function
@@ -779,6 +878,15 @@ impl Animation for MoveAlongPath {
         }
         match self.sample_path(stage, rated) {
             Ok(point) => {
+                if matches!(self.path, MotionPath::Captured(_)) {
+                    if self.state.starting_mobject().is_none() {
+                        return;
+                    }
+                    if let Err(error) = self.restore_begin_geometry(stage) {
+                        self.error = Some(error);
+                        return;
+                    }
+                }
                 stage.move_to(mobject, point, [0.0, 0.0, 0.0]);
             }
             Err(error) => self.error = Some(error),

@@ -6,12 +6,13 @@ use std::sync::{Arc, Mutex};
 
 use fmn_anim::pure_frame::{PureFrameJob, PureFrameRefusal, PureSegment};
 use fmn_anim::{
-    AnimConfig, AnimState, Animation, AnimationSignature, RateFunc, RationalFrameClock, Transform,
-    advance_play, fade_in, fade_out, finish_open_play, grow_from_point, open_play,
-    open_play_with_mode, prepare_animation, replacement_transform,
+    AnimConfig, AnimState, Animation, AnimationSignature, MoveAlongPath, RateFunc,
+    RationalFrameClock, Transform, advance_play, fade_in, fade_out, finish_open_play,
+    grow_from_point, open_play, open_play_with_mode, prepare_animation, replacement_transform,
 };
 use fmn_core::rate::CatalogRate;
 use fmn_core::rng::RngRoot;
+use fmn_mobject::path_sampling::PathSampler;
 use fmn_mobject::{Mob, Mobject, Stage};
 
 fn vector_curve(stage: &mut Stage, x: f32) -> Mob {
@@ -354,6 +355,195 @@ fn native_arcs_lag_time_spans_and_nonmonotone_rates_keep_serial_bits() {
         })),
     ];
     assert_parallel_matches_serial(stage, animations);
+}
+
+#[test]
+fn captured_paths_keep_serial_bits_for_nested_groups_and_nonmonotone_rates() {
+    let mut stage = Stage::new();
+    let path = stage.add(Mobject::from_points(&[
+        [-3.0, -1.0, 0.0],
+        [-2.75, -0.75, 0.0],
+        [-2.5, -0.5, 0.0],
+        [0.0, 4.0, 0.5],
+        [3.0, 0.0, 1.0],
+    ]));
+    let mut sampler = PathSampler::default();
+    let captured = sampler.observe(&stage, path).unwrap();
+    let root = stage.add(Mobject::new());
+    for x in [-0.1, 0.2] {
+        let child = vector_curve(&mut stage, x);
+        stage.attach(root, child).unwrap();
+        stage.remove_from_scene(child);
+    }
+    stage.add_to_scene(root).unwrap();
+    stage.rotate(root, 0.35, [0.25, 0.5, 1.0], None, None);
+    let other = vector_curve(&mut stage, 2.0);
+    let first = MoveAlongPath::from_observation(root, captured.clone()).with_config(AnimConfig {
+        run_time_frames: Some(19),
+        rate_func: RateFunc::Sampled(Arc::from([0.0, 0.9, 0.2, 0.6, 1.0])),
+        time_span: Some((0.05, 0.7)),
+        lag_ratio: 0.25,
+        ..AnimConfig::default()
+    });
+    let second = MoveAlongPath::from_observation(other, captured).with_config(AnimConfig {
+        run_time_frames: Some(29),
+        rate_func: RateFunc::Catalog(CatalogRate::ThereAndBack).squish(0.1, 0.8),
+        ..AnimConfig::default()
+    });
+    let inner = fmn_anim::AnimationGroup::with_lag_ratio(
+        &mut stage,
+        vec![Box::new(first), Box::new(second)],
+        0.3,
+    )
+    .unwrap();
+    let outer = fmn_anim::AnimationGroup::new(&mut stage, vec![Box::new(inner)])
+        .unwrap()
+        .with_run_time_frames(37);
+    stage.delete(path).unwrap();
+    sampler.clear();
+    assert_eq!(sampler.materializations(), 1);
+    assert_parallel_matches_serial(stage, vec![Box::new(outer)]);
+}
+
+#[test]
+fn captured_path_owner_completion_keeps_final_alpha_and_removal() {
+    for remover in [false, true] {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage, 0.1);
+        let path = stage.add(Mobject::from_points(&[
+            [-1.0, 0.0, 0.0],
+            [0.25, 2.5, 0.0],
+            [3.0, 0.5, 0.0],
+        ]));
+        let captured = PathSampler::default().observe(&stage, path).unwrap();
+        let motion = MoveAlongPath::from_observation(mob, captured).with_config(AnimConfig {
+            run_time_frames: Some(8),
+            rate_func: RateFunc::linear(),
+            final_alpha_value: 0.375,
+            remover,
+            ..AnimConfig::default()
+        });
+        let mut owner = stage.snapshot().materialize();
+        let rng = RngRoot::from_seed(4);
+        let mut clock = RationalFrameClock::new(8).unwrap();
+        let mut serial: Vec<Box<dyn Animation>> = vec![Box::new(motion.clone())];
+        fmn_anim::play_segment(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut serial,
+            false,
+            &mut |_| {},
+        )
+        .unwrap();
+        let mut offload: Vec<Box<dyn Animation>> = vec![Box::new(motion)];
+        let mut owner_clock = RationalFrameClock::new(8).unwrap();
+        let open = open_play(&mut owner, &owner_clock, &mut offload).unwrap();
+        let program = PureSegment::freeze(&owner, &owner_clock, &rng, &offload, &open).unwrap();
+        let report = program
+            .finish_on_owner(&mut owner, &mut owner_clock, &mut offload, open)
+            .unwrap();
+        assert_eq!(report.n_frames, 8);
+        assert_eq!(owner_clock.now(), clock.now());
+        assert_eq!(facts(&owner), facts(&stage));
+        assert_eq!(owner.get_points(mob), stage.get_points(mob));
+        assert_eq!(owner.get_center(mob), stage.get_center(mob));
+        assert!(!owner.is_animating(mob));
+        assert!(!owner.is_updating_suspended(mob));
+    }
+}
+
+#[test]
+fn captured_path_jobs_propagate_sample_failures_and_owner_cannot_skip_them() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage, 0.0);
+    let path = stage.add(Mobject::from_points(&[
+        [-1.0, 0.0, 0.0],
+        [0.0, 2.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ]));
+    let captured = PathSampler::default().observe(&stage, path).unwrap();
+    let motion = MoveAlongPath::from_observation(mob, captured).with_config(AnimConfig {
+        run_time_frames: Some(8),
+        rate_func: RateFunc::Sampled(Arc::from([0.0, 0.5, f64::INFINITY, 0.5, 1.0])),
+        ..AnimConfig::default()
+    });
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(motion)];
+    let mut clock = RationalFrameClock::new(8).unwrap();
+    let rng = RngRoot::from_seed(17);
+    let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let program = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap();
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(program.job(1).unwrap().try_materialize().is_ok());
+    assert!(matches!(
+        program.job(3).unwrap().try_materialize(),
+        Err(fmn_anim::AnimError::InvalidPath(
+            "MoveAlongPath rate function returned a non-finite proportion"
+        ))
+    ));
+    assert!(program.job(8).unwrap().try_materialize().is_ok());
+    assert!(
+        program
+            .try_advance_on_owner(&mut stage, &mut clock, &rng, &mut animations, &mut open, 8)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    assert_eq!((clock.now().frames(), open.stepped()), (0, 0));
+    assert!(matches!(
+        advance_play(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut animations,
+            &mut open,
+            3,
+            &mut |_| {}
+        ),
+        Err(fmn_anim::AnimError::InvalidPath(_))
+    ));
+}
+
+#[test]
+fn captured_path_admission_still_refuses_live_effects_views_callbacks_and_aliases() {
+    for kind in 0..5 {
+        let mut stage = Stage::new();
+        let mob = square(&mut stage, 0.0);
+        let path = stage.add(Mobject::from_points(&[
+            [-1.0, 0.0, 0.0],
+            [0.0, 2.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        let captured = PathSampler::default().observe(&stage, path).unwrap();
+        let mut motion = if kind == 0 {
+            MoveAlongPath::new(mob, path)
+        } else {
+            MoveAlongPath::from_observation(mob, captured.clone())
+        };
+        let mut view = None;
+        if kind == 1 {
+            stage.add_dt_updater(mob, |_, _, _| {}, false).unwrap();
+        } else if kind == 2 {
+            view = Some(stage.get_mut(mob).unwrap().buffer.export_view(false));
+        } else if kind == 3 {
+            motion.state_mut().config.rate_func = RateFunc::Base(authored_rate);
+        }
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(motion)];
+        if kind == 4 {
+            animations.push(Box::new(MoveAlongPath::from_observation(mob, captured)));
+        }
+        let clock = RationalFrameClock::new(8).unwrap();
+        let rng = RngRoot::from_seed(13);
+        let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+        let refusal = PureSegment::freeze(&stage, &clock, &rng, &animations, &open).unwrap_err();
+        match kind {
+            0 | 1 => assert_eq!(refusal, PureFrameRefusal::NotAtPureBegin),
+            2 => assert_eq!(refusal, PureFrameRefusal::LiveView(mob)),
+            3 => assert_eq!(refusal, PureFrameRefusal::UnsupportedAnimation(0)),
+            _ => assert_eq!(refusal, PureFrameRefusal::OverlappingOutput(mob)),
+        }
+        drop(view);
+    }
 }
 
 #[test]
