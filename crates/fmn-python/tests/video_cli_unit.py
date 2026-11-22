@@ -14,14 +14,40 @@ _spec.loader.exec_module(v)
 
 
 class VideoCliTests(unittest.TestCase):
-    def test_native_hdr_request_is_refused_without_consuming_legacy_values(self):
-        for token in ("--hdr-pq", "--hdr-pq=true", "--hdr-pq=false"):
-            with self.assertRaisesRegex(ValueError, "native fmn CPU renderer"):
-                v.take_video_options(["scene.py", token])
+    def test_hdr_request_is_explicit_and_keeps_legacy_values(self):
+        for token, value in (("--hdr-pq", True), ("--hdr-pq=true", True), ("--hdr-pq=false", False)):
+            self.assertEqual(v.take_video_options(["scene.py", token]),
+                             (["scene.py"], {"hdr_pq": value}))
+        for tokens in (("--hdr-pq", "--hdr-pq=false"), ("--hdr-pq=1",), ("--hdr-pq=",),
+                       ("--hdr-pq=TRUE",), ("--hdr-pq=not-a-bool",)):
+            with self.assertRaises(ValueError):
+                v.take_video_options(tokens)
         self.assertEqual(
             v.take_video_options(["--file_name", "--hdr-pq"], {"--file_name"}),
             (["--file_name", "--hdr-pq"], {}),
         )
+        writer = SimpleNamespace(hdr_pq=True)
+        v.apply_video_options(SimpleNamespace(file_writer=writer), {"hdr_pq": False})
+        self.assertIs(writer.hdr_pq, False)
+
+    def test_hdr_refuses_nonvideo_alpha_and_explicit_sdr_wires(self):
+        for format in ("mp4", "mov"):
+            for wire in (None, "auto", "p010", "P010LE", "yuv420p10le"):
+                v.validate_video_format(format, {"hdr_pq": True, "pix_fmt": wire})
+            for wire in ("rgba", "bgra", "nv12", "yuv420p"):
+                with self.assertRaisesRegex(ValueError, "P010"):
+                    v.validate_video_format(format, {"hdr_pq": True, "pix_fmt": wire})
+            with self.assertRaisesRegex(ValueError, "opaque"):
+                v.validate_video_format(format, {"hdr_pq": True}, transparent=True)
+        for format in ("png", "png_sequence", "gif", "y4m", "wav", "svg", "fmtl"):
+            with self.assertRaisesRegex(ValueError, "MP4/MOV"):
+                v.validate_video_format(format, {"hdr_pq": True})
+            v.validate_video_format(format, {"hdr_pq": False})
+            with self.assertRaisesRegex(ValueError, "MP4/MOV"):
+                v.validate_writer_video_format(SimpleNamespace(hdr_pq=True), format)
+        for value in (None, 0, 1, "true", "false"):
+            with self.assertRaisesRegex(TypeError, "bool"):
+                v.validate_video_format("mp4", {"hdr_pq": value})
 
     def test_wav_dither_seed_is_explicit_u64_and_not_a_video_control(self):
         for seed in (0, 17, (1 << 64) - 1):

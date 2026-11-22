@@ -9,9 +9,11 @@ mod quality;
 #[cfg(test)]
 mod conversion_tests;
 
-use fmn_frame::VideoColorGrade;
-use fmn_frame::convert::{rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010, rgba16f_to_rgba8};
+use fmn_frame::convert::{
+    rgba16f_to_bgra8, rgba16f_to_nv12, rgba16f_to_p010, rgba16f_to_p010_hdr_pq, rgba16f_to_rgba8,
+};
 use fmn_frame::{ChromaSiting, ColorRange, FrameBuffer, FrameError, FrameLayout, PixelFormat};
+use fmn_frame::{HdrPqConfig, VideoColorGrade};
 use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireFormat};
 use pyo3::exceptions::{PyAttributeError, PyTypeError};
 use pyo3::prelude::*;
@@ -26,6 +28,7 @@ pub(crate) struct PortalVideoConfig {
     pub(crate) job_limits: fmn_output::JobLimits,
     pub(crate) max_input_bytes: u64,
     pub(crate) color_grade: VideoColorGrade,
+    pub(crate) hdr_pq: Option<HdrPqConfig>,
 }
 
 impl PortalVideoConfig {
@@ -71,6 +74,12 @@ impl PortalVideoConfig {
         let saturation: f64 = writer.getattr("saturation")?.extract()?;
         let color_grade = VideoColorGrade::new(gamma, saturation)
             .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let hdr_pq = hdr_requested(&writer)?.then(HdrPqConfig::default);
+        if hdr_pq.is_some() && !color_grade.is_identity() {
+            return Err(PyValueError::new_err(
+                "hdr_pq requires identity movie gamma and saturation",
+            ));
+        }
         let rgba: [f64; 4] = scene
             .getattr("camera")?
             .getattr("background_rgba")?
@@ -95,6 +104,7 @@ impl PortalVideoConfig {
             &codec,
             &pixel_format,
             rgba[3] < 1.0,
+            hdr_pq.is_some(),
         )
         .map_err(PyValueError::new_err)?
         .with_quality(quality)
@@ -124,8 +134,32 @@ impl PortalVideoConfig {
             job_limits,
             max_input_bytes,
             color_grade,
+            hdr_pq,
         })
     }
+}
+
+fn hdr_requested(writer: &Bound<'_, PyAny>) -> PyResult<bool> {
+    let value = match writer.getattr("hdr_pq") {
+        Ok(value) => value,
+        Err(error) if error.is_instance_of::<PyAttributeError>(writer.py()) => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    if !value.is_instance_of::<PyBool>() {
+        return Err(PyTypeError::new_err("file_writer.hdr_pq must be bool"));
+    }
+    value.extract()
+}
+
+/// Keep private/native entry points from silently discarding an HDR request.
+/// Video profiles read and validate this field once during their preflight.
+pub(crate) fn refuse_hdr_non_video(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+    if hdr_requested(&scene.getattr("file_writer")?)? {
+        return Err(PyValueError::new_err(
+            "hdr_pq requires opaque MP4/MOV output",
+        ));
+    }
+    Ok(())
 }
 
 fn positive_limit(writer: &Bound<'_, PyAny>, name: &str) -> PyResult<Option<u64>> {
@@ -211,7 +245,12 @@ fn video_job(
     codec: &str,
     pixel_format: &str,
     transparent: bool,
+    hdr_pq: bool,
 ) -> Result<VideoJob, String> {
+    if hdr_pq && (transparent || !matches!(format, PortalFrameFormat::Mp4 | PortalFrameFormat::Mov))
+    {
+        return Err("hdr_pq requires opaque MP4/MOV output".into());
+    }
     if transparent && format != PortalFrameFormat::Mov {
         return Err("transparent video requires MOV output; select format='mov'".into());
     }
@@ -230,7 +269,17 @@ fn video_job(
     } else {
         EncoderChoice::Named(codec.to_owned())
     };
-    let job = VideoJob {
+    if hdr_pq
+        && !pixel_format.eq_ignore_ascii_case("auto")
+        // The Reference writer's ordinary default is yuv420p. Like the
+        // transparent-MOV profile, explicit HDR promotes that legacy default.
+        // Other explicit SDR wires are refused, never silently substituted.
+        && !pixel_format.eq_ignore_ascii_case("yuv420p")
+        && wire != WireFormat::P010
+    {
+        return Err("hdr_pq requires a P010 pixel_format (or auto)".into());
+    }
+    let mut job = VideoJob {
         width,
         height,
         fps: (fps, 1),
@@ -246,6 +295,9 @@ fn video_job(
         encoder,
         crf: None,
     };
+    if hdr_pq {
+        job = job.with_hdr_pq().map_err(|error| error.to_string())?;
+    }
     let encoder = job.resolved_encoder().map_err(|error| error.to_string())?;
     if transparent && encoder.as_deref() != Some("qtrle") {
         return Err("transparent video currently requires the qtrle encoder".into());
@@ -267,6 +319,7 @@ pub(crate) struct RetainedConversion {
     frame: FrameBuffer,
     valid: bool,
     color_grade: VideoColorGrade,
+    hdr_pq: Option<HdrPqConfig>,
 }
 
 impl RetainedConversion {
@@ -275,6 +328,7 @@ impl RetainedConversion {
             frame: FrameBuffer::new(layout),
             valid: false,
             color_grade: VideoColorGrade::default(),
+            hdr_pq: None,
         }
     }
 
@@ -286,6 +340,24 @@ impl RetainedConversion {
 
     pub(crate) fn color_grade(&self) -> &VideoColorGrade {
         &self.color_grade
+    }
+
+    pub(crate) fn with_hdr_pq(mut self, hdr_pq: Option<HdrPqConfig>) -> Result<Self, FrameError> {
+        if hdr_pq.is_some()
+            && (self.frame.layout().format() != PixelFormat::P010
+                || !self.color_grade.is_identity())
+        {
+            return Err(FrameError::UnsupportedConversion(
+                "HDR PQ requires P010 output with identity movie grading",
+            ));
+        }
+        self.hdr_pq = hdr_pq;
+        self.valid = false;
+        Ok(self)
+    }
+
+    pub(crate) const fn hdr_pq(&self) -> Option<HdrPqConfig> {
+        self.hdr_pq
     }
 
     pub(crate) fn bytes(&self) -> usize {
@@ -315,13 +387,28 @@ impl RetainedConversion {
                 got: source.layout().format(),
             });
         }
+        if self.hdr_pq.is_some() && !self.color_grade.is_identity() {
+            return Err(FrameError::UnsupportedConversion(
+                "HDR PQ requires identity movie grading",
+            ));
+        }
         if reuse {
             destination
                 .as_bytes_mut()
                 .copy_from_slice(self.frame.as_bytes());
         } else {
-            convert_frame(source, destination, None)?;
-            self.color_grade.apply(destination)?;
+            if let Some(profile) = self.hdr_pq {
+                rgba16f_to_p010_hdr_pq(
+                    source,
+                    destination,
+                    ColorRange::Limited,
+                    ChromaSiting::Left,
+                    profile,
+                )?;
+            } else {
+                convert_frame(source, destination, None)?;
+                self.color_grade.apply(destination)?;
+            }
             self.frame
                 .as_bytes_mut()
                 .copy_from_slice(destination.as_bytes());
@@ -359,9 +446,36 @@ pub(crate) fn convert_frame(
     }
 }
 
+/// Exercise the real HDR portal owners, decoded pixels and output signaling.
+/// Zero means only the always-run refusal checks completed because the host
+/// has no ffmpeg with a 10-bit libx264 encoder. Full-input runs require it.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_hdr_video() -> Result<u64, String> {
+    crate::with_python_test_module("portal HDR video", |py, _module, globals| {
+        let source = std::ffi::CString::new(include_str!("../tests/video_hdr.py"))
+            .expect("HDR acceptance suite contains no NUL");
+        py.run(source.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("run_hdr_video_acceptance")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "HDR acceptance suite has no entry point".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<u64>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_hdr_video_acceptance_suite() {
+        super::run_portal_gauntlet_hdr_video().expect("native HDR portal acceptance");
+    }
 
     #[test]
     fn portal_video_defaults_and_all_wire_aliases() {
@@ -377,7 +491,17 @@ mod tests {
             ("p010le", WireFormat::P010),
             ("yuv420p10le", WireFormat::P010),
         ] {
-            let job = video_job(PortalFrameFormat::Mp4, 96, 54, 8, "libx264", name, false).unwrap();
+            let job = video_job(
+                PortalFrameFormat::Mp4,
+                96,
+                54,
+                8,
+                "libx264",
+                name,
+                false,
+                false,
+            )
+            .unwrap();
             assert_eq!(job.wire, expected);
             assert_eq!(job.color.transfer, fmn_output::Transfer::Srgb);
             assert_eq!(job.color.primaries, fmn_output::Primaries::Bt709);
@@ -397,7 +521,17 @@ mod tests {
     #[test]
     fn portal_video_transparent_defaults_and_bgra_preserve_alpha() {
         for name in ["auto", "yuv420p", "rgba", "bgra"] {
-            let job = video_job(PortalFrameFormat::Mov, 95, 53, 8, "libx264", name, true).unwrap();
+            let job = video_job(
+                PortalFrameFormat::Mov,
+                95,
+                53,
+                8,
+                "libx264",
+                name,
+                true,
+                false,
+            )
+            .unwrap();
             assert!(job.wire.has_alpha());
             assert_eq!(job.container, Container::MovTransparent);
             assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some("qtrle"));
@@ -416,9 +550,47 @@ mod tests {
             (PortalFrameFormat::Mp4, "", "rgba", false),
             (PortalFrameFormat::Mp4, "libx264 -vf eq", "rgba", false),
         ] {
-            assert!(video_job(format, 96, 54, 8, codec, wire, transparent).is_err());
+            assert!(video_job(format, 96, 54, 8, codec, wire, transparent, false).is_err());
         }
-        assert!(video_job(PortalFrameFormat::Mp4, 95, 54, 8, "auto", "rgba", false).is_err());
+        assert!(
+            video_job(
+                PortalFrameFormat::Mp4,
+                95,
+                54,
+                8,
+                "auto",
+                "rgba",
+                false,
+                false
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn portal_hdr_pq_negotiates_real_color_conversion_and_keeps_named_encoders() {
+        for format in [PortalFrameFormat::Mp4, PortalFrameFormat::Mov] {
+            for wire in ["auto", "yuv420p", "p010", "p010le", "yuv420p10le"] {
+                for (codec, expected) in [
+                    ("libx264", "libx264"),
+                    ("auto", "libx265"),
+                    ("hevc_nvenc", "hevc_nvenc"),
+                ] {
+                    let job = video_job(format, 96, 54, 8, codec, wire, false, true).unwrap();
+                    assert_eq!(job.wire, WireFormat::P010);
+                    assert_eq!(job.color, ColorDescription::hdr_pq());
+                    assert_eq!(job.resolved_encoder().unwrap().as_deref(), Some(expected));
+                }
+            }
+        }
+        for (format, wire, alpha) in [
+            (PortalFrameFormat::Mov, "auto", true),
+            (PortalFrameFormat::Mp4, "rgba", false),
+            (PortalFrameFormat::Mp4, "nv12", false),
+            (PortalFrameFormat::Png, "auto", false),
+        ] {
+            assert!(video_job(format, 96, 54, 8, "auto", wire, alpha, true).is_err());
+        }
     }
 
     #[test]

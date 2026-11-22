@@ -6924,6 +6924,28 @@ fn python_ode_solution_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     Ok(RunOutcome::ok().with_counter("ode_checks", checks))
 }
 
+fn python_hdr_video_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let decoded_frames = manimlib::run_portal_gauntlet_hdr_video()
+        .map_err(|error| fail(format!("Python HDR PQ video: {error}")))?;
+    let external_capability_unavailable = u64::from(decoded_frames == 0);
+    ctx.event(
+        LogEvent::new("e2e.python.hdr_video")
+            .field("decoded_frames", decoded_frames)
+            .field(
+                "external_capability_unavailable",
+                external_capability_unavailable,
+            )
+            .field("profile_validation_suite", 1_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_hdr_decoded_frames", decoded_frames)
+        .with_counter(
+            "python_hdr_external_capability_unavailable",
+            external_capability_unavailable,
+        )
+        .with_counter("python_hdr_profile_validation_suite", 1))
+}
+
 fn python_portal_native_outputs_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let root = scenario_dir("python_native_outputs")?;
     let manimlib::PortalOutputGauntletReport {
@@ -17854,6 +17876,20 @@ fn spec(
 pub fn catalog() -> Vec<ScenarioSpec> {
     let mut specs = vec![
         spec(
+            "parity.python_hdr_pq.v1",
+            ScenarioClass::ParityDrill,
+            Surface::PythonInProcess,
+            Invocation::new(python_hdr_video_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("python_hdr_profile_validation_suite", 1),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.python.hdr_video",
+                vec![FieldPred::u64_eq("profile_validation_suite", 1)],
+            )],
+        ),
+        spec(
             "parity.native_hdr_pq.v1",
             ScenarioClass::ParityDrill,
             Surface::RustApi,
@@ -23672,6 +23708,16 @@ fn studio_group_checkpoint_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_group_checkpoint.v1")
         .expect("group checkpoint lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_hdr_pq_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.python_hdr_pq.v1")
+        .expect("Python HDR PQ parity is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

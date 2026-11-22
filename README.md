@@ -176,6 +176,19 @@ See the [HDR video guide](docs/HDR_PQ_VIDEO.md) for configuration and receipts,
 and the [output contract](docs/FFMPEG_PROTOCOL.md#12-explicit-bt2020pq-hdr-output)
 for the conversion details.
 
+The Python portal uses the same HDR converter for ordinary rendering, pure
+frame offload, camera scenes, and live recordings:
+
+```sh
+fmn-python scene.py MyScene --format mp4 --hdr-pq --vcodec auto \
+  --resolution 1920x1080 --fps 30 --output media/scene.mp4
+```
+
+API callers can set `scene.file_writer.hdr_pq = True` before rendering or pass
+`scene_kwargs={"file_writer_config": {"hdr_pq": True, "video_codec": "auto"}}`
+to `render_scene`. The completed `RenderResult.hdr_pq` records the profile that
+was actually used, including for a recording whose writer is later changed.
+
 For raster assets, prepare an image once before constructing the scene:
 
 ```rust,no_run

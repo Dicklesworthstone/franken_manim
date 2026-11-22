@@ -108,6 +108,7 @@ impl SvgSession {
                 invocations: Vec::new(),
                 audio_inputs: Vec::new(),
                 audio_dither_seed: None,
+                hdr_pq: None,
                 image_inputs: Vec::new(),
                 routes: crate::PortalRoutes::default(),
                 tuning: None,

@@ -28,6 +28,7 @@ pub(super) fn render<F>(
     config: RetainedFrameRendererConfig,
     output: EmitterHandle,
     color_grade: fmn_frame::VideoColorGrade,
+    hdr_pq: Option<fmn_frame::HdrPqConfig>,
     segment: PureSegment,
     camera: NativeAdaptiveCamera,
     first_sequence: u64,
@@ -57,12 +58,17 @@ where
         let mut prefix_config = config;
         prefix_config.threads = plan.render_teams[0].threads();
         Some(
-            NativeFramePipeline::new_with_color_grade(
+            NativeFramePipeline::with_output_color_policy(
                 plan,
                 prefix_config,
                 None,
                 output.clone(),
+                fmn_render::PixelTileCache::DEFAULT_PREFIX_BUDGET_BYTES,
+                0,
+                0,
                 color_grade,
+                fmn::rendering::YuvConversionPolicy::Scoped,
+                hdr_pq,
             )
             .map_err(error)?,
         )

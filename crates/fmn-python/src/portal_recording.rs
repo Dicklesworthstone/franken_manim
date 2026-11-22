@@ -256,7 +256,10 @@ fn begin_recording(
                 scene, *frame, width, height, fps,
             )?)
         }
-        _ => None,
+        _ => {
+            portal_video::refuse_hdr_non_video(scene)?;
+            None
+        }
     };
     let mut audio = portal_audio::PortalAudio::from_scene(scene, &format, video.as_ref())?;
     let ffmpeg_limits = audio.ffmpeg_limits.clone();
@@ -325,6 +328,7 @@ fn begin_recording(
         owner.render_generation = Arc::new(());
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
+        owner.render_hdr_pq = None;
         owner.render_image_inputs.clear();
         owner.render_ffmpeg_limits = ffmpeg_limits;
     }

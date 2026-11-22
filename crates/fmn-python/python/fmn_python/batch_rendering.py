@@ -7,6 +7,7 @@ never moves a Python scene, its proxies, or a live render across threads.
 from __future__ import annotations
 
 import importlib
+import math
 import os
 import unicodedata
 from collections.abc import Callable, Iterable, Mapping
@@ -565,6 +566,17 @@ def _restored_outcome(row):
             data.get("format") != "wav" or type(dither_seed) is not int
             or not 0 <= dither_seed < 1 << 64):
         raise ValueError("invalid checkpoint receipt field: audio_dither_seed")
+    hdr_pq = data.get("hdr_pq")
+    if hdr_pq is not None:
+        tags = dict(primaries="bt2020", transfer="smpte2084", matrix="bt2020nc", range="limited")
+        if (not isinstance(hdr_pq, dict) or set(hdr_pq) != set(tags) | {"reference_white_nits", "peak_nits"}
+                or data.get("format") not in {"mp4", "mov"} or data.get("certified")
+                or any(hdr_pq.get(key) != value for key, value in tags.items())):
+            raise ValueError("invalid checkpoint receipt field: hdr_pq")
+        white, peak = hdr_pq["reference_white_nits"], hdr_pq["peak_nits"]
+        if (any(type(value) not in {int, float} or not math.isfinite(value) for value in (white, peak))
+                or not 0 < white <= peak <= 10000):
+            raise ValueError("invalid checkpoint receipt field: hdr_pq")
     resolution = data.get("resolution")
     if not isinstance(resolution, list) or len(resolution) != 2 or any(type(value) is not int or value <= 0 for value in resolution):
         raise ValueError("invalid checkpoint receipt resolution")

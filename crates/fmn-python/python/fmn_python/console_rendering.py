@@ -146,7 +146,8 @@ _OUTPUT_HELP = """Native output profiles:
 Transparent MOV defaults to RGBA/qtrle. Explicit transparent video profiles
 require auto/rgba/bgra and qtrle/auto. MP4, GIF, y4m and WAV do not accept -t.
 Output options apply to every selected scene without constructor changes.
-Video remains uncertified. P010 is a 10-bit transport, not an HDR claim.
+Video remains uncertified. P010 alone is SDR; --hdr-pq selects the explicit
+BT.2020/PQ conversion for opaque video with identity movie gamma/saturation.
 --format svg exports one final-state vector document, including native text
 and math outlines, camera pan/zoom, flat paints, background and stroke order.
 It does not rasterize or embed fonts. Depth, lighting, user clip planes,

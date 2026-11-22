@@ -42,6 +42,72 @@ fn codes(frame: &FrameBuffer, plane: usize) -> Vec<u16> {
 }
 
 #[test]
+fn portal_hdr_conversion_preserves_highlights_and_invalidates_sdr_cache() {
+    let mut source = frame(PixelFormat::Rgba16F, 6, 4);
+    for y in 0..4 {
+        for x in 0..6 {
+            let light = [0.0, 1.0, 4.0][x / 2];
+            set_pixel(
+                &mut source,
+                x,
+                y,
+                [
+                    f16_from_f32(light),
+                    f16_from_f32(light),
+                    f16_from_f32(light),
+                    0x3c00,
+                ],
+            );
+        }
+    }
+    let mut output = frame(PixelFormat::P010, 6, 4);
+    let mut cache = RetainedConversion::new(output.layout().clone());
+    assert!(!cache.write_frame(&source, &mut output, false).unwrap());
+    let sdr = output.as_bytes().to_vec();
+    let profile = fmn_frame::HdrPqConfig::default();
+    cache = cache.with_hdr_pq(Some(profile)).unwrap();
+    // The same layout and unchanged raw raster must not reuse its SDR result.
+    assert!(!cache.write_frame(&source, &mut output, true).unwrap());
+    assert_ne!(output.as_bytes(), sdr);
+    let hdr = output.as_bytes().to_vec();
+    let luma = codes(&output, 0);
+    assert_eq!(luma[0], 64);
+    assert!((572..=574).contains(&luma[2]), "203-nit white: {}", luma[2]);
+    assert!(
+        luma[4] > luma[2] + 100,
+        "highlights were clipped to SDR white"
+    );
+    assert!(codes(&output, 1).iter().all(|code| *code == 512));
+    for _ in 0..3 {
+        output.as_bytes_mut().fill(0xCC);
+        assert!(cache.write_frame(&source, &mut output, true).unwrap());
+        assert_eq!(output.as_bytes(), hdr);
+    }
+    // Cache metadata may never survive a failed conversion.
+    let bad_source = frame(PixelFormat::Rgba8, 6, 4);
+    assert!(cache.write_frame(&bad_source, &mut output, true).is_err());
+    assert_eq!(output.as_bytes(), hdr);
+    assert!(!cache.write_frame(&source, &mut output, true).unwrap());
+    cache = cache.with_hdr_pq(None).unwrap();
+    assert!(!cache.write_frame(&source, &mut output, true).unwrap());
+    assert_eq!(output.as_bytes(), sdr);
+
+    for wire in [PixelFormat::Rgba8, PixelFormat::Bgra8, PixelFormat::Nv12] {
+        assert!(
+            RetainedConversion::new(frame(wire, 6, 4).layout().clone())
+                .with_hdr_pq(Some(profile))
+                .is_err()
+        );
+    }
+    assert!(
+        RetainedConversion::new(output.layout().clone())
+            .with_color_grade(VideoColorGrade::new(2.0, 1.0).unwrap())
+            .with_hdr_pq(Some(profile))
+            .is_err()
+    );
+}
+
+#[test]
 fn retained_portal_conversion_reuses_exact_bytes_for_every_wire() {
     let mut source = frame(PixelFormat::Rgba16F, 6, 4);
     for y in 0..4 {

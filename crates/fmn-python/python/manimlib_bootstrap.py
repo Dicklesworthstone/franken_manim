@@ -18562,7 +18562,7 @@ class SceneFileWriter:
         encode_options = {
             name: kwargs.pop(name)
             for name in ("video_crf", "video_preset", "video_tune", "video_bitrate", "audio_bitrate",
-                         "audio_dither_seed")
+                         "audio_dither_seed", "hdr_pq")
             if name in kwargs
         }
         if kwargs:
@@ -18591,6 +18591,7 @@ class SceneFileWriter:
         self.pixel_format = str(pixel_format)
         self.saturation = float(saturation)
         self.gamma = float(gamma)
+        self.hdr_pq = False
         for name, value in encode_options.items():
             setattr(self, name, value)
         self.image_file_path = self.get_image_file_path()

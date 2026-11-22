@@ -1,4 +1,4 @@
-# Native HDR video
+# HDR video
 
 The standalone CPU renderer can export opaque BT.2020/PQ video directly from
 its linear RGBA16F raster. `--hdr-pq` selects limited-range, ten-bit P010 input
@@ -20,6 +20,35 @@ eight-bit-only encoder produces a capability error before scene execution.
 
 The native CLI publishes MP4. The Rust `render()` API also supports opaque MOV
 with `RenderFormat::Mov` and `RenderOptions::hdr_pq`.
+
+## Python scenes
+
+The Python portal uses the same native HDR converter for ordinary captures,
+offloaded animation frames, moving cameras, and live recordings:
+
+```sh
+fmn-python scene.py MyScene --format mp4 --hdr-pq --vcodec auto \
+  --resolution 1920x1080 --fps 30 --output media/scene.mp4
+```
+
+For the Python API, select the profile in the scene's file-writer configuration:
+
+```python
+from fmn_python import render_scene
+
+report = render_scene(
+    MyScene,
+    "media/scene.mp4",
+    scene_kwargs={"file_writer_config": {"hdr_pq": True, "video_codec": "auto"}},
+)
+print(report.hdr_pq)
+```
+
+An existing scene can set `scene.file_writer.hdr_pq = True` before rendering or
+starting a recording. The Python profile uses the same 203 cd/m² white and
+1,000 cd/m² peak as `--hdr-pq`. The completed `RenderResult.hdr_pq` and robot
+report record the profile actually used, even if the writer configuration is
+changed later. Ordinary ten-bit SDR output leaves this field unset.
 
 ## Recorded scenes and sound
 
@@ -65,12 +94,14 @@ HDR requires an opaque background, CPU rendering, standard determinism, and
 identity movie gamma and saturation. PNG, GIF, Y4M, WAV, SVG, transparency,
 certified output, accelerator rendering, and Studio previews reject the flag.
 An explicitly conflicting `--pix_fmt` is refused; `auto` and the P010 aliases
-are accepted. The Python console reports that native HDR conversion is not
-yet available through that entry point before importing the scene source.
+are accepted. The Python console validates requested formats, transparency,
+and explicit pixel formats before importing the scene source. Writer gamma,
+saturation, and native encoder capabilities are checked before an encoder is
+opened. API callers receive the same native validation.
 
 With `--robot`, a completed video report includes `hdr_pq` with the primaries,
 transfer, matrix, range, reference-white luminance, and peak luminance. The
-published manifest includes `native-hdr-pq.json` in the configuration input
+native CLI's published manifest includes `native-hdr-pq.json` in the configuration input
 closure. FFmpeg invocation receipts contain the actual wire format, encoder,
 and color flags. These records distinguish native luminance conversion from
 encoder settings and remain present when the video contains a soundtrack.

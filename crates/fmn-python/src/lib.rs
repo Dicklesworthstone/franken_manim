@@ -58,6 +58,8 @@ mod portal_typography;
 pub use portal_typography::run_portal_gauntlet_text_configuration;
 mod portal_video;
 #[cfg(any(test, feature = "gauntlet"))]
+pub use portal_video::run_portal_gauntlet_hdr_video;
+#[cfg(any(test, feature = "gauntlet"))]
 mod structural_parity;
 #[cfg(feature = "gauntlet")]
 pub use portal_texture::{
@@ -203,6 +205,7 @@ struct PortalArtifactReport {
     invocations: Vec<fmn_output::InvocationReport>,
     audio_inputs: Vec<portal_audio::PortalAudioInput>,
     audio_dither_seed: Option<u64>,
+    hdr_pq: Option<fmn_frame::HdrPqConfig>,
     image_inputs: Vec<portal_raster::PortalImageInput>,
     /// Frames rasterized on Lumen's retained planar route and on the camera
     /// route (fm-sq8.11).
@@ -268,6 +271,7 @@ impl From<NativeArtifactReport> for PortalArtifactReport {
             invocations: Vec::new(),
             audio_inputs: Vec::new(),
             audio_dither_seed: None,
+            hdr_pq: None,
             image_inputs: Vec::new(),
             routes: PortalRoutes::default(),
             tuning: None,
@@ -453,6 +457,7 @@ impl PortalRenderSession {
                         digest: report.digest,
                         invocations: audio.invocations(),
                         audio_dither_seed: audio.dither_seed(),
+                        hdr_pq: None,
                         audio_inputs: std::mem::take(&mut audio.inputs),
                         image_inputs: Vec::new(),
                         routes: PortalRoutes::default(),
@@ -516,6 +521,12 @@ impl PortalFrameSession {
         }
         if max_threads == 0 {
             return Err(PyValueError::new_err("render thread limit must be nonzero"));
+        }
+        let hdr_pq = video.as_ref().and_then(|video| video.hdr_pq);
+        if hdr_pq.is_some() && reproducible {
+            return Err(CapabilityError::new_err(
+                "BT.2020/PQ video conversion is outside the certified artifact set",
+            ));
         }
 
         config.camera.resolution = (width, height);
@@ -659,7 +670,9 @@ impl PortalFrameSession {
                 video.color_grade.clone()
             });
         let conversion = portal_video::RetainedConversion::new(output_layout.clone())
-            .with_color_grade(color_grade);
+            .with_color_grade(color_grade)
+            .with_hdr_pq(hdr_pq)
+            .map_err(native_error)?;
         let conversion_cache_bytes = conversion.bytes() as u64;
         let frame_bytes = u64::try_from(output_layout.total_bytes())
             .map_err(|_| PyOverflowError::new_err("render frame size exceeds u64"))?;
@@ -1043,7 +1056,12 @@ impl PortalFrameSession {
             })?
             .handle();
         let plan = self.plan.clone();
-        let config = self.renderer.config();
+        let mut config = self.renderer.config();
+        if self.conversion.hdr_pq().is_some() {
+            // Admission must use this segment's frozen camera, not the
+            // renderer's earlier configuration-file background.
+            config.frame.background = self.camera.background();
+        }
         let camera = fmn::rendering::NativeAdaptiveCamera::new(
             self.camera.clone(),
             self.planar_policy,
@@ -1054,6 +1072,7 @@ impl PortalFrameSession {
         let first_sequence = self.next_sequence;
         let had_camera_reason = self.routes.first_camera_reason.is_some();
         let color_grade = self.conversion.color_grade().clone();
+        let hdr_pq = self.conversion.hdr_pq();
         let started = Instant::now();
         let mut last_capture = None;
         // No Scene borrow, Python handle or authored callback enters the
@@ -1066,6 +1085,7 @@ impl PortalFrameSession {
                     config,
                     output,
                     color_grade,
+                    hdr_pq,
                     segment,
                     camera,
                     first_sequence,
@@ -1152,6 +1172,7 @@ impl PortalFrameSession {
                     invocations: report.boundary.invocations,
                     audio_inputs: Vec::new(),
                     audio_dither_seed: None,
+                    hdr_pq: self.conversion.hdr_pq(),
                     image_inputs: Vec::new(),
                     routes: PortalRoutes::default(),
                     tuning: None,
@@ -1318,6 +1339,7 @@ struct PyScene {
     render_invocations: Vec<fmn_output::InvocationReport>,
     render_audio_inputs: Vec<portal_audio::PortalAudioInput>,
     render_audio_dither_seed: Option<u64>,
+    render_hdr_pq: Option<fmn_frame::HdrPqConfig>,
     render_image_inputs: Vec<portal_raster::PortalImageInput>,
     image_checkpoints: RefCell<portal_raster::ImageCheckpoints>,
     render_ffmpeg_limits: Option<fmn_output::FfmpegLimitsReport>,
@@ -1964,6 +1986,7 @@ pub(crate) fn install_pristine_arena(
         owner.render_invocations.clear();
         owner.render_audio_inputs.clear();
         owner.render_audio_dither_seed = None;
+        owner.render_hdr_pq = None;
         owner.render_image_inputs.clear();
         *owner.image_checkpoints.borrow_mut() = portal_raster::ImageCheckpoints::default();
         owner.render_ffmpeg_limits = None;
@@ -8933,7 +8956,10 @@ fn begin_portal_render(slf: &Bound<'_, PyScene>, request: PortalRenderRequest) -
             height,
             fps,
         )?),
-        _ => None,
+        _ => {
+            portal_video::refuse_hdr_non_video(slf)?;
+            None
+        }
     };
     let audio = portal_audio::PortalAudio::from_scene(slf, &format, video.as_ref())?;
     let ffmpeg_limits = audio.ffmpeg_limits.clone();
@@ -9011,6 +9037,7 @@ impl PyScene {
             render_invocations: Vec::new(),
             render_audio_inputs: Vec::new(),
             render_audio_dither_seed: None,
+            render_hdr_pq: None,
             render_image_inputs: Vec::new(),
             image_checkpoints: RefCell::new(portal_raster::ImageCheckpoints::default()),
             render_ffmpeg_limits: None,
@@ -9239,6 +9266,7 @@ impl PyScene {
             scene.render_invocations = report.invocations;
             scene.render_audio_inputs = report.audio_inputs;
             scene.render_audio_dither_seed = report.audio_dither_seed;
+            scene.render_hdr_pq = report.hdr_pq;
             scene.render_image_inputs = report.image_inputs;
             scene.render_routes = report.routes;
             scene.render_tuning = report.tuning;
@@ -9336,6 +9364,23 @@ impl PyScene {
     #[getter]
     fn _render_audio_dither_seed(&self) -> Option<u64> {
         self.render_audio_dither_seed
+    }
+
+    /// Frozen color conversion applied to the completed movie generation.
+    /// Values are from the native converter, never re-read from a live writer.
+    #[getter]
+    fn _render_hdr_pq(slf: &Bound<'_, Self>) -> PyResult<Option<Py<PyDict>>> {
+        let Some(profile) = slf.borrow().render_hdr_pq else {
+            return Ok(None);
+        };
+        let out = PyDict::new(slf.py());
+        out.set_item("primaries", "bt2020")?;
+        out.set_item("transfer", "smpte2084")?;
+        out.set_item("matrix", "bt2020nc")?;
+        out.set_item("range", "limited")?;
+        out.set_item("reference_white_nits", profile.reference_white_nits())?;
+        out.set_item("peak_nits", profile.peak_nits())?;
+        Ok(Some(out.unbind()))
     }
 
     #[getter]

@@ -23,13 +23,15 @@ _LIMIT_FLAGS = {
 _VIDEO_FLAGS.update(_LIMIT_FLAGS)
 _VIDEO_FLAGS["--audio-dither-seed"] = "audio_dither_seed"
 VIDEO_VALUE_FLAGS = frozenset(_VIDEO_FLAGS)
-VIDEO_WRITER_OPTIONS = tuple(_VIDEO_FLAGS.values())
+VIDEO_WRITER_OPTIONS = (*_VIDEO_FLAGS.values(), "hdr_pq")
 VIDEO_HELP = """Compressed video quality (fmn-python):
   --crf N                 Software x264/x265 CRF, 0..51 (zero is retained).
   --preset NAME           Software x264/x265 compression-speed preset.
   --tune NAME             One native-validated encoder tune, e.g. animation.
   --video-bitrate BPS     Positive integer bits/second, instead of CRF.
   --audio-bitrate BPS     AAC soundtrack bits/second; video is stream-copied.
+  --hdr-pq                Convert opaque MP4/MOV to BT.2020/PQ P010 video.
+                         Linear white is 203 nits; content clips at 1000 nits.
   --ffmpeg-timeout SECONDS       Positive wall-clock allowance per invocation.
   --ffmpeg-max-log-bytes BYTES    Captured stdout/stderr ceiling per stream.
   --ffmpeg-max-artifact-bytes N   Encoded/intermediate artifact ceiling.
@@ -52,6 +54,9 @@ Every bound is a positive integer; there is no unlimited sentinel. Video encode,
 audio decode and final mux share the admitted policy, recorded in receipts.
 WAV dither is keyed by the interleaved output sample index, starting at zero
 for each artifact, so the same seed is independent of mixer worker count.
+HDR requires identity movie gamma/saturation and a 10-bit encoder; the existing
+encoder choice is retained (auto selects libx265). It is standard-mode output,
+without invented mastering metadata. P010 alone retains the ordinary SDR policy.
 """
 
 
@@ -93,11 +98,12 @@ def take_video_options(arguments: list[str], value_flags=frozenset()):
         token = arguments[index]
         flag, separator, inline = token.partition("=")
         if flag == "--hdr-pq":
-            raise ValueError(
-                "--hdr-pq requires the native fmn CPU renderer; "
-                "fmn-python does not yet convert video to BT.2020/PQ"
-            )
-        if flag in _VIDEO_FLAGS:
+            if "hdr_pq" in overrides:
+                raise ValueError("--hdr-pq must not be repeated")
+            if separator and inline not in {"true", "false"}:
+                raise ValueError("--hdr-pq accepts no value, or =true/=false")
+            overrides["hdr_pq"] = not separator or inline == "true"
+        elif flag in _VIDEO_FLAGS:
             name = _VIDEO_FLAGS[flag]
             if name in overrides:
                 raise ValueError(f"{flag} must not be repeated")
@@ -122,6 +128,15 @@ def take_video_options(arguments: list[str], value_flags=frozenset()):
 
 def validate_video_format(format: str, options, *, transparent: bool = False) -> None:
     """Reject explicitly ignored controls before console source execution."""
+    hdr_pq = options.get("hdr_pq", False)
+    if type(hdr_pq) is not bool:
+        raise TypeError("hdr_pq must be bool")
+    if hdr_pq:
+        if format not in {"mp4", "mov"} or transparent:
+            raise ValueError("hdr_pq requires opaque MP4/MOV output")
+        wire = options.get("pix_fmt")
+        if wire is not None and wire.lower() not in {"auto", "p010", "p010le", "yuv420p10le"}:
+            raise ValueError("--hdr-pq requires a P010 --pix_fmt (or auto)")
     if options.get("audio_dither_seed") is not None and format != "wav":
         raise ValueError("audio_dither_seed requires native wav output")
     if any(options.get(name) is not None for name in _LIMIT_FLAGS.values()):
@@ -148,6 +163,6 @@ def validate_writer_video_format(writer, format: str) -> None:
     # Video parsing happens ONCE in native code, with ownership checks around
     # authored getters. Do not invoke those getters a second time here.
     if format not in {"mp4", "mov"}:
-        names = _QUALITY_WRITER_OPTIONS if format == "wav" else VIDEO_WRITER_OPTIONS
-        validate_video_format(format, {name: getattr(writer, name, None)
+        names = (*_QUALITY_WRITER_OPTIONS, "hdr_pq") if format == "wav" else VIDEO_WRITER_OPTIONS
+        validate_video_format(format, {name: getattr(writer, name, False if name == "hdr_pq" else None)
                                        for name in names})

@@ -141,6 +141,8 @@ class RenderResult:
     autotune: dict[str, Any] | None = None
     # Frozen explicit WAV TPDF seed; None preserves the ordinary PCM policy.
     audio_dither_seed: int | None = None
+    # Frozen native output conversion, present only for completed PQ movies.
+    hdr_pq: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
         result = {
@@ -162,6 +164,8 @@ class RenderResult:
             result["performance"] = copy.deepcopy(self.performance)
         if self.autotune is not None:
             result["autotune"] = copy.deepcopy(self.autotune)
+        if self.hdr_pq is not None:
+            result["hdr_pq"] = copy.deepcopy(self.hdr_pq)
         if self.format == "wav":
             result.update(sample_rate=48000, channels=2)
             if self.audio_dither_seed is not None:
@@ -431,6 +435,8 @@ class RenderSession:
                 closure_digest=closure_digest, ffmpeg_invocations=invocations,
                 audio_inputs=audio_inputs, image_inputs=image_inputs, ffmpeg_limits=ffmpeg_limits,
                 audio_dither_seed=audio_dither_seed,
+                hdr_pq=(copy.deepcopy(getattr(self.scene, "_render_hdr_pq", None))
+                        if self.format in _VIDEO_FORMATS else None),
                 performance=(copy.deepcopy(getattr(self.scene, "_render_performance", None))
                              if self.format not in {"wav", "svg"} else None),
                 autotune=copy.deepcopy(getattr(self.scene, "_render_autotune", None)),
