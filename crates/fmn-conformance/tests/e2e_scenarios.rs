@@ -3908,6 +3908,192 @@ fn native_soundtrack_run(ctx: &mut RunCtx, in_memory: bool) -> Result<RunOutcome
         .with_counter("native_soundtrack_sample_frames", total_samples))
 }
 
+/// A native fake-ffmpeg child consumes the frozen A/B/A clip sequence through
+/// the public facade. This checks composition, input evidence and publication;
+/// the fixture output is not presented as an encoded movie or a timing result.
+#[cfg(unix)]
+fn native_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::{VideoConcatError, VideoConcatOptions, concatenate_video_with_fs};
+    use fmn_platform::fs::VirtualFs;
+    use fmn_platform::process::{
+        FfmpegExecutable, FfmpegLocator, FfmpegLocatorError, StdFfmpegLocator, StdProcessRunner,
+    };
+    use std::os::unix::fs::PermissionsExt as _;
+    use std::path::Path;
+
+    const A: &[u8] = b"fmn-concat-clip-A";
+    const B: &[u8] = b"fmn-concat-clip-B";
+    const OUTPUT: &[u8] = b"FMN_CONCAT_ORDER:A,B,A\n";
+    const REPLACED: &[u8] = b"source changed after bounded snapshot";
+
+    struct ReplaceSourcesAtDiscovery {
+        fs: Arc<VirtualFs>,
+        a: PathBuf,
+        b: PathBuf,
+    }
+    impl FfmpegLocator for ReplaceSourcesAtDiscovery {
+        fn locate_ffmpeg(&self, requested: &Path) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            let executable = StdFfmpegLocator::default().locate_ffmpeg(requested)?;
+            self.fs.insert(&self.a, REPLACED.to_vec());
+            self.fs.insert(&self.b, REPLACED.to_vec());
+            Ok(executable)
+        }
+    }
+
+    let root = Path::new("/tmp")
+        .canonicalize()
+        .map_err(|error| fail(error.to_string()))?
+        .join(format!(
+            "fmn-e2e-video-concat.{}.{}",
+            std::process::id(),
+            RUN_SUFFIX.fetch_add(1, Ordering::Relaxed),
+        ));
+    std::fs::create_dir(&root).map_err(|error| fail(error.to_string()))?;
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700))
+        .map_err(|error| fail(error.to_string()))?;
+    std::fs::write(root.join(".fmn-native-ffmpeg-mode"), "concat-ordered")
+        .map_err(|error| fail(error.to_string()))?;
+
+    let fs = Arc::new(VirtualFs::new());
+    // These are virtual paths: ffmpeg can only consume the private snapshots.
+    // Quotes and line breaks cannot leak into the concat-list grammar.
+    let a = PathBuf::from("/virtual-concat/it's-A.mp4");
+    let b = PathBuf::from("/virtual-concat/B\nclip.mp4");
+    fs.insert(&a, A.to_vec());
+    fs.insert(&b, B.to_vec());
+    let inputs = [a.clone(), b.clone(), a.clone()];
+    let expected = [A, B, A];
+    let total = (A.len() * 2 + B.len()) as u64;
+    let options = |destination: &Path| {
+        let mut options = VideoConcatOptions::new(destination);
+        options.ffmpeg_bin = PathBuf::from(env!(
+            "CARGO_BIN_FILE_FMN_OUTPUT_fmn-ffmpeg-test-fixture"
+        ));
+        options.ffmpeg = Some(fmn::FfmpegCapability {
+            runner: Arc::new(StdProcessRunner),
+            locator: Arc::new(ReplaceSourcesAtDiscovery {
+                fs: fs.clone(),
+                a: a.clone(),
+                b: b.clone(),
+            }),
+            workdir_root: root.clone(),
+        });
+        options.max_inputs = 3;
+        options.max_input_bytes = 1 << 16;
+        options.max_total_input_bytes = 1 << 16;
+        options.ffmpeg_limits.max_artifact_bytes = 1 << 16;
+        options
+    };
+    let destination = root.join("assembled.mp4");
+    let report = concatenate_video_with_fs(&inputs, options(&destination), fs.clone())
+        .map_err(|error| fail(format!("native video concat: {error}")))?;
+    if report.inputs.len() != expected.len() || report.total_input_bytes != total {
+        return Err(fail("video concat lost an input position or its byte count"));
+    }
+    let mut receipts = String::from("position\tbytes\tsha256\n");
+    for (index, expected) in expected.iter().enumerate() {
+        let receipt = &report.inputs[index];
+        if receipt.source_path != inputs[index]
+            || receipt.bytes != expected.len() as u64
+            || receipt.digest != sha256(expected)
+        {
+            return Err(fail(format!("video concat input receipt {index} changed")));
+        }
+        receipts.push_str(&format!(
+            "{index}\t{}\t{}\n",
+            receipt.bytes,
+            receipt.digest.to_hex(),
+        ));
+    }
+    if fs.read(&a).map_err(|error| fail(error.to_string()))?.as_slice() != REPLACED
+        || fs.read(&b).map_err(|error| fail(error.to_string()))?.as_slice() != REPLACED
+    {
+        return Err(fail("source replacement control did not run during tool discovery"));
+    }
+    let published = std::fs::read(&destination).map_err(|error| fail(error.to_string()))?;
+    if published != OUTPUT
+        || report.boundary.destination != destination
+        || report.boundary.artifact_bytes != OUTPUT.len() as u64
+        || report.boundary.artifact_digest != sha256(OUTPUT)
+        || report.boundary.invocations.len() != 1
+    {
+        return Err(fail("video concat published the wrong fixture or output evidence"));
+    }
+    let invocation = &report.boundary.invocations[0];
+    if invocation.provenance.encoder.is_some()
+        || !invocation
+            .provenance
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["-map", "0"])
+        || !invocation
+            .provenance
+            .argv
+            .windows(2)
+            .any(|pair| pair == ["-c", "copy"])
+        || invocation
+            .artifact
+            .parent()
+            .is_none_or(|path| path.exists())
+    {
+        return Err(fail("video concat lost stream-copy provenance or private cleanup"));
+    }
+
+    let conflict = concatenate_video_with_fs(&inputs, options(&destination), fs.clone());
+    if !matches!(conflict, Err(VideoConcatError::DestinationExists(_)))
+        || std::fs::read(&destination).map_err(|error| fail(error.to_string()))? != OUTPUT
+    {
+        return Err(fail("video concat overwrote an existing destination"));
+    }
+
+    // A repeated clip counts against the aggregate source limit a second time.
+    fs.insert(&a, A.to_vec());
+    fs.insert(&b, B.to_vec());
+    let limited_output = root.join("over-budget.mp4");
+    let mut limited = options(&limited_output);
+    limited.max_total_input_bytes = total - 1;
+    let refusal = concatenate_video_with_fs(&inputs, limited, fs.clone());
+    if !matches!(
+        refusal,
+        Err(VideoConcatError::Input {
+            index: 2,
+            error: fmn_platform::fs::FsError::TooLarge { .. },
+        })
+    ) || limited_output.exists()
+    {
+        return Err(fail("video concat did not refuse an over-budget repeated clip"));
+    }
+
+    let certified_output = root.join("certified.mp4");
+    let mut certified = options(&certified_output);
+    certified.determinism = fmn_config::config::DeterminismMode::Certified;
+    if !matches!(
+        concatenate_video_with_fs(&inputs, certified, fs),
+        Err(VideoConcatError::Capability(_))
+    ) || certified_output.exists()
+    {
+        return Err(fail("video concat admitted certified encoded video"));
+    }
+
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.native_video_concat")
+            .field("input_positions", 3_u64)
+            .field("source_bytes", total)
+            .field("process_order", "A,B,A")
+            .field("source_snapshot", "preserved")
+            .field("create_only", "true")
+            .field("refusals", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("concat-inputs.tsv", receipts.into_bytes())
+        .with_artifact("concat-output.fixture", published)
+        .with_counter("concat_input_positions", 3)
+        .with_counter("concat_source_bytes", total)
+        .with_counter("concat_process_order_checked", 1)
+        .with_counter("concat_source_snapshot_checked", 1)
+        .with_counter("concat_refusals", 3))
+}
+
 /// The facade's MP4 request with no ffmpeg capability is a named capability
 /// refusal (D2) that runs no scene code and publishes nothing; a native
 /// format from the same options still renders.
@@ -21196,6 +21382,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    #[cfg(unix)]
+    specs.push(spec(
+        "lifecycle.native_video_concat.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(native_video_concat_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("concat_input_positions", 3),
+            counter_ge("concat_source_bytes", 1),
+            counter_eq("concat_process_order_checked", 1),
+            counter_eq("concat_source_snapshot_checked", 1),
+            counter_eq("concat_refusals", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.native_video_concat",
+            vec![
+                FieldPred::u64_eq("input_positions", 3),
+                FieldPred::str_eq("process_order", "A,B,A"),
+                FieldPred::str_eq("source_snapshot", "preserved"),
+                FieldPred::str_eq("create_only", "true"),
+                FieldPred::u64_eq("refusals", 3),
+            ],
+        )],
+    ));
     specs.push(spec(
         "failure_path.facade_video_requires_ffmpeg_capability.v1",
         ScenarioClass::FailurePath,
@@ -23071,6 +23282,18 @@ fn cli_ffmpeg_limit_admission_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "failure_path.cli_ffmpeg_limit_admission.v1")
         .expect("CLI ffmpeg-limit scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+/// Encoded clip assembly retains frozen input order and create-only publication.
+#[cfg(unix)]
+#[test]
+fn native_video_concat_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.native_video_concat.v1")
+        .expect("native video concat scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

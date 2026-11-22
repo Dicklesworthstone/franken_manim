@@ -15,6 +15,10 @@ pub use crate::images::{
     ImageColorIntent, ImageDecodeError, ImageDecodeLimits, ImageDecodeReport, ImageInputFormat,
     ImageLoadError, ImageLoadOptions, ImageLoadReport, ImageLoader, PreparedImage,
 };
+pub use crate::rendering::{
+    VideoClipReport, VideoConcatError, VideoConcatOptions, VideoConcatReport, concatenate_video,
+    concatenate_video_with_fs,
+};
 pub use crate::{
     BundleExportError, BundleExportOptions, BundleExportReport, BundleStorage,
     CompactRecordingLimits, CompletedScene, Error, ErrorKind, FfmpegCapability, HdrPqConfig,

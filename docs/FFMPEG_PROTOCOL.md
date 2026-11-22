@@ -355,10 +355,28 @@ require the tool. There is no silent format substitution, ever.
   `-i video -i audio -c:v copy -c:a aac -map 0:v:0 -map 1:a:0`.
   Stage 2 **must not re-encode video**: `-c:v copy` is contract,
   asserted by the fake-ffmpeg suite.
-- **Insert files / partial movies** — concat demuxer with stream
-  copy (`-f concat -safe 0 -i list -c copy`); every input is resolved
-  to an absolute UTF-8 path before list creation, and paths containing
-  quotes or line breaks are refused rather than escaped.
+- **Insert files / partial movies** — concat demuxer with explicit all-stream
+  copy (`-f concat -safe 0 -i list -map 0 -c copy`). Native callers use
+  `fmn::concatenate_video` or its explicit-filesystem variant to compose
+  self-contained MP4/MOV clips, including the compatible clips produced by
+  `--subdivide`. Ordered inputs are read once under per-clip and cumulative
+  byte limits, hashed, and copied to private generated filenames before
+  ffmpeg starts. Repeated inputs remain repeated. Each entry restricts
+  probing to the MOV demuxer and the file protocol, with external MOV data
+  references disabled; a frozen playlist cannot expand into unhashed inputs.
+  At most 4093 clips enter one boundary job, independently of byte budgets;
+  three more directory entries are reserved for the executable, list and output.
+  The native facade defaults to 1024 clips, 64 MiB per clip and 256 MiB total
+  frozen input bytes; these explicit budgets also bound resident source data.
+  A distinct composition receipt records each source digest and the final
+  artifact/tool/argv identity without inventing a frame count or duration.
+  Publication is atomic and create-only, including a destination created by
+  another writer during composition. Codecs, time bases and stream layouts
+  must already be compatible: composition never renders or re-encodes clips.
+  Encoded compositions are outside the certified artifact set.
+  The low-level path-based `Boundary::concat` retains its live-file,
+  replacement-publication contract; `prepare_concat` defers publication,
+  and `prepare_concat_bytes` provides the frozen-input path used by the facade.
 - **`--subdivide` outputs** — one boundary job per subdivision; the
   protocol is per-invocation and needs nothing special.
 - **`--prerun` counting** — a counting pass invokes the boundary

@@ -143,6 +143,28 @@ For Y4M or opaque video output, `options.yuv_conversion = fmn::rendering::YuvCon
 
 For MP4/MOV, enable the facade's `ffmpeg` feature (`fmn = { …, features = ["ffmpeg"] }`) and pass `RenderFormat::Mp4` or `RenderFormat::Mov`: frames go through the one sandboxed ffmpeg boundary, and any `scene_mut().add_sound(…)` cues are mixed natively and muxed. Hosts that govern processes themselves inject an `FfmpegCapability` instead. Without one, video is a named capability error, never a silent substitute.
 
+Already-rendered chapters can be joined without rendering or encoding them
+again. With the same `ffmpeg` feature, compose compatible, self-contained
+MP4/MOV clips in the order you want:
+
+```rust,no_run
+use fmn::{VideoConcatOptions, concatenate_video};
+
+let clips = vec!["intro.mp4".into(), "lesson.mp4".into(), "outro.mp4".into()];
+let report = concatenate_video(&clips, VideoConcatOptions::new("complete.mp4"))?;
+assert_eq!(report.inputs.len(), 3);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The inputs must already have matching codecs, time bases and stream layouts.
+The API preserves all streams and repeated clips, freezes and hashes its inputs
+under explicit size limits, and publishes a new file atomically. An existing
+destination is preserved. `concatenate_video_with_fs` accepts a source filesystem
+and an explicit process capability; its receipt records source and output hashes
+plus the exact ffmpeg invocation. Like other encoded video, the result is outside
+the certified artifact set.
+
+
 Native Rust video can opt into **BT.2020/PQ HDR** with an explicit luminance
 profile:
 

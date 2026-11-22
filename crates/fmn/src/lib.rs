@@ -95,7 +95,9 @@ pub use images::{
 pub use rendering::{
     FfmpegCapability, HdrPqConfig, RenderArtifact, RenderError, RenderFormat, RenderOptions,
     RenderReport, SoundtrackRenderOptions, SoundtrackRenderReport, SoundtrackReport,
-    SvgRenderError, SvgRenderOptions, SvgRenderReport, render, render_soundtrack,
+    SvgRenderError, SvgRenderOptions, SvgRenderReport, VideoClipReport, VideoConcatError,
+    VideoConcatOptions, VideoConcatReport, concatenate_video, concatenate_video_with_fs, render,
+    render_soundtrack,
     render_soundtrack_with_fs, render_svg, render_svg_camera, render_svg_camera_with_fs,
     render_svg_with_fs, render_with_fs,
 };

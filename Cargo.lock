@@ -747,6 +747,7 @@ dependencies = [
  "fmn-core",
  "fmn-frame",
  "fmn-geom",
+ "fmn-hash",
  "fmn-library",
  "fmn-mobject",
  "fmn-output",

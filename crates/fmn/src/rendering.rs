@@ -56,12 +56,17 @@ use crate::SceneConstruct;
 
 mod camera_animation;
 mod compiled;
+mod concatenating;
 mod ffmpeg_limits;
 mod pipeline;
 mod soundtrack;
 mod svg;
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use compiled::{render_bundle, render_bundle_with_fs};
+pub use concatenating::{
+    VideoClipReport, VideoConcatError, VideoConcatOptions, VideoConcatReport, concatenate_video,
+    concatenate_video_with_fs,
+};
 pub use ffmpeg_limits::{
     DEFAULT_RENDER_FFMPEG_TIMEOUT, FfmpegLimitsReport, admit_render_ffmpeg_limits,
     default_render_ffmpeg_limits,

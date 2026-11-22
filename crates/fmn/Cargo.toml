@@ -12,6 +12,7 @@ fmn-config.workspace = true
 fmn-cache.workspace = true
 fmn-platform.workspace = true
 fmn-geom.workspace = true
+fmn-hash.workspace = true
 fmn-mobject.workspace = true
 fmn-anim.workspace = true
 fmn-text.workspace = true
