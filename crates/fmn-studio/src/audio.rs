@@ -16,11 +16,13 @@ use fmn_scene::timeline_bundle::{BundleReadError, BundleSoundtrack, TimelineBund
 pub const MAX_AUDIO_CHUNK_FRAMES: u32 = 65_536;
 /// Maximum raw Float32 payload in one preview response.
 pub const MAX_AUDIO_CHUNK_BYTES: usize = MAX_AUDIO_CHUNK_FRAMES as usize * 2 * 4;
+/// Maximum PCM retained by a captured worker generation (256 MiB).
+pub const MAX_CAPTURED_AUDIO_BYTES: usize = 256 * 1024 * 1024;
 
 /// Stable metadata for one immutable soundtrack generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct StudioAudioInfo {
-    /// Digest of the complete source FMTL, including pictures and camera track.
+    /// Digest binding this soundtrack to its complete picture generation.
     pub source: Digest,
     /// Recorded sample clock, not a requested device rate.
     pub sample_rate: u32,
@@ -61,6 +63,10 @@ pub enum StudioAudioError {
     Position,
     /// The bounded response could not be allocated.
     Allocation,
+    /// Metadata exceeds the admitted PCM format or total sample budget.
+    Metadata,
+    /// A transported chunk has inconsistent shape, nonfinite PCM or digest.
+    Payload,
 }
 
 impl fmt::Display for StudioAudioError {
@@ -72,11 +78,26 @@ impl fmt::Display for StudioAudioError {
             Self::ChunkSize => "Studio audio requests require 1..=65536 sample frames",
             Self::Position => "Studio audio sample cursor is beyond the recording",
             Self::Allocation => "could not allocate the bounded Studio audio response",
+            Self::Metadata => "invalid or over-budget Studio audio metadata",
+            Self::Payload => "invalid Studio audio sample payload",
         })
     }
 }
 
 impl std::error::Error for StudioAudioError {}
+
+impl StudioAudioInfo {
+    pub(crate) fn validate(self) -> Result<(), StudioAudioError> {
+        if !(1..=384_000).contains(&self.sample_rate)
+            || !matches!(self.channels, 1 | 2)
+            || self.sample_frames
+                > (MAX_CAPTURED_AUDIO_BYTES / 4 / usize::from(self.channels)) as u64
+        {
+            return Err(StudioAudioError::Metadata);
+        }
+        Ok(())
+    }
+}
 
 impl StudioAudioTrack {
     /// Retain an already-validated native soundtrack without copying its PCM.
@@ -188,6 +209,48 @@ impl StudioAudioTrack {
 }
 
 impl StudioAudioChunk {
+    /// Validate a bounded worker response before it reaches the browser.
+    pub(crate) fn from_wire(
+        info: StudioAudioInfo,
+        start: u64,
+        frames: u32,
+        bytes: Vec<u8>,
+        digest: Digest,
+    ) -> Result<Self, StudioAudioError> {
+        let chunk = Self {
+            info,
+            start,
+            frames,
+            bytes,
+            digest,
+        };
+        chunk.validate()?;
+        Ok(chunk)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), StudioAudioError> {
+        self.info.validate()?;
+        let end = self
+            .start
+            .checked_add(u64::from(self.frames))
+            .ok_or(StudioAudioError::Position)?;
+        if self.frames > MAX_AUDIO_CHUNK_FRAMES || end > self.info.sample_frames {
+            return Err(StudioAudioError::Position);
+        }
+        if self.bytes.len() != self.frames as usize * usize::from(self.info.channels) * 4
+            || self.bytes.len() > MAX_AUDIO_CHUNK_BYTES
+            || (self.frames == 0 && self.start != self.info.sample_frames)
+            || sha256(&self.bytes) != self.digest
+            || self.bytes.as_chunks::<4>().0.iter().any(|sample| {
+                let value = f32::from_le_bytes(*sample);
+                !value.is_finite() || !(-1.0..=1.0).contains(&value)
+            })
+        {
+            return Err(StudioAudioError::Payload);
+        }
+        Ok(())
+    }
+
     /// Recording metadata associated with this response, including its identity.
     #[must_use]
     pub const fn info(&self) -> StudioAudioInfo {

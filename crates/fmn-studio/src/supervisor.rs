@@ -1994,6 +1994,8 @@ fn supervisor_request_scene(request: &SupervisorRequest) -> Option<&str> {
         | SupervisorRequest::Scrub { scene, .. }
         | SupervisorRequest::Event { scene, .. }
         | SupervisorRequest::Inspect { scene }
+        | SupervisorRequest::AudioInfo { scene }
+        | SupervisorRequest::AudioChunk { scene, .. }
         | SupervisorRequest::Overlay { scene, .. } => Some(scene),
         SupervisorRequest::RestoreCheckpoint(checkpoint) => Some(&checkpoint.scene),
         SupervisorRequest::ReplayJournal(replay) => Some(&replay.scene),
@@ -2007,9 +2009,10 @@ fn worker_response_scene(response: &WorkerResponse) -> Option<&str> {
     match response {
         WorkerResponse::Frame(frame) => Some(&frame.scene),
         WorkerResponse::Checkpoint(checkpoint) => Some(&checkpoint.scene),
-        WorkerResponse::JournalSegment { scene, .. } | WorkerResponse::StudioData { scene, .. } => {
-            Some(scene)
-        }
+        WorkerResponse::JournalSegment { scene, .. }
+        | WorkerResponse::StudioData { scene, .. }
+        | WorkerResponse::AudioInfo { scene, .. }
+        | WorkerResponse::AudioChunk { scene, .. } => Some(scene),
         WorkerResponse::Crash(report) => report.scene.as_deref(),
         WorkerResponse::Hello { .. }
         | WorkerResponse::Scenes(_)

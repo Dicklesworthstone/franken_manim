@@ -460,6 +460,21 @@ impl WorkerService for CameraBundleWorker {
                 self.require_scene(&scene)?;
                 self.inspect()
             }
+            SupervisorRequest::AudioInfo { scene } => {
+                self.require_scene(&scene)?;
+                Ok(WorkerResponse::AudioInfo {
+                    scene,
+                    info: None,
+                    fps: 0,
+                    picture_frames: 0,
+                })
+            }
+            SupervisorRequest::AudioChunk { scene, .. } => {
+                self.require_scene(&scene)?;
+                Err(invalid(
+                    "camera bundle narration belongs to the recorded host",
+                ))
+            }
             SupervisorRequest::ReplayJournal(replay) => self.replay(replay),
             SupervisorRequest::RestoreCheckpoint(checkpoint) => {
                 self.require_scene(&checkpoint.scene)?;

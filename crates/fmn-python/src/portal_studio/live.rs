@@ -375,6 +375,7 @@ impl WorkerService for LiveWorker {
 
 pub(crate) fn prepare(scene: &Bound<'_, PyScene>) -> PyResult<Recording> {
     let worker = LiveWorker::new(scene)?;
+    super::prepare_live_audio(scene)?;
     let tuning = with_capture(scene, &worker.generation, |capture| {
         Ok(capture.tuning.clone())
     })

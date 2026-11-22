@@ -4176,6 +4176,21 @@ impl fmn_studio::WorkerService for NativeStudioWorker {
             fmn_studio::SupervisorRequest::RestoreCheckpoint(checkpoint) => {
                 self.restore_checkpoint(checkpoint)
             }
+            fmn_studio::SupervisorRequest::AudioInfo { scene } => {
+                self.require_scene(&scene)?;
+                Ok(fmn_studio::WorkerResponse::AudioInfo {
+                    scene,
+                    info: None,
+                    fps: 0,
+                    picture_frames: 0,
+                })
+            }
+            fmn_studio::SupervisorRequest::AudioChunk { scene, .. } => {
+                self.require_scene(&scene)?;
+                Err(studio_service_error(
+                    "recorded narration belongs to the Studio host",
+                ))
+            }
             fmn_studio::SupervisorRequest::Hello { .. }
             | fmn_studio::SupervisorRequest::Shutdown => Err(fmn_studio::ServiceError::new(
                 fmn_studio::WorkerErrorCode::InvalidRequest,

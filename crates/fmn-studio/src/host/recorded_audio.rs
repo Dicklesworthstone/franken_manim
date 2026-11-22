@@ -94,6 +94,102 @@ impl StudioHost {
 }
 
 impl HostHandler {
+    /// Query the currently admitted worker under the same lock as picture
+    /// publication and reload. No soundtrack survives independently in host
+    /// storage, so a failed replacement cannot pair new PCM with old pictures.
+    pub(in crate::host) fn worker_audio_info(
+        &self,
+        stream: &mut TcpStream,
+    ) -> Result<(), HostError> {
+        let body = {
+            let _operation = lock(&self.session.operations);
+            let mut supervisor = lock(&self.session.supervisor);
+            let response = worker_response(supervisor.request(
+                SupervisorRequest::AudioInfo {
+                    scene: self.session.try_owned_scene()?,
+                },
+                &*self.session.asset_ok,
+            )?)?;
+            match response {
+                WorkerResponse::AudioInfo {
+                    info: Some(info),
+                    fps,
+                    picture_frames,
+                    ..
+                } => Some(audio_info_body(
+                    info,
+                    fps,
+                    picture_frames,
+                    supervisor.generation(),
+                )),
+                WorkerResponse::AudioInfo { info: None, .. } => None,
+                WorkerResponse::Error { message, .. } => {
+                    return Err(HostError::WorkerRejected(message));
+                }
+                _ => return Err(HostError::UnexpectedWorkerResponse),
+            }
+        };
+        match body {
+            Some(body) => write_json_response(stream, body.as_bytes()),
+            None => write_http_response(
+                stream,
+                404,
+                "Not Found",
+                "text/plain; charset=utf-8",
+                b"This capture has no recorded narration; reload after live edits.\n",
+            ),
+        }
+    }
+
+    pub(in crate::host) fn worker_audio_chunk(
+        &self,
+        stream: &mut TcpStream,
+        request: &HttpRequest,
+    ) -> Result<(), HostError> {
+        let window = audio_window(request)?;
+        let (chunk, generation) = {
+            let _operation = lock(&self.session.operations);
+            let mut supervisor = lock(&self.session.supervisor);
+            let generation = supervisor.generation();
+            if generation != window.generation {
+                return Err(HostError::BadRequest(
+                    "stale recorded audio worker generation",
+                ));
+            }
+            let response = worker_response(supervisor.request(
+                SupervisorRequest::AudioChunk {
+                    scene: self.session.try_owned_scene()?,
+                    source: window.source,
+                    start: window.start,
+                    frames: window.frames,
+                },
+                &*self.session.asset_ok,
+            )?)?;
+            let chunk = match response {
+                WorkerResponse::AudioChunk { chunk, .. } => chunk,
+                WorkerResponse::Error { .. } => {
+                    return Err(HostError::BadRequest(
+                        "recorded audio source or sample window is no longer available",
+                    ));
+                }
+                _ => return Err(HostError::UnexpectedWorkerResponse),
+            };
+            let expected = chunk
+                .info()
+                .sample_frames
+                .checked_sub(window.start)
+                .map(|n| n.min(u64::from(window.frames)));
+            if chunk.info().source != window.source
+                || chunk.start() != window.start
+                || expected != Some(u64::from(chunk.frames()))
+            {
+                return Err(HostError::UnexpectedWorkerResponse);
+            }
+            (chunk, generation)
+        };
+        write_audio_chunk(stream, &chunk, generation)
+    }
+
     fn admit_recorded_audio(&self, audio: &StudioRecordedAudio) -> Result<(), HostError> {
         if audio.fps == 0 || audio.picture_frames == 0 {
             return Err(HostError::BadRequest(
@@ -192,17 +288,7 @@ impl HostHandler {
             let _operation = lock(&self.session.operations);
             self.admit_recorded_audio(audio)?;
             let generation = lock(&self.session.supervisor).generation();
-            let info = audio.info();
-            format!(
-                "{{\"schema\":\"fmn.studio.audio\",\"version\":1,\"source\":\"{}\",\"sample_rate\":{},\"channels\":{},\"sample_frames\":{},\"fps\":{},\"picture_frames\":{},\"max_chunk_frames\":{},\"worker_generation\":{generation}}}",
-                info.source.to_hex(),
-                info.sample_rate,
-                info.channels,
-                info.sample_frames,
-                audio.fps,
-                audio.picture_frames,
-                MAX_AUDIO_CHUNK_FRAMES,
-            )
+            audio_info_body(audio.info(), audio.fps, audio.picture_frames, generation)
         };
         write_json_response(stream, body.as_bytes())
     }
@@ -213,41 +299,19 @@ impl HostHandler {
         request: &HttpRequest,
         audio: &StudioRecordedAudio,
     ) -> Result<(), HostError> {
-        for (key, _) in &request.query {
-            if !matches!(
-                key.as_str(),
-                "cap" | "source" | "start" | "frames" | "worker_generation"
-            ) {
-                return Err(HostError::BadRequest("unknown recorded audio query field"));
-            }
-        }
-        let field = |name| {
-            request
-                .query_one(name)?
-                .ok_or(HostError::BadRequest("missing recorded audio query field"))
-        };
-        let source = field("source")?;
-        let start = field("start")?
-            .parse::<u64>()
-            .map_err(|_| HostError::BadRequest("invalid audio sample cursor"))?;
-        let frames = field("frames")?
-            .parse::<u32>()
-            .map_err(|_| HostError::BadRequest("invalid audio chunk size"))?;
-        let expected_generation = field("worker_generation")?
-            .parse::<u64>()
-            .map_err(|_| HostError::BadRequest("invalid audio worker generation"))?;
+        let window = audio_window(request)?;
         let (chunk, generation) = {
             let _operation = lock(&self.session.operations);
             self.admit_recorded_audio(audio)?;
             let generation = lock(&self.session.supervisor).generation();
-            if generation != expected_generation || source != audio.info().source.to_hex() {
+            if generation != window.generation || window.source != audio.info().source {
                 return Err(HostError::BadRequest(
                     "stale recorded audio source or worker generation",
                 ));
             }
             let chunk = audio
                 .track
-                .chunk(audio.info().source, start, frames)
+                .chunk(window.source, window.start, window.frames)
                 .map_err(|error| match error {
                     crate::StudioAudioError::Allocation => {
                         HostError::Configuration("Studio audio response allocation failed")
@@ -256,24 +320,93 @@ impl HostHandler {
                 })?;
             (chunk, generation)
         };
-        write_response_with_headers(
-            stream,
-            200,
-            "OK",
-            "application/vnd.frankenmanim.pcm-f32le",
-            chunk.bytes(),
-            &[
-                ("X-FMN-Audio-Source", &chunk.info().source.to_hex()),
-                ("X-FMN-Worker-Generation", &generation.to_string()),
-                ("X-FMN-Audio-Start", &chunk.start().to_string()),
-                ("X-FMN-Audio-Frames", &chunk.frames().to_string()),
-                ("X-FMN-Audio-Next", &chunk.next().to_string()),
-                (
-                    "X-FMN-Audio-End",
-                    if chunk.is_terminal() { "true" } else { "false" },
-                ),
-                ("X-FMN-SHA256", &chunk.digest().to_hex()),
-            ],
-        )
+        write_audio_chunk(stream, &chunk, generation)
     }
+}
+
+struct AudioWindow {
+    source: Digest,
+    start: u64,
+    frames: u32,
+    generation: u64,
+}
+
+fn audio_window(request: &HttpRequest) -> Result<AudioWindow, HostError> {
+    for (key, _) in &request.query {
+        if !matches!(
+            key.as_str(),
+            "cap" | "source" | "start" | "frames" | "worker_generation"
+        ) {
+            return Err(HostError::BadRequest("unknown recorded audio query field"));
+        }
+    }
+    let field = |name| {
+        request
+            .query_one(name)?
+            .ok_or(HostError::BadRequest("missing recorded audio query field"))
+    };
+    let source = Digest::from_hex(field("source")?)
+        .map_err(|_| HostError::BadRequest("invalid audio source identity"))?;
+    let start = field("start")?
+        .parse::<u64>()
+        .map_err(|_| HostError::BadRequest("invalid audio sample cursor"))?;
+    let frames = field("frames")?
+        .parse::<u32>()
+        .map_err(|_| HostError::BadRequest("invalid audio chunk size"))?;
+    if frames == 0 || frames > MAX_AUDIO_CHUNK_FRAMES {
+        return Err(HostError::BadRequest("invalid audio chunk size"));
+    }
+    let generation = field("worker_generation")?
+        .parse::<u64>()
+        .map_err(|_| HostError::BadRequest("invalid audio worker generation"))?;
+    Ok(AudioWindow {
+        source,
+        start,
+        frames,
+        generation,
+    })
+}
+
+fn audio_info_body(
+    info: crate::StudioAudioInfo,
+    fps: u32,
+    picture_frames: u32,
+    generation: u64,
+) -> String {
+    format!(
+        "{{\"schema\":\"fmn.studio.audio\",\"version\":1,\"source\":\"{}\",\"sample_rate\":{},\"channels\":{},\"sample_frames\":{},\"fps\":{},\"picture_frames\":{},\"max_chunk_frames\":{},\"worker_generation\":{generation}}}",
+        info.source.to_hex(),
+        info.sample_rate,
+        info.channels,
+        info.sample_frames,
+        fps,
+        picture_frames,
+        MAX_AUDIO_CHUNK_FRAMES,
+    )
+}
+
+fn write_audio_chunk(
+    stream: &mut TcpStream,
+    chunk: &crate::StudioAudioChunk,
+    generation: u64,
+) -> Result<(), HostError> {
+    write_response_with_headers(
+        stream,
+        200,
+        "OK",
+        "application/vnd.frankenmanim.pcm-f32le",
+        chunk.bytes(),
+        &[
+            ("X-FMN-Audio-Source", &chunk.info().source.to_hex()),
+            ("X-FMN-Worker-Generation", &generation.to_string()),
+            ("X-FMN-Audio-Start", &chunk.start().to_string()),
+            ("X-FMN-Audio-Frames", &chunk.frames().to_string()),
+            ("X-FMN-Audio-Next", &chunk.next().to_string()),
+            (
+                "X-FMN-Audio-End",
+                if chunk.is_terminal() { "true" } else { "false" },
+            ),
+            ("X-FMN-SHA256", &chunk.digest().to_hex()),
+        ],
+    )
 }

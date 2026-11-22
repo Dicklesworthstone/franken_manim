@@ -117,7 +117,10 @@ class StudioPolicyTests(unittest.TestCase):
             def __init__(self):
                 self.camera = SimpleNamespace(_core=SimpleNamespace(set_pixel_shape=lambda *args: None))
                 instances.append(self)
-            def _begin_studio_capture(self, *args):
+            def _begin_studio_capture(self, *args, **options):
+                case.assertEqual(options, {
+                    "audio": True, "max_audio_bytes": 64 * 1024 * 1024, "audio_ffmpeg": False,
+                })
                 events.append("begin")
             def run(self):
                 events.append("construct")
@@ -180,12 +183,26 @@ class StudioPolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "interactive must be a bool"):
             Studio(self.source, "Lesson", interactive=1)
 
+    def test_audio_policy_and_budget_are_frozen_in_the_worker_identity(self):
+        identities = []
+        for options in ({}, {"audio": False}, {"audio_ffmpeg": True}, {"max_audio_bytes": 8192}):
+            with Studio(self.source, "Lesson", **options) as host:
+                request = json.loads(host._host.artifact[1][-1])
+                self.assertEqual(request["audio"], options.get("audio", True))
+                self.assertEqual(request["audio_ffmpeg"], options.get("audio_ffmpeg", False))
+                self.assertEqual(request["max_audio_bytes"], options.get("max_audio_bytes", 64 * 1024 * 1024))
+                identities.append(request["build_id"])
+        self.assertEqual(len(set(identities)), 4)
+
     def test_invalid_resource_profiles_fail_before_launch(self):
         for options in ({"fps": True}, {"fps": 0}, {"threads": 97}, {"max_frames": 0},
                         {"max_bytes": 2**31}, {"resolution": (16384, 16384)},
                         {"resolution": (20,)}, {"port": 65536}, {"timeout": 0},
                         {"startup_timeout": 0}, {"startup_timeout": 901},
-                        {"startup_timeout": True}, {"startup_timeout": 1.5}):
+                        {"startup_timeout": True}, {"startup_timeout": 1.5},
+                        {"audio": 1}, {"audio_ffmpeg": 1}, {"max_audio_bytes": 7},
+                        {"max_audio_bytes": 2**29}, {"max_audio_bytes": True},
+                        {"audio": False, "audio_ffmpeg": True}):
             with self.subTest(options=options), self.assertRaises(ValueError):
                 Studio(self.source, "Lesson", **options)
         for value in (True, 1.0, -1, 500):

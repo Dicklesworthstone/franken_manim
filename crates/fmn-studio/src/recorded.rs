@@ -11,10 +11,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 mod advance;
+#[cfg(test)]
+mod audio_tests;
 mod live;
 
 use fmn_codec::{PngLimits, decode_png};
-use fmn_hash::{Digest, Schema, Writer, sha256};
+use fmn_hash::{Digest, Schema, Sha256, Writer, sha256};
 use fmn_scene::{AssetRead, EffectClass, Entry, Journal};
 
 use crate::protocol::studio_seek_frame;
@@ -40,8 +42,8 @@ struct RecordedFrame {
     encoded_bytes: usize,
 }
 
-/// One bounded capture generation. The byte ceiling counts encoded PNG and
-/// inspector documents; inspector traversal/value ceilings independently bound
+/// One bounded capture generation. The byte ceiling counts encoded PNG,
+/// inspector documents and optional retained PCM; inspector traversal/value ceilings independently bound
 /// their structured in-memory representation. No live Stage/proxy is retained.
 pub struct RecordedTimeline {
     scene: String,
@@ -55,6 +57,8 @@ pub struct RecordedTimeline {
     commands: u64,
     input_revision: Option<u64>,
     advance_enabled: bool,
+    audio: Option<crate::StudioAudioTrack>,
+    audio_bytes: usize,
     limits: ProtocolLimits,
 }
 
@@ -89,6 +93,8 @@ impl RecordedTimeline {
             commands: 0,
             input_revision: None,
             advance_enabled: false,
+            audio: None,
+            audio_bytes: 0,
             limits,
         })
     }
@@ -101,6 +107,9 @@ impl RecordedTimeline {
         stream: FrameStream,
         inspection: InspectorSnapshot,
     ) -> Result<(), ServiceError> {
+        if self.audio.is_some() {
+            return Err(invalid("soundtrack capture is already sealed"));
+        }
         if self.frames.len() == self.max_frames {
             return Err(invalid("recorded timeline frame budget exceeded"));
         }
@@ -213,6 +222,63 @@ impl RecordedTimeline {
         self.encoded_bytes
     }
 
+    /// Remaining combined picture, inspector and PCM budget.
+    #[must_use]
+    pub const fn remaining_bytes(&self) -> usize {
+        self.max_bytes.saturating_sub(self.encoded_bytes)
+    }
+
+    /// Seal native mixed PCM against the actual captured pictures. The caller
+    /// has already prepared cues on the capture clock; playback never mixes or
+    /// decodes again. Failure leaves the previous capture untouched.
+    pub fn attach_soundtrack(
+        &mut self,
+        soundtrack: fmn_scene::timeline_bundle::BundleSoundtrack,
+    ) -> Result<(), ServiceError> {
+        self.check_scene(&self.scene)?;
+        if self.audio.is_some() {
+            return Err(invalid("soundtrack capture is already sealed"));
+        }
+        let bytes = soundtrack
+            .samples()
+            .len()
+            .checked_mul(4)
+            .filter(|bytes| {
+                *bytes <= self.remaining_bytes() && *bytes <= crate::audio::MAX_CAPTURED_AUDIO_BYTES
+            })
+            .ok_or_else(|| invalid("recorded soundtrack byte budget exceeded"))?;
+        let fps = self.frames[0]
+            .inspection
+            .view
+            .as_ref()
+            .expect("admitted view")
+            .fps;
+        if !(1..=240).contains(&fps) {
+            return Err(invalid("recorded soundtrack needs a bounded picture clock"));
+        }
+        let mut identity = Sha256::new();
+        identity.update(b"fmn.studio.captured-audio.v1\0");
+        identity.update(self.build_id.as_bytes());
+        identity.update(self.source_digest.as_bytes());
+        identity.update(&fps.to_le_bytes());
+        identity.update(&(self.frames.len() as u64).to_le_bytes());
+        for frame in &self.frames {
+            identity.update(frame.state_hash.as_bytes());
+        }
+        identity.update(&soundtrack.sample_rate().to_le_bytes());
+        identity.update(&soundtrack.channels().to_le_bytes());
+        identity.update(&soundtrack.sample_frames().to_le_bytes());
+        for sample in soundtrack.samples() {
+            identity.update(&sample.to_le_bytes());
+        }
+        let track = crate::StudioAudioTrack::new(identity.finalize(), soundtrack);
+        track.info().validate().map_err(failed)?;
+        self.encoded_bytes += bytes;
+        self.audio_bytes = bytes;
+        self.audio = Some(track);
+        Ok(())
+    }
+
     fn select(&mut self, scene: &str, frame: i64) -> Result<(), ServiceError> {
         self.check_scene(scene)?;
         let index = usize::try_from(frame).map_err(|_| invalid("negative recorded frame"))?;
@@ -320,6 +386,36 @@ impl WorkerService for RecordedTimeline {
                     bytes,
                     digest,
                 })
+            }
+            SupervisorRequest::AudioInfo { scene } => {
+                self.check_scene(&scene)?;
+                Ok(WorkerResponse::AudioInfo {
+                    scene,
+                    info: self.audio.as_ref().map(crate::StudioAudioTrack::info),
+                    fps: self.frames[0]
+                        .inspection
+                        .view
+                        .as_ref()
+                        .expect("admitted view")
+                        .fps,
+                    picture_frames: self.frames.len() as u32,
+                })
+            }
+            SupervisorRequest::AudioChunk {
+                scene,
+                source,
+                start,
+                frames,
+            } => {
+                self.check_scene(&scene)?;
+                let audio = self
+                    .audio
+                    .as_ref()
+                    .ok_or_else(|| invalid("capture has no soundtrack"))?;
+                let chunk = audio
+                    .chunk(source, start, frames)
+                    .map_err(|error| invalid(&error.to_string()))?;
+                Ok(WorkerResponse::AudioChunk { scene, chunk })
             }
             SupervisorRequest::Play { scene, command } => {
                 if self.commands >= 4096 {

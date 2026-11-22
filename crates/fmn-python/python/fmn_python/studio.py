@@ -2,7 +2,7 @@
 
 The selected source runs in a disposable instance of *this* host interpreter.
 The supervisor does not import scene code. Captures are bounded, native PNGs
-and native inspectors; scrubbing never executes source again. The Studio UI's
+and native inspectors with a frozen native soundtrack; scrubbing never executes source again. The Studio UI's
 Reload button creates a fresh process, including fresh helper-module imports.
 This is process isolation for robustness, not a Python security sandbox.
 """
@@ -29,6 +29,7 @@ _SCHEMA = "fmn-python.studio-worker"
 _MAX_SOURCE_BYTES = 16 * 1024 * 1024
 _DEFAULT_FRAMES = 7200
 _DEFAULT_BYTES = 256 * 1024 * 1024
+_DEFAULT_AUDIO_BYTES = 64 * 1024 * 1024
 _MAX_RELOAD_RESPONSE = 65536
 
 
@@ -87,7 +88,16 @@ class Studio:
 
     Construction executes the selected scene once in a disposable worker.
     ``url`` contains a bearer capability: do not share it with untrusted users.
-    Preview is silent/read-only; ordinary offline rendering remains separate.
+    The browser's Play narration control plays native WAV and SoundData cues
+    on the captured picture clock, including offsets, gains and audio tails.
+    ``audio=False`` skips soundtrack preparation. ``audio_ffmpeg=True`` admits
+    compressed cues through the existing bounded decoder and frozen writer
+    settings. ``max_audio_bytes`` bounds each preparation pool and the retained
+    PCM; retained PCM also counts against the combined ``max_bytes`` capture cap.
+    Explicit show() captures that do not advance the scene clock require
+    ``audio=False`` when cues are present. A successful live edit invalidates
+    the initial narration until reload, keeping edited pictures and old sound
+    from sharing a clock.
     ``autoreload=True`` explicitly authorizes rerunning source on stabilized
     edits. It watches local Python sources and any additional ``watch_paths``;
     files named explicitly may be non-Python assets. Worker failures leave the
@@ -103,6 +113,8 @@ class Studio:
         timeout: int = 120, startup_timeout: int = 120, port: int = 0,
         autoreload: bool = False, watch_paths: tuple[os.PathLike[str] | str, ...] | list = (),
         debounce_ms: int = 200, interactive: bool = False,
+        audio: bool = True, max_audio_bytes: int = _DEFAULT_AUDIO_BYTES,
+        audio_ffmpeg: bool = False,
     ) -> None:
         _ensure_exclusive_manimlib_namespace()
         from manimlib import _native
@@ -113,6 +125,10 @@ class Studio:
             raise ValueError("autoreload must be a bool")
         if not isinstance(interactive, bool):
             raise ValueError("interactive must be a bool")
+        if not isinstance(audio, bool) or not isinstance(audio_ffmpeg, bool):
+            raise ValueError("audio and audio_ffmpeg must be bools")
+        if audio_ffmpeg and not audio:
+            raise ValueError("audio_ffmpeg requires audio=True")
         if not isinstance(watch_paths, (tuple, list)) or len(watch_paths) > 62:
             raise ValueError("watch_paths must be a list or tuple of at most 62 paths")
         if watch_paths and not autoreload:
@@ -136,6 +152,8 @@ class Studio:
             "max_frames": _integer(max_frames, "max_frames", 1, 100000),
             "max_bytes": _integer(max_bytes, "max_bytes", 1, 1024 * 1024 * 1024),
             "interactive": interactive,
+            "audio": audio, "audio_ffmpeg": audio_ffmpeg,
+            "max_audio_bytes": _integer(max_audio_bytes, "max_audio_bytes", 8, 256 * 1024 * 1024),
         }
         timeout = _integer(timeout, "timeout", 1, 900)
         startup_timeout = _integer(startup_timeout, "startup_timeout", 1, 900)
@@ -355,6 +373,9 @@ def _capture(request: dict[str, Any], native: Any):
             request["scene"], request["build_id"], inputs.fingerprint,
             request["width"], request["height"], request["fps"], request["threads"],
             _seed(scene.random_seed), request["max_frames"], request["max_bytes"],
+            audio=request.get("audio", True),
+            max_audio_bytes=request.get("max_audio_bytes", _DEFAULT_AUDIO_BYTES),
+            audio_ffmpeg=request.get("audio_ffmpeg", False),
         )
         try:
             scene.camera._core.set_pixel_shape(request["width"], request["height"])
@@ -376,7 +397,9 @@ def _capture(request: dict[str, Any], native: Any):
                 try:
                     # Prepare the existing service; the outer native worker
                     # owns Hello, requests and shutdown through one loop.
-                    yield scene._prepare_studio_live()
+                    recording = scene._prepare_studio_live()
+                    inputs.verify(loaded)
+                    yield recording
                 finally:
                     try:
                         scene._abort_render()
@@ -446,6 +469,7 @@ _HELP = """Read-only native Studio for Python scenes:
                     [--max_frames N] [--max_bytes N] [--timeout SECONDS]
                     [--startup_timeout SECONDS] [--port N]
                     [--autoreload] [--watch PATH ...] [--debounce_ms N] [--interactive]
+                    [--no-audio] [--audio-ffmpeg] [--max_audio_bytes N]
 
 Executes once in a disposable host-CPython worker; scrub and inspect the captured
 frames in the authenticated native Studio UI. Reload explicitly executes fresh
@@ -465,8 +489,15 @@ Live commands also check the declared-input generation before callbacks and
 before final capture: a helper/asset edit cannot silently mix two generations.
 Select the final frame to Step live frame or Run live nominal updater ticks.
 Run is bounded and pauses on input, navigation, focus loss or worker changes.
-No sound playback, callback checkpoints, or certified render claim.
-Default: 640x360, 30 FPS, 7200 frames, 256 MiB encoded capture budget.
+Play narration uses the browser audio clock and a frozen native soundtrack.
+Native WAV and SoundData cues work by default; --audio-ffmpeg admits compressed
+cues through the configured bounded decoder. --no-audio skips all sound work.
+PCM counts against both --max_audio_bytes and the remaining --max_bytes budget.
+Explicit show() captures with cues require --no-audio; use play/wait for a shared
+picture/sound clock. Successful live edits invalidate narration until reload.
+No callback checkpoints or certified render claim.
+Default: 640x360, 30 FPS, 7200 frames, 256 MiB combined capture budget.
+Audio default: 48 kHz stereo, 64 MiB per preparation pool and retained PCM.
 Startup and scene/operation deadlines are separate; both default to 120 seconds.
 """
 
@@ -490,10 +521,13 @@ def try_studio_cli(native: Any, arguments: list[str]) -> int | None:
     parser.add_argument("--resolution", default="640x360")
     parser.add_argument("--autoreload", action="store_true")
     parser.add_argument("--interactive", action="store_true")
+    parser.add_argument("--no-audio", dest="audio", action="store_false", default=True)
+    parser.add_argument("--audio-ffmpeg", dest="audio_ffmpeg", action="store_true")
     parser.add_argument("--watch", dest="watch_paths", action="append", default=[])
     parser.add_argument("--debounce_ms", type=int, default=200)
     for flag, default in (("fps", 30), ("threads", 1), ("max_frames", _DEFAULT_FRAMES),
                           ("max_bytes", _DEFAULT_BYTES), ("timeout", 120),
+                          ("max_audio_bytes", _DEFAULT_AUDIO_BYTES),
                           ("startup_timeout", 120), ("port", 0)):
         parser.add_argument("--" + flag, type=int, default=default)
     phase = "arguments"

@@ -870,6 +870,19 @@ impl WorkerService for NativeSceneWorker {
                     bytes,
                 })
             }
+            SupervisorRequest::AudioInfo { scene } => {
+                self.require_scene(&scene)?;
+                Ok(WorkerResponse::AudioInfo {
+                    scene,
+                    info: None,
+                    fps: 0,
+                    picture_frames: 0,
+                })
+            }
+            SupervisorRequest::AudioChunk { scene, .. } => {
+                self.require_scene(&scene)?;
+                Err(invalid("live native scenes have no captured soundtrack"))
+            }
             SupervisorRequest::RestoreCheckpoint(checkpoint) => self.restore(checkpoint),
             SupervisorRequest::ReplayJournal(replay) => self.replay(replay),
             SupervisorRequest::Hello { .. } | SupervisorRequest::Shutdown => {

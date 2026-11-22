@@ -119,6 +119,15 @@ fn every_request_variant_round_trips_canonically() {
             scene: "Demo".to_owned(),
             layers: DebugLayerSet::TILES | DebugLayerSet::DEPTH,
         },
+        SupervisorRequest::AudioInfo {
+            scene: "Demo".to_owned(),
+        },
+        SupervisorRequest::AudioChunk {
+            scene: "Demo".to_owned(),
+            source: sha256(b"captured audio"),
+            start: 17,
+            frames: 65536,
+        },
         SupervisorRequest::Shutdown,
     ];
     for (index, variant) in variants.into_iter().enumerate() {
@@ -137,6 +146,11 @@ fn every_response_variant_round_trips_canonically() {
     let png = b"\x89PNG\r\n\x1a\nfixture".to_vec();
     let journal = journal().to_bytes().unwrap();
     let inspection = br#"{"scene":"Demo","nodes":[]}"#.to_vec();
+    let audio = fmn_studio::StudioAudioTrack::new(
+        sha256(b"captured audio"),
+        fmn_scene::timeline_bundle::BundleSoundtrack::new(48000, 2, vec![0.25, -0.5, 0.125, -0.25])
+            .unwrap(),
+    );
     let variants = vec![
         WorkerResponse::Hello {
             version: CURRENT_VERSION,
@@ -224,6 +238,22 @@ fn every_response_variant_round_trips_canonically() {
             bytes: inspection,
         },
         WorkerResponse::Bye,
+        WorkerResponse::AudioInfo {
+            scene: "Demo".to_owned(),
+            info: Some(audio.info()),
+            fps: 30,
+            picture_frames: 4,
+        },
+        WorkerResponse::AudioInfo {
+            scene: "Demo".to_owned(),
+            info: None,
+            fps: 30,
+            picture_frames: 4,
+        },
+        WorkerResponse::AudioChunk {
+            scene: "Demo".to_owned(),
+            chunk: audio.chunk(audio.info().source, 0, 1).unwrap(),
+        },
     ];
     for (index, variant) in variants.into_iter().enumerate() {
         let envelope = response(index as u64 + 1, variant);
@@ -232,6 +262,139 @@ fn every_response_variant_round_trips_canonically() {
         assert_eq!(decoded, envelope);
         assert_eq!(decoded.to_bytes(limits).unwrap(), bytes);
     }
+}
+
+#[test]
+fn audio_protocol_refuses_invalid_shapes_clocks_and_payloads_before_publication() {
+    use fmn_studio::{MAX_AUDIO_CHUNK_FRAMES, StudioAudioInfo};
+    let limits = ProtocolLimits::default();
+    let info = StudioAudioInfo {
+        source: sha256(b"capture"),
+        sample_rate: 48_000,
+        channels: 2,
+        sample_frames: 2,
+    };
+    let wire = |info: StudioAudioInfo, start: u64, frames: u32, bytes: &[u8], digest| {
+        let mut writer = Writer::new(fmn_studio::RESPONSE_SCHEMA);
+        writer
+            .put_u64(1)
+            .put_u8(12)
+            .put_str("Sound")
+            .put_digest(&info.source)
+            .put_u32(info.sample_rate)
+            .put_u16(info.channels)
+            .put_u64(info.sample_frames)
+            .put_u64(start)
+            .put_u32(frames)
+            .put_digest(&digest)
+            .put_bytes(bytes);
+        writer.finish().unwrap()
+    };
+    let samples: Vec<_> = [0.25_f32, -0.5]
+        .into_iter()
+        .flat_map(f32::to_le_bytes)
+        .collect();
+    let valid = wire(info, 0, 1, &samples, sha256(&samples));
+    assert!(ResponseEnvelope::from_bytes(&valid, limits).is_ok());
+    for metadata in [
+        StudioAudioInfo {
+            sample_rate: 0,
+            ..info
+        },
+        StudioAudioInfo {
+            sample_rate: 384_001,
+            ..info
+        },
+        StudioAudioInfo {
+            channels: 0,
+            ..info
+        },
+        StudioAudioInfo {
+            channels: 3,
+            ..info
+        },
+        StudioAudioInfo {
+            sample_frames: u64::MAX,
+            ..info
+        },
+    ] {
+        assert!(
+            ResponseEnvelope::from_bytes(&wire(metadata, 0, 1, &samples, sha256(&samples)), limits)
+                .is_err()
+        );
+    }
+    for (start, frames) in [
+        (0, MAX_AUDIO_CHUNK_FRAMES + 1),
+        (u64::MAX, 1),
+        (2, 1),
+        (0, 0),
+    ] {
+        assert!(
+            ResponseEnvelope::from_bytes(
+                &wire(info, start, frames, &samples, sha256(&samples)),
+                limits
+            )
+            .is_err()
+        );
+    }
+    for bytes in [
+        vec![0; 4],
+        vec![0; 12],
+        [f32::NAN, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect(),
+        [1.5_f32, 0.0]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect(),
+    ] {
+        assert!(
+            ResponseEnvelope::from_bytes(&wire(info, 0, 1, &bytes, sha256(&bytes)), limits)
+                .is_err()
+        );
+    }
+    assert!(
+        ResponseEnvelope::from_bytes(&wire(info, 0, 1, &samples, sha256(b"wrong")), limits)
+            .is_err()
+    );
+    assert!(ResponseEnvelope::from_bytes(&wire(info, 2, 0, &[], sha256(&[])), limits).is_ok());
+    for (fps, picture_frames) in [(0, 1), (30, 0), (241, 1), (30, 100_001)] {
+        assert!(
+            response(
+                1,
+                WorkerResponse::AudioInfo {
+                    scene: "Sound".into(),
+                    info: Some(info),
+                    fps,
+                    picture_frames,
+                }
+            )
+            .to_bytes(limits)
+            .is_err()
+        );
+    }
+    for frames in [0, MAX_AUDIO_CHUNK_FRAMES + 1] {
+        assert!(
+            request(
+                1,
+                SupervisorRequest::AudioChunk {
+                    scene: "Sound".into(),
+                    source: info.source,
+                    start: 0,
+                    frames,
+                }
+            )
+            .to_bytes(limits)
+            .is_err()
+        );
+    }
+    assert!(
+        ProtocolVersion { major: 1, minor: 3 }
+            .require_current()
+            .is_err(),
+        "the old worker cannot silently advertise the new audio boundary"
+    );
 }
 
 #[test]

@@ -9152,6 +9152,7 @@ impl PyScene {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (name, build, source, width, height, fps, threads, seed, max_frames, max_bytes, *, audio=true, max_audio_bytes=67_108_864, audio_ffmpeg=false))]
     fn _begin_studio_capture(
         slf: &Bound<'_, Self>,
         name: String,
@@ -9164,9 +9165,25 @@ impl PyScene {
         seed: u64,
         max_frames: usize,
         max_bytes: usize,
+        audio: bool,
+        max_audio_bytes: usize,
+        audio_ffmpeg: bool,
     ) -> PyResult<()> {
         portal_studio::begin(
-            slf, name, build, source, width, height, fps, threads, seed, max_frames, max_bytes,
+            slf,
+            name,
+            build,
+            source,
+            width,
+            height,
+            fps,
+            threads,
+            seed,
+            max_frames,
+            max_bytes,
+            audio,
+            max_audio_bytes,
+            audio_ffmpeg,
         )
     }
 

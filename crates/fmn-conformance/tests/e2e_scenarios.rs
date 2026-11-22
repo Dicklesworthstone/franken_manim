@@ -7097,6 +7097,34 @@ fn python_studio_editing_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     Ok(RunOutcome::ok().with_counter("studio_editing_checks", checks))
 }
 
+fn python_studio_audio_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_studio_capture()
+        .map_err(|error| fail(format!("Python Studio soundtrack: {error}")))?;
+    if report.audio_sample_frames != 48_064
+        || report.audio_pcm.len() != 48_064 * 2 * 4
+        || report.captures != 1
+        || report.frames != 6
+    {
+        return Err(fail(
+            "Studio soundtrack lost its bounded capture clock or native PCM",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.python.studio_audio")
+            .field("native_cues", 3_u64)
+            .field("sample_frames", report.audio_sample_frames)
+            .field("negative_offset_cropped", true)
+            .field("stereo_order_preserved", true)
+            .field("audio_tail_preserved", true)
+            .field("bounded_worker_protocol", true),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("studio_audio_sample_frames", report.audio_sample_frames)
+        .with_counter("studio_audio_authored_captures", report.captures)
+        .with_artifact("studio_narration.f32le", report.audio_pcm)
+        .with_artifact("studio_picture.png", report.last_png))
+}
+
 fn python_insert_recording_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let checks = manimlib::run_portal_gauntlet_insert_recording()
         .map_err(|error| fail(format!("Python insert recording: {error}")))?;
@@ -20338,6 +20366,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_studio_audio.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_studio_audio_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "studio_narration.f32le".to_owned(),
+                "studio_picture.png".to_owned(),
+            ]),
+            counter_eq("studio_audio_sample_frames", 48_064),
+            counter_eq("studio_audio_authored_captures", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.studio_audio",
+            vec![
+                FieldPred::u64_eq("native_cues", 3),
+                FieldPred::bool_eq("negative_offset_cropped", true),
+                FieldPred::bool_eq("stereo_order_preserved", true),
+                FieldPred::bool_eq("audio_tail_preserved", true),
+                FieldPred::bool_eq("bounded_worker_protocol", true),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_insert_recording.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -23438,6 +23491,16 @@ fn python_studio_editing_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.python_studio_editing.v1")
         .expect("Python Studio editing is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_studio_audio_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_studio_audio.v1")
+        .expect("Python Studio audio is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

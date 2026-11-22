@@ -268,7 +268,9 @@ impl WorkerChannel for FakeChannel {
             | SupervisorRequest::Seek { .. }
             | SupervisorRequest::Scrub { .. }
             | SupervisorRequest::Event { .. }
-            | SupervisorRequest::Overlay { .. } => WorkerResponse::Ack {
+            | SupervisorRequest::Overlay { .. }
+            | SupervisorRequest::AudioInfo { .. }
+            | SupervisorRequest::AudioChunk { .. } => WorkerResponse::Ack {
                 state_hash: None,
                 journal_len: 0,
             },
@@ -2496,7 +2498,9 @@ impl WorkerService for ChildService {
             | SupervisorRequest::Scrub { .. }
             | SupervisorRequest::Event { .. }
             | SupervisorRequest::Inspect { .. }
-            | SupervisorRequest::Overlay { .. } => Ok(WorkerResponse::Ack {
+            | SupervisorRequest::Overlay { .. }
+            | SupervisorRequest::AudioInfo { .. }
+            | SupervisorRequest::AudioChunk { .. } => Ok(WorkerResponse::Ack {
                 state_hash: None,
                 journal_len: 0,
             }),

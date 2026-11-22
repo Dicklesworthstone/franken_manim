@@ -11,6 +11,7 @@ use std::collections::TryReserveError;
 use std::fmt;
 use std::io::{Read, Write};
 
+use crate::{MAX_AUDIO_CHUNK_BYTES, MAX_AUDIO_CHUNK_FRAMES, StudioAudioChunk, StudioAudioInfo};
 use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Writer, sha256};
 use fmn_scene::{
     CommandKind, CommandRecord, EventPayload, Journal, JournalError, Key, Modifiers, MouseButton,
@@ -18,13 +19,13 @@ use fmn_scene::{
 };
 
 /// Canonical request envelope schema.
-pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 1);
+pub const REQUEST_SCHEMA: Schema = Schema::new(*b"FMNI", 1, 1, 2);
 /// Canonical response envelope schema.
-pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 2);
+pub const RESPONSE_SCHEMA: Schema = Schema::new(*b"FMNI", 2, 1, 3);
 const STUDIO_SEEK_COMMAND_SCHEMA: Schema = Schema::new(*b"FMNI", 3, 1, 0);
 
 /// The live protocol version advertised during the mandatory handshake.
-pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 3 };
+pub const CURRENT_VERSION: ProtocolVersion = ProtocolVersion { major: 1, minor: 4 };
 
 /// Maximum distinct renderer/backend identities attached to one frame.
 ///
@@ -886,6 +887,22 @@ pub enum SupervisorRequest {
         /// Requested diagnostic layers.
         layers: DebugLayerSet,
     },
+    /// Read immutable soundtrack metadata without advancing the scene.
+    AudioInfo {
+        /// Scene identity.
+        scene: String,
+    },
+    /// Read a bounded original-PCM window from the captured generation.
+    AudioChunk {
+        /// Scene identity.
+        scene: String,
+        /// Expected picture/soundtrack identity from AudioInfo.
+        source: Digest,
+        /// Original sample-frame cursor.
+        start: u64,
+        /// Requested sample frames, at most MAX_AUDIO_CHUNK_FRAMES.
+        frames: u32,
+    },
     /// Graceful worker shutdown.
     Shutdown,
 }
@@ -921,10 +938,16 @@ impl SupervisorRequest {
                     .validate()
                     .map_err(|_| ProtocolError::Malformed("invalid input event"))?;
             }
-            Self::Inspect { scene } => require_scene(scene)?,
+            Self::Inspect { scene } | Self::AudioInfo { scene } => require_scene(scene)?,
             Self::Overlay { scene, layers } => {
                 require_scene(scene)?;
                 DebugLayerSet::from_bits(layers.bits())?;
+            }
+            Self::AudioChunk { scene, frames, .. } => {
+                require_scene(scene)?;
+                if *frames == 0 || *frames > MAX_AUDIO_CHUNK_FRAMES {
+                    return Err(ProtocolError::Malformed("audio chunk size"));
+                }
             }
         }
         Ok(())
@@ -1060,6 +1083,24 @@ pub enum WorkerResponse {
         /// Digest of `bytes`, checked on receipt.
         digest: Digest,
     },
+    /// Immutable soundtrack and its picture clock, or an explicit absence.
+    AudioInfo {
+        /// Scene identity.
+        scene: String,
+        /// Absent for silent or edited live captures.
+        info: Option<StudioAudioInfo>,
+        /// Captured picture FPS (zero is allowed only without audio).
+        fps: u32,
+        /// Captured picture count (zero is allowed only without audio).
+        picture_frames: u32,
+    },
+    /// One validated, source-bound PCM window.
+    AudioChunk {
+        /// Scene identity.
+        scene: String,
+        /// Bounded original little-endian Float32 PCM.
+        chunk: StudioAudioChunk,
+    },
     /// Graceful shutdown acknowledged.
     Bye,
 }
@@ -1116,6 +1157,21 @@ impl WorkerResponse {
                 if !valid_json_container(bytes) {
                     return Err(ProtocolError::Malformed("Studio data is not valid JSON"));
                 }
+            }
+            Self::AudioInfo {
+                scene,
+                info,
+                fps,
+                picture_frames,
+            } => {
+                require_scene(scene)?;
+                validate_audio_clock(*info, *fps, *picture_frames)?;
+            }
+            Self::AudioChunk { scene, chunk } => {
+                require_scene(scene)?;
+                chunk
+                    .validate()
+                    .map_err(|_| ProtocolError::Malformed("audio chunk"))?;
             }
         }
         Ok(())
@@ -1369,6 +1425,22 @@ fn put_request(writer: &mut Writer, request: &SupervisorRequest) {
             writer.put_str(scene);
             writer.put_u8(layers.bits());
         }
+        SupervisorRequest::AudioInfo { scene } => {
+            writer.put_u8(11).put_str(scene);
+        }
+        SupervisorRequest::AudioChunk {
+            scene,
+            source,
+            start,
+            frames,
+        } => {
+            writer
+                .put_u8(12)
+                .put_str(scene)
+                .put_digest(source)
+                .put_u64(*start)
+                .put_u32(*frames);
+        }
     }
 }
 
@@ -1412,6 +1484,15 @@ fn get_request(
         10 => Ok(SupervisorRequest::Overlay {
             scene: owned_string(reader.get_str()?, "scene")?,
             layers: DebugLayerSet::from_bits(reader.get_u8()?)?,
+        }),
+        11 => Ok(SupervisorRequest::AudioInfo {
+            scene: owned_string(reader.get_str()?, "scene")?,
+        }),
+        12 => Ok(SupervisorRequest::AudioChunk {
+            scene: owned_string(reader.get_str()?, "scene")?,
+            source: reader.get_digest()?,
+            start: reader.get_u64()?,
+            frames: reader.get_u32()?,
         }),
         _ => Err(ProtocolError::Malformed("supervisor request tag")),
     }
@@ -1497,6 +1578,27 @@ fn put_response(writer: &mut Writer, response: &WorkerResponse) -> Result<(), Pr
             writer.put_digest(digest);
             writer.put_bytes(bytes);
         }
+        WorkerResponse::AudioInfo {
+            scene,
+            info,
+            fps,
+            picture_frames,
+        } => {
+            writer.put_u8(11).put_str(scene).put_bool(info.is_some());
+            if let Some(info) = info {
+                put_audio_info(writer, *info);
+            }
+            writer.put_u32(*fps).put_u32(*picture_frames);
+        }
+        WorkerResponse::AudioChunk { scene, chunk } => {
+            writer.put_u8(12).put_str(scene);
+            put_audio_info(writer, chunk.info());
+            writer
+                .put_u64(chunk.start())
+                .put_u32(chunk.frames())
+                .put_digest(&chunk.digest())
+                .put_bytes(chunk.bytes());
+        }
     }
     Ok(())
 }
@@ -1560,8 +1662,82 @@ fn get_response(
             digest: reader.get_digest()?,
             bytes: bounded_bytes(reader, "Studio data", limits.max_studio_data_bytes)?,
         }),
+        11 => {
+            let scene = owned_string(reader.get_str()?, "scene")?;
+            let info = if reader.get_bool()? {
+                Some(get_audio_info(reader)?)
+            } else {
+                None
+            };
+            let fps = reader.get_u32()?;
+            let picture_frames = reader.get_u32()?;
+            validate_audio_clock(info, fps, picture_frames)?;
+            Ok(WorkerResponse::AudioInfo {
+                scene,
+                info,
+                fps,
+                picture_frames,
+            })
+        }
+        12 => {
+            let scene = owned_string(reader.get_str()?, "scene")?;
+            let info = get_audio_info(reader)?;
+            let start = reader.get_u64()?;
+            let frames = reader.get_u32()?;
+            if frames > MAX_AUDIO_CHUNK_FRAMES
+                || start
+                    .checked_add(u64::from(frames))
+                    .is_none_or(|n| n > info.sample_frames)
+            {
+                return Err(ProtocolError::Malformed("audio sample window"));
+            }
+            let digest = reader.get_digest()?;
+            let expected = frames as usize * usize::from(info.channels) * 4;
+            let bytes = bounded_bytes(reader, "audio chunk", expected.min(MAX_AUDIO_CHUNK_BYTES))?;
+            let chunk = StudioAudioChunk::from_wire(info, start, frames, bytes, digest)
+                .map_err(|_| ProtocolError::Malformed("audio chunk"))?;
+            Ok(WorkerResponse::AudioChunk { scene, chunk })
+        }
         _ => Err(ProtocolError::Malformed("worker response tag")),
     }
+}
+
+fn validate_audio_clock(
+    info: Option<StudioAudioInfo>,
+    fps: u32,
+    frames: u32,
+) -> Result<(), ProtocolError> {
+    if let Some(info) = info {
+        info.validate()
+            .map_err(|_| ProtocolError::Malformed("audio metadata"))?;
+        if fps == 0 || frames == 0 {
+            return Err(ProtocolError::Malformed("audio picture clock"));
+        }
+    }
+    if fps > 240 || frames > 100_000 {
+        return Err(ProtocolError::Malformed("audio picture clock"));
+    }
+    Ok(())
+}
+
+fn put_audio_info(writer: &mut Writer, info: StudioAudioInfo) {
+    writer
+        .put_digest(&info.source)
+        .put_u32(info.sample_rate)
+        .put_u16(info.channels)
+        .put_u64(info.sample_frames);
+}
+
+fn get_audio_info(reader: &mut Reader<'_>) -> Result<StudioAudioInfo, ProtocolError> {
+    let info = StudioAudioInfo {
+        source: reader.get_digest()?,
+        sample_rate: reader.get_u32()?,
+        channels: reader.get_u16()?,
+        sample_frames: reader.get_u64()?,
+    };
+    info.validate()
+        .map_err(|_| ProtocolError::Malformed("audio metadata"))?;
+    Ok(info)
 }
 
 fn put_version(writer: &mut Writer, version: ProtocolVersion) {

@@ -347,5 +347,119 @@ class StudioWheelTests(unittest.TestCase):
         self.assertIn("read-only", json.loads(help.stdout)["help"].lower())
 
 
+class StudioAudioWheelTests(unittest.TestCase):
+    """Actual worker/mixer/IPC/HTTP with no decoder process or audio device."""
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="fmn studio narration ")
+        self.root = Path(self.temp.name)
+        self.source = self.root / "sound.py"
+        self.marker = self.root / "runs.txt"
+        self.authored = (
+            "from manimlib import *\nfrom fmn_python import SoundData\n"
+            "LEVEL = 0.25\nCOUNT = 32\n"
+            "class Narrated(Scene):\n"
+            "    def construct(self):\n"
+            f"        with open({str(self.marker)!r}, 'a') as f: f.write('capture\\n')\n"
+            "        self.box = Square(fill_opacity=1)\n"
+            "        self.add(self.box)\n"
+            "        self.add_sound(SoundData([0.125] * 16), time_offset=-4/48000)\n"
+            "        self.wait_frames(1)\n"
+            "        self.add_sound(SoundData([LEVEL, -0.5] * COUNT, channels=2), time_offset=0.25)\n"
+            "        self.wait_frames(1)\n"
+            "    def on_key_press(self, symbol, modifiers):\n"
+            "        self.box.shift(RIGHT)\n"
+        )
+        self.source.write_text(self.authored)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def host(self, **options):
+        return Studio(self.source, "Narrated", resolution=(48, 27), fps=8,
+                      max_frames=4, max_bytes=1024 * 1024, max_audio_bytes=1024 * 1024,
+                      **options)
+
+    def chunk(self, api, info, start, frames):
+        query = urllib.parse.urlencode(dict(cap=api.cap, source=info["source"],
+            worker_generation=info["worker_generation"], start=start, frames=frames))
+        with api.opener.open(api.base + "/api/audio/chunk?" + query, timeout=20) as response:
+            data = response.read(65536 * 8 + 1)
+            self.assertEqual(response.headers["Content-Type"], "application/vnd.frankenmanim.pcm-f32le")
+            self.assertEqual(response.headers["X-FMN-SHA256"], hashlib.sha256(data).hexdigest())
+            self.assertEqual(int(response.headers["X-FMN-Worker-Generation"]), info["worker_generation"])
+            self.assertEqual(response.headers["X-FMN-Audio-Source"], info["source"])
+            self.assertEqual(int(response.headers["X-FMN-Audio-Start"]), start)
+            self.assertEqual(int(response.headers["X-FMN-Audio-Frames"]), min(frames, info["sample_frames"] - start))
+        return data
+
+    def test_exact_cue_offsets_channel_order_tail_and_bounded_authenticated_transport(self):
+        with self.host() as host:
+            api = Preview(host)
+            info = api.json("/api/audio")
+            self.assertEqual((info["fps"], info["picture_frames"], info["sample_rate"],
+                              info["channels"], info["sample_frames"]), (8, 2, 48000, 2, 18032))
+            expected = ([0.125, 0.125] * 12 + [0.0, 0.0] * (18000 - 12)
+                        + [0.25, -0.5] * 32)
+            joined = b"".join(self.chunk(api, info, start, 4096) for start in range(0, 18032, 4096))
+            self.assertEqual(struct.unpack("<" + "f" * len(expected), joined), tuple(expected))
+            self.assertEqual(self.chunk(api, info, 18000, 1), struct.pack("<ff", 0.25, -0.5))
+            self.assertEqual(self.chunk(api, info, 18032, 1), b"")
+            for start, count in ((0, 0), (0, 65537), (18033, 1)):
+                with self.assertRaises(urllib.error.HTTPError) as failure:
+                    self.chunk(api, info, start, count)
+                self.assertEqual(failure.exception.code, 400)
+            with self.assertRaises(urllib.error.HTTPError) as failure:
+                api.request("/api/audio", cap=False)
+            self.assertEqual(failure.exception.code, 403)
+            api.json("/api/scrub", {"frame": 1})
+            self.assertEqual(api.json("/api/audio"), info)
+            self.assertEqual(self.marker.read_text().splitlines(), ["capture"])
+
+    def test_reload_swaps_picture_and_audio_and_failed_mix_retains_healthy_generation(self):
+        with self.host() as host:
+            api = Preview(host)
+            previous = api.json("/api/audio")
+            self.source.write_text(self.authored.replace("LEVEL = 0.25", "LEVEL = 0.5"))
+            host.reload()
+            current = api.json("/api/audio")
+            self.assertGreater(current["worker_generation"], previous["worker_generation"])
+            self.assertNotEqual(current["source"], previous["source"])
+            with self.assertRaises(urllib.error.HTTPError) as failure:
+                self.chunk(api, previous, 18000, 1)
+            self.assertEqual(failure.exception.code, 400)
+            self.assertEqual(self.chunk(api, current, 18000, 1), struct.pack("<ff", 0.5, -0.5))
+            healthy_picture = api.json("/api/scrub", {"frame": 0})["sha256"]
+            self.source.write_text(self.authored.replace("COUNT = 32", "COUNT = 200000"))
+            with self.assertRaises(Exception):
+                host.reload()
+            self.assertEqual(api.json("/api/audio"), current)
+            self.assertEqual(api.json("/api/scrub", {"frame": 0})["sha256"], healthy_picture)
+            self.assertEqual(self.chunk(api, current, 18000, 1), struct.pack("<ff", 0.5, -0.5))
+
+    def test_silent_opt_out_and_successful_live_edit_invalidate_initial_narration(self):
+        with self.host(audio=False) as host:
+            with self.assertRaises(urllib.error.HTTPError) as failure:
+                Preview(host).json("/api/audio")
+            self.assertEqual(failure.exception.code, 404)
+        with self.host(interactive=True) as host:
+            api = Preview(host)
+            info = api.json("/api/audio")
+            api.json("/api/scrub", {"frame": 1})
+            with api.request("/api/inspect") as response:
+                generation = int(response.headers["X-FMN-Worker-Generation"])
+                view = json.load(response)["view"]
+            api.json("/api/event", dict(type="key_press", key="k", worker_generation=generation,
+                frame=view["frame_index"], revision=view["input_revision"]))
+            with self.assertRaises(urllib.error.HTTPError) as failure:
+                api.json("/api/audio")
+            self.assertEqual(failure.exception.code, 404)
+            with self.assertRaises(urllib.error.HTTPError) as failure:
+                self.chunk(api, info, 18000, 1)
+            self.assertEqual(failure.exception.code, 400)
+            host.reload()
+            self.assertEqual(api.json("/api/audio")["sample_frames"], 18032)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

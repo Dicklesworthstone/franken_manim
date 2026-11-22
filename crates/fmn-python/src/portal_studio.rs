@@ -18,6 +18,7 @@ pub(super) mod live;
 
 pub(super) struct Capture {
     bundle: Option<bundle::BundleCapture>,
+    audio: Option<portal_audio::BundleAudioCapture>,
     renderer: RetainedFrameRenderer,
     tuning: portal_autotune::Report,
     camera: Camera,
@@ -131,6 +132,7 @@ impl Capture {
         Ok((
             Self {
                 bundle: None,
+                audio: None,
                 renderer,
                 tuning: portal_autotune::Report::for_camera(&plan),
                 camera,
@@ -152,6 +154,21 @@ impl Capture {
             || self.recorded.frame_count() == 0,
             bundle::BundleCapture::is_empty,
         )
+    }
+
+    fn prepare_audio(&mut self, scene: &Scene) -> PyResult<()> {
+        if let Some(audio) = self.audio.take()
+            && let Some(mixed) = audio.mix(
+                scene,
+                u32::try_from(self.recorded.frame_count()).map_err(native_error)?,
+                self.recorded.remaining_bytes(),
+            )?
+        {
+            self.recorded
+                .attach_soundtrack(mixed.soundtrack)
+                .map_err(native_error)?;
+        }
+        Ok(())
     }
 
     pub(super) fn bind_camera(
@@ -300,11 +317,32 @@ pub(super) fn begin(
     seed: u64,
     max_frames: usize,
     max_bytes: usize,
+    audio: bool,
+    max_audio_bytes: usize,
+    audio_ffmpeg: bool,
 ) -> PyResult<()> {
     portal_video::check_scene_ownership(slf)?;
+    if !audio && audio_ffmpeg {
+        return Err(PyValueError::new_err("audio_ffmpeg requires audio=True"));
+    }
+    let audio_options = portal_audio::BundleAudioOptions {
+        sample_rate: 48_000,
+        channels: 2,
+        workers: threads.min(64),
+        max_bytes: max_audio_bytes,
+        allow_ffmpeg: audio_ffmpeg,
+    }
+    .validate()?;
+    // Freeze decoder/process settings before authored setup/construct. A
+    // silent capture and native WAV/SoundData cues discover no executable.
+    let soundtrack = if audio {
+        Some(audio_options.capture(slf)?)
+    } else {
+        None
+    };
     let config = portal_autotune::camera_snapshot(slf.py())?;
     portal_video::check_scene_ownership(slf)?;
-    let (capture, runtime) = Capture::new(
+    let (mut capture, runtime) = Capture::new(
         name,
         ProtocolDigest::from_hex(build).map_err(native_error)?,
         ProtocolDigest::from_hex(source).map_err(native_error)?,
@@ -316,6 +354,7 @@ pub(super) fn begin(
         max_bytes,
         config,
     )?;
+    capture.audio = soundtrack;
     let replacement = Scene::new(runtime, seed).map_err(native_error)?;
     let slot = Arc::clone(&slf.borrow().render);
     let mut slot = slot
@@ -370,16 +409,32 @@ pub(super) fn finish(slf: &Bound<'_, PyScene>) -> PyResult<Recording> {
             "Studio capture ownership changed during finish",
         ));
     }
-    let Some(PortalRenderSession::Preview(capture)) = slot.take() else {
+    let Some(PortalRenderSession::Preview(mut capture)) = slot.take() else {
         unreachable!()
     };
-    if let Some(error) = capture.failure {
-        return Err(PyRuntimeError::new_err(error));
+    drop(slot);
+    if let Some(error) = &capture.failure {
+        return Err(PyRuntimeError::new_err(error.clone()));
     }
+    capture.prepare_audio(&original_engine.borrow())?;
     Ok(Recording {
         worker: Some(CapturedWorker::Recorded(Box::new(capture.recorded))),
         tuning: capture.tuning,
     })
+}
+
+/// Freeze narration only after the live worker's initial final-frame refresh.
+/// Future successful edits invalidate it in RecordedTimeline itself.
+pub(super) fn prepare_live_audio(scene: &Bound<'_, PyScene>) -> PyResult<()> {
+    let engine = Rc::clone(&scene.try_borrow()?.engine);
+    let render = Arc::clone(&scene.try_borrow()?.render);
+    let mut slot = render
+        .lock()
+        .map_err(|_| PyRuntimeError::new_err("Studio generation lock poisoned"))?;
+    let Some(PortalRenderSession::Preview(capture)) = slot.as_mut() else {
+        return Err(PyRuntimeError::new_err("no Studio capture is active"));
+    };
+    capture.prepare_audio(&engine.borrow())
 }
 
 enum CapturedWorker {
@@ -889,6 +944,8 @@ pub struct PortalStudioGauntletReport {
     pub frames: u64,
     pub captures: u64,
     pub contexts_closed: u64,
+    pub audio_pcm: Vec<u8>,
+    pub audio_sample_frames: u64,
 }
 
 /// Exercise the production capture and worker protocol without publishing an
@@ -901,6 +958,7 @@ pub fn run_portal_gauntlet_studio_capture() -> Result<PortalStudioGauntletReport
 import contextlib
 import json
 import manimlib as m
+from fmn_python import SoundData
 _captures = 0
 _contexts_closed = 0
 @contextlib.contextmanager
@@ -911,10 +969,13 @@ def capture():
     s._begin_studio_capture('Moving', '11' * 32, '22' * 32, 96, 54, 8, 1, 0, 16, 1024*1024)
     s.camera._core.set_pixel_shape(96, 54)
     s.camera.fps = 8
+    s.add_sound(SoundData([0.125] * 16), time_offset=-4 / 48000)
     box = m.Square(fill_opacity=1)
     s.add(box)
     s.play(box.animate.shift(m.RIGHT), run_time=0.5)
+    s.add_sound(SoundData([0.25, -0.5] * 32, channels=2), time_offset=-0.125)
     s.wait(0.25)
+    s.add_sound(SoundData([0.0625] * 64), time_offset=0.25)
     r = s._finish_studio_capture()
     assert r.frame_count == 6, r.frame_count
     first, last = json.loads(r.inspect(0)), json.loads(r.inspect(5))
@@ -997,8 +1058,8 @@ def capture():
         else {
             return Err("Studio did not return its native inspector".to_owned());
         };
-        let captures = captures()?;
-        if captures != 1 {
+        let capture_count = captures()?;
+        if capture_count != 1 {
             return Err("Studio re-executed authored code while scrubbing".to_owned());
         }
         let frames = worker
@@ -1007,6 +1068,81 @@ def capture():
             .ok_or_else(|| "Studio produced no captured timeline".to_owned())?
             .frame_count()
             .map_err(|e| e.to_string())? as u64;
+        let WorkerResponse::AudioInfo {
+            info: Some(info),
+            fps,
+            picture_frames,
+            ..
+        } = worker
+            .handle(SupervisorRequest::AudioInfo {
+                scene: "Moving".into(),
+            })
+            .map_err(|e| e.to_string())?
+        else {
+            return Err("Studio omitted its captured soundtrack".into());
+        };
+        if (
+            fps,
+            picture_frames,
+            info.sample_rate,
+            info.channels,
+            info.sample_frames,
+        ) != (8, 6, 48_000, 2, 48_064)
+        {
+            return Err("Studio audio did not retain the native picture clock and tail".into());
+        }
+        let mut audio_pcm = Vec::new();
+        let mut cursor = 0;
+        while cursor < info.sample_frames {
+            let response = worker
+                .handle(SupervisorRequest::AudioChunk {
+                    scene: "Moving".into(),
+                    source: info.source,
+                    start: cursor,
+                    frames: 8191,
+                })
+                .map_err(|e| e.to_string())?;
+            // Exercise the production bounded binary transport, not just an
+            // in-process sample accessor.
+            let envelope = fmn_studio::ResponseEnvelope {
+                request_id: cursor + 1,
+                response,
+            };
+            let wire = envelope
+                .to_bytes(ProtocolLimits::default())
+                .map_err(|e| e.to_string())?;
+            let envelope =
+                fmn_studio::ResponseEnvelope::from_bytes(&wire, ProtocolLimits::default())
+                    .map_err(|e| e.to_string())?;
+            let WorkerResponse::AudioChunk { chunk, .. } = envelope.response else {
+                return Err("Studio did not return native PCM".into());
+            };
+            if chunk.start() != cursor || chunk.info() != info || chunk.frames() == 0 {
+                return Err("Studio PCM window lost its capture identity".into());
+            }
+            cursor = chunk.next();
+            audio_pcm.extend_from_slice(chunk.bytes());
+        }
+        for (index, sample) in audio_pcm.as_chunks::<4>().0.iter().enumerate() {
+            let frame = index / 2;
+            let expected = if frame < 12 {
+                0.125_f32
+            } else if (18_000..18_032).contains(&frame) {
+                if index % 2 == 0 { 0.25 } else { -0.5 }
+            } else if frame >= 48_000 {
+                0.0625
+            } else {
+                0.0
+            };
+            if *sample != expected.to_le_bytes() {
+                return Err(format!(
+                    "Studio cue placement/channel mismatch at sample {index}"
+                ));
+            }
+        }
+        if captures()? != 1 {
+            return Err("audio reads re-executed authored scene code".into());
+        }
         worker.close_capture().map_err(|e| e.to_string())?;
         let contexts_closed = globals
             .get_item("_contexts_closed")
@@ -1022,8 +1158,10 @@ def capture():
             last_png,
             last_inspector,
             frames,
-            captures,
+            captures: capture_count,
             contexts_closed,
+            audio_pcm,
+            audio_sample_frames: info.sample_frames,
         })
     })
 }

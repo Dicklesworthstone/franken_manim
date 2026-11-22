@@ -1281,6 +1281,8 @@ impl HostHandler {
             (Method::Post, "/api/event") => self.event(stream, &request),
             (Method::Post, "/api/advance") => self.advance(stream, &request),
             (Method::Get, "/api/inspect") => self.inspect(stream),
+            (Method::Get, "/api/audio") => self.worker_audio_info(stream),
+            (Method::Get, "/api/audio/chunk") => self.worker_audio_chunk(stream, &request),
             (Method::Get, "/api/overlays") => self.overlays(stream, &request),
             (Method::Get, "/api/session") => self.saved_session(stream),
             _ => write_http_response(

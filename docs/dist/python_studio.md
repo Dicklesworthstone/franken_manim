@@ -52,6 +52,37 @@ fixing the source permits another explicit Reload. A failed capture is not
 published as a successful truncated timeline, even if scene code catches its
 exception. Automatic crash re-execution is disabled.
 
+### Sound playback
+
+Use **Play narration** to hear `Scene.add_sound` and file-writer sound cues
+while the captured pictures follow the browser's audio clock. Capture prepares
+one immutable 48 kHz stereo soundtrack through the existing native decoder and
+mixer. Cue offsets, negative-time cropping, channel order, gains and an audio
+tail beyond the last picture retain their ordinary native sound semantics.
+Scrubbing or seeking audio reads that captured PCM; it does not rerun scene
+code, decode media or mix again. The ordinary picture Play control remains
+available for silent playback.
+
+Native WAV files and `SoundData` work by default without FFmpeg. Pass
+`--audio-ffmpeg` (`audio_ffmpeg=True`) to admit compressed audio through the
+writer's configured, bounded FFmpeg decoder. Pass `--no-audio` (`audio=False`)
+to skip sound preparation, including unavailable or intentionally omitted cues.
+Use `--max_audio_bytes` (`max_audio_bytes`) to change the default 64 MiB limit
+for each preparation pool (source bytes, decoded PCM and prepared samples),
+and for retained PCM. Retained PCM
+also counts against the remaining `--max_bytes` capture budget. A decoding or
+budget failure rejects the replacement capture and retains the healthy worker.
+
+Pictures and narration share a source identity and worker generation. Reload
+replaces them together; a client requesting old PCM after reload is refused.
+An interactive capture can play its initial soundtrack, but a successful live
+edit invalidates that narration until reload. Failed picture replacement keeps
+the previous picture and sound. Explicit `show()` captures do not advance the
+scene clock, so scenes combining those extra captures with sound cues must use
+`audio=False`; ordinary `play`/`wait` and a terminal still have a shared clock.
+The browser starts physical playback only after the user's Play narration
+gesture and owns device sample-rate conversion and volume.
+
 ### Automatic source reload
 
 `--autoreload` explicitly authorizes re-executing authored source after stable
@@ -202,7 +233,7 @@ separate modes with their existing behavior.
 
 ## Budgets and host access
 
-The defaults are 640×360, 30 FPS, 7,200 captured frames, a 256 MiB encoded capture
+The defaults are 640×360, 30 FPS, 7,200 captured frames, a 256 MiB combined capture
 budget, and separate 120-second startup and worker-request timeouts. Set
 `--startup_timeout` for cold imports, bundled font/template initialization and
 persistent-cache binding before Hello. The first-frame readiness probe gets
@@ -216,21 +247,22 @@ callback keeps its short operation deadline. A reload keeps the healthy worker
 until its replacement has answered
 Hello and produced a valid first frame; failed preparation leaves the old
 worker available. Set `--max_frames`, `--max_bytes`, or `--timeout` explicitly
-for longer scenes. The encoded budget
-accounts for PNGs, inspector documents and per-frame metadata; native inspector
+for longer scenes. The capture budget
+accounts for PNGs, inspector documents, per-frame metadata and retained PCM; native inspector
 traversal/field limits and a 16M-pixel frame ceiling apply independently. It is
 not an operating-system memory quota on arbitrary authored Python. The maximum
-accepted controls are 100,000 frames, 1 GiB encoded captures, and 900 seconds.
+accepted controls are 100,000 frames, 1 GiB combined captures, 256 MiB per audio
+preparation pool, and 900 seconds.
 
 The native HTTP host binds only loopback and requires its random bearer
-capability for the UI, frames, inspector and mutation routes. Its existing
+capability for the UI, frames, inspector, PCM and mutation routes. Its existing
 origin, request-size, concurrency, and rate limits remain in force. The URL is
 a capability: do not share it with untrusted users. There is no automatic
 browser opening or public-network bind. Ctrl-C or `Studio.close()` stops the
 host and reaps its disposable worker; context-manager use is recommended.
 
-Preview is silent and needs no ffmpeg. Use `render_scene` / ordinary
-`fmn-python lesson.py Example` for soundtrack or movie export.
+Use `render_scene` / ordinary `fmn-python lesson.py Example` to publish a
+soundtrack or movie file from the scene.
 
 **Process isolation is not a sandbox.** Scene code has the host user's file and
 process permissions. Source/runtime digests bind this preview generation; they

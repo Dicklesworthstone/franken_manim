@@ -40,10 +40,15 @@ impl RecordedTimeline {
             .len()
             .checked_sub(1)
             .ok_or_else(|| invalid("empty live capture"))?;
-        let occupied = self.encoded_bytes - self.frames[index].encoded_bytes;
+        let occupied = self.encoded_bytes - self.frames[index].encoded_bytes - self.audio_bytes;
         let candidate = self.admit_frame(stream, inspection, index as u64, occupied)?;
         self.encoded_bytes = occupied + candidate.encoded_bytes;
         self.frames[index] = candidate;
+        // The initial narration describes the immutable captured execution.
+        // A successful live edit creates a different picture generation; never
+        // play that old soundtrack under newly authored pictures or clock steps.
+        self.audio = None;
+        self.audio_bytes = 0;
         Ok(())
     }
 
