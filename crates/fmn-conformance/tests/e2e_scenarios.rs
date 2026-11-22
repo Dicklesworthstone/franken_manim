@@ -67,8 +67,6 @@ mod hdr_pq;
 mod live_bar_chart_example;
 #[path = "../../fmn/tests/support/obj_smoothing.rs"]
 mod obj_smoothing;
-#[path = "../../fmn/tests/support/surface_normals.rs"]
-mod surface_normals;
 #[path = "support/path_motion.rs"]
 mod path_motion;
 #[path = "support/path_observation.rs"]
@@ -84,6 +82,8 @@ mod studio_native_resume;
 mod studio_pure_seek;
 #[path = "support/studio_wait_tail.rs"]
 mod studio_wait_tail;
+#[path = "../../fmn/tests/support/surface_normals.rs"]
+mod surface_normals;
 
 // fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
 // (crates/fmn/examples/hoeffding_d), compiled here from its own sources so

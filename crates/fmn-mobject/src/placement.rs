@@ -507,7 +507,10 @@ mod tests {
         let source = [0.25, 0.0, 0.25];
         let materialized = stretch.normal_transform().apply_offset(source);
         let successive = shear.normal_transform().apply_offset(materialized);
-        let composed = shear.compose(stretch).normal_transform().apply_offset(source);
+        let composed = shear
+            .compose(stretch)
+            .normal_transform()
+            .apply_offset(source);
         assert_direction(successive, [1.0, 0.0, 2.0]);
         assert_direction(composed, [1.0, 0.0, 2.0]);
     }

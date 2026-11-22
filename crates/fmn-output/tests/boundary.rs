@@ -23,12 +23,10 @@ use fmn_output::{ColorDescription, Container, EncoderChoice, VideoJob, WireForma
 #[cfg(all(unix, feature = "exact-process"))]
 use fmn_platform::process::{
     ProcessCancellation, ProcessError, ProcessMechanism, ProcessSpec, ProcessStdinLimits,
-    RunningProcess,
+    RunningProcess, StdProcessRunner,
 };
 #[cfg(unix)]
-use fmn_platform::process::{
-    ProcessOutcome, ProcessRunner, ProcessTermination, ScriptedRunner, StdProcessRunner,
-};
+use fmn_platform::process::{ProcessOutcome, ProcessRunner, ProcessTermination, ScriptedRunner};
 
 fn job(wire: WireFormat, container: Container, encoder: EncoderChoice) -> VideoJob {
     VideoJob {
@@ -3426,6 +3424,7 @@ mod private_boundary {
 
     // ---- the real thing, behind an env flag ----------------------------
 
+    #[cfg(feature = "exact-process")]
     #[test]
     fn real_ffmpeg_smoke() {
         if std::env::var("FMN_REAL_FFMPEG").is_err() {

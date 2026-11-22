@@ -138,7 +138,7 @@ fn transparent_mov_refuses_other_encoder_profiles_even_with_alpha_input_formats(
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "exact-process"))]
 fn probe_formats_retaining_failure(
     caps: &fmn_output::EncoderCapabilities,
     tool: &fmn_output::FfmpegTool,
@@ -350,7 +350,7 @@ Encoder h264_nvenc [NVIDIA NVENC H.264 encoder]:
     assert!(parsed.contains("p010le"));
     assert!(parsed.contains("yuv420p"));
 
-    #[cfg(unix)]
+    #[cfg(all(unix, feature = "exact-process"))]
     {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::Arc;

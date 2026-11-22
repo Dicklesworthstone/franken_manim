@@ -174,8 +174,7 @@ fn collapsed_normals_stay_absent_after_reflection_in_every_materialization_path(
     for route in 0..3 {
         let mut stage = Stage::new();
         let mob = surface(&mut stage);
-        let view =
-            (route == 2).then(|| stage.get_mut(mob).unwrap().buffer.export_view(false));
+        let view = (route == 2).then(|| stage.get_mut(mob).unwrap().buffer.export_view(false));
         stage.apply_affine(mob, flatten);
         if route == 1 {
             stage.bake_placement(mob).unwrap();

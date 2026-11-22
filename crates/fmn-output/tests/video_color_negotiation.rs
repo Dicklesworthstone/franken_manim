@@ -292,7 +292,7 @@ fn hdr_pq_refuses_unadvertised_or_eight_bit_encoder_inputs() {
     }
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "exact-process"))]
 #[test]
 fn real_ffmpeg_lossless_nv12_preserves_native_codes_without_a_hidden_matrix_transform() {
     use std::os::unix::fs::PermissionsExt;
@@ -434,7 +434,7 @@ fn native_wire_metadata_describes_srgb_samples_without_retagging_external_bt709(
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "exact-process"))]
 #[test]
 fn real_ffmpeg_p010_hevc_retains_more_than_256_luma_levels_and_color_tags() {
     use std::collections::BTreeSet;
@@ -568,7 +568,7 @@ fn real_ffmpeg_p010_hevc_retains_more_than_256_luma_levels_and_color_tags() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, feature = "exact-process"))]
 #[test]
 fn real_ffmpeg_pq_hevc_keeps_hdr_tags_and_ten_bit_precision_after_audio_mux() {
     use std::collections::BTreeSet;
