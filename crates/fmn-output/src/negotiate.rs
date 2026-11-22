@@ -16,7 +16,7 @@
 
 use std::path::Path;
 
-use fmn_frame::{ColorRange, PixelFormat};
+use fmn_frame::{ColorRange, FrameError, FrameLayout, PixelFormat};
 
 mod audio_quality;
 pub use audio_quality::AudioQuality;
@@ -89,16 +89,25 @@ impl WireFormat {
         }
     }
 
-    /// Bytes of one tightly-packed frame on the wire.
-    #[must_use]
-    pub const fn frame_bytes(self, width: u32, height: u32) -> usize {
-        let px = width as usize * height as usize;
-        match self {
-            Self::Rgba8 | Self::Bgra8 => px * 4,
-            // Luma + interleaved half-res chroma.
-            Self::Nv12 => px + px / 2,
-            Self::P010 => (px + px / 2) * 2,
-        }
+    /// Bytes of one tightly-packed frame on the wire, validated by the same
+    /// layout authority that produces native frame buffers.
+    ///
+    /// # Errors
+    /// Zero dimensions, odd dimensions for 4:2:0 formats, or a layout whose
+    /// strides and planes cannot be represented in addressable memory.
+    pub fn frame_bytes(self, width: u32, height: u32) -> Result<usize, NegotiationError> {
+        FrameLayout::tight(self.frame_format(), width, height)
+            .map(|layout| layout.total_bytes())
+            .map_err(|error| {
+                NegotiationError(match error {
+                    FrameError::ZeroDimension => "zero frame dimensions",
+                    FrameError::OddDimensions { .. } => {
+                        "4:2:0 wire formats require even frame dimensions"
+                    }
+                    FrameError::TooLarge => "wire frame layout exceeds addressable memory",
+                    _ => "invalid wire frame layout",
+                })
+            })
     }
 
     /// Whether the wire carries an alpha channel.
@@ -323,14 +332,12 @@ impl VideoJob {
     ///
     /// # Errors
     /// [`NegotiationError`] when the job's dimensions contradict each
-    /// other (alpha container on an opaque wire, zero dimensions or frame
-    /// rate), a transparent MOV names an encoder outside its qtrle profile,
+    /// other (alpha container on an opaque wire, invalid frame geometry or
+    /// zero frame rate), a transparent MOV names an encoder outside its qtrle profile,
     /// the PQ profile has incompatible wire/color/container settings, or
     /// quality controls contradict the encoder/container/rate mode.
     pub fn resolved_encoder(&self) -> Result<Option<String>, NegotiationError> {
-        if self.width == 0 || self.height == 0 {
-            return Err(NegotiationError("zero frame dimensions"));
-        }
+        self.wire.frame_bytes(self.width, self.height)?;
         if self.fps.0 == 0 || self.fps.1 == 0 {
             return Err(NegotiationError("zero frame rate"));
         }

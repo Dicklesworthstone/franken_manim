@@ -716,7 +716,7 @@ fn real_ffmpeg_pq_hevc_keeps_hdr_tags_and_ten_bit_precision_after_audio_mux() {
     }
     assert_eq!(
         decoded.stdout.len(),
-        WireFormat::P010.frame_bytes(width, height) * 4
+        WireFormat::P010.frame_bytes(width, height).unwrap() * 4
     );
     let levels: BTreeSet<u16> = decoded.stdout[..width as usize * 2]
         .as_chunks::<2>()

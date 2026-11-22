@@ -185,9 +185,18 @@ fn every_wire_format_negotiates() {
         assert_eq!(argv[at + 1], "64x36");
     }
     // Wire payload arithmetic (the NV12 argument).
-    assert_eq!(WireFormat::Rgba8.frame_bytes(3840, 2160), 33_177_600);
-    assert_eq!(WireFormat::Nv12.frame_bytes(3840, 2160), 12_441_600);
-    assert_eq!(WireFormat::P010.frame_bytes(3840, 2160), 24_883_200);
+    assert_eq!(
+        WireFormat::Rgba8.frame_bytes(3840, 2160).unwrap(),
+        33_177_600
+    );
+    assert_eq!(
+        WireFormat::Nv12.frame_bytes(3840, 2160).unwrap(),
+        12_441_600
+    );
+    assert_eq!(
+        WireFormat::P010.frame_bytes(3840, 2160).unwrap(),
+        24_883_200
+    );
 }
 
 #[test]
@@ -360,6 +369,50 @@ fn private_ffmpeg_boundary_fails_closed_without_a_provable_directory_acl() {
         runner.runs().is_empty(),
         "a refused private workdir must not execute ffmpeg"
     );
+}
+
+#[test]
+fn negotiation_refuses_invalid_wire_geometry() {
+    for wire in [
+        WireFormat::Rgba8,
+        WireFormat::Bgra8,
+        WireFormat::Nv12,
+        WireFormat::P010,
+    ] {
+        for (width, height) in [(0, 2), (2, 0), (u32::MAX - 1, u32::MAX - 1)] {
+            let mut request = job(wire, Container::Mp4, EncoderChoice::Auto);
+            request.width = width;
+            request.height = height;
+            assert!(
+                request.resolved_encoder().is_err(),
+                "invalid {wire:?} layout {width}x{height} must be refused during negotiation"
+            );
+        }
+    }
+    for wire in [WireFormat::Nv12, WireFormat::P010] {
+        for (width, height) in [(3, 2), (2, 3), (3, 3)] {
+            let mut request = job(wire, Container::Mp4, EncoderChoice::Auto);
+            request.width = width;
+            request.height = height;
+            assert!(
+                request.resolved_encoder().is_err(),
+                "4:2:0 layout {wire:?} {width}x{height} must match fmn-frame admission"
+            );
+        }
+    }
+}
+
+#[test]
+fn negotiation_preserves_odd_rgba_and_bgra_geometry() {
+    for wire in [WireFormat::Rgba8, WireFormat::Bgra8] {
+        let mut request = job(wire, Container::MovTransparent, EncoderChoice::Auto);
+        request.width = 3;
+        request.height = 5;
+        assert_eq!(
+            request.resolved_encoder().unwrap().as_deref(),
+            Some("qtrle")
+        );
+    }
 }
 
 // ---- the ScriptedRunner contract suite -----------------------------
@@ -945,7 +998,7 @@ mod private_boundary {
         let boundary =
             Boundary::new(tool, runner.clone(), JobLimits::default(), dir.clone()).unwrap();
         let destination = dir.join("must-not-publish.mp4");
-        let frames = vec![0_u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![0_u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let job_error = boundary
             .encode(
                 &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
@@ -987,7 +1040,7 @@ mod private_boundary {
             dir.clone(),
         )
         .unwrap();
-        let frames = vec![0_u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![0_u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let error = boundary
             .encode(
                 &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
@@ -1179,7 +1232,7 @@ mod private_boundary {
         let error = boundary
             .encode(
                 &job(WireFormat::P010, Container::Mp4, EncoderChoice::Auto),
-                vec![0; WireFormat::P010.frame_bytes(64, 36)],
+                vec![0; WireFormat::P010.frame_bytes(64, 36).unwrap()],
                 &caps,
                 &destination,
             )
@@ -1397,7 +1450,7 @@ mod private_boundary {
                     Container::Mp4,
                     EncoderChoice::Named("h264_nvenc".to_owned()),
                 ),
-                vec![0; WireFormat::Nv12.frame_bytes(64, 36)],
+                vec![0; WireFormat::Nv12.frame_bytes(64, 36).unwrap()],
                 &caps,
                 &destination,
             )
@@ -1456,7 +1509,7 @@ mod private_boundary {
 
     #[test]
     fn encode_contract_spec() {
-        let frame = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frame = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let (result, runs, dir) = scripted_encode(EncoderChoice::Auto, frame.repeat(3));
         // The scripted run wrote no artifact: verification refuses, and the
         // destination was never touched.
@@ -1483,7 +1536,7 @@ mod private_boundary {
         // The payload rides stdin, whole.
         assert_eq!(
             spec.stdin.as_ref().unwrap().len(),
-            3 * WireFormat::Nv12.frame_bytes(64, 36)
+            3 * WireFormat::Nv12.frame_bytes(64, 36).unwrap()
         );
         // The artifact is born inside the private dir.
         let out_arg = spec.argv.last().unwrap();
@@ -1502,16 +1555,19 @@ mod private_boundary {
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let relative_audio = Path::new("Cargo.toml");
         let canonical_audio = std::fs::canonicalize(relative_audio).unwrap();
-        let stream = boundary
+        let frame = vec![0; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
+        let frame_bytes = frame.len() as u64;
+        let mut stream = boundary
             .start_encode(
                 &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
                 &caps,
                 &dir.join("unused.mp4"),
                 Some(relative_audio),
                 fmn_platform::process::ProcessCancellation::new(),
-                fmn_platform::process::ProcessStdinLimits::new(1, 0),
+                fmn_platform::process::ProcessStdinLimits::new(frame_bytes, frame_bytes),
             )
             .unwrap();
+        stream.write_stdin(&frame).unwrap();
 
         let video_artifact = first_bound_tool(&dir)
             .parent()
@@ -1604,7 +1660,7 @@ mod private_boundary {
 
     #[test]
     fn hardware_encoder_explicit_and_unknown() {
-        let frame = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frame = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         // Present in caps and functionally usable: both trial and encode name it.
         let (result, runs, _) =
             scripted_encode(EncoderChoice::Named("h264_nvenc".into()), frame.clone());
@@ -1642,10 +1698,258 @@ mod private_boundary {
     }
 
     #[test]
+    fn invalid_wire_layouts_are_refused_before_direct_or_streaming_spawn() {
+        let (dir, _gate) = scratch("invalid-wire-layout");
+        let (tool_path, runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        let runner = Arc::new(runner);
+        let boundary =
+            Boundary::new(tool, runner.clone(), JobLimits::default(), dir.clone()).unwrap();
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let destination = dir.join("existing.mp4");
+        std::fs::write(&destination, b"keep this render").unwrap();
+
+        for wire in [
+            WireFormat::Rgba8,
+            WireFormat::Bgra8,
+            WireFormat::Nv12,
+            WireFormat::P010,
+        ] {
+            let dimensions = if wire.has_alpha() {
+                vec![(u32::MAX - 1, u32::MAX - 1), (0, 2), (2, 0)]
+            } else {
+                vec![
+                    (u32::MAX - 1, u32::MAX - 1),
+                    (0, 2),
+                    (2, 0),
+                    (3, 2),
+                    (2, 3),
+                    (3, 3),
+                ]
+            };
+            for (width, height) in dimensions {
+                let mut request = job(wire, Container::Mp4, EncoderChoice::Auto);
+                request.width = width;
+                request.height = height;
+                let direct = boundary.encode(&request, vec![0; 8], &caps, &destination);
+                assert!(matches!(direct, Err(BoundaryError::Negotiation(_))));
+                let muxed = boundary.encode_with_audio(
+                    &request,
+                    vec![0; 8],
+                    &dir.join("missing.wav"),
+                    &caps,
+                    &destination,
+                );
+                assert!(matches!(muxed, Err(BoundaryError::Negotiation(_))));
+                let streaming = boundary.start_encode(
+                    &request,
+                    &caps,
+                    &destination,
+                    None,
+                    fmn_platform::process::ProcessCancellation::new(),
+                    fmn_platform::process::ProcessStdinLimits::new(8, 8),
+                );
+                assert!(matches!(streaming, Err(BoundaryError::Negotiation(_))));
+            }
+        }
+
+        assert_eq!(runner.runs().len(), 1, "only tool resolution may run");
+        assert!(!first_bound_tool(&dir).parent().unwrap().exists());
+        assert_eq!(std::fs::read(destination).unwrap(), b"keep this render");
+    }
+
+    #[test]
+    fn streaming_incomplete_frames_never_publish_or_reach_audio_mux() {
+        let (dir, _gate) = scratch("incomplete-stream");
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        let frame_bytes = fmn_frame::FrameLayout::tight(fmn_frame::PixelFormat::Nv12, 64, 36)
+            .unwrap()
+            .total_bytes();
+        for input_bytes in [frame_bytes + 1, frame_bytes - 1, 0] {
+            for audio in [false, true] {
+                let case_dir = dir.join(format!("{input_bytes}-{audio}"));
+                create_private_test_directory(&case_dir);
+                let (tool_path, mut runner) = scripted_tool(&case_dir);
+                let tool = resolve_tool(&tool_path, &runner, &case_dir).unwrap();
+                runner.script(first_bound_tool(&case_dir), successful_scripted_outcome());
+                let runner = Arc::new(runner);
+                let boundary =
+                    Boundary::new(tool, runner.clone(), JobLimits::default(), case_dir.clone())
+                        .unwrap();
+                let destination = case_dir.join("existing.mp4");
+                std::fs::write(&destination, b"keep this render").unwrap();
+                let mut stream = boundary
+                    .start_encode(
+                        &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
+                        &caps,
+                        &destination,
+                        None,
+                        fmn_platform::process::ProcessCancellation::new(),
+                        fmn_platform::process::ProcessStdinLimits::new(137, input_bytes as u64),
+                    )
+                    .unwrap();
+                for chunk in vec![7; input_bytes].chunks(137) {
+                    stream.write_stdin(chunk).unwrap();
+                }
+                // A successful child can leave usable whole frames despite
+                // truncating its last raw frame. Publication must still fail.
+                let private_dir = first_bound_tool(&case_dir).parent().unwrap().to_path_buf();
+                std::fs::write(private_dir.join("out.mp4"), b"truncated video").unwrap();
+                let prepared = if audio {
+                    stream.prepare_with_wav(b"native soundtrack")
+                } else {
+                    stream.prepare()
+                };
+                let result = prepared.and_then(|artifact| artifact.commit());
+                assert!(
+                    matches!(
+                        result,
+                        Err(BoundaryError::PayloadGeometry { frame_bytes: expected, got })
+                            if expected == frame_bytes && got == input_bytes as u64
+                    ),
+                    "incomplete {input_bytes}-byte stream must fail before publication"
+                );
+                assert_eq!(runner.runs().len(), 3, "audio mux must not start");
+                assert_eq!(std::fs::read(destination).unwrap(), b"keep this render");
+                assert!(
+                    !private_dir.exists(),
+                    "failed encode must clean its private artifacts"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn streaming_incomplete_input_preserves_primary_process_errors() {
+        let (dir, _gate) = scratch("incomplete-stream-process-errors");
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        for (name, termination) in [
+            ("nonzero", ProcessTermination::Exited(Some(7))),
+            ("timeout", ProcessTermination::TimedOut),
+            ("logs", ProcessTermination::OutputLimitExceeded),
+            ("cancelled", ProcessTermination::Cancelled),
+        ] {
+            let case_dir = dir.join(name);
+            create_private_test_directory(&case_dir);
+            let (tool_path, mut runner) = scripted_tool(&case_dir);
+            let tool = resolve_tool(&tool_path, &runner, &case_dir).unwrap();
+            runner.script(
+                first_bound_tool(&case_dir),
+                ProcessOutcome {
+                    termination,
+                    stdout: Vec::new(),
+                    stderr: b"original encoder failure".to_vec(),
+                },
+            );
+            let boundary = Boundary::new(
+                tool,
+                Arc::new(runner),
+                JobLimits::default(),
+                case_dir.clone(),
+            )
+            .unwrap();
+            let destination = case_dir.join("must-not-publish.mp4");
+            let stream = boundary
+                .start_encode(
+                    &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
+                    &caps,
+                    &destination,
+                    None,
+                    fmn_platform::process::ProcessCancellation::new(),
+                    fmn_platform::process::ProcessStdinLimits::new(1, 0),
+                )
+                .unwrap();
+            let result = stream.prepare().map(|_| ());
+            match name {
+                "nonzero" => assert!(matches!(
+                    result,
+                    Err(BoundaryError::EncodeFailed { code: Some(7), stderr })
+                        if stderr.contains("original encoder failure")
+                )),
+                "timeout" => assert!(matches!(result, Err(BoundaryError::JobTimedOut { .. }))),
+                "logs" => assert!(matches!(result, Err(BoundaryError::LogOverflow))),
+                "cancelled" => assert!(matches!(result, Err(BoundaryError::Cancelled))),
+                _ => unreachable!(),
+            }
+            assert!(!destination.exists());
+        }
+    }
+
+    #[test]
+    fn streaming_complete_frames_accept_arbitrary_chunk_boundaries() {
+        let (dir, _gate) = scratch("complete-split-stream");
+        let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
+        for (wire, width, height, container) in [
+            (WireFormat::Nv12, 64, 36, Container::Mp4),
+            (WireFormat::Rgba8, 3, 5, Container::MovTransparent),
+            (WireFormat::Bgra8, 3, 5, Container::MovTransparent),
+        ] {
+            let case_dir = dir.join(format!("{wire:?}"));
+            create_private_test_directory(&case_dir);
+            let (tool_path, mut runner) = scripted_tool(&case_dir);
+            let tool = resolve_tool(&tool_path, &runner, &case_dir).unwrap();
+            runner.script(first_bound_tool(&case_dir), successful_scripted_outcome());
+            runner.script(bound_tool(&case_dir, 1), successful_scripted_outcome());
+            let runner = Arc::new(runner);
+            let boundary =
+                Boundary::new(tool, runner.clone(), JobLimits::default(), case_dir.clone())
+                    .unwrap();
+            let destination = case_dir.join(format!("complete.{}", container.extension()));
+            let mut request = job(wire, container, EncoderChoice::Auto);
+            request.width = width;
+            request.height = height;
+            let frame_bytes = fmn_frame::FrameLayout::tight(wire.frame_format(), width, height)
+                .unwrap()
+                .total_bytes();
+            let frames = vec![7; 2 * frame_bytes];
+            let mut stream = boundary
+                .start_encode(
+                    &request,
+                    &caps,
+                    &destination,
+                    None,
+                    fmn_platform::process::ProcessCancellation::new(),
+                    fmn_platform::process::ProcessStdinLimits::new(31, frames.len() as u64),
+                )
+                .unwrap();
+            stream.write_stdin(&[]).unwrap();
+            for chunk in frames.chunks(31) {
+                stream.write_stdin(chunk).unwrap();
+            }
+            std::fs::write(
+                first_bound_tool(&case_dir)
+                    .parent()
+                    .unwrap()
+                    .join(format!("out.{}", container.extension())),
+                b"complete video",
+            )
+            .unwrap();
+            let prepared = stream.prepare().unwrap();
+            assert!(!destination.exists(), "preparation must not publish");
+            prepared.commit().unwrap();
+            assert_eq!(std::fs::read(destination).unwrap(), b"complete video");
+
+            // The direct API admits the same complete payload, including odd
+            // alpha layouts. This scripted second child writes no artifact.
+            let direct = boundary.encode(
+                &request,
+                frames.clone(),
+                &caps,
+                &case_dir.join(format!("direct.{}", container.extension())),
+            );
+            assert!(matches!(direct, Err(BoundaryError::ArtifactMissing)));
+            assert_eq!(
+                runner.runs().last().unwrap().stdin.as_deref(),
+                Some(frames.as_slice())
+            );
+        }
+    }
+
+    #[test]
     fn failure_modes_map_to_typed_refusals() {
         let (dir, _gate) = scratch("failures");
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
-        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let j = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
 
         // Nonzero exit with stderr.
@@ -1891,16 +2195,19 @@ mod private_boundary {
             std::fs::write(&audio, b"private input").unwrap();
             let destination = dir.join("prior.mp4");
             std::fs::write(&destination, b"prior video").unwrap();
-            let stream = boundary
+            let frame = vec![0; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
+            let frame_bytes = frame.len() as u64;
+            let mut stream = boundary
                 .start_encode(
                     &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
                     &EncoderCapabilities::parse(ENCODERS_LISTING),
                     &destination,
                     Some(&audio),
                     ProcessCancellation::new(),
-                    ProcessStdinLimits::new(1, 0),
+                    ProcessStdinLimits::new(frame_bytes, frame_bytes),
                 )
                 .unwrap();
+            stream.write_stdin(&frame).unwrap();
             // The scripted first stage owns a valid private artifact; the
             // second invocation must fail before publication can replace it.
             std::fs::write(
@@ -2122,7 +2429,7 @@ mod private_boundary {
             Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone()).unwrap();
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let video_job = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
-        let frames = vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let input = dir.join("input.media");
         std::fs::write(&input, b"native fixture input").unwrap();
         for route in ["encode", "mux", "audio", "image", "concat"] {
@@ -2205,7 +2512,7 @@ mod private_boundary {
                         Container::Mp4,
                         EncoderChoice::Named("h264_nvenc".to_owned()),
                     ),
-                    vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)],
+                    vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()],
                     &caps,
                     &worker_destination,
                 )
@@ -2255,7 +2562,7 @@ mod private_boundary {
                     Container::Mp4,
                     EncoderChoice::Named("h264_nvenc".to_owned()),
                 ),
-                vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36)],
+                vec![7_u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()],
                 &caps,
                 &worker_destination,
             );
@@ -2349,7 +2656,7 @@ mod private_boundary {
         let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let destination = dir.join("published/movie.mp4");
-        let frames = vec![7u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![7u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let report = boundary
             .encode(
                 &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
@@ -2400,7 +2707,7 @@ mod private_boundary {
             Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone()).unwrap();
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let destination = dir.join("must-not-publish.mp4");
-        let frames = vec![5_u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![5_u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let bytes = u64::try_from(frames.len()).unwrap();
         let mut stream = boundary
             .start_encode(
@@ -2471,7 +2778,7 @@ mod private_boundary {
         )
         .unwrap();
         let destination = dir.join("bound.mp4");
-        let frames = vec![3_u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![3_u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let report = boundary
             .encode(
                 &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
@@ -2539,7 +2846,12 @@ mod private_boundary {
         let mut blocked_job = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
         blocked_job.width = 3840;
         blocked_job.height = 2160;
-        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(blocked_job.width, blocked_job.height)];
+        let frames = vec![
+            0u8;
+            WireFormat::Nv12
+                .frame_bytes(blocked_job.width, blocked_job.height)
+                .unwrap()
+        ];
         let worker_destination = destination.clone();
         let setup_started = std::time::Instant::now();
         let worker = std::thread::spawn(move || {
@@ -2632,7 +2944,7 @@ mod private_boundary {
             video.width = 3840;
             video.height = 2160;
             // Far larger than the stdin pipe; the fixture never consumes it.
-            let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+            let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height).unwrap()];
             boundary.encode(&video, frames, &caps, &output)
         });
         let result = finish_live_disk_job(&dir, worker);
@@ -2681,7 +2993,8 @@ mod private_boundary {
                 "mux" => {
                     let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
                     let video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
-                    let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+                    let frames =
+                        vec![0_u8; video.wire.frame_bytes(video.width, video.height).unwrap()];
                     boundary
                         .encode_with_audio(&video, frames, &input, &caps, &output)
                         .map(|_| ())
@@ -2756,7 +3069,7 @@ mod private_boundary {
         let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let video = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
-        let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height)];
+        let frames = vec![0_u8; video.wire.frame_bytes(video.width, video.height).unwrap()];
         let bytes = frames.len() as u64;
         let destination = dir.join("soundtrack.mp4");
         let mut encode = boundary
@@ -2821,7 +3134,7 @@ mod private_boundary {
         let boundary = Boundary::new(tool, Arc::new(runner), limits, dir.clone()).unwrap();
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let destination = dir.join("big.mp4");
-        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let result = boundary.encode(
             &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
             frames,
@@ -2852,7 +3165,7 @@ mod private_boundary {
         let caps = EncoderCapabilities::parse(ENCODERS_LISTING);
         let destination = dir.join("keep.mp4");
         std::fs::write(&destination, b"the old render").unwrap();
-        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let result = boundary.encode(
             &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
             frames,
@@ -2885,7 +3198,7 @@ mod private_boundary {
         let destination = dir.join("with_audio.mp4");
         let audio = dir.join("track.wav");
         std::fs::write(&audio, b"RIFFfake").unwrap();
-        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frames = vec![0u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let report = boundary
             .encode_with_audio(
                 &job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto),
@@ -3027,7 +3340,12 @@ mod private_boundary {
         let invocation = &runs[1];
         assert!(invocation.cwd.is_none());
         assert!(invocation.argv.windows(2).any(|args| args == ["-map", "0"]));
-        assert!(invocation.argv.windows(2).any(|args| args == ["-c", "copy"]));
+        assert!(
+            invocation
+                .argv
+                .windows(2)
+                .any(|args| args == ["-c", "copy"])
+        );
         let list_at = invocation
             .argv
             .iter()
@@ -3078,7 +3396,10 @@ mod private_boundary {
             .unwrap();
         assert!(!destination.exists(), "preparation must remain private");
         drop(abandoned);
-        assert!(!destination.exists(), "dropping a prepared job never publishes");
+        assert!(
+            !destination.exists(),
+            "dropping a prepared job never publishes"
+        );
 
         let prepared = boundary
             .prepare_concat_bytes(&[b"frozen encoded clip"], &destination, 64)
@@ -3123,7 +3444,7 @@ mod private_boundary {
         let mut j = job(WireFormat::Nv12, Container::Mp4, EncoderChoice::Auto);
         j.fps = (30, 1);
         // Three gray frames.
-        let frame = vec![0x80u8; WireFormat::Nv12.frame_bytes(64, 36)];
+        let frame = vec![0x80u8; WireFormat::Nv12.frame_bytes(64, 36).unwrap()];
         let report = boundary
             .encode(&j, frame.repeat(3), &caps, &destination)
             .unwrap();
@@ -3151,10 +3472,7 @@ mod private_boundary {
 
         // A frozen top-level playlist is not a frozen input closure. It must
         // fail instead of causing ffmpeg to read another, unhashed clip.
-        let nested = format!(
-            "ffconcat version 1.0\nfile '{}'\n",
-            destination.display()
-        );
+        let nested = format!("ffconcat version 1.0\nfile '{}'\n", destination.display());
         let refused = dir.join("nested-playlist.mp4");
         assert!(matches!(
             boundary.prepare_concat_bytes(&[nested.as_bytes()], &refused, 4096),

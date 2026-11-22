@@ -219,7 +219,7 @@ pub enum BoundaryError {
         /// Bytes one frame occupies on the wire.
         frame_bytes: usize,
         /// The payload length that failed the divisibility check.
-        got: usize,
+        got: u64,
     },
     /// The wall-clock timeout expired before spawn or while supervising a child.
     JobTimedOut {
@@ -1539,6 +1539,7 @@ impl Boundary {
         cancellation: ProcessCancellation,
         stdin_limits: ProcessStdinLimits,
     ) -> Result<StreamingEncode, BoundaryError> {
+        let frame_bytes = job.wire.frame_bytes(job.width, job.height)?;
         self.audio_quality.validate()?;
         if !self.audio_quality.is_default() && job.container == Container::Gif {
             return Err(NegotiationError("AAC quality requires MP4 or MOV output").into());
@@ -1631,6 +1632,9 @@ impl Boundary {
             audio_quality: self.audio_quality,
             encoder,
             video_argv: argv,
+            frame_bytes,
+            input_bytes: 0,
+            stdin_limits,
             process: Some(process),
             watch: Some(watch),
             cancellation,
@@ -1795,14 +1799,14 @@ impl Boundary {
         caps: &EncoderCapabilities,
         destination: &Path,
     ) -> Result<BoundaryReport, BoundaryError> {
-        let frame_bytes = job.wire.frame_bytes(job.width, job.height);
-        if frame_bytes == 0 || frames.is_empty() || !frames.len().is_multiple_of(frame_bytes) {
+        let frame_bytes = job.wire.frame_bytes(job.width, job.height)?;
+        let bytes = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+        if frames.is_empty() || !frames.len().is_multiple_of(frame_bytes) {
             return Err(BoundaryError::PayloadGeometry {
                 frame_bytes,
-                got: frames.len(),
+                got: bytes,
             });
         }
-        let bytes = u64::try_from(frames.len()).unwrap_or(u64::MAX);
         let mut encode = self.start_encode(
             job,
             caps,
@@ -1829,14 +1833,14 @@ impl Boundary {
         caps: &EncoderCapabilities,
         destination: &Path,
     ) -> Result<BoundaryReport, BoundaryError> {
-        let frame_bytes = job.wire.frame_bytes(job.width, job.height);
-        if frame_bytes == 0 || frames.is_empty() || !frames.len().is_multiple_of(frame_bytes) {
+        let frame_bytes = job.wire.frame_bytes(job.width, job.height)?;
+        let bytes = u64::try_from(frames.len()).unwrap_or(u64::MAX);
+        if frames.is_empty() || !frames.len().is_multiple_of(frame_bytes) {
             return Err(BoundaryError::PayloadGeometry {
                 frame_bytes,
-                got: frames.len(),
+                got: bytes,
             });
         }
-        let bytes = u64::try_from(frames.len()).unwrap_or(u64::MAX);
         let mut encode = self.start_encode(
             job,
             caps,
@@ -1963,7 +1967,9 @@ impl Boundary {
             return Err(NegotiationError("concat of zero inputs").into());
         }
         if inputs.len() > MAX_CONCAT_INPUTS {
-            return Err(NegotiationError("concat input count exceeds the boundary entry budget").into());
+            return Err(
+                NegotiationError("concat input count exceeds the boundary entry budget").into(),
+            );
         }
         let mut listing = String::new();
         for input in inputs {
@@ -2018,7 +2024,9 @@ impl Boundary {
             return Err(NegotiationError("concat of zero inputs").into());
         }
         if inputs.len() > MAX_CONCAT_INPUTS {
-            return Err(NegotiationError("concat input count exceeds the boundary entry budget").into());
+            return Err(
+                NegotiationError("concat input count exceeds the boundary entry budget").into(),
+            );
         }
         if max_input_bytes == 0 {
             return Err(NegotiationError("concat input byte limit must be nonzero").into());
@@ -2131,6 +2139,9 @@ pub struct StreamingEncode {
     audio_quality: AudioQuality,
     encoder: Option<String>,
     video_argv: Vec<String>,
+    frame_bytes: usize,
+    input_bytes: u64,
+    stdin_limits: ProcessStdinLimits,
     process: Option<Box<dyn RunningProcess>>,
     watch: Option<ArtifactWatch>,
     cancellation: ProcessCancellation,
@@ -2185,7 +2196,8 @@ impl StreamingEncode {
     /// Feed the next tightly packed ordered byte chunk.
     ///
     /// The OS pipe supplies bounded backpressure; the process supervisor can
-    /// cancel and close its read end while this call is blocked.
+    /// cancel and close its read end while this call is blocked. A chunk may
+    /// split a frame; [`Self::prepare`] checks the complete stream geometry.
     ///
     /// # Errors
     /// [`BoundaryError`] when process stdin refuses the chunk.
@@ -2193,18 +2205,32 @@ impl StreamingEncode {
         if self.watch.as_ref().is_some_and(ArtifactWatch::is_finished) {
             self.finish_watch()?;
         }
-        let write = self
+        let process = self
             .process
             .as_mut()
             .ok_or_else(|| BoundaryError::Workdir {
                 detail: "streaming ffmpeg stdin is already closed".to_string(),
-            })?
-            .write_stdin(bytes);
-        let Err(write_error) = write else {
-            if self.watch.as_ref().is_some_and(ArtifactWatch::is_finished) {
-                self.finish_watch()?;
+            })?;
+        let next_input_bytes = u64::try_from(bytes.len())
+            .ok()
+            .and_then(|bytes| self.input_bytes.checked_add(bytes));
+        let write = match next_input_bytes {
+            Some(total) => process.write_stdin(bytes).map(|()| total),
+            None => Err(ProcessError::StdinTotalLimit {
+                program: self.bound_tool.path().to_path_buf(),
+                attempted: u64::MAX,
+                max: self.stdin_limits.max_total_bytes,
+            }),
+        };
+        let write_error = match write {
+            Ok(total) => {
+                self.input_bytes = total;
+                if self.watch.as_ref().is_some_and(ArtifactWatch::is_finished) {
+                    self.finish_watch()?;
+                }
+                return Ok(());
             }
-            return Ok(());
+            Err(error) => error,
         };
 
         // A killed/exited child commonly surfaces first as BrokenPipe on the
@@ -2238,7 +2264,8 @@ impl StreamingEncode {
     /// publishing it.
     ///
     /// # Errors
-    /// Process, timeout, log, codec, artifact, or cancellation refusals.
+    /// Process, timeout, log, codec, artifact, cancellation, or an empty or
+    /// incomplete raw-frame stream.
     pub fn prepare(mut self) -> Result<PreparedFfmpegArtifact, BoundaryError> {
         let process = self.process.take().ok_or_else(|| BoundaryError::Workdir {
             detail: "streaming ffmpeg process was already finalized".to_string(),
@@ -2249,6 +2276,12 @@ impl StreamingEncode {
         self.bound_tool.verify_current(&self.tool)?;
         let outcome = outcome?;
         check_process_outcome(&self.limits, &outcome)?;
+        if self.input_bytes == 0 || !self.input_bytes.is_multiple_of(self.frame_bytes as u64) {
+            return Err(BoundaryError::PayloadGeometry {
+                frame_bytes: self.frame_bytes,
+                got: self.input_bytes,
+            });
+        }
         self.workdir.verify_current("verify video artifact")?;
         verify_private_artifact(&self.video_artifact, self.limits.max_artifact_bytes)?;
         let mut invocations = vec![invocation_report(
