@@ -554,8 +554,8 @@ impl Texture {
                 a: 0.0,
             };
         }
-        let x = uv[0] * f64::from(self.width) - 0.5;
-        let y = uv[1] * f64::from(self.height) - 0.5;
+        let x = texel_coordinate(uv[0], self.width, policy.wrap_u);
+        let y = texel_coordinate(uv[1], self.height, policy.wrap_v);
         let x0 = floor_to_i64(x);
         let y0 = floor_to_i64(y);
         let fx = x - x0 as f64;
@@ -599,6 +599,24 @@ fn decode_channel(encoded: f64, encoding: TextureEncoding) -> f64 {
             }
         }
     }
+}
+
+// Preserve the established arithmetic while half-texel positions are
+// representable. Beyond 2^52, multiplying first can lose the half-texel
+// offset, saturate the integer index, or overflow even for a finite UV.
+// Reduce only that large-coordinate case before scaling; signed remainders
+// preserve phase without an extra rounding, and wrap_index handles negatives.
+fn texel_coordinate(coordinate: f64, size: u32, wrap: TextureWrap) -> f64 {
+    let scaled = coordinate * f64::from(size);
+    if scaled.abs() < 4_503_599_627_370_496.0 {
+        return scaled - 0.5;
+    }
+    let bounded = match wrap {
+        TextureWrap::ClampToEdge => coordinate.clamp(0.0, 1.0),
+        TextureWrap::Repeat => coordinate % 1.0,
+        TextureWrap::MirroredRepeat => coordinate % 2.0,
+    };
+    bounded * f64::from(size) - 0.5
 }
 
 fn floor_to_i64(value: f64) -> i64 {
@@ -928,6 +946,215 @@ mod tests {
 
         let mirrored = texture.sample([1.25, 0.25], policy(TextureWrap::MirroredRepeat));
         assert!(close(mirrored.r, 0.0) && close(mirrored.g, 1.0));
+    }
+
+    #[test]
+    fn extreme_finite_uvs_preserve_wrap_phase_and_finite_colours() {
+        let red = [1.0, 0.0, 0.0, 1.0];
+        let green = [0.0, 1.0, 0.0, 1.0];
+        let blue = [0.0, 0.0, 1.0, 1.0];
+        let white = [1.0; 4];
+        let seam = [1.0, 0.5, 0.5, 1.0];
+        let first_pair = [0.5, 0.5, 0.0, 1.0];
+        let last_pair = [0.5, 0.5, 1.0, 1.0];
+        let texture = Texture::from_premultiplied_linear(
+            4,
+            1,
+            [red, green, blue, white]
+                .into_iter()
+                .map(|colour| colour.map(|value| value as f32))
+                .collect(),
+        )
+        .unwrap();
+        let sample = |u, wrap| {
+            let colour = texture.sample(
+                [u, 0.5],
+                SamplerPolicy {
+                    wrap_u: wrap,
+                    wrap_v: TextureWrap::ClampToEdge,
+                },
+            );
+            [colour.r, colour.g, colour.b, colour.a]
+        };
+        // Both signs and both multiplication overflow and integer-index
+        // saturation. These representable values have even integral phase.
+        for magnitude in [f64::MAX, 2.0_f64.powi(63)] {
+            for sign in [-1.0, 1.0] {
+                let u = sign * magnitude;
+                assert_eq!(sample(u, TextureWrap::Repeat), seam);
+                assert_eq!(sample(u, TextureWrap::MirroredRepeat), red);
+                assert_eq!(
+                    sample(u, TextureWrap::ClampToEdge),
+                    if sign < 0.0 { red } else { white }
+                );
+            }
+        }
+        // An odd integral phase must mirror onto the opposite edge.
+        for u in [4_503_599_627_370_497.0, -4_503_599_627_370_497.0] {
+            assert_eq!(sample(u, TextureWrap::Repeat), seam);
+            assert_eq!(sample(u, TextureWrap::MirroredRepeat), white);
+        }
+        // Four texels distinguish quarter-period phases that a 2x2 fixture
+        // would mask. These products are large but do not overflow.
+        let even = 1_125_899_906_842_624.0;
+        for (u, repeated, mirrored) in [
+            (even + 0.25, first_pair, first_pair),
+            (-even - 0.25, last_pair, first_pair),
+            (even + 0.75, last_pair, last_pair),
+            (-even - 0.75, first_pair, last_pair),
+        ] {
+            assert_eq!(sample(u, TextureWrap::Repeat), repeated, "{u}");
+            assert_eq!(sample(u, TextureWrap::MirroredRepeat), mirrored, "{u}");
+        }
+        // A non-power-of-two dimension must retain the original UV phase,
+        // not the already-rounded product's phase.
+        let three = Texture::from_premultiplied_linear(
+            3,
+            1,
+            vec![
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 1.0],
+            ],
+        )
+        .unwrap();
+        for u in [2_251_799_813_685_248.5, -2_251_799_813_685_248.5] {
+            let colour = three.sample([u, 0.5], policy(TextureWrap::Repeat));
+            assert_eq!([colour.r, colour.g, colour.b, colour.a], green);
+        }
+    }
+
+    #[test]
+    fn large_uv_axes_wrap_independently_and_nonfinite_inputs_still_refuse() {
+        let texture = matrix();
+        for (uv, wrap_u, wrap_v, expected) in [
+            (
+                [f64::MAX, -f64::MAX],
+                TextureWrap::ClampToEdge,
+                TextureWrap::MirroredRepeat,
+                [0.0, 1.0, 0.0, 1.0],
+            ),
+            (
+                [f64::MAX, -f64::MAX],
+                TextureWrap::Repeat,
+                TextureWrap::ClampToEdge,
+                [0.5, 0.5, 0.0, 1.0],
+            ),
+            (
+                [f64::MAX, -4_503_599_627_370_497.0],
+                TextureWrap::MirroredRepeat,
+                TextureWrap::MirroredRepeat,
+                [0.0, 0.0, 1.0, 1.0],
+            ),
+            (
+                [-f64::MAX, f64::MAX],
+                TextureWrap::ClampToEdge,
+                TextureWrap::Repeat,
+                [0.5, 0.0, 0.5, 1.0],
+            ),
+            (
+                [-f64::MAX, f64::MAX],
+                TextureWrap::Repeat,
+                TextureWrap::Repeat,
+                [0.5, 0.5, 0.5, 1.0],
+            ),
+        ] {
+            let colour = texture.sample(uv, SamplerPolicy { wrap_u, wrap_v });
+            assert_eq!([colour.r, colour.g, colour.b, colour.a], expected);
+        }
+        for wrap in [
+            TextureWrap::Repeat,
+            TextureWrap::MirroredRepeat,
+            TextureWrap::ClampToEdge,
+        ] {
+            for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                for uv in [[invalid, f64::MAX], [f64::MAX, invalid]] {
+                    let colour = texture.sample(uv, policy(wrap));
+                    assert_eq!([colour.r, colour.g, colour.b, colour.a], [0.0; 4]);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_uvs_keep_known_premultiplied_colour_bits() {
+        use TextureWrap::{ClampToEdge, MirroredRepeat, Repeat};
+
+        let texture = Texture::from_premultiplied_linear(
+            2,
+            1,
+            vec![[0.25, 0.0, 0.0, 0.5], [0.0, 0.0, 0.25, 0.25]],
+        )
+        .unwrap();
+        // Independent exact-colour fixtures: the binary fractions interpolate
+        // exactly in f32; unpremultiplication supplies the stated ratios.
+        for (u, wrap, expected) in [
+            (0.25, Repeat, [0.5, 0.0, 0.0, 0.5]),
+            (0.75, Repeat, [0.0, 0.0, 1.0, 0.25]),
+            (0.5, Repeat, [1.0 / 3.0, 0.0, 1.0 / 3.0, 3.0 / 8.0]),
+            (-0.125, Repeat, [1.0 / 5.0, 0.0, 3.0 / 5.0, 5.0 / 16.0]),
+            (0.125, Repeat, [3.0 / 7.0, 0.0, 1.0 / 7.0, 7.0 / 16.0]),
+            (1.25, Repeat, [0.5, 0.0, 0.0, 0.5]),
+            (1.25, MirroredRepeat, [0.0, 0.0, 1.0, 0.25]),
+            (-0.25, MirroredRepeat, [0.5, 0.0, 0.0, 0.5]),
+            (1.25, ClampToEdge, [0.0, 0.0, 1.0, 0.25]),
+            (-0.25, ClampToEdge, [0.5, 0.0, 0.0, 0.5]),
+        ] {
+            let colour = texture.sample([u, 0.5], policy(wrap));
+            assert_eq!(
+                [colour.r, colour.g, colour.b, colour.a].map(f64::to_bits),
+                expected.map(f64::to_bits)
+            );
+        }
+    }
+
+    #[test]
+    fn image_raster_with_large_repeat_uvs_matches_its_periodic_phase() {
+        use crate::{
+            Camera, CameraConfig, SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDDraw, ThreeDJob,
+            Tiling,
+        };
+
+        let camera = Camera::new(CameraConfig {
+            resolution: (16, 16),
+            ..CameraConfig::default()
+        })
+        .unwrap();
+        let texture = matrix();
+        let half_width = camera.frame().width() / 2.0;
+        let half_height = camera.frame().height() / 2.0;
+        let raster = |uv, threads| {
+            let mesh = SurfaceMesh::from_uv_grid(
+                [
+                    [-half_width, half_height, 0.0],
+                    [-half_width, -half_height, 0.0],
+                    [half_width, half_height, 0.0],
+                    [half_width, -half_height, 0.0],
+                ]
+                .map(|point| SurfaceVertex::textured(point, [0.0, 0.0, 1.0], uv, 1.0))
+                .to_vec(),
+                (2, 2),
+            )
+            .unwrap();
+            let draws = [ThreeDDraw::Surface(SurfaceDraw::image(&mesh, &texture))];
+            ThreeDJob::new(&camera, &draws, Tiling::default())
+                .unwrap()
+                .render(threads)
+                .unwrap()
+        };
+        let reference = raster([0.0, 0.0], 1);
+        let centre = 8 * reference.layout().stride(0) + 8 * 8;
+        // The periodic seam averages all four texels to opaque half-grey.
+        // A blank or missing draw must not make frame equivalence vacuous.
+        assert_eq!(
+            &reference.plane(0)[centre..centre + 8],
+            &[0x00, 0x38, 0x00, 0x38, 0x00, 0x38, 0x00, 0x3c]
+        );
+        let huge = 2.0_f64.powi(80);
+        for threads in [1, 4] {
+            let actual = raster([huge, -huge], threads);
+            assert_eq!(actual.plane(0), reference.plane(0));
+        }
     }
 
     #[test]
