@@ -14245,6 +14245,15 @@ pub(crate) fn with_python_test_module<T>(
     suite: &'static str,
     body: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>, &Bound<'py, PyDict>) -> T,
 ) -> T {
+    with_python_test_module_initializer(suite, manimlib, body)
+}
+
+#[cfg(any(test, feature = "gauntlet"))]
+fn with_python_test_module_initializer<T>(
+    suite: &'static str,
+    initialize: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>) -> PyResult<()>,
+    body: impl for<'py> FnOnce(Python<'py>, &Bound<'py, PyModule>, &Bound<'py, PyDict>) -> T,
+) -> T {
     let _lock = python_embedding_lock();
     Python::initialize();
     Python::attach(|py| {
@@ -14335,7 +14344,7 @@ _fmn_sys.unraisablehook = _fmn_capture_unraisable
 
         let path_before = path_entries();
         let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            manimlib(py, &module).expect("initialize manimlib");
+            initialize(py, &module).expect("initialize manimlib");
             body(py, &module, &suite_globals)
         }));
         // Canonical, so a root reached through a symlink still contains the
@@ -14569,6 +14578,104 @@ pub struct PortalGauntletReport {
     pub engine: String,
     /// Fixed render team width.
     pub threads: usize,
+}
+
+/// Identical native output from embedded, cold-cache and warm-cache startup.
+#[cfg(any(test, feature = "gauntlet"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalBootstrapCacheReport {
+    /// Independently initialized and torn-down portal modules.
+    pub modes: u64,
+    /// Frames published by each initialization mode.
+    pub frame_count: u64,
+    /// Bytes published by each initialization mode.
+    pub bytes: u64,
+    /// SHA-256 of each byte-identical y4m witness.
+    pub digest: String,
+    /// Path-independent executed bootstrap identity shared by every mode.
+    pub code_sha256: String,
+}
+
+/// Compare real portal output with and without its CPython compilation cache.
+///
+/// The warm initialization cannot invoke the source compiler. Each run uses
+/// the same owner-thread teardown as the other native acceptance suites.
+///
+/// # Errors
+/// The witness directory was already used, initialization/rendering failed,
+/// or the modes produced different code identities or output bytes.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_bootstrap_cache(
+    directory: &std::path::Path,
+) -> Result<PortalBootstrapCacheReport, String> {
+    std::fs::create_dir_all(directory).map_err(|error| error.to_string())?;
+    let source_dir = directory.join("bootstrap_source");
+    std::fs::create_dir(&source_dir)
+        .map_err(|error| format!("create unused bootstrap-cache witness: {error}"))?;
+    let installed = source_dir.join("_embedded_bootstrap.py");
+    let embedded = source_dir.join("missing_bootstrap.py");
+    std::fs::write(
+        &installed,
+        include_bytes!("../python/manimlib_bootstrap.py"),
+    )
+    .map_err(|error| error.to_string())?;
+    let suite = CString::new(include_str!("../tests/bootstrap_cache.py"))
+        .expect("bootstrap cache suite contains no NUL");
+    let mut expected: Option<(Vec<u8>, PortalBootstrapCacheReport)> = None;
+    for (mode, source) in [
+        ("embedded", &embedded),
+        ("cold", &installed),
+        ("warm", &installed),
+    ] {
+        let destination = directory.join(format!("{mode}.y4m"));
+        let (frames, bytes, digest, code_sha256) = with_python_test_module_initializer(
+            "bootstrap cache",
+            |py, module| {
+                let helpers = PyDict::new(py);
+                py.run(suite.as_c_str(), Some(&helpers), Some(&helpers))?;
+                let context = helpers
+                    .get_item("bootstrap_source")?
+                    .expect("bootstrap source context exists")
+                    .call1((source.to_string_lossy().as_ref(), mode))?;
+                context.call_method0("__enter__")?;
+                let initialized = manimlib(py, module);
+                context.call_method1("__exit__", (py.None(), py.None(), py.None()))?;
+                initialized
+            },
+            |py, _module, globals| -> Result<(u64, u64, String, String), String> {
+                py.run(suite.as_c_str(), Some(globals), Some(globals))
+                    .map_err(|error| error.to_string())?;
+                globals
+                    .get_item("render_bootstrap")
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "bootstrap render acceptance is missing".to_owned())?
+                    .call1((destination.to_string_lossy().as_ref(),))
+                    .inspect_err(|error| error.print(py))
+                    .and_then(|report| report.extract())
+                    .map_err(|error| error.to_string())
+            },
+        )?;
+        let payload = std::fs::read(&destination).map_err(|error| error.to_string())?;
+        let report = PortalBootstrapCacheReport {
+            modes: 3,
+            frame_count: frames,
+            bytes,
+            digest,
+            code_sha256,
+        };
+        if let Some((expected_payload, expected_report)) = &expected {
+            if &payload != expected_payload || &report != expected_report {
+                return Err(format!(
+                    "{mode} bootstrap changed native output or executable identity"
+                ));
+            }
+        } else {
+            expected = Some((payload, report));
+        }
+    }
+    expected
+        .map(|(_, report)| report)
+        .ok_or_else(|| "bootstrap acceptance did not execute".to_owned())
 }
 
 /// Drive one real Python `Scene` through its production Lumen/Reel route.

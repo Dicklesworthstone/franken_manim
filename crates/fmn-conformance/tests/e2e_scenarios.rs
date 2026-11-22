@@ -7118,6 +7118,31 @@ fn python_time_varying_copies_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
     Ok(RunOutcome::ok().with_counter("python_time_field_copy_checks", checks))
 }
 
+fn python_bootstrap_cache_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_bootstrap_cache")?;
+    let report = manimlib::run_portal_gauntlet_bootstrap_cache(&root)
+        .map_err(|error| fail(format!("Python bootstrap cache: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.bootstrap_cache")
+            .field("modes", report.modes)
+            .field("frames", report.frame_count)
+            .field("bytes", report.bytes)
+            .field("code_sha256", report.code_sha256)
+            .field("byte_identical", "true")
+            .field("warm_compile_forbidden", "true"),
+    );
+    let mut outcome = RunOutcome::ok()
+        .with_counter("python_bootstrap_modes", report.modes)
+        .with_counter("python_bootstrap_frames", report.frame_count)
+        .with_counter("python_bootstrap_bytes", report.bytes);
+    for name in ["embedded.y4m", "cold.y4m", "warm.y4m"] {
+        let bytes = std::fs::read(root.join(name))
+            .map_err(|error| fail(format!("read bootstrap witness {name}: {error}")))?;
+        outcome = outcome.with_artifact(name, bytes);
+    }
+    Ok(outcome)
+}
+
 fn python_portal_animation_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     python_portal_sequence_run(ctx, true)
 }
@@ -21030,6 +21055,31 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_bootstrap_cache.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_bootstrap_cache_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "embedded.y4m".to_owned(),
+                "cold.y4m".to_owned(),
+                "warm.y4m".to_owned(),
+            ]),
+            counter_eq("python_bootstrap_modes", 3),
+            counter_ge("python_bootstrap_frames", 2),
+            counter_ge("python_bootstrap_bytes", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.bootstrap_cache",
+            vec![
+                FieldPred::u64_eq("modes", 3),
+                FieldPred::str_eq("byte_identical", "true"),
+                FieldPred::str_eq("warm_compile_forbidden", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.python_animation_semantics.v1",
         ScenarioClass::LifecycleDrill,
         Surface::PythonInProcess,
@@ -23822,6 +23872,16 @@ fn python_ode_solution_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.python_ode_solution.v1")
         .expect("Python ODE solution scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_bootstrap_cache_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_bootstrap_cache.v1")
+        .expect("Python bootstrap cache scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
