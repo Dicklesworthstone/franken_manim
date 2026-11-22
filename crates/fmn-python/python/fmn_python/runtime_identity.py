@@ -14,6 +14,7 @@ import io
 from itertools import islice
 import importlib.metadata as metadata
 import importlib.machinery
+import importlib.util
 import json
 import os
 from pathlib import Path, PurePosixPath
@@ -214,6 +215,29 @@ def _python_library():
     raise RuntimeIdentityError("the shared CPython runtime library cannot be identified")
 
 
+def _bootstrap_identity(native):
+    """Bind executed bootstrap code while excluding cache location/warmness."""
+    observed = getattr(native, "_FMN_BOOTSTRAP_IDENTITY", None)
+    keys = {"source_sha256", "code_sha256", "cache_tag", "magic", "optimization", "source_path"}
+    if not isinstance(observed, dict) or set(observed) != keys:
+        raise RuntimeIdentityError("portal bootstrap has no complete executed-code identity")
+    values = dict(observed)
+    for key in ("source_sha256", "code_sha256"):
+        value = values[key]
+        if (not isinstance(value, str) or len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)):
+            raise RuntimeIdentityError("portal bootstrap has an invalid " + key)
+    if (values["cache_tag"] != sys.implementation.cache_tag
+            or values["magic"] != importlib.util.MAGIC_NUMBER.hex()
+            or type(values["optimization"]) is not int
+            or values["optimization"] != sys.flags.optimize):
+        raise RuntimeIdentityError("portal bootstrap compiler identity differs from the host interpreter")
+    path = values.pop("source_path")
+    if path is not None:
+        _label(path, "portal bootstrap source path")
+    return values, path
+
+
 def _layout(native):
     if sys.implementation.name != "cpython":
         raise RuntimeIdentityError("certified portal runtime requires CPython")
@@ -225,8 +249,14 @@ def _layout(native):
     numpy_file = getattr(numpy, "__file__", None)
     if not numpy_file:
         raise RuntimeIdentityError("portal runtime requires an imported, file-backed NumPy")
+    bootstrap, bootstrap_source = _bootstrap_identity(native)
+    required_portal = [extension, __file__, *_module_paths(("fmn_python", "manimlib"))]
+    if bootstrap_source is not None:
+        # get_code executes in the native namespace rather than importing a
+        # new module, so its verified .py source needs explicit RECORD coverage.
+        required_portal.append(bootstrap_source)
     portal_version, portal_files = _distribution(
-        "franken-manim", [extension, __file__, *_module_paths(("fmn_python", "manimlib"))],
+        "franken-manim", required_portal,
     )
     numpy_version, numpy_files = _distribution("numpy", [numpy_file, *_module_paths(("numpy",))])
     if portal_version != getattr(native, "__version__", None) or numpy_version != getattr(numpy, "__version__", None):
@@ -238,6 +268,7 @@ def _layout(native):
         "abiflags": getattr(sys, "abiflags", ""),
         "portal_policy": _label(getattr(native, "__abi_policy__", None), "portal ABI policy"),
         "byteorder": sys.byteorder, "pointer_bits": 64 if sys.maxsize > 2**32 else 32,
+        "bootstrap": bootstrap,
     }
     python_files = [("executable", Path(os.path.abspath(sys.executable))), *_python_library()]
     return {"cpython": ("CPython " + sys.version.split()[0], python_files),

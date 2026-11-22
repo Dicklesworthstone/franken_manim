@@ -13179,12 +13179,27 @@ fn execute_bootstrap(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
     module.add("_FMN_MODULE", module)?;
     module.add("_API_SCHEMA_TSV", include_str!("../../../API_SCHEMA.tsv"))?;
     module.add("_API_OVERLAY_TSV", include_str!("../../../API_OVERLAY.tsv"))?;
-    let source = CString::new(include_str!("../python/manimlib_bootstrap.py"))
-        .expect("embedded bootstrap contains no NUL");
     let globals = module.dict();
-    let result = py.run(source.as_c_str(), Some(&globals), Some(&globals));
+    let result: PyResult<Bound<'_, PyAny>> = (|| {
+        let loaded = py
+            .import("fmn_python.bootstrap_loader")?
+            .getattr("load_bootstrap")?
+            .call1((pyo3::types::PyBytes::new(
+                py,
+                include_bytes!("../python/manimlib_bootstrap.py"),
+            ),))?;
+        let (code, identity): (Bound<'_, PyAny>, Bound<'_, PyAny>) = loaded.extract()?;
+        // The code object retains the same native globals and module identities
+        // as the embedded compile path. Only CPython's compilation work is reused.
+        py.import("builtins")?
+            .getattr("exec")?
+            .call1((code, &globals, &globals))?;
+        Ok(identity)
+    })();
+    // Verification can fail before code execution. Break the temporary cycle
+    // on that path too, as on an exception raised by the bootstrap itself.
     module.delattr("_FMN_MODULE")?;
-    result?;
+    module.setattr("_FMN_BOOTSTRAP_IDENTITY", result?)?;
     let semantics = CString::new(include_str!("../python/manimlib/_animation_semantics.py"))
         .expect("embedded animation semantics contain no NUL");
     install_animation_semantics(py, module, semantics.as_c_str())

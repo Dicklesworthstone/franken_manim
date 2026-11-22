@@ -284,6 +284,68 @@ class DistributionTests(unittest.TestCase):
             identity._python_library()
 
 
+class BootstrapIdentityTests(unittest.TestCase):
+    def setUp(self):
+        self.values = {
+            "source_sha256": "a" * 64,
+            "code_sha256": "b" * 64,
+            "cache_tag": sys.implementation.cache_tag,
+            "magic": importlib.util.MAGIC_NUMBER.hex(),
+            "optimization": sys.flags.optimize,
+            "source_path": "/installed/fmn_python/_embedded_bootstrap.py",
+        }
+        self.native = types.SimpleNamespace(_FMN_BOOTSTRAP_IDENTITY=self.values)
+
+    def test_path_and_cache_warmness_do_not_enter_executed_identity(self):
+        first, path = identity._bootstrap_identity(self.native)
+        self.assertEqual(path, self.values["source_path"])
+        self.assertNotIn("source_path", first)
+        self.values["source_path"] = None
+        second, path = identity._bootstrap_identity(self.native)
+        self.assertIsNone(path)
+        self.assertEqual(first, second)
+        second["source_sha256"] = "c" * 64
+        self.assertEqual(first, identity._bootstrap_identity(self.native)[0])
+
+    def test_actual_code_changes_invalidate_the_runtime_snapshot(self):
+        root = Path(tempfile.mkdtemp(dir=_ROOT))
+        payload = root / "runtime"
+        payload.write_bytes(b"unchanged installed payload")
+        groups = {role: (role + " 1.0", [("payload", payload)])
+                  for role in ("cpython", "wheel", "numpy")}
+        snapshot = identity.RuntimeSnapshot(
+            lambda: (groups, {"bootstrap": identity._bootstrap_identity(self.native)[0]}),
+        )
+        self.values["code_sha256"] = "c" * 64
+        with self.assertRaisesRegex(identity.RuntimeIdentityError, "abi"):
+            snapshot.verify()
+
+    def test_unknown_or_wrong_compiler_identity_is_refused(self):
+        for key, value in (("source_sha256", "bad"), ("code_sha256", "Z" * 64),
+                           ("cache_tag", "foreign"), ("magic", "00000000"),
+                           ("optimization", True), ("optimization", 9),
+                           ("source_path", "")):
+            with self.subTest(key=key, value=value):
+                with patch.dict(self.values, {key: value}):
+                    with self.assertRaises(identity.RuntimeIdentityError):
+                        identity._bootstrap_identity(self.native)
+        with self.assertRaisesRegex(identity.RuntimeIdentityError, "complete"):
+            identity._bootstrap_identity(types.SimpleNamespace())
+
+    def test_generated_source_is_a_required_installed_payload(self):
+        self.native.__file__ = "/installed/manimlib/manimlib" + importlib.machinery.EXTENSION_SUFFIXES[0]
+        self.native.__version__ = "1.0"
+        self.native.__abi_policy__ = "cpython-3.13-full-abi"
+        self.native._np = types.SimpleNamespace(__file__="/installed/numpy/__init__.py", __version__="1.0")
+        with patch.object(identity, "_distribution", return_value=("1.0", [])) as inventory:
+            with patch.object(identity, "_module_paths", return_value=[]):
+                with patch.object(identity, "_python_library", return_value=[]):
+                    _, abi = identity._layout(self.native)
+        self.assertIn(self.values["source_path"], inventory.call_args_list[0].args[1])
+        self.assertEqual(abi["bootstrap"]["code_sha256"], "b" * 64)
+        self.assertNotIn("source_path", abi["bootstrap"])
+
+
 _PORTAL_PATH = Path(__file__).resolve().parents[1] / "python/fmn_python/__init__.py"
 _PORTAL_SPEC = importlib.util.spec_from_file_location("fmn_python_namespace_under_test", _PORTAL_PATH)
 portal = importlib.util.module_from_spec(_PORTAL_SPEC)

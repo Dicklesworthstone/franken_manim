@@ -35,6 +35,7 @@ python-packages = ["manimlib", "fmn_python"]
 locked = true
 strip = true
 include = [
+    { path = "_embedded_bootstrap.py", from = "out-dir", to = "fmn_python/", crate-name = "fmn-python" },
     { path = "LICENSE", format = ["sdist", "wheel"] },
     { path = "dist/licenses/LICENSE", format = ["sdist", "wheel"] },
     { path = "dist/licenses/fonts/*.txt", format = ["sdist", "wheel"] },
