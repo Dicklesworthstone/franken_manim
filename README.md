@@ -164,6 +164,20 @@ and an explicit process capability; its receipt records source and output hashes
 plus the exact ffmpeg invocation. Like other encoded video, the result is outside
 the certified artifact set.
 
+The native CLI exposes the same composition boundary:
+
+```sh
+fmn concat --output complete.mp4 intro.mp4 lesson.mp4 outro.mp4
+fmn concat --robot --output repeat.mov opening.mov middle.mov opening.mov
+```
+
+Use `--ffmpeg /path/to/ffmpeg` to select the executable. The command defaults to
+at most 1,024 input positions, 64 MiB per position and 256 MiB combined;
+`--max-clips`, `--max-clip-bytes` and `--max-input-bytes` set those allowances.
+Repeated inputs count each time. `--timeout`, `--max-log-bytes` and
+`--max-output-bytes` bound the process separately. Robot output includes the
+ordered input hashes, output hash, effective limits and process provenance.
+
 
 Native Rust video can opt into **BT.2020/PQ HDR** with an explicit luminance
 profile:

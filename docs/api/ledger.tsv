@@ -9,6 +9,7 @@
 #
 # module	symbol	canonical	kind	exported	signature_defaults	status	evidence	tests	notes
 fmn.cli	batch	batch	cli_command	0	-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Render a bounded multi-scene farm under asupersync
+fmn.cli	concat	concat	cli_command	0	-	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Assemble compatible encoded clips with stream copy, ordered input receipts and create-only publication
 fmn.cli	doctor	doctor	cli_command	0	-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Report capabilities and the derived ExecutionPlan
 fmn.cli	render	render	cli_command	0	-	same	-	crates/fmn-cli/src/lib.rs#tests	Render one or more selected scenes
 fmn.cli	studio	studio	cli_command	0	-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Run the isolated-worker live Studio
@@ -16,6 +17,14 @@ fmn.cli.batch	--budget-ms	budget_ms	cli_flag	0	action=store;nargs=-;type=u64;def
 fmn.cli.batch	--fail-fast	fail_fast	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Cancel remaining jobs after the first failure
 fmn.cli.batch	--manifest-dir	manifest_dir	cli_flag	0	action=store;nargs=-;type=path;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Write per-scene manifests under this directory
 fmn.cli.batch	--max-scenes	max_scenes	cli_flag	0	action=store;nargs=-;type=usize;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Bound simultaneously active scene jobs
+fmn.cli.concat	--max-clip-bytes	concat_max_clip_bytes	cli_flag	0	action=store;nargs=-;type=u64;default=67108864	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound each frozen input clip in bytes (default 64 MiB)
+fmn.cli.concat	--max-clips	concat_max_clips	cli_flag	0	action=store;nargs=-;type=usize;default=1024	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound ordered input positions, including repeated clips (maximum 4093)
+fmn.cli.concat	--max-input-bytes	concat_max_input_bytes	cli_flag	0	action=store;nargs=-;type=u64;default=268435456	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound combined frozen input bytes, counting repeated clips again (default 256 MiB)
+fmn.cli.concat	--max-log-bytes	concat_max_log_bytes	cli_flag	0	action=store;nargs=-;type=u64;default=1048576	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound captured bytes per ffmpeg stdout or stderr stream (default 1 MiB)
+fmn.cli.concat	--max-output-bytes	concat_max_output_bytes	cli_flag	0	action=store;nargs=-;type=u64;default=8589934592	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound the assembled movie and additional process scratch in bytes (default 8 GiB)
+fmn.cli.concat	--output	concat_output	cli_flag	0	action=store;nargs=-;type=path;default=-	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Publish a new MP4 or MOV at this exact path; never overwrite an existing destination
+fmn.cli.concat	--timeout	concat_timeout	cli_flag	0	action=store;nargs=-;type=u64;default=600	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Set positive wall-clock seconds for the stream-copy job (default 600)
+fmn.cli.concat	clips	concat_inputs	cli_flag	0	action=store;nargs=*;type=path;default=-	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Compatible self-contained MP4 or MOV clips in movie order; repeated paths are preserved
 fmn.cli.doctor	--autotune	autotune	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Measure and cache standard CPU raster tile geometry
 fmn.cli.doctor	--require-ffmpeg	require_ffmpeg	cli_flag	0	action=store_true;nargs=-;type=-;default=False	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Exit with capability status when ffmpeg is unavailable
 fmn.cli.global	--cache-dir	cache_dir	cli_flag	0	action=store;nargs=-;type=path;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Explicit FrankenManim content-store root

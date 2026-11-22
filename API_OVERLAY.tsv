@@ -18,7 +18,7 @@
 [meta]
 overlay_version	1
 # BN-15 amendment: native CPU --hdr-pq adds explicit BT.2020/PQ video and named refusals.
-ledger_reviewed_digest	61c495f3f0740b7cccdf2e49256a63126fdf012df725e63d564e97e675e29764
+ledger_reviewed_digest	c4b28c1e32e7b765c227cd11dbaadfe4d13ba70cdb9849dbaa20762377b72373
 
 # ---------------------------------------------------------------------------
 # [canonical] — Appendix C ruling C-9: public-surface typos.
@@ -2810,6 +2810,14 @@ scene_names	same	-	render	scene_names	crates/fmn-cli/src/lib.rs#tests	explicit s
 --checkpoint-frames	store	-	120	u64	studio	checkpoint_frames	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Maximum frames between replay checkpoints
 --preview-codec	store	-	png	preview_codec	studio	preview_codec	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select permanent multipart PNG or optional MJPEG preview
 --restore-session	store	-	-	path	studio	restore_session	improved	BN-15	crates/fmn-cli/src/studio_session.rs#tests	Restore a saved native Studio session with matching scene and render settings
+--output	store	-	-	path	concat	concat_output	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Publish a new MP4 or MOV at this exact path; never overwrite an existing destination
+--max-clips	store	-	1024	usize	concat	concat_max_clips	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound ordered input positions, including repeated clips (maximum 4093)
+--max-clip-bytes	store	-	67108864	u64	concat	concat_max_clip_bytes	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound each frozen input clip in bytes (default 64 MiB)
+--max-input-bytes	store	-	268435456	u64	concat	concat_max_input_bytes	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound combined frozen input bytes, counting repeated clips again (default 256 MiB)
+--timeout	store	-	600	u64	concat	concat_timeout	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Set positive wall-clock seconds for the stream-copy job (default 600)
+--max-log-bytes	store	-	1048576	u64	concat	concat_max_log_bytes	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound captured bytes per ffmpeg stdout or stderr stream (default 1 MiB)
+--max-output-bytes	store	-	8589934592	u64	concat	concat_max_output_bytes	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Bound the assembled movie and additional process scratch in bytes (default 8 GiB)
+clips	store	*	-	path	concat	concat_inputs	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Compatible self-contained MP4 or MOV clips in movie order; repeated paths are preserved
 
 # ---------------------------------------------------------------------------
 # [subcommands] — the native command tree. `render` is also the default when
@@ -2821,6 +2829,7 @@ render	same	-	crates/fmn-cli/src/lib.rs#tests	Render one or more selected scenes
 doctor	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Report capabilities and the derived ExecutionPlan
 batch	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Render a bounded multi-scene farm under asupersync
 studio	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Run the isolated-worker live Studio
+concat	improved	BN-15	crates/fmn-cli/src/concatenating.rs#tests	Assemble compatible encoded clips with stream copy, ordered input receipts and create-only publication
 
 # ---------------------------------------------------------------------------
 # [exit_codes] — stable process statuses shared by human and robot modes.

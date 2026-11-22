@@ -26,6 +26,37 @@ fn parser_smoke_remains_available_without_a_partial_shipping_binary() {
 }
 
 #[cfg(feature = "batch")]
+#[test]
+fn shipping_concat_help_capability_and_create_only_errors_are_actionable() {
+    let fixture = Fixture::new();
+    let help = run(&fixture, args(&["concat", "--help"]));
+    assert_code(&help, 0);
+    assert!(stdout(&help).contains("fmn concat --output MOVIE.mp4"));
+    assert!(stdout(&help).contains("--max-input-bytes"));
+    assert!(!stdout(&help).contains("--fps"));
+
+    let source = fixture.root.join("clip.mp4");
+    fs::write(&source, b"a bounded encoded clip placeholder").unwrap();
+    let output = fixture.root.join("complete.mp4");
+    let mut argv = args(&["concat", "--robot", "--ffmpeg"]);
+    argv.push(fixture.missing_ffmpeg().into_os_string());
+    argv.push("--output".into());
+    argv.push(output.clone().into_os_string());
+    argv.push(source.into_os_string());
+    let unavailable = run(&fixture, argv.clone());
+    assert_code(&unavailable, 4);
+    assert!(stdout(&unavailable).contains("\"exit_name\":\"capability\""));
+    assert!(stdout(&unavailable).contains("native"));
+    assert!(!output.exists());
+
+    fs::write(&output, b"previously completed movie").unwrap();
+    let existing = run(&fixture, argv);
+    assert_code(&existing, 6);
+    assert!(stdout(&existing).contains("destination already exists"));
+    assert_eq!(fs::read(output).unwrap(), b"previously completed movie");
+}
+
+#[cfg(feature = "batch")]
 static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(feature = "batch")]

@@ -12,6 +12,7 @@ mod camera_route;
 mod build_identity;
 #[cfg(test)]
 mod cargo_profile;
+mod concatenating;
 mod doctor_autotune;
 mod generated;
 mod offline_cpu;
@@ -19,6 +20,7 @@ mod studio_live;
 pub mod studio_preview;
 mod studio_session;
 
+pub use concatenating::ConcatCommand;
 pub use generated::{
     CommandScope, EXIT_CODE_SPECS, ExitCodeSpec, FLAG_SPECS, FlagAction, FlagArity, FlagSource,
     FlagSpec, FlagStatus, INTERACTION_SPECS, InteractionKind, InteractionSpec, SUBCOMMAND_SPECS,
@@ -673,6 +675,8 @@ pub enum Invocation {
     Batch(BatchCommand),
     /// Live Studio.
     Studio(StudioCommand),
+    /// Assemble existing encoded clips without rendering their frames again.
+    Concat(ConcatCommand),
     /// Schema-generated help for the selected command.
     Help {
         /// Selected command.
@@ -811,6 +815,14 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         "budget_ms" | "max_scenes" | "fail_fast" | "manifest_dir" => CommandScope::Batch,
         "bind" | "port" | "no_browser" | "tui" | "checkpoint_frames" | "preview_codec"
         | "restore_session" => CommandScope::Studio,
+        "concat_output"
+        | "concat_max_clips"
+        | "concat_max_clip_bytes"
+        | "concat_max_input_bytes"
+        | "concat_timeout"
+        | "concat_max_log_bytes"
+        | "concat_max_output_bytes"
+        | "concat_inputs" => CommandScope::Concat,
         _ => return None,
     })
 }
@@ -1011,6 +1023,10 @@ fn assign_positionals(
             collected.extend_values("scene_names", positionals);
             Ok(())
         }
+        CommandScope::Concat => {
+            collected.extend_values("concat_inputs", positionals);
+            Ok(())
+        }
         CommandScope::Doctor | CommandScope::Global => {
             if positionals.is_empty() {
                 Ok(())
@@ -1184,6 +1200,7 @@ fn build_invocation(
 
     match scope {
         CommandScope::Render => build_render(values, common).map(Invocation::Render),
+        CommandScope::Concat => concatenating::parse(&values, common).map(Invocation::Concat),
         CommandScope::Doctor => Ok(Invocation::Doctor(DoctorCommand {
             common,
             require_ffmpeg: values.bool("require_ffmpeg"),
@@ -1446,6 +1463,7 @@ const fn scope_name(scope: CommandScope) -> &'static str {
         CommandScope::Doctor => "doctor",
         CommandScope::Batch => "batch",
         CommandScope::Studio => "studio",
+        CommandScope::Concat => "concat",
     }
 }
 
@@ -8596,6 +8614,15 @@ where
             }
         }
         Invocation::ClearCache { common } => clear_cache(fs.as_ref(), &common),
+        Invocation::Concat(command) => {
+            if let Err(error) = check_simd_tier_support() {
+                return error_output(command.common.robot, &error);
+            }
+            match concatenating::execute(Arc::clone(&fs), Arc::clone(&runner), locator, &command) {
+                Ok(report) => concatenating::success(&command, &report),
+                Err(error) => error_output(command.common.robot, &error),
+            }
+        }
         Invocation::Render(command) => {
             if let Err(error) = check_simd_tier_support() {
                 return error_output(command.common.robot, &error);
@@ -9498,6 +9525,10 @@ fn human_help(command: CommandScope) -> String {
     let mut out = String::new();
     let _ = match command {
         CommandScope::Doctor => writeln!(out, "Usage: fmn doctor [OPTIONS]"),
+        CommandScope::Concat => writeln!(
+            out,
+            "Usage: fmn concat --output MOVIE.mp4 [OPTIONS] CLIP [CLIP ...]"
+        ),
         CommandScope::Render | CommandScope::Batch | CommandScope::Studio => writeln!(
             out,
             "Usage: fmn {} [OPTIONS] [NATIVE_SCENE] [SCENE ...]",
@@ -9753,7 +9784,7 @@ mod tests {
     }
 
     #[cfg(unix)]
-    fn write_native_ffmpeg_fixture(path: &Path) {
+    pub(super) fn write_native_ffmpeg_fixture(path: &Path) {
         use std::os::unix::fs::PermissionsExt as _;
 
         let bytes = if cfg!(target_os = "macos") {
@@ -10061,6 +10092,13 @@ mod tests {
             "ffmpeg_timeout" => "21600",
             "ffmpeg_max_log_bytes" => "1048576",
             "ffmpeg_max_artifact_bytes" | "ffmpeg_max_input_bytes" => "68719476736",
+            "concat_output" => "/tmp/complete.mp4",
+            "concat_max_clips" => "2",
+            "concat_timeout" => "60",
+            "concat_max_clip_bytes"
+            | "concat_max_input_bytes"
+            | "concat_max_log_bytes"
+            | "concat_max_output_bytes" => "1048576",
             "format" => "png",
             "engine" => "cpu",
             "preview_codec" => "png",
@@ -10085,10 +10123,19 @@ mod tests {
         if spec.binding == "scene_names" {
             return vec!["scene.py".to_owned(), "Demo".to_owned()];
         }
+        let concat_args = || {
+            ["concat", "--output", "/tmp/complete.mp4", "/tmp/clip.mp4"]
+                .map(str::to_owned)
+                .to_vec()
+        };
+        if spec.binding == "concat_inputs" {
+            return concat_args();
+        }
         let mut args = match spec.command {
             CommandScope::Doctor => vec!["doctor".to_owned()],
             CommandScope::Batch => vec!["batch".to_owned()],
             CommandScope::Studio => vec!["studio".to_owned()],
+            CommandScope::Concat => concat_args(),
             CommandScope::Global | CommandScope::Render => Vec::new(),
         };
         args.push(alias.to_owned());

@@ -721,6 +721,8 @@ pub enum CliCommand {
     Batch,
     /// `fmn studio`.
     Studio,
+    /// `fmn concat` assembles already encoded clips.
+    Concat,
 }
 
 impl CliCommand {
@@ -731,6 +733,7 @@ impl CliCommand {
             "doctor" => Self::Doctor,
             "batch" => Self::Batch,
             "studio" => Self::Studio,
+            "concat" => Self::Concat,
             _ => return None,
         })
     }
@@ -744,6 +747,7 @@ impl CliCommand {
             Self::Doctor => "doctor",
             Self::Batch => "batch",
             Self::Studio => "studio",
+            Self::Concat => "concat",
         }
     }
 }
@@ -3125,6 +3129,7 @@ pub fn generate_cli_rs(schema: &Schema) -> String {
          \x20   Doctor,\n\
          \x20   Batch,\n\
          \x20   Studio,\n\
+         \x20   Concat,\n\
          }\n\n\
          #[derive(Debug, Clone, Copy, PartialEq, Eq)]\n\
          pub enum FlagAction {\n\
@@ -3379,6 +3384,7 @@ const fn command_variant(command: CliCommand) -> &'static str {
         CliCommand::Doctor => "Doctor",
         CliCommand::Batch => "Batch",
         CliCommand::Studio => "Studio",
+        CliCommand::Concat => "Concat",
     }
 }
 

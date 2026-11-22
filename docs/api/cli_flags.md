@@ -88,6 +88,14 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--checkpoint-frames` | studio | `checkpoint_frames` | improved | BN-15 | store | 120 | Maximum frames between replay checkpoints |
 | `--preview-codec` | studio | `preview_codec` | improved | BN-15 | store | png | Select permanent multipart PNG or optional MJPEG preview |
 | `--restore-session` | studio | `restore_session` | improved | BN-15 | store | — | Restore a saved native Studio session with matching scene and render settings |
+| `--output` | concat | `concat_output` | improved | BN-15 | store | — | Publish a new MP4 or MOV at this exact path; never overwrite an existing destination |
+| `--max-clips` | concat | `concat_max_clips` | improved | BN-15 | store | 1024 | Bound ordered input positions, including repeated clips (maximum 4093) |
+| `--max-clip-bytes` | concat | `concat_max_clip_bytes` | improved | BN-15 | store | 67108864 | Bound each frozen input clip in bytes (default 64 MiB) |
+| `--max-input-bytes` | concat | `concat_max_input_bytes` | improved | BN-15 | store | 268435456 | Bound combined frozen input bytes, counting repeated clips again (default 256 MiB) |
+| `--timeout` | concat | `concat_timeout` | improved | BN-15 | store | 600 | Set positive wall-clock seconds for the stream-copy job (default 600) |
+| `--max-log-bytes` | concat | `concat_max_log_bytes` | improved | BN-15 | store | 1048576 | Bound captured bytes per ffmpeg stdout or stderr stream (default 1 MiB) |
+| `--max-output-bytes` | concat | `concat_max_output_bytes` | improved | BN-15 | store | 8589934592 | Bound the assembled movie and additional process scratch in bytes (default 8 GiB) |
+| `clips` | concat | `concat_inputs` | improved | BN-15 | store | — | Compatible self-contained MP4 or MOV clips in movie order; repeated paths are preserved |
 
 ## Commands
 
@@ -97,6 +105,7 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `doctor` | improved | BN-15 | Report capabilities and the derived ExecutionPlan |
 | `batch` | improved | BN-15 | Render a bounded multi-scene farm under asupersync |
 | `studio` | improved | BN-15 | Run the isolated-worker live Studio |
+| `concat` | improved | BN-15 | Assemble compatible encoded clips with stream copy, ordered input receipts and create-only publication |
 
 ## Exit codes
 
