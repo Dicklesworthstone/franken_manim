@@ -5299,6 +5299,64 @@ mod tests {
     }
 
     #[test]
+    fn saturated_uniform_strokes_match_the_full_scan_frame_at_every_thread_count() {
+        let mut path = fmn_geom::quadpath::QuadPath::new();
+        for index in 0..64 {
+            let y = 7.5 + f64::from(index) / 63.0;
+            path.start_new_path([2.0, y, 0.0]);
+            path.add_line_to([26.0, y, 0.0], false)
+                .expect("overlapping line");
+        }
+        let mut stage = Stage::new();
+        let mob = stage.add(vmob(path.points(), [0.0; 4], [0.25, 0.5, 1.0, 0.7], 600.0));
+        stage.add_to_scene(mob).expect("rooted uniform stroke");
+        let cfg = FrameConfig::new(
+            Viewport {
+                width: 32,
+                height: 24,
+            },
+            config().map,
+            config().background,
+        );
+        let (plan, mono, binning) = derive(&stage, cfg, default_tiling());
+        let job = FrameJob::new(&plan, &mono, &binning, cfg).expect("prepared stroke");
+        let draw = job.draws().iter().flatten().next().expect("one draw");
+        assert!(draw.stroke.expect("stroke").bins.is_some());
+        assert!(!draw.style.stroke_station_is_observable());
+        let point = [14.5, 8.5];
+        let stopped = job.stroke_of(draw).expect("prepared stroke").shade_in_tile(
+            0,
+            job.segments_of(draw),
+            job.joins_of(draw),
+            &draw.style,
+            cfg.map,
+            draw.translate,
+            point,
+        );
+        let scanned = stroke_shade(
+            job.segments_of(draw),
+            job.joins_of(draw),
+            &draw.style,
+            cfg.map,
+            draw.translate,
+            point,
+        );
+        assert_eq!(stopped.0, 1.0, "the stroke actually covers this pixel");
+        assert!(
+            stopped.1 < scanned.1,
+            "the production scan stops before the closest segment"
+        );
+        let expected = render_reference(&job);
+        for threads in [1, 4, 16] {
+            assert_frames_equal(
+                &job.render(threads).expect("uniform stroke frame"),
+                &expected,
+                &format!("saturated stroke differs from full scan with {threads} threads"),
+            );
+        }
+    }
+
+    #[test]
     fn the_draw_list_is_index_aligned_with_the_instance_list() {
         // Stated as its own assertion because it is a *representation* invariant
         // the whole tile loop rests on, and because the first version of this

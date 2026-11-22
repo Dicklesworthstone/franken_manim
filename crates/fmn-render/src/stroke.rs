@@ -620,7 +620,9 @@ impl<'a> PreparedStroke<'a> {
         (lo <= hi).then_some((lo, hi))
     }
 
-    fn nearest(
+    // The false specialization keeps the full prepared scan available to the
+    // regression/measurement oracle; production always stops at saturation.
+    fn nearest<const STOP_AT_SATURATION: bool>(
         &self,
         segments: &[Segment],
         style: &Style,
@@ -637,6 +639,7 @@ impl<'a> PreparedStroke<'a> {
         let mut best = f64::INFINITY;
         let mut best_s = 0.0;
         let mut admitted = false;
+        let saturated = -zero_coverage_excess(style);
         for (segment, prepared) in segments.iter().zip(self.segments.iter()) {
             if p[0] < prepared.slab[0]
                 || p[0] > prepared.slab[2]
@@ -661,12 +664,21 @@ impl<'a> PreparedStroke<'a> {
             if excess < best {
                 best = excess;
                 best_s = s;
+                // A uniform stroke has no observable winning station. Once
+                // its minimum lies in AA's fully covered interval, later
+                // segments can only lower it within that interval. Joins are
+                // fixed min/max operations: they either keep it saturated or
+                // replace it with the same wedge excess, so their final
+                // coverage is unchanged too.
+                if STOP_AT_SATURATION && !prepared.station && best <= saturated {
+                    break;
+                }
             }
         }
         admitted.then_some((best, best_s))
     }
 
-    fn nearest_in_tile(
+    fn nearest_in_tile<const STOP_AT_SATURATION: bool>(
         &self,
         tile: usize,
         segments: &[Segment],
@@ -676,7 +688,7 @@ impl<'a> PreparedStroke<'a> {
         p: [f64; 2],
     ) -> Option<(f64, f64)> {
         let Some(bins) = self.bins else {
-            return self.nearest(segments, style, map, translate, p);
+            return self.nearest::<STOP_AT_SATURATION>(segments, style, map, translate, p);
         };
         let scale = map.scale;
         if scale == 0.0 || segments.is_empty() || segments.len() != self.segments.len() {
@@ -691,6 +703,7 @@ impl<'a> PreparedStroke<'a> {
         let mut best = f64::INFINITY;
         let mut best_s = 0.0;
         let mut admitted = false;
+        let saturated = -zero_coverage_excess(style);
         for &index in entries {
             let idx = index as usize;
             let (Some(segment), Some(prepared)) = (segments.get(idx), self.segments.get(idx))
@@ -720,6 +733,9 @@ impl<'a> PreparedStroke<'a> {
             if excess < best {
                 best = excess;
                 best_s = s;
+                if STOP_AT_SATURATION && !prepared.station && best <= saturated {
+                    break;
+                }
             }
         }
         admitted.then_some((best, best_s))
@@ -744,7 +760,7 @@ impl<'a> PreparedStroke<'a> {
         {
             return (coverage, 0.0);
         }
-        match self.nearest(segments, style, map, translate, p) {
+        match self.nearest::<true>(segments, style, map, translate, p) {
             Some((round, s)) => (
                 aa_coverage(
                     apply_joins(round, joins, style.joint_type, p),
@@ -780,7 +796,7 @@ impl<'a> PreparedStroke<'a> {
         {
             return (coverage, 0.0);
         }
-        match self.nearest_in_tile(tile, segments, style, map, translate, p) {
+        match self.nearest_in_tile::<true>(tile, segments, style, map, translate, p) {
             Some((round, s)) => (
                 aa_coverage(
                     apply_joins(round, joins, style.joint_type, p),
@@ -1477,6 +1493,278 @@ mod tests {
         p.start_new_path([0.0, 0.0, 0.0]);
         p.add_line_to([len, 0.0, 0.0], false).unwrap();
         p
+    }
+
+    #[test]
+    fn uniform_saturation_stops_before_the_nearest_segment_and_preserves_joins() {
+        let mut path = QuadPath::default();
+        path.start_new_path([2.0, 8.0, 0.0]);
+        path.add_line_to([14.0, 8.0, 0.0], false).unwrap();
+        path.add_line_to([14.0, 20.0, 0.0], false).unwrap();
+        path.start_new_path([3.0, 7.0, 0.0]);
+        path.add_line_to([20.0, 7.0, 0.0], false).unwrap();
+        let (shape, segments) = compile_shape(shape_digest(path.points()), &path, Hint::General, 0)
+            .expect("three bounded segments");
+        let starts = [0, segments.len() as u32];
+        let entries: Vec<_> = (0..segments.len() as u32).collect();
+        let bins = StrokeBins::new(&starts, &entries);
+        let point = [15.0, 7.0];
+
+        for joint_type in [
+            JointType::Auto,
+            JointType::NoJoint,
+            JointType::Bevel,
+            JointType::Miter,
+        ] {
+            let style = Style {
+                joint_type,
+                ..flat_stroke_style(600.0)
+            };
+            let joins = join_wedges(&segments, &shape.subpath_starts, &style, unit(), [0.0; 2]);
+            let (backing, slab) = prepared(&segments, &style, unit(), [0.0; 2], false);
+            let prepared = PreparedStroke::from_parts_binned(&backing, slab, Some(bins));
+            let full = prepared
+                .nearest::<false>(&segments, &style, unit(), [0.0; 2], point)
+                .unwrap();
+            let stopped = prepared
+                .nearest::<true>(&segments, &style, unit(), [0.0; 2], point)
+                .unwrap();
+            assert!(stopped.0 > full.0, "the later segment is closer");
+            assert_eq!(
+                stopped.1, segments[0].s0,
+                "the scan stops on its first segment"
+            );
+            assert_eq!(
+                full.1, segments[2].s0,
+                "the full scan reaches the later segment"
+            );
+            assert_eq!(
+                prepared.nearest_in_tile::<true>(0, &segments, &style, unit(), [0.0; 2], point),
+                Some(stopped),
+                "the indexed production path also stops"
+            );
+            let expected = stroke_shade(&segments, &joins, &style, unit(), [0.0; 2], point);
+            if joint_type == JointType::Bevel {
+                assert!(
+                    expected.0 > 0.0 && expected.0 < 1.0,
+                    "the bevel trims saturated coverage"
+                );
+            } else {
+                assert_eq!(expected.0, 1.0);
+            }
+            for actual in [
+                prepared.shade(&segments, &joins, &style, unit(), [0.0; 2], point),
+                prepared.shade_in_tile(0, &segments, &joins, &style, unit(), [0.0; 2], point),
+            ] {
+                assert_eq!(actual.0.to_bits(), expected.0.to_bits(), "{joint_type:?}");
+                assert_eq!(
+                    stroke_rgba_at(&style, actual.1),
+                    stroke_rgba_at(&style, expected.1)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn saturated_strokes_keep_scanning_when_the_winning_station_is_visible() {
+        let segments = [
+            Segment {
+                p0: [0.0, 0.0, 0.0],
+                p1: [8.0, 0.0, 0.0],
+                p2: [16.0, 0.0, 0.0],
+                s0: 0.0,
+                s1: 0.5,
+            },
+            Segment {
+                p0: [0.0, 1.0, 0.0],
+                p1: [8.0, 1.0, 0.0],
+                p2: [16.0, 1.0, 0.0],
+                s0: 0.5,
+                s1: 1.0,
+            },
+        ];
+        let base = flat_stroke_style(600.0);
+        let profile = crate::StrokeProfile::new(vec![
+            crate::StrokeKnot {
+                s: 0.0,
+                width: 600.0,
+                rgba: [1.0; 4],
+            },
+            crate::StrokeKnot {
+                s: 0.5,
+                width: 600.0,
+                rgba: [0.0, 0.5, 1.0, 0.5],
+            },
+            crate::StrokeKnot {
+                s: 1.0,
+                width: 600.0,
+                rgba: [1.0; 4],
+            },
+        ])
+        .unwrap();
+        for style in [
+            Style {
+                stroke_width_end: 800.0,
+                ..base.clone()
+            },
+            Style {
+                stroke_rgba_end: [0.0, 0.5, 1.0, 0.5],
+                ..base.clone()
+            },
+            base.with_stroke_profile(profile),
+        ] {
+            assert!(style.stroke_station_is_observable());
+            for straight in [false, true] {
+                let (backing, slab) = prepared(&segments, &style, unit(), [0.0; 2], straight);
+                let prepared = PreparedStroke::from_parts_binned(
+                    &backing,
+                    slab,
+                    Some(StrokeBins::new(&[0, 2], &[0, 1])),
+                );
+                let point = [8.0, 1.0];
+                let full = prepared
+                    .nearest::<false>(&segments, &style, unit(), [0.0; 2], point)
+                    .unwrap();
+                assert!(full.0 <= -zero_coverage_excess(&style));
+                assert!(full.1 >= 0.5, "the later segment must supply the paint");
+                assert_eq!(
+                    prepared.nearest::<true>(&segments, &style, unit(), [0.0; 2], point),
+                    Some(full),
+                );
+                assert_eq!(
+                    prepared.nearest_in_tile::<true>(0, &segments, &style, unit(), [0.0; 2], point),
+                    Some(full),
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "manual same-invocation prepared-stroke saturation A/B measurement"]
+    fn uniform_stroke_saturation_scan_measurement() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        let segments: Vec<_> = (0..96)
+            .map(|index| {
+                let offset = (index % 12) as f64 * 0.025;
+                Segment {
+                    p0: [-8.0, offset, 0.0],
+                    p1: [0.0, 2.0 + offset, 0.0],
+                    p2: [8.0, offset, 0.0],
+                    s0: index as f64 / 96.0,
+                    s1: (index + 1) as f64 / 96.0,
+                }
+            })
+            .collect();
+        let style = flat_stroke_style(600.0);
+        let map = ScreenMap {
+            origin: [8.0, 5.0],
+            ..unit()
+        };
+        let (backing, slab) = prepared(&segments, &style, map, [0.0; 2], false);
+        let mut starts = crate::arena::Pool::default();
+        let mut entries = crate::arena::Pool::default();
+        let mut ranges = crate::arena::Pool::default();
+        let (start_range, entry_range) = build_stroke_bins_into(
+            &mut starts,
+            &mut entries,
+            &mut ranges,
+            &backing,
+            crate::bin::Viewport {
+                width: 16,
+                height: 12,
+            },
+            16,
+        )
+        .expect("bounded production index")
+        .expect("long stroke uses bins");
+        let prepared = PreparedStroke::from_parts_binned(
+            &backing,
+            slab,
+            Some(StrokeBins::new(
+                starts.slice(start_range),
+                entries.slice(entry_range),
+            )),
+        );
+        let points: Vec<_> = (0..24)
+            .flat_map(|y| (0..32).map(move |x| [f64::from(x) * 0.5, f64::from(y) * 0.5]))
+            .collect();
+        let coverage = |nearest: Option<(f64, f64)>| {
+            nearest.map_or(0.0, |(excess, _)| {
+                aa_coverage(excess, f64::from(style.anti_alias_width))
+            })
+        };
+        let mut stopped_samples = 0;
+        for &point in &points {
+            let full =
+                prepared.nearest_in_tile::<false>(0, &segments, &style, map, [0.0; 2], point);
+            let stopped =
+                prepared.nearest_in_tile::<true>(0, &segments, &style, map, [0.0; 2], point);
+            assert_eq!(coverage(full).to_bits(), coverage(stopped).to_bits());
+            stopped_samples += usize::from(full != stopped);
+        }
+        assert!(
+            stopped_samples > 100,
+            "the workload must exercise early exits"
+        );
+        let run = |stop| {
+            let start = Instant::now();
+            let mut sum = 0.0;
+            for _ in 0..4 {
+                for &point in black_box(&points) {
+                    let nearest = if stop {
+                        prepared.nearest_in_tile::<true>(
+                            0,
+                            black_box(&segments),
+                            &style,
+                            map,
+                            [0.0; 2],
+                            point,
+                        )
+                    } else {
+                        prepared.nearest_in_tile::<false>(
+                            0,
+                            black_box(&segments),
+                            &style,
+                            map,
+                            [0.0; 2],
+                            point,
+                        )
+                    };
+                    sum += coverage(nearest);
+                }
+            }
+            (start.elapsed().as_secs_f64(), black_box(sum))
+        };
+        let mut full_times = Vec::new();
+        let mut stopped_times = Vec::new();
+        for round in 0..9 {
+            let (full, stopped) = if round % 2 == 0 {
+                (run(false), run(true))
+            } else {
+                let stopped = run(true);
+                (run(false), stopped)
+            };
+            assert_eq!(full.1.to_bits(), stopped.1.to_bits());
+            if round > 0 {
+                full_times.push(full.0);
+                stopped_times.push(stopped.0);
+            }
+        }
+        full_times.sort_by(f64::total_cmp);
+        stopped_times.sort_by(f64::total_cmp);
+        let full = full_times[full_times.len() / 2];
+        let stopped = stopped_times[stopped_times.len() / 2];
+        eprintln!(
+            "uniform_stroke_saturation segments={} queries={} changed_winner_samples={} full_scan_median_ms={:.3} saturated_median_ms={:.3} speedup={:.3}x coverage_bits_equal=true",
+            segments.len(),
+            points.len() * 4,
+            stopped_samples,
+            full * 1000.0,
+            stopped * 1000.0,
+            full / stopped,
+        );
     }
 
     #[test]
