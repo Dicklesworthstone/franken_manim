@@ -269,12 +269,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(affine.engine, ExecutionEngine::FastCpu);
-        assert_eq!(camera.engine, ExecutionEngine::CertifiedCpu);
+        assert_eq!(camera.engine, ExecutionEngine::FastCpu);
         assert_eq!(
             config.determinism.mode,
             fmn_config::config::DeterminismMode::Standard
         );
         assert!(camera.estimated_in_flight_bytes >= affine.estimated_in_flight_bytes + 64 * 48 * 8);
+        config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        let (certified_camera, _, _) = super::super::derive_execution_plan_with_annex(
+            &fs,
+            &config,
+            RenderIntent::Offline,
+            OutputPixelFormat::Rgba8,
+            super::super::MetalSelection::Offline,
+            true,
+        )
+        .unwrap();
+        assert_eq!(certified_camera.engine, ExecutionEngine::CertifiedCpu);
     }
 
     #[test]

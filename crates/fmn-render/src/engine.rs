@@ -596,6 +596,26 @@ impl EngineIdentity {
         }
     }
 
+    /// Validate the arithmetic identity accepted by this build's CPU renderers.
+    ///
+    /// # Errors
+    /// Rejects accelerator identities and a renderer version other than this
+    /// artifact's version before renderer inputs or scratch are prepared.
+    pub fn validate_cpu(self) -> Result<(), FrameJobError> {
+        if matches!(self.engine, EngineKind::Metal | EngineKind::Cuda) {
+            return Err(FrameJobError::UnsupportedEngine {
+                engine: self.engine,
+            });
+        }
+        if self.renderer_version != RENDERER_VERSION {
+            return Err(FrameJobError::RendererVersionMismatch {
+                requested: self.renderer_version,
+                compiled: RENDERER_VERSION,
+            });
+        }
+        Ok(())
+    }
+
     /// This artifact's standard-only Metal-annex identity.
     ///
     /// The host build tier remains part of C7 because it prepares the derived
@@ -1511,11 +1531,7 @@ impl<'a> FrameJob<'a> {
         config: FrameConfig,
         identity: EngineIdentity,
     ) -> Result<FrameJob<'a>, FrameJobError> {
-        if matches!(identity.engine, EngineKind::Metal | EngineKind::Cuda) {
-            return Err(FrameJobError::UnsupportedEngine {
-                engine: identity.engine,
-            });
-        }
+        identity.validate_cpu()?;
         let mut arena = FrameArena::new();
         arena.begin_frame();
         let (draws, cols) = Self::prepare(plan, mono, binning, config, identity, &mut arena)?;
@@ -1574,11 +1590,7 @@ impl<'a> FrameJob<'a> {
         config: FrameConfig,
         identity: EngineIdentity,
     ) -> Result<FrameJob<'a>, FrameJobError> {
-        if matches!(identity.engine, EngineKind::Metal | EngineKind::Cuda) {
-            return Err(FrameJobError::UnsupportedEngine {
-                engine: identity.engine,
-            });
-        }
+        identity.validate_cpu()?;
         arena.begin_frame();
         let (draws, cols) = Self::prepare(plan, mono, binning, config, identity, arena)?;
         Ok(FrameJob {
@@ -3406,6 +3418,20 @@ pub(crate) trait PixelKernel {
     fn source_over(rgba: [f32; 4], coverage: f64, dst: Self::Pixel) -> Self::Pixel;
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]);
 
+    /// Camera shaders produce linear f64 colors after lighting and perspective
+    /// interpolation. Certified compositing must not narrow those inputs to
+    /// the planar record format. Premultiply before the fast kernels narrow:
+    /// finite HDR RGB paired with tiny opacity can have a representable product
+    /// even when separately narrowed inputs would multiply infinity by zero.
+    #[inline]
+    fn source_over_linear(source: LinearRgba, dst: Self::Pixel) -> Self::Pixel {
+        Self::source_over_premul(Self::from_premul(source.premultiply()), dst)
+    }
+
+    fn source_over_premul(source: Self::Pixel, dst: Self::Pixel) -> Self::Pixel;
+    fn add(left: Self::Pixel, right: Self::Pixel) -> Self::Pixel;
+    fn scale(pixel: Self::Pixel, factor: f64) -> Self::Pixel;
+
     /// This kernel's sub-pool — how one [`WorkerPool`] serves all four
     /// monomorphized kernels with no type erasure.
     fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self>
@@ -3433,7 +3459,7 @@ pub(crate) trait PixelKernel {
 }
 
 /// The certified scalar definition.
-struct CertifiedScalar;
+pub(crate) struct CertifiedScalar;
 
 impl PixelKernel for CertifiedScalar {
     type Pixel = PremulRgba;
@@ -3459,6 +3485,37 @@ impl PixelKernel for CertifiedScalar {
     }
 
     #[inline]
+    fn source_over_premul(source: Self::Pixel, dst: Self::Pixel) -> Self::Pixel {
+        let remaining = 1.0 - source.a;
+        PremulRgba {
+            r: source.r + dst.r * remaining,
+            g: source.g + dst.g * remaining,
+            b: source.b + dst.b * remaining,
+            a: source.a + dst.a * remaining,
+        }
+    }
+
+    #[inline]
+    fn add(left: Self::Pixel, right: Self::Pixel) -> Self::Pixel {
+        PremulRgba {
+            r: left.r + right.r,
+            g: left.g + right.g,
+            b: left.b + right.b,
+            a: left.a + right.a,
+        }
+    }
+
+    #[inline]
+    fn scale(pixel: Self::Pixel, factor: f64) -> Self::Pixel {
+        PremulRgba {
+            r: pixel.r * factor,
+            g: pixel.g * factor,
+            b: pixel.b * factor,
+            a: pixel.a * factor,
+        }
+    }
+
+    #[inline]
     fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
         &pool.certified_scalar
     }
@@ -3470,7 +3527,7 @@ impl PixelKernel for CertifiedScalar {
 /// through the worker pool avoids gathering channels from different pixels on
 /// every layer. All arithmetic is elementwise, in the scalar definition's
 /// multiply-then-add order; alpha is never a horizontal reduction.
-struct CertifiedBuildTier;
+pub(crate) struct CertifiedBuildTier;
 
 impl PixelKernel for CertifiedBuildTier {
     type Pixel = Simd<f64, 4>;
@@ -3502,6 +3559,21 @@ impl PixelKernel for CertifiedBuildTier {
     }
 
     #[inline]
+    fn source_over_premul(source: Self::Pixel, dst: Self::Pixel) -> Self::Pixel {
+        source + dst * Simd::splat(1.0 - source[3])
+    }
+
+    #[inline]
+    fn add(left: Self::Pixel, right: Self::Pixel) -> Self::Pixel {
+        left + right
+    }
+
+    #[inline]
+    fn scale(pixel: Self::Pixel, factor: f64) -> Self::Pixel {
+        pixel * Simd::splat(factor)
+    }
+
+    #[inline]
     fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
         &pool.certified_tier
     }
@@ -3519,7 +3591,7 @@ impl PixelKernel for CertifiedBuildTier {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct PremulRgba32 {
+pub(crate) struct PremulRgba32 {
     r: f32,
     g: f32,
     b: f32,
@@ -3527,7 +3599,7 @@ struct PremulRgba32 {
 }
 
 /// Standard-mode scalar mixed precision: f32 colour and blend arithmetic.
-struct FastScalar;
+pub(crate) struct FastScalar;
 
 impl PixelKernel for FastScalar {
     type Pixel = PremulRgba32;
@@ -3572,13 +3644,46 @@ impl PixelKernel for FastScalar {
     }
 
     #[inline]
+    fn source_over_premul(source: Self::Pixel, dst: Self::Pixel) -> Self::Pixel {
+        let remaining = 1.0 - source.a;
+        PremulRgba32 {
+            r: source.r + dst.r * remaining,
+            g: source.g + dst.g * remaining,
+            b: source.b + dst.b * remaining,
+            a: source.a + dst.a * remaining,
+        }
+    }
+
+    #[inline]
+    fn add(left: Self::Pixel, right: Self::Pixel) -> Self::Pixel {
+        PremulRgba32 {
+            r: left.r + right.r,
+            g: left.g + right.g,
+            b: left.b + right.b,
+            a: left.a + right.a,
+        }
+    }
+
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    fn scale(pixel: Self::Pixel, factor: f64) -> Self::Pixel {
+        let factor = factor as f32;
+        PremulRgba32 {
+            r: pixel.r * factor,
+            g: pixel.g * factor,
+            b: pixel.b * factor,
+            a: pixel.a * factor,
+        }
+    }
+
+    #[inline]
     fn sub_pool(pool: &WorkerPool) -> &KernelSlots<Self> {
         &pool.fast_scalar
     }
 }
 
 /// Standard-mode build-tier route.
-struct FastBuildTier;
+pub(crate) struct FastBuildTier;
 
 impl PixelKernel for FastBuildTier {
     type Pixel = Simd<f32, 4>;
@@ -3607,6 +3712,22 @@ impl PixelKernel for FastBuildTier {
     #[inline]
     fn write_row(acc: &[Self::Pixel], out: &mut [u8]) {
         write_premul_f32_pixels(acc.iter().map(|pixel| pixel.to_array()), out);
+    }
+
+    #[inline]
+    fn source_over_premul(source: Self::Pixel, dst: Self::Pixel) -> Self::Pixel {
+        source + dst * Simd::splat(1.0 - source[3])
+    }
+
+    #[inline]
+    fn add(left: Self::Pixel, right: Self::Pixel) -> Self::Pixel {
+        left + right
+    }
+
+    #[inline]
+    #[allow(clippy::cast_possible_truncation)]
+    fn scale(pixel: Self::Pixel, factor: f64) -> Self::Pixel {
+        pixel * Simd::splat(factor as f32)
     }
 
     #[inline]

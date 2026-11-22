@@ -9,7 +9,7 @@
 
 use super::{CacheStats, PixelTileCacheError, frame_row_start, rgba16f_row_bytes, tile_rect};
 use crate::three_d::{PreparedThreeDProjection, same_projection_camera};
-use crate::{Camera, Tiling};
+use crate::{Camera, EngineIdentity, Tiling};
 use fmn_frame::FrameBuffer;
 use std::sync::Arc;
 
@@ -105,6 +105,7 @@ impl CameraTile {
 struct CameraClosure {
     camera: Camera,
     tiling: Tiling,
+    identity: EngineIdentity,
 }
 
 /// A sorted sparse table avoids unaccounted hash-table buckets. Retained and
@@ -189,13 +190,17 @@ impl CameraTileCache {
         self.pending_stats = CacheStats::default();
         let camera = projection.camera();
         let tiling = projection.tiling();
+        let identity = projection.engine_identity();
         if !self.closure.as_ref().is_some_and(|previous| {
-            previous.tiling == tiling && same_projection_camera(&previous.camera, camera)
+            previous.tiling == tiling
+                && previous.identity == identity
+                && same_projection_camera(&previous.camera, camera)
         }) {
             self.tiles = Vec::new();
             self.closure = Some(CameraClosure {
                 camera: camera.clone(),
                 tiling,
+                identity,
             });
         }
         for tile in &mut self.tiles {

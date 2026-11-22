@@ -501,7 +501,16 @@ fn camera_bundle_config(
                 macro_tile: plan.macro_tile,
                 fine_tile: plan.fine_tile,
             },
-            engine: EngineIdentity::certified(),
+            engine: match plan.engine {
+                fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
+                fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
+                _ => {
+                    return Err(CliError::new(
+                        "capability",
+                        "camera-bundle Studio requires a CPU execution plan",
+                    ));
+                }
+            },
             threads: plan
                 .render_teams
                 .first()
@@ -1080,6 +1089,7 @@ mod tests {
                 ..
             } = configuration(&fs, &command).unwrap();
             assert_eq!((native.fps, native.frame_count), (30, 9));
+            assert_eq!(native.renderer.engine, EngineIdentity::fast());
             let camera = fmn_render::Camera::new(native.camera.clone().unwrap()).unwrap();
             let mut capture = StudioPacketCapture::default();
             let mut program = camera_route::builtin(name).unwrap();
@@ -1177,6 +1187,7 @@ mod tests {
             let mut command = camera_command(name);
             command.render.file = Some(PathBuf::from("/camera.fmtl"));
             let view = camera_bundle_config(&fs, &command, &bundle).unwrap();
+            assert_eq!(view.renderer.engine, EngineIdentity::fast());
             let camera = view.fixed_camera.as_ref().unwrap();
             let expected: Vec<_> = (0..2)
                 .map(|frame| serial_camera(&bundle.stage_at(frame).unwrap(), camera, view.renderer))

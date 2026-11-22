@@ -2,7 +2,7 @@
 //! remain owned by Lumen; this module only validates and journals their inputs.
 
 use fmn_hash::{Schema, Writer};
-use fmn_render::{Camera, CameraConfig, EngineIdentity, RetainedFrameRendererConfig};
+use fmn_render::{Camera, CameraConfig, RetainedFrameRendererConfig};
 use fmn_scene::{RenderBackendRecord, RenderBackendRole};
 
 use super::program::{execution_error, invalid};
@@ -31,13 +31,10 @@ impl CameraCapture {
                 "native camera background must match the output background",
             ));
         }
-        // render_with_camera executes ThreeDJob, not a selected affine/annex
-        // FrameJob engine. Never mislabel this route.
-        if renderer.engine != EngineIdentity::certified() {
-            return Err(invalid(
-                "native camera capture requires the certified CPU engine",
-            ));
-        }
+        renderer
+            .engine
+            .validate_cpu()
+            .map_err(|error| invalid(&error.to_string()))?;
         let camera = Camera::new(config).map_err(execution_error)?;
         let backend = camera_capture_backend(&camera, renderer)?;
         Ok(Self { camera, backend })
@@ -46,26 +43,27 @@ impl CameraCapture {
 
 /// Identity of the actual retained-camera CPU route. Imperative front doors
 /// call this at capture time so background, lighting and authored camera pose
-/// are represented without claiming an affine/annex FrameJob executed instead.
+/// and the selected CPU arithmetic are represented by the same capture.
 pub fn camera_capture_backend(
     camera: &Camera,
     renderer: RetainedFrameRendererConfig,
 ) -> Result<RenderBackendRecord, ServiceError> {
-    if renderer.engine != EngineIdentity::certified()
-        || camera.pixel_shape()
-            != (
-                renderer.frame.viewport.width,
-                renderer.frame.viewport.height,
-            )
+    renderer
+        .engine
+        .validate_cpu()
+        .map_err(|error| invalid(&error.to_string()))?;
+    if camera.pixel_shape()
+        != (
+            renderer.frame.viewport.width,
+            renderer.frame.viewport.height,
+        )
     {
-        return Err(invalid(
-            "camera capture requires the matching certified CPU viewport",
-        ));
+        return Err(invalid("camera capture requires the matching CPU viewport"));
     }
     let mut identity = Writer::new(CAMERA_CAPTURE_SCHEMA);
     identity
         .put_str("lumen-retained-camera-cpu-v1")
-        .put_str(&EngineIdentity::certified().closure_string())
+        .put_str(&renderer.engine.closure_string())
         .put_u32(camera.pixel_width())
         .put_u32(camera.pixel_height())
         .put_u32(camera.fps())

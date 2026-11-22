@@ -45,7 +45,7 @@ fn replay_failed(message: &str) -> ServiceError {
 /// from arbitrary tracker records or substituted for a captured camera.
 #[derive(Clone, Debug)]
 pub struct CameraBundleView {
-    /// Actual camera renderer, including its viewport and certified CPU kernel.
+    /// Actual camera renderer, including its viewport and CPU kernel identity.
     pub renderer: RetainedFrameRendererConfig,
     /// Deterministic scene-state seed used by the seek journal.
     pub seed: u64,
@@ -177,8 +177,8 @@ impl CameraBundleWorker {
     }
 
     /// Create a worker from an already bounded, validated artifact generation.
-    /// Camera rendering must be admitted as the real certified-CPU kernel by
-    /// the composition root, even when the source's determinism mode is standard.
+    /// The composition root selects the CPU identity, which remains part of
+    /// the camera capture and replay contract.
     /// No accelerator/affine fallback or recorded-camera override is substituted.
     pub fn new(
         scene: String,

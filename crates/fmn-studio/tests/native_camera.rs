@@ -11,12 +11,13 @@ use fmn_mobject::{
     RenderPrimitive,
 };
 use fmn_render::{
-    Camera, CameraConfig, CameraFrame, EngineIdentity, FrameConfig, RetainedFrameRenderer,
-    RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
+    Camera, CameraConfig, CameraFrame, EngineIdentity, EngineKind, FrameConfig,
+    RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap, Tier, Tiling, Viewport,
 };
 use fmn_scene::{EventPayload, Journal, Key, Modifiers, RuntimeConfig, Scene};
 use fmn_studio::native::{
     NativeReplayPolicy, NativeSceneProgram, NativeSceneWorker, NativeSegment, NativeWorkerConfig,
+    camera_capture_backend,
 };
 use fmn_studio::protocol::studio_seek_command;
 use fmn_studio::{
@@ -269,6 +270,45 @@ fn every_primitive_and_mixed_painter_sequence_matches_direct_lumen_pixels() {
 }
 
 #[test]
+fn fast_cpu_camera_workers_publish_exact_backend_identity_and_pixels() {
+    for &tier in Tier::ALL {
+        let identity = EngineIdentity {
+            tier,
+            ..EngineIdentity::fast()
+        };
+        let mut reference = config(1);
+        reference.renderer.engine = identity;
+        let camera = Camera::new(reference.camera.clone().unwrap()).unwrap();
+        let expected_backend = camera_capture_backend(&camera, reference.renderer).unwrap();
+        let certified_backend = camera_capture_backend(&camera, config(1).renderer).unwrap();
+        let closure = identity.closure_string();
+        assert!(
+            expected_backend
+                .identity()
+                .windows(closure.len())
+                .any(|bytes| bytes == closure.as_bytes()),
+            "the backend must bind the arithmetic that produces its pixels"
+        );
+        assert_ne!(expected_backend.identity(), certified_backend.identity());
+        let expected_pixels = direct(Kind::Mixed, 4, &reference);
+        for threads in [1, 4] {
+            let mut policy = config(threads);
+            policy.renderer.engine = identity;
+            let mut worker = NativeSceneWorker::new(policy, || program(Kind::Mixed)).unwrap();
+            let frame = seek(&mut worker, 4);
+            assert_eq!(png(&frame), expected_pixels);
+            assert_eq!(frame.render_backends.len(), 1);
+            assert_eq!(
+                frame.render_backends[0].identity(),
+                expected_backend.identity()
+            );
+            assert_ne!(png(&seek(&mut worker, 0)), expected_pixels);
+            assert_eq!(seek(&mut worker, 4), frame);
+        }
+    }
+}
+
+#[test]
 fn nonvector_content_still_refuses_without_explicit_camera_selection() {
     let mut policy = config(1);
     policy.camera = None;
@@ -305,14 +345,20 @@ fn camera_bits_and_backend_identity_are_independent_of_render_team_width() {
 #[test]
 fn camera_constructor_refuses_inconsistent_policy_before_factory_execution() {
     let calls = Rc::new(Cell::new(0));
-    for variant in 0..5 {
+    for variant in 0..7 {
         let mut policy = config(1);
         match variant {
             0 => policy.camera.as_mut().unwrap().resolution = (128, 64),
             1 => policy.camera.as_mut().unwrap().fps = 24,
             2 => policy.camera.as_mut().unwrap().background.r = 0.5,
-            3 => policy.renderer.engine = EngineIdentity::fast(),
+            3 => policy.renderer.engine = EngineIdentity::metal(),
+            4 => policy.renderer.engine.engine = EngineKind::Cuda,
+            5 => policy.renderer.engine.renderer_version += 1,
             _ => policy.camera.as_mut().unwrap().light_source_position[0] = f64::NAN,
+        }
+        if matches!(variant, 3..=5) {
+            let camera = Camera::new(policy.camera.clone().unwrap()).unwrap();
+            assert!(camera_capture_backend(&camera, policy.renderer).is_err());
         }
         let observed = Rc::clone(&calls);
         assert!(
@@ -383,7 +429,7 @@ fn changed_camera_policy_invalidates_replay_before_running_any_factory() {
             .iter()
             .any(|read| read.path == "native/camera-capture-policy")
     );
-    for variant in 0..5 {
+    for variant in 0..7 {
         let mut policy = config(1);
         let camera = policy.camera.as_mut().unwrap();
         match variant {
@@ -400,7 +446,9 @@ fn changed_camera_policy_invalidates_replay_before_running_any_factory() {
                     .unwrap();
             }
             3 => camera.samples = 4,
-            _ => camera.light_source_position = [10.0, 0.0, 10.0],
+            4 => camera.light_source_position = [10.0, 0.0, 10.0],
+            5 => policy.renderer.engine = EngineIdentity::fast(),
+            _ => policy.renderer.engine.tier = Tier::COMPILED,
         }
         let calls = Rc::new(Cell::new(0));
         let observed = Rc::clone(&calls);

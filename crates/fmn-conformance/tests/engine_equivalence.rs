@@ -27,6 +27,10 @@ use fmn_render::bin::Binning;
 use fmn_render::engine::{EngineIdentity, FrameJob, Tier};
 use fmn_render::fill::MonoTable;
 use fmn_render::plan::RenderPlan;
+use fmn_render::{
+    Camera, CameraConfig, SurfaceDraw, SurfaceMaterial, SurfaceMesh, SurfaceVertex, Texture,
+    TextureEncoding, TextureMaterial, ThreeDDraw, ThreeDJob, Tiling, TrueDotDraw, VectorDraw,
+};
 
 /// How many threads the fast route renders with. Thread count is not part
 /// of an engine identity (C10), so the blocker exercises a multithreaded
@@ -196,6 +200,154 @@ fn fast_cpu_stays_inside_the_versioned_v1_budget() {
     assert!(
         failures.is_empty(),
         "engine-equivalence budget v1 violated:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn camera_mixed_primitives_stay_inside_the_versioned_v1_budget() {
+    use fmn_core::color::LinearRgba;
+    use fmn_mobject::{Mobject, RecordBuffer, RecordSchema};
+
+    let rgba = |r, g, b, a| LinearRgba { r, g, b, a };
+    let vertex = |point, color| SurfaceVertex::colored(point, [0.0, 0.0, 1.0], color);
+    let front = SurfaceMesh::new(
+        vec![
+            vertex([-2.4, -1.5, 0.7], rgba(0.9, 0.1, 0.2, 0.81)),
+            vertex([2.2, -1.2, -0.3], rgba(0.1, 0.8, 0.3, 0.67)),
+            vertex([-0.2, 1.8, 0.5], rgba(0.2, 0.1, 0.9, 0.73)),
+        ],
+        vec![0, 1, 2],
+    )
+    .unwrap();
+    let behind = SurfaceMesh::new(
+        vec![
+            vertex([-2.8, -1.7, -1.0], rgba(0.1, 0.4, 0.7, 0.59)),
+            vertex([2.7, -1.6, -1.0], rgba(0.7, 0.3, 0.1, 0.67)),
+            vertex([1.4, 1.8, -1.0], rgba(0.4, 0.7, 0.2, 0.71)),
+        ],
+        vec![0, 1, 2],
+    )
+    .unwrap();
+    let image = SurfaceMesh::new(
+        [
+            ([-2.2, -1.3, 0.8], [0.0, 1.0]),
+            ([-2.2, 1.1, 0.8], [0.0, 0.0]),
+            ([0.5, -1.3, 0.8], [1.0, 1.0]),
+            ([0.5, 1.1, 0.8], [1.0, 0.0]),
+        ]
+        .into_iter()
+        .map(|(point, uv)| SurfaceVertex::textured(point, [0.0, 0.0, 1.0], uv, 0.57))
+        .collect(),
+        vec![0, 1, 2, 3, 2, 1],
+    )
+    .unwrap();
+    let light = Texture::from_rgba8(
+        2,
+        2,
+        &[
+            241, 71, 39, 137, 43, 229, 91, 201, 67, 31, 227, 0, 239, 221, 193, 255,
+        ],
+        TextureEncoding::Srgb,
+    )
+    .unwrap();
+    let dark = Texture::from_rgba8(1, 1, &[19, 37, 59, 255], TextureEncoding::Linear).unwrap();
+    let points = [
+        [-1.6, -1.1, 0.4],
+        [0.2, -1.1, 0.4],
+        [2.0, -1.1, 0.4],
+        [1.5, 0.2, 0.4],
+        [1.0, 1.5, 0.4],
+        [-0.3, 0.2, 0.4],
+        [-1.6, -1.1, 0.4],
+    ];
+    let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+    for (index, point) in points.iter().enumerate() {
+        assert!(buffer.write(index, "point", point));
+        assert!(buffer.write(index, "fill_rgba", &[0.07, 0.53, 0.91, 0.61]));
+        assert!(buffer.write(index, "stroke_rgba", &[0.97, 0.61, 0.13, 0.83]));
+        assert!(buffer.write(index, "stroke_width", &[2.7]));
+        assert!(buffer.write(index, "fill_border_width", &[0.0]));
+    }
+    let mut stage = Stage::new();
+    let vector = stage.add(Mobject::from_buffer(buffer));
+    stage.add_to_scene(vector).unwrap();
+    let mut failures = Vec::new();
+    for samples in [1, 2, 4] {
+        let mut config = CameraConfig {
+            resolution: (96, 64),
+            samples,
+            background: rgba(0.017, 0.023, 0.041, 0.37),
+            ..CameraConfig::default()
+        };
+        config.frame.set_shape([6.0, 4.0]).unwrap();
+        let camera = Camera::new(config).unwrap();
+        let mut plan = RenderPlan::new();
+        plan.sync(&stage, camera.revision()).unwrap();
+        let mut front_draw = SurfaceDraw::new(&front);
+        front_draw.clip_planes[0] = [1.0, 0.0, 0.0, 0.45];
+        let textured_surface = SurfaceDraw {
+            material: SurfaceMaterial::Texture(TextureMaterial::surface(&light, Some(&dark))),
+            depth_test: false,
+            ..SurfaceDraw::new(&image)
+        };
+        let draws = [
+            ThreeDDraw::Surface(front_draw),
+            ThreeDDraw::Surface(SurfaceDraw::new(&behind)),
+            ThreeDDraw::Surface(textured_surface),
+            ThreeDDraw::Vector(VectorDraw::new(&plan, 0)),
+            ThreeDDraw::Surface(SurfaceDraw::image(&image, &light)),
+            ThreeDDraw::TrueDot(TrueDotDraw::glow(
+                [1.2, 0.4, 1.1],
+                0.73,
+                rgba(0.31, 0.89, 0.47, 0.69),
+            )),
+        ];
+        let prepare = |identity| {
+            ThreeDJob::new(&camera, &draws, Tiling::default())
+                .unwrap()
+                .with_identity(identity)
+                .unwrap()
+        };
+        let certified = prepare(EngineIdentity::certified()).render(1).unwrap();
+        let empty = ThreeDJob::new(&camera, &[], Tiling::default())
+            .unwrap()
+            .render(1)
+            .unwrap();
+        assert_ne!(
+            certified.as_bytes(),
+            empty.as_bytes(),
+            "the corpus must contain ink"
+        );
+        for &tier in Tier::ALL {
+            let exact = prepare(EngineIdentity {
+                tier,
+                ..EngineIdentity::certified()
+            });
+            let fast = prepare(EngineIdentity {
+                tier,
+                ..EngineIdentity::fast()
+            });
+            let candidate = fast.render(1).unwrap();
+            for threads in [FAST_THREADS, 16] {
+                assert_eq!(
+                    exact.render(threads).unwrap().as_bytes(),
+                    certified.as_bytes()
+                );
+                assert_eq!(
+                    fast.render(threads).unwrap().as_bytes(),
+                    candidate.as_bytes()
+                );
+            }
+            let measured = divergence(&certified, &candidate);
+            let name = format!("camera.mixed_primitives.samples_{samples}.v1");
+            eprintln!("{name} {tier:?}: {measured:?}");
+            failures.extend(budget_v1_failures(&name, tier, &measured));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "engine-equivalence budget v1 violated on camera content:\n{}",
         failures.join("\n")
     );
 }

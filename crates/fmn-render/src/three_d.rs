@@ -29,7 +29,12 @@ use crate::bloom::Bloom;
 use crate::camera::{
     Camera, CameraError, ClippedFillQuadratic, ClippedQuadratic, EdgeSampleLimit, Projection,
 };
-use crate::engine::{NativeScopedSpawner, ScopedSpawner, run_scoped_workers};
+#[cfg(test)]
+use crate::engine::RENDERER_VERSION;
+use crate::engine::{
+    CertifiedBuildTier, CertifiedScalar, EngineIdentity, EngineKind, FastBuildTier, FastScalar,
+    FrameJobError, NativeScopedSpawner, PixelKernel, ScopedSpawner, Tier, run_scoped_workers,
+};
 use crate::fill::{self, GradientField, MonoPiece, RationalPiece};
 use crate::plan::RenderPlan;
 use crate::stroke::{aa_coverage, stroke_rgba_at};
@@ -302,6 +307,8 @@ pub struct SurfaceMesh {
 /// Mesh/job construction refusal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThreeDError {
+    /// The requested CPU policy names another renderer version or an annex.
+    Engine(FrameJobError),
     /// Triangle index list was not a multiple of three.
     IncompleteTriangle,
     /// An index named no vertex.
@@ -372,6 +379,7 @@ pub enum ThreeDError {
 impl std::fmt::Display for ThreeDError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Engine(error) => write!(f, "3D engine: {error}"),
             Self::IncompleteTriangle => {
                 f.write_str("surface index list must contain complete triangles")
             }
@@ -438,7 +446,18 @@ impl std::fmt::Display for ThreeDError {
     }
 }
 
-impl std::error::Error for ThreeDError {}
+impl std::error::Error for ThreeDError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Engine(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+pub(crate) fn validate_cpu_identity(identity: EngineIdentity) -> Result<(), ThreeDError> {
+    identity.validate_cpu().map_err(ThreeDError::Engine)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PreparationRows {
@@ -1960,6 +1979,18 @@ pub(crate) struct CameraBandLayout {
 }
 
 impl PreparedThreeDProjection {
+    pub(crate) fn engine_identity(&self) -> EngineIdentity {
+        self.scratch_pool.identity
+    }
+
+    pub(crate) fn with_identity(mut self, identity: EngineIdentity) -> Result<Self, ThreeDError> {
+        validate_cpu_identity(identity)?;
+        if self.engine_identity() != identity {
+            self.scratch_pool = Arc::new(TileScratchPool::with_identity(identity));
+        }
+        Ok(self)
+    }
+
     pub(crate) fn camera(&self) -> &Camera {
         &self.camera
     }
@@ -2207,6 +2238,30 @@ pub struct ThreeDJob<'a> {
 }
 
 impl<'a> ThreeDJob<'a> {
+    /// Select the existing CPU compositing policy over this camera-bound IR.
+    ///
+    /// Geometry, projection, lighting, clipping and depth remain shared f64/f32
+    /// semantics. Certified retains its original f64 accumulator; fast CPU
+    /// uses f32 RGBA scratch, blending and fixed-order sample resolve, with the
+    /// same scalar/build-tier kernels as planar frames. Changing identity
+    /// retires arithmetic-specific scratch but keeps the compiled geometry.
+    ///
+    /// # Errors
+    /// Refuses annex identities and a renderer version other than this build.
+    pub fn with_identity(mut self, identity: EngineIdentity) -> Result<Self, ThreeDError> {
+        validate_cpu_identity(identity)?;
+        if self.engine_identity() != identity {
+            self.scratch_pool = Arc::new(TileScratchPool::with_identity(identity));
+        }
+        Ok(self)
+    }
+
+    /// Arithmetic policy frozen into this job and any retained projection.
+    #[must_use]
+    pub fn engine_identity(&self) -> EngineIdentity {
+        self.scratch_pool.identity
+    }
+
     /// Compile painter-ordered primitives against one immutable camera.
     pub fn new(
         camera: &'a Camera,
@@ -2522,7 +2577,13 @@ impl<'a> ThreeDJob<'a> {
         Ok(())
     }
 
-    fn render_band(&self, scratch: &mut TileScratch, band: usize, bytes: &mut [u8], stride: usize) {
+    fn render_band(
+        &self,
+        scratch: &mut CameraScratch,
+        band: usize,
+        bytes: &mut [u8],
+        stride: usize,
+    ) {
         RasterPass {
             camera: self.camera,
             draws: &self.draws,
@@ -2560,7 +2621,34 @@ impl<M: Copy> RasterPass<'_, M> {
 
     fn render_band<'texture>(
         &self,
-        scratch: &mut TileScratch,
+        scratch: &mut CameraScratch,
+        band: usize,
+        bytes: &mut [u8],
+        stride: usize,
+        cache: Option<&crate::PixelTileCache>,
+        material: impl Fn(usize, M) -> TextureMaterial<'texture> + Copy,
+    ) {
+        // Dispatch once per band. Every pixel, depth test and AA sample below
+        // uses a monomorphized kernel, with no engine branch in the hot loop.
+        match scratch {
+            CameraScratch::Certified(scratch) => {
+                self.render_band_with(scratch, band, bytes, stride, cache, material)
+            }
+            CameraScratch::CertifiedTier(scratch) => {
+                self.render_band_with(scratch, band, bytes, stride, cache, material)
+            }
+            CameraScratch::Fast(scratch) => {
+                self.render_band_with(scratch, band, bytes, stride, cache, material)
+            }
+            CameraScratch::FastTier(scratch) => {
+                self.render_band_with(scratch, band, bytes, stride, cache, material)
+            }
+        }
+    }
+
+    fn render_band_with<'texture, K: PixelKernel>(
+        &self,
+        scratch: &mut TileScratch<K>,
         band: usize,
         bytes: &mut [u8],
         stride: usize,
@@ -2584,9 +2672,9 @@ impl<M: Copy> RasterPass<'_, M> {
         }
     }
 
-    fn render_tile<'texture>(
+    fn render_tile<'texture, K: PixelKernel>(
         &self,
-        scratch: &mut TileScratch,
+        scratch: &mut TileScratch<K>,
         rectangle: [u32; 4],
         bytes: &mut [u8],
         stride: usize,
@@ -2679,7 +2767,7 @@ impl<M: Copy> RasterPass<'_, M> {
             for local_x in 0..width {
                 let pixel = scratch.resolve(local_x, local_y, width);
                 let offset = (x0 as usize + local_x) * 8;
-                write_pixel(pixel, &mut row[offset..offset + 8]);
+                write_pixel(K::to_premul(pixel), &mut row[offset..offset + 8]);
             }
         }
     }
@@ -5204,6 +5292,7 @@ fn shade_vector(
     })
 }
 
+#[cfg(test)]
 fn source_over_premul(source: PremulRgba, destination: PremulRgba) -> PremulRgba {
     let remaining = 1.0 - source.a;
     PremulRgba {
@@ -5215,11 +5304,12 @@ fn source_over_premul(source: PremulRgba, destination: PremulRgba) -> PremulRgba
 }
 
 struct TileScratchPoolState {
-    idle: Vec<TileScratch>,
+    idle: Vec<CameraScratch>,
     slots: usize,
 }
 
 struct TileScratchPool {
+    identity: EngineIdentity,
     state: Mutex<TileScratchPoolState>,
     available: Condvar,
     heap_allocs: AtomicU64,
@@ -5236,7 +5326,12 @@ impl std::fmt::Debug for TileScratchPool {
 
 impl TileScratchPool {
     fn new() -> Self {
+        Self::with_identity(EngineIdentity::certified())
+    }
+
+    fn with_identity(identity: EngineIdentity) -> Self {
         Self {
+            identity,
             state: Mutex::new(TileScratchPoolState {
                 idle: Vec::new(),
                 slots: 0,
@@ -5287,11 +5382,11 @@ impl TileScratchPool {
             self.heap_allocs.fetch_add(1, Ordering::Relaxed);
         }
         for _ in 0..additional {
-            let scratch = TileScratch::new(max_pixels, sample_grid)?;
+            let scratch = CameraScratch::new(max_pixels, sample_grid, self.identity)?;
             state.idle.push(scratch);
             state.slots += 1;
             self.heap_allocs
-                .fetch_add(TileScratch::HEAP_ALLOCATIONS, Ordering::Relaxed);
+                .fetch_add(CameraScratch::HEAP_ALLOCATIONS, Ordering::Relaxed);
         }
         Ok(())
     }
@@ -5315,11 +5410,11 @@ impl TileScratchPool {
 
 struct PooledTileScratch<'a> {
     pool: &'a TileScratchPool,
-    scratch: Option<TileScratch>,
+    scratch: Option<CameraScratch>,
 }
 
 impl std::ops::Deref for PooledTileScratch<'_> {
-    type Target = TileScratch;
+    type Target = CameraScratch;
 
     fn deref(&self) -> &Self::Target {
         self.scratch
@@ -5353,12 +5448,49 @@ impl Drop for PooledTileScratch<'_> {
     }
 }
 
-struct TileScratch {
+/// Only the selected arithmetic allocates color storage. Depth, sample
+/// classification and geometric coverage are unchanged for every CPU policy.
+enum CameraScratch {
+    Certified(TileScratch<CertifiedScalar>),
+    CertifiedTier(TileScratch<CertifiedBuildTier>),
+    Fast(TileScratch<FastScalar>),
+    FastTier(TileScratch<FastBuildTier>),
+}
+
+impl CameraScratch {
+    const HEAP_ALLOCATIONS: u64 = 3;
+
+    fn new(
+        max_pixels: usize,
+        sample_grid: u32,
+        identity: EngineIdentity,
+    ) -> Result<Self, FrameError> {
+        match (identity.engine, identity.tier) {
+            (EngineKind::CertifiedCpu, Tier::Scalar) => {
+                TileScratch::new(max_pixels, sample_grid).map(Self::Certified)
+            }
+            (EngineKind::CertifiedCpu, _) => {
+                TileScratch::new(max_pixels, sample_grid).map(Self::CertifiedTier)
+            }
+            (EngineKind::FastCpu, Tier::Scalar) => {
+                TileScratch::new(max_pixels, sample_grid).map(Self::Fast)
+            }
+            (EngineKind::FastCpu, _) => {
+                TileScratch::new(max_pixels, sample_grid).map(Self::FastTier)
+            }
+            (EngineKind::Metal | EngineKind::Cuda, _) => {
+                unreachable!("camera CPU identity is validated before scratch admission")
+            }
+        }
+    }
+}
+
+struct TileScratch<K: PixelKernel> {
     max_pixels: usize,
     sample_grid: u32,
     samples_per_pixel: usize,
     boundary: Vec<bool>,
-    color: Vec<PremulRgba>,
+    color: Vec<K::Pixel>,
     depth: Vec<f32>,
 }
 
@@ -5371,9 +5503,7 @@ fn scratch_buffer<T: Clone>(len: usize, value: T) -> Result<Vec<T>, FrameError> 
     Ok(buffer)
 }
 
-impl TileScratch {
-    const HEAP_ALLOCATIONS: u64 = 3;
-
+impl<K: PixelKernel> TileScratch<K> {
     fn new(max_pixels: usize, sample_grid: u32) -> Result<Self, FrameError> {
         let sample_edge = usize::try_from(sample_grid).map_err(|_| FrameError::TooLarge)?;
         let samples_per_pixel = sample_edge
@@ -5387,7 +5517,7 @@ impl TileScratch {
             sample_grid,
             samples_per_pixel,
             boundary: scratch_buffer(max_pixels, false)?,
-            color: scratch_buffer(samples, PremulRgba::TRANSPARENT)?,
+            color: scratch_buffer(samples, K::from_premul(PremulRgba::TRANSPARENT))?,
             depth: scratch_buffer(samples, 1.0)?,
         })
     }
@@ -5396,7 +5526,8 @@ impl TileScratch {
         let pixels = width * height;
         debug_assert!(pixels <= self.max_pixels);
         self.boundary[..pixels].fill(false);
-        self.color[..pixels * self.samples_per_pixel].fill(background.premultiply());
+        self.color[..pixels * self.samples_per_pixel]
+            .fill(K::from_premul(background.premultiply()));
         self.depth[..pixels * self.samples_per_pixel].fill(1.0);
     }
 
@@ -5537,7 +5668,7 @@ impl TileScratch {
                         let Some(source) = shade(shader, attributes) else {
                             continue;
                         };
-                        self.color[slot] = source_over(source, self.color[slot]);
+                        self.color[slot] = K::source_over_linear(source, self.color[slot]);
                         if depth_test {
                             self.depth[slot] = depth;
                         }
@@ -5596,18 +5727,19 @@ impl TileScratch {
                             // sequence. Source-over is associative over the
                             // reals, but changing the f64 grouping can move f16
                             // output bits for no semantic gain.
-                            let mut source = PremulRgba::TRANSPARENT;
+                            let mut source = K::from_premul(PremulRgba::TRANSPARENT);
                             for fragment in fragments.into_iter().flatten() {
-                                source = source_over(fragment.source, source);
+                                source = K::source_over_linear(fragment.source, source);
                             }
-                            self.color[slot] = source_over_premul(source, self.color[slot]);
+                            self.color[slot] = K::source_over_premul(source, self.color[slot]);
                             continue;
                         }
                         for fragment in fragments.into_iter().flatten() {
                             if fragment.depth >= self.depth[slot] {
                                 continue;
                             }
-                            self.color[slot] = source_over(fragment.source, self.color[slot]);
+                            self.color[slot] =
+                                K::source_over_linear(fragment.source, self.color[slot]);
                             self.depth[slot] = fragment.depth;
                         }
                     }
@@ -5616,26 +5748,18 @@ impl TileScratch {
         }
     }
 
-    fn resolve(&self, x: usize, y: usize, width: usize) -> PremulRgba {
+    fn resolve(&self, x: usize, y: usize, width: usize) -> K::Pixel {
         let pixel = y * width + x;
         if !self.boundary[pixel] || self.samples_per_pixel == 1 {
             return self.color[pixel * self.samples_per_pixel];
         }
         let start = pixel * self.samples_per_pixel;
-        let mut sum = PremulRgba::TRANSPARENT;
+        let mut sum = K::from_premul(PremulRgba::TRANSPARENT);
         for sample in &self.color[start..start + self.samples_per_pixel] {
-            sum.r += sample.r;
-            sum.g += sample.g;
-            sum.b += sample.b;
-            sum.a += sample.a;
+            sum = K::add(sum, *sample);
         }
         let inverse = 1.0 / self.samples_per_pixel as f64;
-        PremulRgba {
-            r: sum.r * inverse,
-            g: sum.g * inverse,
-            b: sum.b * inverse,
-            a: sum.a * inverse,
-        }
+        K::scale(sum, inverse)
     }
 }
 
@@ -5731,6 +5855,7 @@ fn mix_color(a: LinearRgba, b: LinearRgba, alpha: f64) -> LinearRgba {
     }
 }
 
+#[cfg(test)]
 fn source_over(source: LinearRgba, destination: PremulRgba) -> PremulRgba {
     let source = source.premultiply();
     let remaining = 1.0 - source.a;
@@ -5794,6 +5919,237 @@ mod tests {
             ..crate::camera::CameraConfig::default()
         })
         .expect("camera")
+    }
+
+    #[test]
+    fn camera_certified_kernels_preserve_original_f64_compositing_bits() {
+        fn bits(value: PremulRgba) -> [u64; 4] {
+            [value.r, value.g, value.b, value.a].map(f64::to_bits)
+        }
+        let mut original = color("#123456", 0.314_159_265_358).premultiply();
+        let mut scalar = CertifiedScalar::from_premul(original);
+        let mut tier = CertifiedBuildTier::from_premul(original);
+        for index in 0..96 {
+            // Neither color nor opacity is exactly representable in f32.
+            // Narrowing the certified camera shader at the kernel boundary
+            // must fail this before any f16 writeback can hide the change.
+            let source = LinearRgba {
+                r: (f64::from(index) + 1.0) / 113.0,
+                g: (f64::from(index) + 2.0) / 127.0,
+                b: (f64::from(index) + 3.0) / 139.0,
+                a: (f64::from(index) + 0.1) / 157.0,
+            };
+            original = source_over(source, original);
+            scalar = CertifiedScalar::source_over_linear(source, scalar);
+            tier = CertifiedBuildTier::source_over_linear(source, tier);
+            assert_eq!(bits(CertifiedScalar::to_premul(scalar)), bits(original));
+            assert_eq!(bits(CertifiedBuildTier::to_premul(tier)), bits(original));
+
+            let source = source.premultiply();
+            original = source_over_premul(source, original);
+            scalar = CertifiedScalar::source_over_premul(source, scalar);
+            tier = CertifiedBuildTier::source_over_premul(
+                CertifiedBuildTier::from_premul(source),
+                tier,
+            );
+            assert_eq!(bits(CertifiedScalar::to_premul(scalar)), bits(original));
+            assert_eq!(bits(CertifiedBuildTier::to_premul(tier)), bits(original));
+        }
+    }
+
+    #[test]
+    fn camera_fast_hdr_tiny_alpha_preserves_finite_visible_contributions() {
+        let camera = camera();
+        // These are admitted finite shader inputs. Their premultiplied RGB
+        // remains ordinary visible light, while casting the straight RGB and
+        // opacity independently to f32 would produce infinity times zero.
+        let paint = LinearRgba {
+            r: 1e100,
+            g: 5e99,
+            b: 2.5e99,
+            a: 1e-100,
+        };
+        let mesh = full_triangle(0.0, paint);
+        let surface = ThreeDDraw::Surface(SurfaceDraw {
+            shading: [0.0; 3],
+            ..SurfaceDraw::new(&mesh)
+        });
+        let dot = ThreeDDraw::TrueDot(TrueDotDraw::new([0.0; 3], 1.3, paint));
+        for draw in [surface, dot] {
+            let draws = [draw];
+            let prepare = |engine, tier| {
+                ThreeDJob::new(&camera, &draws, Tiling::default())
+                    .unwrap()
+                    .with_identity(EngineIdentity {
+                        engine,
+                        tier,
+                        renderer_version: RENDERER_VERSION,
+                    })
+                    .unwrap()
+            };
+            let reference = prepare(EngineKind::CertifiedCpu, Tier::Scalar)
+                .render(1)
+                .unwrap();
+            assert!(pixel(&reference, 16, 12)[0] > 0.5);
+            for &tier in Tier::ALL {
+                let fast = prepare(EngineKind::FastCpu, tier);
+                let serial = fast.render(1).unwrap();
+                assert!(pixel(&serial, 16, 12)[0] > 0.5);
+                for y in 0..camera.pixel_height() {
+                    for x in 0..camera.pixel_width() {
+                        for (expected, actual) in pixel(&reference, x, y)
+                            .into_iter()
+                            .zip(pixel(&serial, x, y))
+                        {
+                            assert!(expected.is_finite() && actual.is_finite());
+                            assert!((expected - actual).abs() <= 2e-3);
+                        }
+                    }
+                }
+                for threads in [4, 16] {
+                    assert_eq!(fast.render(threads).unwrap().as_bytes(), serial.as_bytes());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn camera_cpu_identity_is_validated_and_frozen_with_projection() {
+        let camera = camera();
+        let draws = [ThreeDDraw::TrueDot(TrueDotDraw::new(
+            [0.0; 3],
+            0.8,
+            color("#acf357", 0.73),
+        ))];
+        let prepare = || ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+        let original = prepare();
+        assert_eq!(original.engine_identity(), EngineIdentity::certified());
+        original.render(4).unwrap();
+        let original_pool = Arc::clone(&original.scratch_pool);
+        let fast = original.with_identity(EngineIdentity::fast()).unwrap();
+        assert_eq!(fast.engine_identity(), EngineIdentity::fast());
+        assert!(!Arc::ptr_eq(&original_pool, &fast.scratch_pool));
+        assert_eq!(original_pool.slots(), 4);
+        assert_eq!(fast.scratch_pool.slots(), 0);
+        let expected = fast.render(4).unwrap();
+        let projection = fast.into_projection().unwrap();
+        assert_eq!(projection.engine_identity(), EngineIdentity::fast());
+        for threads in [1, 4] {
+            let replay = projection.bind(&camera, &draws).unwrap();
+            assert_eq!(replay.engine_identity(), EngineIdentity::fast());
+            assert!(Arc::ptr_eq(&projection.scratch_pool, &replay.scratch_pool));
+            assert_eq!(
+                replay.render(threads).unwrap().as_bytes(),
+                expected.as_bytes()
+            );
+            assert_eq!(projection.scratch_pool.heap_allocs(), 0);
+        }
+
+        for engine in [EngineKind::Metal, EngineKind::Cuda] {
+            let identity = EngineIdentity {
+                engine,
+                ..EngineIdentity::certified()
+            };
+            assert_eq!(
+                prepare().with_identity(identity).unwrap_err(),
+                ThreeDError::Engine(FrameJobError::UnsupportedEngine { engine })
+            );
+        }
+        let version = EngineIdentity {
+            renderer_version: RENDERER_VERSION + 1,
+            ..EngineIdentity::fast()
+        };
+        assert_eq!(
+            prepare().with_identity(version).unwrap_err(),
+            ThreeDError::Engine(FrameJobError::RendererVersionMismatch {
+                requested: RENDERER_VERSION + 1,
+                compiled: RENDERER_VERSION,
+            })
+        );
+    }
+
+    #[test]
+    fn camera_fast_scratch_halves_color_storage_and_reuses_the_pool() {
+        fn storage<K: PixelKernel>(scratch: &TileScratch<K>) -> [usize; 3] {
+            [
+                scratch.color.capacity() * std::mem::size_of::<K::Pixel>(),
+                scratch.depth.capacity() * std::mem::size_of::<f32>(),
+                scratch.boundary.capacity() * std::mem::size_of::<bool>(),
+            ]
+        }
+        fn pool_storage(pool: &TileScratchPool) -> [usize; 3] {
+            let state = pool.state.lock().unwrap();
+            assert_eq!(state.idle.len(), state.slots);
+            state.idle.iter().fold([0; 3], |total, scratch| {
+                let bytes = match scratch {
+                    CameraScratch::Certified(scratch) => storage(scratch),
+                    CameraScratch::CertifiedTier(scratch) => storage(scratch),
+                    CameraScratch::Fast(scratch) => storage(scratch),
+                    CameraScratch::FastTier(scratch) => storage(scratch),
+                };
+                std::array::from_fn(|index| total[index] + bytes[index])
+            })
+        }
+        for samples in [1, 2, 4] {
+            let camera = Camera::new(crate::CameraConfig {
+                resolution: (32, 24),
+                samples,
+                background: color("#172849", 0.37),
+                ..crate::CameraConfig::default()
+            })
+            .unwrap();
+            let draws = [ThreeDDraw::TrueDot(TrueDotDraw::glow(
+                [0.2, 0.1, 0.0],
+                1.3,
+                color("#acf357", 0.73),
+            ))];
+            for &tier in Tier::ALL {
+                let prepare = |engine| {
+                    ThreeDJob::new(&camera, &draws, Tiling::default())
+                        .unwrap()
+                        .with_identity(EngineIdentity {
+                            engine,
+                            tier,
+                            renderer_version: RENDERER_VERSION,
+                        })
+                        .unwrap()
+                };
+                let certified = prepare(EngineKind::CertifiedCpu);
+                let fast = prepare(EngineKind::FastCpu);
+                let reference = certified.render(4).unwrap();
+                let candidate = fast.render(4).unwrap();
+                let certified_bytes = pool_storage(&certified.scratch_pool);
+                let fast_bytes = pool_storage(&fast.scratch_pool);
+                assert!(fast_bytes[0] > 0);
+                assert_eq!(certified_bytes[0], fast_bytes[0] * 2);
+                assert_eq!(certified_bytes[1..], fast_bytes[1..]);
+                let mut squared = 0.0;
+                let mut maximum = 0.0_f64;
+                for y in 0..camera.pixel_height() {
+                    for x in 0..camera.pixel_width() {
+                        for (a, b) in pixel(&reference, x, y)
+                            .into_iter()
+                            .zip(pixel(&candidate, x, y))
+                        {
+                            let error = (a - b).abs();
+                            maximum = maximum.max(error);
+                            squared += error * error;
+                        }
+                    }
+                }
+                let channels = f64::from(camera.pixel_width() * camera.pixel_height() * 4);
+                let rms = (squared / channels).sqrt();
+                assert!(maximum <= crate::FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR);
+                assert!(rms <= crate::FAST_VISUAL_BUDGET_V1_RMS_CHANNEL_ERROR);
+                eprintln!(
+                    "camera CPU same-run samples={samples} tier={tier:?}: max={maximum} rms={rms} certified_color_bytes={} fast_color_bytes={} depth_bytes={} boundary_bytes={}",
+                    certified_bytes[0], fast_bytes[0], fast_bytes[1], fast_bytes[2],
+                );
+                assert_eq!(fast.render(1).unwrap().as_bytes(), candidate.as_bytes());
+                assert_eq!(fast.scratch_pool.heap_allocs(), 0);
+                assert_eq!(pool_storage(&fast.scratch_pool), fast_bytes);
+            }
+        }
     }
 
     #[test]
@@ -8576,7 +8932,7 @@ mod tests {
         };
 
         let background = color("#000000", 1.0);
-        let mut scratch = TileScratch::new(1, 1).expect("one-pixel scratch");
+        let mut scratch = TileScratch::<CertifiedScalar>::new(1, 1).expect("one-pixel scratch");
         scratch.clear(1, 1, background);
         scratch.depth[0] = threshold;
         scratch.raster_vector(
@@ -8652,7 +9008,8 @@ mod tests {
             "the actual four-by-four raster lattice must observe this edge"
         );
 
-        let mut scratch = TileScratch::new(1, 4).expect("one-pixel supersample scratch");
+        let mut scratch =
+            TileScratch::<CertifiedScalar>::new(1, 4).expect("one-pixel supersample scratch");
         scratch.mark_vector_boundaries(&camera, vector, [16, 10, 17, 11], 1, 1);
         assert!(
             scratch.boundary[0],

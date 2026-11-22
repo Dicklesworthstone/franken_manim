@@ -65,7 +65,7 @@ fn run(
         .env_remove("PYTHONHOME");
     command.output().unwrap()
 }
-fn ok(output: Output, route: &str) -> String {
+fn ok(output: Output, route: &str, engine: &str) -> String {
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(
         output.status.success(),
@@ -73,7 +73,7 @@ fn ok(output: Output, route: &str) -> String {
         String::from_utf8_lossy(&output.stderr)
     );
     assert!(text.contains(&format!("\"route\":\"{route}\"")), "{text}");
-    assert!(text.contains("certified-cpu"), "{text}");
+    assert!(text.contains(engine), "{text}");
     assert!(text.contains("\"outstanding_slots\":0"), "{text}");
     text
 }
@@ -168,7 +168,7 @@ fn mixed_bundle(recorded: bool) -> Vec<u8> {
     }
     export_timeline_bundle(timeline, &mut stage, &RngRoot::from_seed(5)).unwrap()
 }
-fn serial(bundle: &TimelineBundle) -> Vec<Vec<u8>> {
+fn serial(bundle: &TimelineBundle, engine: EngineIdentity) -> Vec<Vec<u8>> {
     let config = fmn_config::Config::resolve(&[], None).unwrap().config;
     let mut frame = CameraFrame::default();
     frame
@@ -204,7 +204,7 @@ fn serial(bundle: &TimelineBundle) -> Vec<Vec<u8>> {
             let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
                 frame,
                 tiling: Tiling::default(),
-                engine: EngineIdentity::certified(),
+                engine,
                 threads: 1,
             })
             .unwrap();
@@ -241,6 +241,7 @@ fn every_camera_registration_reaches_the_real_binary_at_all_thread_caps() {
                     &[],
                 ),
                 "camera-cpu",
+                "certified-cpu",
             );
             let frames = pngs(&output.join(name));
             assert_eq!(frames.len(), 2);
@@ -281,8 +282,6 @@ fn pure_and_recorded_mixed_bundles_match_serial_camera_for_the_whole_artifact() 
             })
         );
         assert!(reader.requires_camera());
-        let expected = serial(&reader);
-        assert_ne!(expected[0], expected[1]);
         if recorded {
             let visible: Vec<_> = (0..reader.frame_count())
                 .map(|index| {
@@ -297,17 +296,25 @@ fn pure_and_recorded_mixed_bundles_match_serial_camera_for_the_whole_artifact() 
                 .collect();
             assert_eq!(visible, [false, true, true, false]);
         }
-        for threads in ["1", "4", "16"] {
-            let output = root.join(threads);
-            let text = ok(
-                run(&source, &output, "Mixed", threads, "png_sequence", &[]),
-                "compiled-camera-cpu",
-            );
-            assert!(text.contains("\"submitted\":4,\"emitted\":4"));
-            let frames = pngs(&output.join("Mixed"));
-            assert_eq!(frames.len(), expected.len());
-            for (png, want) in frames.iter().zip(&expected) {
-                assert_eq!(&decode_png(png, &PngLimits::default()).unwrap().rgba, want);
+        for (engine, identity, extra) in [
+            ("certified-cpu", EngineIdentity::certified(), &[][..]),
+            ("fast-cpu", EngineIdentity::fast(), &["--engine", "cpu"][..]),
+        ] {
+            let expected = serial(&reader, identity);
+            assert_ne!(expected[0], expected[1]);
+            for threads in ["1", "4", "16"] {
+                let output = root.join(format!("{engine}-{threads}"));
+                let text = ok(
+                    run(&source, &output, "Mixed", threads, "png_sequence", extra),
+                    "compiled-camera-cpu",
+                    engine,
+                );
+                assert!(text.contains("\"submitted\":4,\"emitted\":4"));
+                let frames = pngs(&output.join("Mixed"));
+                assert_eq!(frames.len(), expected.len());
+                for (png, want) in frames.iter().zip(&expected) {
+                    assert_eq!(&decode_png(png, &PngLimits::default()).unwrap().rgba, want);
+                }
             }
         }
     }
@@ -344,6 +351,11 @@ fn camera_native_streams_subdivisions_and_no_clobber_share_the_output_contract()
             ok(
                 run(&source, &output, "Mixed", threads, format, &[]),
                 "compiled-camera-cpu",
+                if format == "gif" {
+                    "fast-cpu"
+                } else {
+                    "certified-cpu"
+                },
             );
             let bytes = std::fs::read(output.join(format!("Mixed.{format}"))).unwrap();
             if let Some(expected) = &expected {
@@ -373,6 +385,7 @@ fn camera_native_streams_subdivisions_and_no_clobber_share_the_output_contract()
             &["--subdivide"],
         ),
         "camera-cpu",
+        "certified-cpu",
     );
     let naming = fmn_scene::OutputNaming {
         output_directory: output,
@@ -574,6 +587,7 @@ fn compiled_camera_ranges_preserve_source_camera_and_svg_stop_state() {
     ok(
         run(&source, &full, "CameraRange", "1", "png_sequence", &[]),
         "compiled-camera-cpu",
+        "certified-cpu",
     );
     let full = pngs(&full.join("CameraRange"));
     assert_eq!(full.len(), 5);
@@ -591,6 +605,7 @@ fn compiled_camera_ranges_preserve_source_camera_and_svg_stop_state() {
                 &["-n", "1,2", "--prerun"],
             ),
             "compiled-camera-cpu",
+            "certified-cpu",
         );
         assert!(stdout.contains("\"frames\":1,\"segments\":1"), "{stdout}");
         assert!(stdout.contains("\"source_frames\":[2,3]"), "{stdout}");

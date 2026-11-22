@@ -44,8 +44,7 @@ fn mixed_surface_and_vector_scene_uses_the_real_camera_pose() {
     let mut images = Vec::new();
     for (directory, theta, phi) in [("/front", 0.0, 0.0), ("/oblique", 0.6, 0.8)] {
         let mut options = options(directory);
-        // Standard mode must still report the certified CPU camera engine,
-        // not the fast 2D engine that it bypasses.
+        // Standard mode selects the camera compositor's f32 CPU kernel.
         options.config.determinism.mode = DeterminismMode::Standard;
         let mut camera = options.camera_config().unwrap();
         assert_eq!(camera.frame.height(), 4.0);
@@ -56,7 +55,7 @@ fn mixed_surface_and_vector_scene_uses_the_real_camera_pose() {
             .unwrap();
         options.camera = Some(camera);
         let report = render_with_fs(&mut MixedScene, options, fs.clone()).unwrap();
-        assert_eq!(report.execution_plan.engine, ExecutionEngine::CertifiedCpu);
+        assert_eq!(report.execution_plan.engine, ExecutionEngine::FastCpu);
         assert_eq!(report.artifact.frame_count, 1);
         let image = pixels(&fs, directory, 0);
         let colored = image

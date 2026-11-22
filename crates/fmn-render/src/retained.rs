@@ -560,6 +560,8 @@ impl RetainedFrameRenderer {
         stage: &Stage,
         camera: &Camera,
     ) -> Result<PreparedCameraFrame, RetainedFrameRendererError> {
+        crate::three_d::validate_cpu_identity(self.config.engine)
+            .map_err(RetainedFrameRendererError::ThreeD)?;
         let scene = self.prepare_camera_scene(stage, camera)?;
         if !self
             .camera_plan
@@ -574,6 +576,7 @@ impl RetainedFrameRenderer {
             && Arc::ptr_eq(&previous.scene, &scene)
             && Arc::ptr_eq(&previous.plan, &plan)
             && previous.projection.tiling == tiling
+            && previous.projection.identity == self.config.engine
             && same_projection_camera(&previous.projection.camera, camera)
         {
             return Ok(previous.clone());
@@ -584,6 +587,7 @@ impl RetainedFrameRenderer {
             scene,
             projection: Arc::new(CameraProjection {
                 camera: camera.clone(),
+                identity: self.config.engine,
                 tiling,
                 cache: Arc::clone(&self.camera_projection_cache),
                 prepared: Mutex::new(None),
@@ -689,6 +693,12 @@ pub struct PreparedCameraFrame {
 }
 
 impl PreparedCameraFrame {
+    /// CPU compositing policy captured with the geometry and camera.
+    #[must_use]
+    pub fn engine_identity(&self) -> EngineIdentity {
+        self.projection.identity
+    }
+
     /// Whether two captures share the complete immutable raster input.
     ///
     /// A true result permits reusing a successful raw frame, regardless of
@@ -887,6 +897,7 @@ impl PreparedCameraBands {
 #[derive(Debug)]
 struct CameraProjection {
     camera: Camera,
+    identity: EngineIdentity,
     tiling: Tiling,
     cache: Arc<CameraProjectionCache>,
     prepared: Mutex<Option<Arc<PreparedThreeDProjection>>>,
@@ -902,14 +913,17 @@ impl CameraProjection {
         if let Some(projection) = &*prepared {
             return Ok(Arc::clone(projection));
         }
-        let projection = Arc::new(PreparedThreeDProjection::prepare_retained(
-            &self.camera,
-            draws,
-            sources,
-            self.tiling,
-            ThreeDPreparationLimits::default(),
-            &self.cache,
-        )?);
+        let projection = Arc::new(
+            PreparedThreeDProjection::prepare_retained(
+                &self.camera,
+                draws,
+                sources,
+                self.tiling,
+                ThreeDPreparationLimits::default(),
+                &self.cache,
+            )?
+            .with_identity(self.identity)?,
+        );
         *prepared = Some(Arc::clone(&projection));
         Ok(projection)
     }
@@ -1899,6 +1913,14 @@ mod tests {
     }
 
     fn fresh_camera_bits(stage: &Stage, camera: &Camera) -> Vec<u8> {
+        fresh_camera_bits_with_identity(stage, camera, EngineIdentity::certified())
+    }
+
+    fn fresh_camera_bits_with_identity(
+        stage: &Stage,
+        camera: &Camera,
+        identity: EngineIdentity,
+    ) -> Vec<u8> {
         // Independent serial oracle: compile directly without retaining or
         // rebinding the owned projection under test.
         let mut plan = RenderPlan::new();
@@ -1909,6 +1931,8 @@ mod tests {
         plan.commit_image_frame(scene.images.clone());
         let draws = camera_draws(&plan, &scene).unwrap();
         crate::ThreeDJob::new(camera, &draws, config(1).tiling)
+            .unwrap()
+            .with_identity(identity)
             .unwrap()
             .render(1)
             .unwrap()
@@ -2022,7 +2046,7 @@ mod tests {
         assert!(!renderer.last_camera_frame_reused());
         assert_eq!(
             renderer.frame().as_bytes(),
-            fresh_camera_bits(&stage, &camera)
+            fresh_camera_bits_with_identity(&stage, &camera, configured.engine)
         );
         assert_eq!(renderer.frame().as_bytes().as_ptr(), allocation);
         assert_eq!(original.render(1).unwrap().as_bytes(), original_pixels);
@@ -2061,6 +2085,118 @@ mod tests {
         assert_eq!(renderer.raster_team_stats().frames_completed, completed);
         assert_eq!(renderer.frame().as_bytes(), pixels);
         assert_eq!(renderer.frame().as_bytes().as_ptr(), allocation);
+    }
+
+    #[test]
+    fn camera_captures_and_pixel_tiles_keep_cpu_engine_identities_separate() {
+        let mut camera = camera();
+        let mut stage = Stage::new();
+        let mut roots = Vec::new();
+        for object in [
+            vector(),
+            surface((2, 2)),
+            dot_cloud(),
+            triangle_mesh(),
+            image_quad(&camera, [213, 71, 119, 131].repeat(4)),
+        ] {
+            let mob = stage.add(object);
+            stage.add_to_scene(mob).unwrap();
+            roots.push(mob);
+        }
+        let mut renderer = RetainedFrameRenderer::new(config(1)).unwrap();
+        let identities = [
+            EngineIdentity::certified(),
+            EngineIdentity {
+                tier: crate::Tier::Scalar,
+                ..EngineIdentity::fast()
+            },
+            EngineIdentity::fast(),
+            EngineIdentity {
+                tier: crate::Tier::COMPILED,
+                ..EngineIdentity::certified()
+            },
+        ];
+        let mut captures: Vec<PreparedCameraFrame> = Vec::new();
+        let mut expected = Vec::new();
+        for identity in identities {
+            renderer.config.engine = identity;
+            let capture = renderer.prepare_with_camera(&stage, &camera).unwrap();
+            assert_eq!(capture.engine_identity(), identity);
+            if let Some(previous) = captures.last() {
+                assert!(!previous.same_capture(&capture));
+                assert!(Arc::ptr_eq(&previous.scene, &capture.scene));
+                assert!(Arc::ptr_eq(&previous.plan, &capture.plan));
+            }
+            expected.push(fresh_camera_bits_with_identity(&stage, &camera, identity));
+            captures.push(capture);
+        }
+        // Replay must carry the selected engine after all mutable inputs and
+        // the renderer which prepared them have changed or disappeared.
+        for root in roots {
+            stage.shift(root, [4.0, -2.0, 1.0]);
+        }
+        camera.frame_mut().set_center([2.0, 0.0, 0.0]).unwrap();
+        drop(renderer);
+        drop(stage);
+        drop(camera);
+
+        for threads in [1, 4] {
+            let mut team = RasterTeam::new(threads).unwrap();
+            let mut cache =
+                PixelTileCache::with_budgets(PixelTileCache::DEFAULT_KEY_BUDGET_BYTES, 0);
+            let mut pixels = FrameBuffer::new(captures[0].layout().unwrap());
+            for (position, index) in [0, 0, 1, 1, 2, 2, 3, 3, 0, 0].into_iter().enumerate() {
+                pixels.plane_mut(0).fill(0xA5);
+                let stats = captures[index]
+                    .render_cached_into_with_team(&mut team, &mut cache, &mut pixels)
+                    .unwrap();
+                assert_eq!(pixels.as_bytes(), expected[index]);
+                assert_eq!(stats.cache, cache.stats());
+                if position % 2 == 0 {
+                    assert_eq!(stats.cache.hits, 0, "another engine cannot supply pixels");
+                    assert!(stats.cache.misses > 0);
+                } else {
+                    assert!(
+                        stats.cache.hits > 0,
+                        "the same engine must reuse exact tiles"
+                    );
+                    assert_eq!(stats.cache.misses, 0);
+                }
+                assert_eq!(captures[index].engine_identity(), identities[index]);
+            }
+        }
+    }
+
+    #[test]
+    fn camera_refuses_invalid_cpu_identity_before_retaining_inputs() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let mob = stage.add(vector());
+        stage.add_to_scene(mob).unwrap();
+        for identity in [
+            EngineIdentity::metal(),
+            EngineIdentity {
+                engine: crate::EngineKind::Cuda,
+                ..EngineIdentity::fast()
+            },
+            EngineIdentity {
+                renderer_version: crate::RENDERER_VERSION + 1,
+                ..EngineIdentity::fast()
+            },
+        ] {
+            let mut configuration = config(1);
+            configuration.engine = identity;
+            let mut renderer = RetainedFrameRenderer::new(configuration).unwrap();
+            let pixels = renderer.frame().as_bytes().to_vec();
+            assert!(matches!(
+                renderer.prepare_with_camera(&stage, &camera),
+                Err(RetainedFrameRendererError::ThreeD(ThreeDError::Engine(_)))
+            ));
+            assert!(renderer.camera_scene.is_none());
+            assert!(renderer.camera_plan.is_none());
+            assert!(renderer.camera_projection.is_none());
+            assert_eq!(renderer.frame().as_bytes(), pixels);
+        }
     }
 
     #[test]

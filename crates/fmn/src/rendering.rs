@@ -1039,18 +1039,19 @@ impl RenderSink {
             PlanRequest::standard(RenderIntent::Offline, surface, output_format)
         }
         .with_max_frames_in_flight(options.frames_in_flight);
-        // ThreeDJob's camera path has one certified CPU implementation. Do not
-        // report a fast/annex engine that did not actually produce the pixels.
-        if options.camera.is_some() {
-            request = request.with_engine(ExecutionEngine::CertifiedCpu);
-        }
         if let ThreadPolicy::Fixed(threads) = config.render.threads {
             let threads = usize::try_from(threads)
                 .map_err(|_| RenderError::InvalidOptions("thread count exceeds this target"))?;
             request = request.with_max_cpu_threads(threads);
         }
-        let plan = crate::autotune::derive_execution_plan(fs.as_ref(), config, request, &topology)
-            .map_err(RenderError::Plan)?;
+        let plan = if options.camera.is_some() {
+            // The calibration corpus measures planar rasterization. Camera
+            // compositing has its own workload and keeps baseline tile sizes.
+            ExecutionPlan::derive(request, &topology, None)
+        } else {
+            crate::autotune::derive_execution_plan(fs.as_ref(), config, request, &topology)
+        }
+        .map_err(RenderError::Plan)?;
         // Account for retained pixels separately from in-flight raw/output
         // surfaces. Each affine render team retains its own tile cache and
         // each multithreaded team owns disjoint raster bands. Camera

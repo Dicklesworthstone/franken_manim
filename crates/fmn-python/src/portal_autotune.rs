@@ -16,8 +16,8 @@ pub(super) fn file_snapshot(py: Python<'_>, certified: bool) -> PyResult<fmn_con
     from_live(py, true)
 }
 
-/// The camera path executes the certified CPU renderer in a standard artifact
-/// mode. Its AA remains configured, but FastCpu cache settings are irrelevant.
+/// Camera compositing retains configured AA and baseline tile geometry. The
+/// persisted planar calibration does not measure this workload.
 pub(super) fn camera_snapshot(py: Python<'_>) -> PyResult<fmn_config::Config> {
     from_live(py, false)
 }
@@ -114,6 +114,7 @@ fn from_live(py: Python<'_>, include_cache: bool) -> PyResult<fmn_config::Config
 #[derive(Clone, Debug)]
 pub(super) struct Report {
     source: &'static str,
+    applies_to: &'static str,
     engine: &'static str,
     fine_tile: u32,
     macro_tile: u32,
@@ -128,6 +129,7 @@ impl Report {
     pub(super) fn from_plan(plan: &fmn_runtime::ExecutionPlan) -> Self {
         use fmn_runtime::{Determinism, ExecutionEngine, TuningSource};
         Self {
+            applies_to: "retained-planar-2d",
             source: match plan.tuning_source {
                 TuningSource::CertifiedProfile => "certified-profile",
                 TuningSource::StandardBaseline => "standard-baseline",
@@ -155,6 +157,14 @@ impl Report {
         }
     }
 
+    pub(super) fn for_camera(plan: &fmn_runtime::ExecutionPlan) -> Self {
+        let mut report = Self::from_plan(plan);
+        report.applies_to = "retained-camera";
+        report.bypass_reason =
+            Some("planar raster calibration does not apply to the camera compositor");
+        report
+    }
+
     pub(super) fn with_file_routes(
         mut self,
         planar: u64,
@@ -172,7 +182,7 @@ impl Report {
         out.set_item("schema", "fmn-python.raster-autotune")?;
         out.set_item("version", 1)?;
         out.set_item("source", self.source)?;
-        out.set_item("applies_to", "retained-planar-2d")?;
+        out.set_item("applies_to", self.applies_to)?;
         out.set_item("engine", self.engine)?;
         out.set_item("fine_tile", self.fine_tile)?;
         out.set_item("macro_tile", self.macro_tile)?;

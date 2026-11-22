@@ -11,20 +11,18 @@ use std::time::Duration;
 
 use fmn::prelude::*;
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind, VirtualFs};
-use fmn_platform::process::{
-    FfmpegExecutable, FfmpegLocator, FfmpegLocatorError, NoProcessRunner,
-};
+use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError, NoProcessRunner};
 
 static NEXT_DESTINATION: AtomicUsize = AtomicUsize::new(0);
 
 fn destination(label: &str) -> PathBuf {
     let id = NEXT_DESTINATION.fetch_add(1, Ordering::SeqCst);
-    let nonce = std::time::SystemTime::now()
+    let timestamp_nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos();
     std::env::temp_dir().join(format!(
-        "fmn-concat-{label}-{}-{nonce}-{id}.mp4",
+        "fmn-concat-{label}-{}-{timestamp_nanos}-{id}.mp4",
         std::process::id(),
     ))
 }
@@ -152,7 +150,10 @@ fn invalid_policy_and_certification_fail_before_source_reads_or_tool_discovery()
 
     for request in cases {
         let error = concatenate_video_with_fs(&inputs, request, source.clone()).unwrap_err();
-        assert!(matches!(error, VideoConcatError::InvalidOptions(_)), "{error}");
+        assert!(
+            matches!(error, VideoConcatError::InvalidOptions(_)),
+            "{error}"
+        );
     }
     let error = concatenate_video_with_fs(&[], valid.clone(), source.clone()).unwrap_err();
     assert!(matches!(error, VideoConcatError::InvalidOptions(_)));
@@ -171,7 +172,11 @@ fn invalid_policy_and_certification_fail_before_source_reads_or_tool_discovery()
     request.determinism = DeterminismMode::Certified;
     let error = concatenate_video_with_fs(&inputs, request, source.clone()).unwrap_err();
     assert!(matches!(error, VideoConcatError::Capability(_)));
-    assert!(error.to_string().contains("outside the certified artifact set"));
+    assert!(
+        error
+            .to_string()
+            .contains("outside the certified artifact set")
+    );
     assert!(source.reads.lock().unwrap().is_empty());
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
@@ -180,12 +185,8 @@ fn invalid_policy_and_certification_fail_before_source_reads_or_tool_discovery()
 fn explicit_source_entry_point_never_infers_host_process_authority() {
     let source = Arc::new(SourceFs::default());
     let request = VideoConcatOptions::new(destination("no-capability"));
-    let error = concatenate_video_with_fs(
-        &[PathBuf::from("/scene.mp4")],
-        request,
-        source.clone(),
-    )
-    .unwrap_err();
+    let error = concatenate_video_with_fs(&[PathBuf::from("/scene.mp4")], request, source.clone())
+        .unwrap_err();
     assert!(matches!(error, VideoConcatError::Capability(_)));
     assert!(error.to_string().contains("FfmpegCapability"));
     assert!(source.reads.lock().unwrap().is_empty());
@@ -271,21 +272,26 @@ fn missing_empty_and_oversized_sources_are_typed_before_tool_discovery() {
     for (path, kind) in [("/missing.mp4", 0), ("/empty.mp4", 1), ("/large.mp4", 2)] {
         let (mut request, calls) = options("source-refusal");
         request.max_input_bytes = 3;
-        let error = concatenate_video_with_fs(
-            &[PathBuf::from(path)],
-            request,
-            source.clone(),
-        )
-        .unwrap_err();
+        let error =
+            concatenate_video_with_fs(&[PathBuf::from(path)], request, source.clone()).unwrap_err();
         match kind {
             0 => assert!(matches!(
                 error,
-                VideoConcatError::Input { index: 0, error: FsError::NotFound { .. } },
+                VideoConcatError::Input {
+                    index: 0,
+                    error: FsError::NotFound { .. }
+                },
             )),
-            1 => assert!(matches!(error, VideoConcatError::EmptyInput { index: 0, .. })),
+            1 => assert!(matches!(
+                error,
+                VideoConcatError::EmptyInput { index: 0, .. }
+            )),
             _ => assert!(matches!(
                 error,
-                VideoConcatError::Input { index: 0, error: FsError::TooLarge { limit: 3, .. } },
+                VideoConcatError::Input {
+                    index: 0,
+                    error: FsError::TooLarge { limit: 3, .. }
+                },
             )),
         }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
@@ -298,15 +304,14 @@ fn missing_empty_and_oversized_sources_are_typed_before_tool_discovery() {
     source.inner.insert("/untrusted.mp4", b"1234".to_vec());
     let (mut request, calls) = options("broken-fs-bound");
     request.max_input_bytes = 3;
-    let error = concatenate_video_with_fs(
-        &[PathBuf::from("/untrusted.mp4")],
-        request,
-        source,
-    )
-    .unwrap_err();
+    let error =
+        concatenate_video_with_fs(&[PathBuf::from("/untrusted.mp4")], request, source).unwrap_err();
     assert!(matches!(
         error,
-        VideoConcatError::Input { index: 0, error: FsError::TooLarge { limit: 3, .. } },
+        VideoConcatError::Input {
+            index: 0,
+            error: FsError::TooLarge { limit: 3, .. }
+        },
     ));
     assert_eq!(calls.load(Ordering::SeqCst), 0);
 }
@@ -322,12 +327,9 @@ fn existing_output_is_preserved_before_source_reads_or_tool_discovery() {
             std::fs::write(&request.output, b"existing movie").unwrap();
         }
         let output = request.output.clone();
-        let error = concatenate_video_with_fs(
-            &[PathBuf::from("/scene.mp4")],
-            request,
-            source.clone(),
-        )
-        .unwrap_err();
+        let error =
+            concatenate_video_with_fs(&[PathBuf::from("/scene.mp4")], request, source.clone())
+                .unwrap_err();
         assert!(matches!(error, VideoConcatError::DestinationExists(path) if path == output));
         if directory {
             assert!(output.is_dir());
@@ -347,12 +349,8 @@ fn dangling_output_link_is_a_conflict_even_when_its_target_is_absent() {
     let target = destination("absent-target");
     std::os::unix::fs::symlink(&target, &request.output).unwrap();
     let output = request.output.clone();
-    let error = concatenate_video_with_fs(
-        &[PathBuf::from("/scene.mp4")],
-        request,
-        source.clone(),
-    )
-    .unwrap_err();
+    let error = concatenate_video_with_fs(&[PathBuf::from("/scene.mp4")], request, source.clone())
+        .unwrap_err();
     assert!(matches!(error, VideoConcatError::DestinationExists(path) if path == output));
     assert_eq!(std::fs::read_link(output).unwrap(), target);
     assert!(!target.exists());

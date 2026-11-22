@@ -1104,12 +1104,12 @@ impl NativeFramePipeline {
             }
         };
         let viewport = config.frame.viewport;
-        if camera.as_ref().is_some_and(|camera| {
-            camera.pixel_shape() != (viewport.width, viewport.height)
-                || plan.engine != ExecutionEngine::CertifiedCpu
-        }) {
+        if camera
+            .as_ref()
+            .is_some_and(|camera| camera.pixel_shape() != (viewport.width, viewport.height))
+        {
             return Err(RenderError::InvalidOptions(
-                "camera dimensions and certified CPU identity must match the plan",
+                "camera dimensions must match the execution plan",
             ));
         }
         let max_projection_bytes_per_compiler = max_projection_bytes_per_compiler

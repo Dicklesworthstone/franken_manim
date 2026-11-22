@@ -71,23 +71,18 @@ impl Capture {
             fmn_runtime::SurfaceSpec::lumen(width, height),
             fmn_runtime::OutputPixelFormat::Rgba8,
         )
-        .with_max_cpu_threads(threads)
-        // Camera/ThreeD executes this engine even in standard artifact mode.
-        // A FastCpu tile measurement must never be applied to that route.
-        .with_engine(fmn_runtime::ExecutionEngine::CertifiedCpu);
-        let plan = fmn::autotune::derive_execution_plan(
-            &fmn_platform::fs::StdFs,
-            &config,
+        .with_max_cpu_threads(threads);
+        // The camera compositor has a real FastCpu kernel, but the persisted
+        // planar probe does not measure its tile geometry.
+        let plan = fmn_runtime::ExecutionPlan::derive(
             request,
             &fmn_platform::topology::HardwareTopology::current(),
+            None,
         )
         .map_err(native_error)?;
         let engine = match plan.engine {
-            // render_with_camera executes ThreeDJob's CPU route, not the
-            // affine FastCpu FrameJob. Python/source execution is uncertified.
-            fmn_runtime::ExecutionEngine::FastCpu | fmn_runtime::ExecutionEngine::CertifiedCpu => {
-                EngineIdentity::certified()
-            }
+            fmn_runtime::ExecutionEngine::FastCpu => EngineIdentity::fast(),
+            fmn_runtime::ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
             _ => {
                 return Err(CapabilityError::new_err(
                     "Python Studio capture requires a CPU execution plan",
@@ -137,7 +132,7 @@ impl Capture {
             Self {
                 bundle: None,
                 renderer,
-                tuning: portal_autotune::Report::from_plan(&plan),
+                tuning: portal_autotune::Report::for_camera(&plan),
                 camera,
                 rgba,
                 light: None,

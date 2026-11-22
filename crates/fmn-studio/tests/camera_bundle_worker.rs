@@ -583,6 +583,16 @@ fn viewport_seed_and_engine_are_truthful_inputs_and_failures_leave_position_inta
     );
     other = view;
     other.renderer.engine = EngineIdentity::fast();
+    assert_ne!(
+        identity,
+        CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &other).unwrap()
+    );
+    other.renderer.engine = EngineIdentity::metal();
+    assert!(CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &other).is_err());
+    other.renderer.engine = EngineIdentity {
+        renderer_version: fmn_render::RENDERER_VERSION + 1,
+        ..EngineIdentity::fast()
+    };
     assert!(CameraBundleWorker::input_reads(sha256(b"build"), &read, &bundle, &other).is_err());
     let mut worker = worker(&source, 1);
     scrub(&mut worker, 2);

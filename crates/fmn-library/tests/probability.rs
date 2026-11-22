@@ -102,13 +102,21 @@ fn both_divisions_preserve_explicit_zero_probability_bands() {
     let colors = vertical_default_colors();
     let probabilities = [0.0, 0.25, 0.75, 0.0];
     for (bands, dimension) in [
-        (space.horizontal_division(&probabilities, &colors).unwrap(), 1),
+        (
+            space.horizontal_division(&probabilities, &colors).unwrap(),
+            1,
+        ),
         (space.vertical_division(&probabilities, &colors).unwrap(), 0),
     ] {
         assert_eq!(bands.children().len(), 4);
         for (band, expected_extent) in bands.children().iter().zip([0.0, 0.75, 2.25, 0.0]) {
             assert!((band.length_over_dim(dimension) - expected_extent).abs() < 1e-12);
-            assert!(band.points().iter().flatten().all(|value| value.is_finite()));
+            assert!(
+                band.points()
+                    .iter()
+                    .flatten()
+                    .all(|value| value.is_finite())
+            );
         }
     }
 }

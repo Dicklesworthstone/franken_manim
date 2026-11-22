@@ -17,7 +17,9 @@ use fmn_render::{
     Camera, EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig,
     ScreenMap, Tiling, Viewport,
 };
-use fmn_runtime::{ExecutionPlan, OutputPixelFormat, PlanRequest, RenderIntent, SurfaceSpec};
+use fmn_runtime::{
+    ExecutionEngine, ExecutionPlan, OutputPixelFormat, PlanRequest, RenderIntent, SurfaceSpec,
+};
 use fmn_scene::CameraRig;
 
 fn options(path: &str, window: usize) -> RenderOptions {
@@ -49,7 +51,11 @@ fn config(plan: &ExecutionPlan, camera: &CameraConfig) -> RetainedFrameRendererC
             macro_tile: plan.macro_tile,
             fine_tile: plan.fine_tile,
         },
-        engine: EngineIdentity::certified(),
+        engine: match plan.engine {
+            ExecutionEngine::CertifiedCpu => EngineIdentity::certified(),
+            ExecutionEngine::FastCpu => EngineIdentity::fast(),
+            _ => panic!("the camera fixture requires a CPU plan"),
+        },
         threads: 1,
     }
 }
@@ -145,10 +151,24 @@ fn images(fs: &VirtualFs, path: &str, count: u64) -> Vec<Vec<u8>> {
 
 #[test]
 fn camera_orbit_zoom_fov_and_light_match_serial_snapshots_at_every_window() {
+    use fmn_config::config::DeterminismMode;
+    for (mode, engine) in [
+        (DeterminismMode::Certified, ExecutionEngine::CertifiedCpu),
+        (DeterminismMode::Standard, ExecutionEngine::FastCpu),
+    ] {
+        assert_camera_orbit_matches_serial(mode, engine);
+    }
+}
+
+fn assert_camera_orbit_matches_serial(
+    mode: fmn_config::config::DeterminismMode,
+    engine: ExecutionEngine,
+) {
     let mut first = None;
     for window in [1, 2, 4] {
         let fs = Arc::new(VirtualFs::new());
-        let options = options("/orbit", window);
+        let mut options = options("/orbit", window);
+        options.config.determinism.mode = mode;
         let base = options.camera_config().unwrap();
         let mut scene = Scene::new(
             RuntimeConfig::from_config(&options.config),
@@ -159,6 +179,7 @@ fn camera_orbit_zoom_fov_and_light_match_serial_snapshots_at_every_window() {
         populate(&mut scene).unwrap();
         let animation = rig.animate_to(&mut scene, &target(&base)).unwrap();
         let report = render_camera_with_fs(factory, options, fs.clone()).unwrap();
+        assert_eq!(report.execution_plan.engine, engine);
         let stats = report.frame_pipeline.as_ref().unwrap();
         assert_eq!(
             (stats.submitted, stats.emitted, stats.outstanding_slots),

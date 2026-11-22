@@ -300,9 +300,12 @@ pub fn concatenate_video_with_fs(
         let source_bytes = u64::try_from(bytes.len()).map_err(|_| {
             VideoConcatError::InvalidOptions("source length exceeds the receipt range")
         })?;
-        total_input_bytes = total_input_bytes.checked_add(source_bytes).ok_or(
-            VideoConcatError::InvalidOptions("combined source byte count overflow"),
-        )?;
+        total_input_bytes =
+            total_input_bytes
+                .checked_add(source_bytes)
+                .ok_or(VideoConcatError::InvalidOptions(
+                    "combined source byte count overflow",
+                ))?;
         reports.push(VideoClipReport {
             source_path: path.clone(),
             bytes: source_bytes,
@@ -387,9 +390,9 @@ fn validate_options(
         }
     }
     let extension = options.output.extension().and_then(|value| value.to_str());
-    if !extension.is_some_and(|value| {
-        value.eq_ignore_ascii_case("mp4") || value.eq_ignore_ascii_case("mov")
-    }) {
+    if !extension
+        .is_some_and(|value| value.eq_ignore_ascii_case("mp4") || value.eq_ignore_ascii_case("mov"))
+    {
         return Err(VideoConcatError::InvalidOptions(
             "destination must have an MP4 or MOV extension",
         ));

@@ -52,7 +52,8 @@ def studio_capture(unusable_cache=False):
     assert recording.frame_count == 1
     report = recording.autotune
     assert report["source"] == "standard-baseline"
-    assert report["engine"] == "certified-cpu"
+    assert report["engine"] == "fast-cpu"
+    assert report["applies_to"] == "retained-camera"
     assert report["fine_tile"] == _BASELINE_FINE
     assert report["macro_tile"] == _BASELINE_MACRO
     assert report["diagnostic"] is None
@@ -117,7 +118,7 @@ try:
     # witness separately checks that the cold profile read creates no root.
     assert not (root / "missing-cache" / _AUTOTUNE_NAMESPACE).exists()
 
-    # A populated FastCpu record must not enter the distinct camera engine.
+    # A populated planar FastCpu record must not tune the camera compositor.
     config["directories"]["cache"] = str(root / "warm-cache")
     studio_capture()
     studio_capture(unusable_cache=True)

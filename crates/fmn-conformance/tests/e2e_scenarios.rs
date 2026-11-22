@@ -3966,9 +3966,8 @@ fn native_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     let total = (A.len() * 2 + B.len()) as u64;
     let options = |destination: &Path| {
         let mut options = VideoConcatOptions::new(destination);
-        options.ffmpeg_bin = PathBuf::from(env!(
-            "CARGO_BIN_FILE_FMN_OUTPUT_fmn-ffmpeg-test-fixture"
-        ));
+        options.ffmpeg_bin =
+            PathBuf::from(env!("CARGO_BIN_FILE_FMN_OUTPUT_fmn-ffmpeg-test-fixture"));
         options.ffmpeg = Some(fmn::FfmpegCapability {
             runner: Arc::new(StdProcessRunner),
             locator: Arc::new(ReplaceSourcesAtDiscovery {
@@ -3988,7 +3987,9 @@ fn native_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     let report = concatenate_video_with_fs(&inputs, options(&destination), fs.clone())
         .map_err(|error| fail(format!("native video concat: {error}")))?;
     if report.inputs.len() != expected.len() || report.total_input_bytes != total {
-        return Err(fail("video concat lost an input position or its byte count"));
+        return Err(fail(
+            "video concat lost an input position or its byte count",
+        ));
     }
     let mut receipts = String::from("position\tbytes\tsha256\n");
     for (index, expected) in expected.iter().enumerate() {
@@ -4005,10 +4006,20 @@ fn native_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
             receipt.digest.to_hex(),
         ));
     }
-    if fs.read(&a).map_err(|error| fail(error.to_string()))?.as_slice() != REPLACED
-        || fs.read(&b).map_err(|error| fail(error.to_string()))?.as_slice() != REPLACED
+    if fs
+        .read(&a)
+        .map_err(|error| fail(error.to_string()))?
+        .as_slice()
+        != REPLACED
+        || fs
+            .read(&b)
+            .map_err(|error| fail(error.to_string()))?
+            .as_slice()
+            != REPLACED
     {
-        return Err(fail("source replacement control did not run during tool discovery"));
+        return Err(fail(
+            "source replacement control did not run during tool discovery",
+        ));
     }
     let published = std::fs::read(&destination).map_err(|error| fail(error.to_string()))?;
     if published != OUTPUT
@@ -4017,7 +4028,9 @@ fn native_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         || report.boundary.artifact_digest != sha256(OUTPUT)
         || report.boundary.invocations.len() != 1
     {
-        return Err(fail("video concat published the wrong fixture or output evidence"));
+        return Err(fail(
+            "video concat published the wrong fixture or output evidence",
+        ));
     }
     let invocation = &report.boundary.invocations[0];
     if invocation.provenance.encoder.is_some()
@@ -4036,7 +4049,9 @@ fn native_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
             .parent()
             .is_none_or(|path| path.exists())
     {
-        return Err(fail("video concat lost stream-copy provenance or private cleanup"));
+        return Err(fail(
+            "video concat lost stream-copy provenance or private cleanup",
+        ));
     }
 
     let conflict = concatenate_video_with_fs(&inputs, options(&destination), fs.clone());
@@ -4061,7 +4076,9 @@ fn native_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
         })
     ) || limited_output.exists()
     {
-        return Err(fail("video concat did not refuse an over-budget repeated clip"));
+        return Err(fail(
+            "video concat did not refuse an over-budget repeated clip",
+        ));
     }
 
     let certified_output = root.join("certified.mp4");
@@ -13596,6 +13613,105 @@ fn native_surface_holes_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("native_surface_hole_endpoint", u64::from(endpoint_exact)))
 }
 
+/// Both CPU identities reach real mixed camera output through the public facade.
+/// The numeric quality contract is exercised by the engine-equivalence suite.
+fn native_camera_engines_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::prelude::{
+        BLUE, Circle as NativeCircle, Cube, RenderOptions, SceneConstruct, Stage as NativeStage,
+        render_with_fs,
+    };
+    use fmn_config::config::{DeterminismMode, ThreadPolicy};
+    use fmn_platform::fs::VirtualFs;
+    use fmn_runtime::ExecutionEngine;
+
+    struct MixedCamera;
+    impl SceneConstruct for MixedCamera {
+        fn construct(&mut self, stage: &mut NativeStage<'_>) -> fmn::Result<()> {
+            stage.add(Cube::new(1.4).color(BLUE))?;
+            let circle = stage.add(NativeCircle::new().radius(0.3).color(WHITE))?;
+            stage.set_fill(circle, Some(WHITE), Some(1.0), None, true);
+            stage.shift(circle, [-1.5, 0.0, 0.0]);
+            Ok(())
+        }
+    }
+
+    let mut outcome = RunOutcome::ok();
+    for (name, mode, engine) in [
+        (
+            "certified-cpu",
+            DeterminismMode::Certified,
+            ExecutionEngine::CertifiedCpu,
+        ),
+        (
+            "fast-cpu",
+            DeterminismMode::Standard,
+            ExecutionEngine::FastCpu,
+        ),
+    ] {
+        let fs = std::sync::Arc::new(VirtualFs::new());
+        let mut options =
+            RenderOptions::new("/camera-engines").map_err(|error| fail(error.to_string()))?;
+        options.config.camera.resolution = (64, 48);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.render.threads = ThreadPolicy::Fixed(4);
+        options.config.determinism.mode = mode;
+        options.frames_in_flight = 2;
+        let mut camera = options
+            .camera_config()
+            .map_err(|error| fail(error.to_string()))?;
+        camera
+            .frame
+            .set_euler_angles(Some(0.6), Some(0.8), None)
+            .map_err(|error| fail(error.to_string()))?;
+        options.camera = Some(camera);
+        let report = render_with_fs(&mut MixedCamera, options, fs.clone())
+            .map_err(|error| fail(error.to_string()))?;
+        if report.execution_plan.engine != engine || report.artifact.frame_count != 1 {
+            return Err(fail("camera output did not use its requested CPU identity"));
+        }
+        let stats = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("camera output omitted its pipeline receipt"))?;
+        if (stats.submitted, stats.emitted, stats.outstanding_slots) != (1, 1, 0) {
+            return Err(fail("camera output did not drain its frame pipeline"));
+        }
+        let bytes = fs
+            .read(std::path::Path::new("/camera-engines/frame_000000.png"))
+            .map_err(|error| fail(error.to_string()))?;
+        let image = fmn_codec::decode_png(&bytes, &fmn_codec::PngLimits::default())
+            .map_err(|error| fail(error.to_string()))?;
+        let pixels = image.rgba.as_chunks::<4>().0;
+        let surface_visible = pixels
+            .iter()
+            .filter(|pixel| pixel[2] > 30 && pixel[2] > pixel[0])
+            .count()
+            > 20;
+        let vector_visible = pixels
+            .iter()
+            .filter(|pixel| pixel[0] > 180 && pixel[1] > 180 && pixel[2] > 180)
+            .count()
+            > 3;
+        if (image.width, image.height) != (64, 48) || !surface_visible || !vector_visible {
+            return Err(fail(
+                "mixed camera primitives did not reach the published PNG",
+            ));
+        }
+        ctx.event(
+            LogEvent::new("e2e.render_matrix.native_camera_engines")
+                .field("engine", name)
+                .field("visible", "true")
+                .field("pipeline_drained", "true")
+                .field("sha256", sha256(&bytes).to_hex()),
+        );
+        outcome = outcome.with_artifact(format!("{name}.png"), bytes);
+    }
+    Ok(outcome
+        .with_counter("native_camera_engine_routes", 2)
+        .with_counter("native_camera_engine_frames", 2))
+}
+
 /// Camera-following face order remains native grid metadata through snapshots,
 /// camera changes and immutable frame replay. Two colored translucent panels
 /// share one folded UV strip, making an ignored ordering policy visibly wrong.
@@ -18947,6 +19063,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_camera_engines.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_camera_engines_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_camera_engine_routes", 2),
+            counter_eq("native_camera_engine_frames", 2),
+        ],
+        ["certified-cpu", "fast-cpu"]
+            .into_iter()
+            .map(|engine| {
+                LogExpect::span_present(
+                    "e2e.render_matrix.native_camera_engines",
+                    vec![
+                        FieldPred::str_eq("engine", engine),
+                        FieldPred::str_eq("visible", "true"),
+                        FieldPred::str_eq("pipeline_drained", "true"),
+                    ],
+                )
+            })
+            .collect(),
+    ));
+    specs.push(spec(
         "render_matrix.live_coordinate_surface.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -22751,6 +22891,16 @@ fn native_camera_sorted_surfaces_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_camera_sorted_surfaces.v1")
         .expect("the native camera-sorted surface scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_camera_engines_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_camera_engines.v1")
+        .expect("the native camera engine scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

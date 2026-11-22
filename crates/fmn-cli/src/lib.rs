@@ -1949,8 +1949,13 @@ fn derive_execution_plan_with_annex(
 > {
     let request = execution_plan_request(config, intent, output_format, metal_selection, camera)?;
     let (topology, topology_source) = detect_topology(fs);
-    let plan = fmn::autotune::derive_execution_plan(fs, config, request, &topology)
-        .map_err(execution_plan_error)?;
+    let plan = if camera {
+        // Planar calibration does not measure the camera compositor.
+        fmn_runtime::ExecutionPlan::derive(request, &topology, None)
+    } else {
+        fmn::autotune::derive_execution_plan(fs, config, request, &topology)
+    }
+    .map_err(execution_plan_error)?;
     Ok((plan, topology, topology_source))
 }
 
@@ -2031,13 +2036,7 @@ fn execution_plan_request(
             ));
         }
     }
-    request = request.with_engine(if camera {
-        // ThreeDJob is the certified CPU kernel, including in standard mode.
-        // Keep the requested artifact mode and compression policy unchanged.
-        fmn_runtime::ExecutionEngine::CertifiedCpu
-    } else {
-        engine
-    });
+    request = request.with_engine(engine);
     if let fmn_config::config::ThreadPolicy::Fixed(threads) = config.render.threads {
         let threads = usize::try_from(threads)
             .map_err(|_| CliError::new("config", "thread count does not fit this target"))?;
@@ -4698,14 +4697,16 @@ impl RenderSink {
         };
         let frame_config = resolved_frame_config(config)?;
         if camera.as_ref().is_some_and(|camera| {
-            plan.engine != fmn_runtime::ExecutionEngine::CertifiedCpu
-                || camera.pixel_shape() != (width, height)
+            !matches!(
+                plan.engine,
+                fmn_runtime::ExecutionEngine::CertifiedCpu | fmn_runtime::ExecutionEngine::FastCpu
+            ) || camera.pixel_shape() != (width, height)
                 || camera.fps() != config.camera.fps
                 || camera.background() != frame_config.background
         }) {
             return Err(CliError::new(
                 "config",
-                "camera policy and certified CPU identity must match the output execution plan",
+                "camera policy and CPU identity must match the output execution plan",
             ));
         }
         let tiling = Tiling {
