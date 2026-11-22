@@ -5,7 +5,7 @@ use fmn_core::constants::{DOWN, LEFT, RIGHT, UP};
 use fmn_hash::sha256;
 use fmn_text::FontBook;
 
-use fmn_library::probability::{SampleSpace, vertical_default_colors};
+use fmn_library::probability::{ProbabilityError, SampleSpace, vertical_default_colors};
 use fmn_library::vmobject::VMobject;
 
 fn fail(message: String) -> ! {
@@ -34,6 +34,83 @@ fn complete_p_list_pads_with_the_remainder() {
     );
     let error = space.complete_p_list(&[1.5]).unwrap_err();
     assert!(format!("{error}").contains("outside [0, 1]"), "{error}");
+}
+
+#[test]
+fn complete_p_list_rejects_excess_total_instead_of_adding_negative_mass() {
+    let space = SampleSpace::new();
+    for (entries, total) in [([0.75, 0.5], 1.25), ([1.0, 1.0], 2.0)] {
+        assert_eq!(
+            space.complete_p_list(&entries).unwrap_err(),
+            ProbabilityError::BadProbability { value: total },
+        );
+    }
+    assert!(matches!(
+        space.complete_p_list(&[0.5, 0.5 + 2e-8]),
+        Err(ProbabilityError::BadProbability { value }) if value > 1.0,
+    ));
+}
+
+#[test]
+fn complete_p_list_preserves_valid_entries_and_completion_tolerance() {
+    let space = SampleSpace::new();
+    for entries in [
+        vec![0.25, 0.75],
+        vec![0.0, 1.0, 0.0],
+        vec![0.5, 0.5 + 0.5e-8],
+        vec![0.5, 0.5 - 0.5e-8],
+    ] {
+        assert_eq!(space.complete_p_list(&entries).unwrap(), entries);
+    }
+    assert_eq!(space.complete_p_list(&[]).unwrap(), vec![1.0]);
+    assert_eq!(
+        space.complete_p_list(&[0.0, 0.0]).unwrap(),
+        vec![0.0, 0.0, 1.0],
+    );
+}
+
+#[test]
+fn complete_p_list_refuses_nonfinite_and_out_of_range_entries() {
+    let space = SampleSpace::new();
+    for entry in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.25, 1.25] {
+        let error = space.complete_p_list(&[0.25, entry]).unwrap_err();
+        let ProbabilityError::BadProbability { value } = error else {
+            panic!("expected a typed probability refusal, got {error}");
+        };
+        assert_eq!(value.to_bits(), entry.to_bits());
+    }
+}
+
+#[test]
+fn both_divisions_propagate_invalid_probability_totals() {
+    let space = SampleSpace::new();
+    let colors = vertical_default_colors();
+    for result in [
+        space.horizontal_division(&[0.75, 0.5], &colors),
+        space.vertical_division(&[0.75, 0.5], &colors),
+    ] {
+        assert_eq!(
+            result.unwrap_err(),
+            ProbabilityError::BadProbability { value: 1.25 },
+        );
+    }
+}
+
+#[test]
+fn both_divisions_preserve_explicit_zero_probability_bands() {
+    let space = SampleSpace::new();
+    let colors = vertical_default_colors();
+    let probabilities = [0.0, 0.25, 0.75, 0.0];
+    for (bands, dimension) in [
+        (space.horizontal_division(&probabilities, &colors).unwrap(), 1),
+        (space.vertical_division(&probabilities, &colors).unwrap(), 0),
+    ] {
+        assert_eq!(bands.children().len(), 4);
+        for (band, expected_extent) in bands.children().iter().zip([0.0, 0.75, 2.25, 0.0]) {
+            assert!((band.length_over_dim(dimension) - expected_extent).abs() < 1e-12);
+            assert!(band.points().iter().flatten().all(|value| value.is_finite()));
+        }
+    }
 }
 
 #[test]

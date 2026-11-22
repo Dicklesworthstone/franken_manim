@@ -38,10 +38,10 @@ const P_LIST_EPSILON: f64 = 1e-8;
 /// Why a sample-space family could not be built.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ProbabilityError {
-    /// A probability outside `[0, 1]`, or a list whose completion overflows
-    /// past zero within `P_LIST_EPSILON`.
+    /// A probability outside `[0, 1]`, or a list whose total exceeds one
+    /// by more than the probability-completion tolerance.
     BadProbability {
-        /// The offending value.
+        /// The offending entry or excessive total probability.
         value: f64,
     },
     /// Scribe refused a title or band label.
@@ -170,15 +170,21 @@ impl SampleSpace {
     /// `complete_p_list`: pad with the remainder so the slices sum to one.
     ///
     /// # Errors
-    /// [`ProbabilityError::BadProbability`] for entries outside `[0, 1]`.
+    /// [`ProbabilityError::BadProbability`] for entries outside `[0, 1]`
+    /// or total probability exceeding one by more than `1e-8`. Totals within
+    /// that tolerance retain their authored entries without a remainder band.
     pub fn complete_p_list(&self, p_list: &[f64]) -> Result<Vec<f64>, ProbabilityError> {
         for value in p_list {
             if !(*value >= 0.0 && *value <= 1.0) {
                 return Err(ProbabilityError::BadProbability { value: *value });
             }
         }
+        let total = p_list.iter().sum::<f64>();
+        let remainder = 1.0 - total;
+        if remainder < -P_LIST_EPSILON {
+            return Err(ProbabilityError::BadProbability { value: total });
+        }
         let mut completed = p_list.to_vec();
-        let remainder = 1.0 - completed.iter().sum::<f64>();
         if completed.is_empty() || (remainder - 0.0).abs() > P_LIST_EPSILON {
             completed.push(remainder);
         }
