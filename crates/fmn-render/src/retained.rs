@@ -1499,6 +1499,7 @@ fn surface_mesh(
         })?;
     let records = entry.buffer.len();
     let placement = entry.placement();
+    let normals = placement.normal_transform();
     let camera_sorted = matches!(
         entry.render_primitive(),
         RenderPrimitive::CameraSortedSurfaceGrid { .. }
@@ -1535,7 +1536,7 @@ fn surface_mesh(
             ));
             continue;
         }
-        let normal = normalized_or_zero(placement.apply_vector([
+        let normal = normalized_or_zero(normals.apply([
             d_normal[0] - point[0],
             d_normal[1] - point[1],
             d_normal[2] - point[2],

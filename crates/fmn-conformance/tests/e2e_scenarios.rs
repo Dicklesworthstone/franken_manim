@@ -67,6 +67,8 @@ mod hdr_pq;
 mod live_bar_chart_example;
 #[path = "../../fmn/tests/support/obj_smoothing.rs"]
 mod obj_smoothing;
+#[path = "../../fmn/tests/support/surface_normals.rs"]
+mod surface_normals;
 #[path = "support/path_motion.rs"]
 mod path_motion;
 #[path = "support/path_observation.rs"]
@@ -12187,6 +12189,23 @@ fn retained_prefix_run(
         .with_counter("static_prefix_adaptive_cells", refined))
 }
 
+fn affine_surface_normals_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let witness = surface_normals::verify().map_err(fail)?;
+    ctx.event(
+        LogEvent::new("e2e.render.affine_surface_normals")
+            .field("frames", witness.frames)
+            .field("transform_cases", 4_u64)
+            .field("primitive_kinds", 2_u64)
+            .field("thread_counts", 3_u64)
+            .field("materialization_routes", 3_u64)
+            .field("authored_normals_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("affine-surface-correct.png", witness.first)
+        .with_artifact("affine-surface-forward-control.png", witness.last)
+        .with_counter("affine_surface_normal_frames", witness.frames))
+}
+
 fn obj_smoothing_groups_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let witness = obj_smoothing::verify().map_err(fail)?;
     ctx.event(
@@ -19470,6 +19489,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.affine_surface_normals.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(affine_surface_normals_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("affine_surface_normal_frames", 88),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.affine_surface_normals",
+            vec![
+                FieldPred::u64_eq("frames", 88),
+                FieldPred::u64_eq("transform_cases", 4),
+                FieldPred::u64_eq("primitive_kinds", 2),
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("materialization_routes", 3),
+                FieldPred::str_eq("authored_normals_match", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.obj_smoothing_groups.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -23151,6 +23191,16 @@ fn obj_texture_options_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.obj_texture_options.v1")
         .expect("OBJ texture-options scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn affine_surface_normals_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.affine_surface_normals.v1")
+        .expect("affine surface-normal scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

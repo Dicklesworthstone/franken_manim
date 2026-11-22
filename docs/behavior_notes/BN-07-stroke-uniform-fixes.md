@@ -89,6 +89,36 @@ at its original resolution, or recenters an asymmetric wireframe. A mesh
 is a snapshot; construct another mesh (or use `always_redraw`) to follow
 subsequent source changes.
 
+### Affine surface normals remain perpendicular
+
+Nonuniform stretches and shears now transform surface normal directions with
+the inverse transpose of the linear map. The Reference transforms a stored
+normal-control point as another position, which tilts its offset away from the
+surface normal. This changes lighting on stretched or sheared surfaces and
+triangle meshes. Reflections retain the authored outward-facing side.
+
+The correction applies to retained rendering, placement baking, attached
+record views, portal surface copies/regridding, and detached native
+`Surface::stretched` helpers. Translations, rotations, uniform scales and
+orthogonal reflections keep their prior point/vector arithmetic. Colors,
+texture coordinates and missing surface samples keep their existing meaning.
+Arbitrary pointwise callbacks still map both pointlike columns; no derivative
+is inferred from a callback.
+
+A singular affine map has no inverse transpose and records a zero normal
+direction. The renderer's existing fallback for absent normals applies.
+The result stays consistent when collapsed geometry is baked or viewed
+before a subsequent reflection, rather than choosing opposite sides in the
+retained and materialized paths.
+
+For invertible maps, materialization preserves the forward offset's length
+while correcting its direction, with the original nudge length as a fallback
+if that length underflows or overflows. Nudge magnitude is a storage detail:
+successive materializations can have different nudge lengths while preserving
+the same unit normal direction. The native render witness compares shaded
+grid and triangle output with independently authored normals and checks
+retained, baked and live-view paths at one, four and sixteen raster threads.
+
 - Code that called `get_scale_stroke_with_zoom()` and happened to rely on
   it returning `flat_stroke` (almost certainly none — the coincidence was
   never documented) now gets the honest answer. Read `get_flat_stroke()`

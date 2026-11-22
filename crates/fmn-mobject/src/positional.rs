@@ -66,9 +66,9 @@ impl From<Vec3> for PosTarget {
 }
 
 /// Prepare all auxiliary 3D point fields before resetting retained placement.
-/// A normal-control point is a point, not a direction: translating only `point`
-/// changes their difference and therefore changes surface lighting. UVs, colors,
-/// and other non-pointlike fields must never receive the geometric map.
+/// A normal-control point stays paired with its primary point: its offset
+/// follows the affine inverse transpose, and its anchor receives translation.
+/// UVs, colors, and other non-pointlike fields never receive the geometric map.
 fn mapped_auxiliary_points(
     buffer: &RecordBuffer,
     placement: Placement,
@@ -87,6 +87,16 @@ fn try_mapped_auxiliary_points<E>(
 ) -> Result<Vec<(String, Vec<f32>)>, E> {
     let mut columns: Vec<(String, Vec<f32>)> = Vec::new();
     let validity = buffer.read_column(SURFACE_VALIDITY_FIELD);
+    let normal_anchors = if buffer.schema().field_width("point") == Some(3)
+        && buffer.schema().field_width("d_normal_point") == Some(3)
+    {
+        buffer.read_column("point")
+    } else {
+        None
+    };
+    let normal_transform = normal_anchors
+        .as_ref()
+        .map(|_| placement.normal_transform());
     for key in buffer.schema().pointlike_keys() {
         if key == "point" || columns.iter().any(|(name, _)| name == key) {
             continue;
@@ -103,11 +113,16 @@ fn try_mapped_auxiliary_points<E>(
             let mut mapped = Vec::with_capacity(values.len());
             for (index, point) in values.as_chunks::<3>().0.iter().enumerate() {
                 let point = if surface_sample_is_present(validity.as_deref(), index) {
-                    map(placement.apply_point([
-                        f64::from(point[0]),
-                        f64::from(point[1]),
-                        f64::from(point[2]),
-                    ]))?
+                    let local = point.map(f64::from);
+                    let world = if key == "d_normal_point"
+                        && let (Some(anchors), Some(normals)) = (&normal_anchors, normal_transform)
+                    {
+                        let anchor = anchors.as_chunks::<3>().0[index].map(f64::from);
+                        normals.apply_control_point(anchor, local)
+                    } else {
+                        placement.apply_point(local)
+                    };
+                    map(world)?
                 } else {
                     [0.0; 3]
                 };
@@ -875,7 +890,51 @@ impl Stage {
             .get(member)
             .is_some_and(|entry| !entry.buffer.is_empty() && entry.buffer.live_view_count() > 0);
         if has_live_view {
-            let _ = self.map_world_pointlikes(member, |point| affine.apply_point(point));
+            // Views expose world-space records, so publish directly without
+            // detaching their generation. A newly applied stretch/shear must
+            // transform the paired normal as a normal, not as another point
+            // passed to the generic pointwise-map callback.
+            let Ok(mut mapped) =
+                self.prepare_world_pointlikes(member, |point| affine.apply_point(point))
+            else {
+                return;
+            };
+            if let Some(entry) = self.get(member)
+                && entry.buffer.schema().field_width("point") == Some(3)
+                && entry.buffer.schema().field_width("d_normal_point") == Some(3)
+                && !affine.normal_transform().maps_normals_as_vectors()
+                && let Some(points) = &mapped.points
+                && let Some((_, normal_points)) = mapped
+                    .columns
+                    .iter_mut()
+                    .find(|(key, _)| key == "d_normal_point")
+                && let Some(anchors) = entry.buffer.read_column("point")
+                && let Some(controls) = entry.buffer.read_column("d_normal_point")
+            {
+                let normals = affine.compose(entry.placement()).normal_transform();
+                let validity = entry.buffer.read_column(SURFACE_VALIDITY_FIELD);
+                for (index, ((anchor, control), output)) in anchors
+                    .as_chunks::<3>()
+                    .0
+                    .iter()
+                    .zip(controls.as_chunks::<3>().0)
+                    .zip(normal_points.as_chunks_mut::<3>().0)
+                    .enumerate()
+                {
+                    if !surface_sample_is_present(validity.as_deref(), index) {
+                        continue;
+                    }
+                    let delta = std::array::from_fn(|axis| {
+                        f64::from(control[axis]) - f64::from(anchor[axis])
+                    });
+                    let offset = normals.apply_offset(delta);
+                    #[allow(clippy::cast_possible_truncation)]
+                    for axis in 0..3 {
+                        output[axis] = (points[index][axis] + offset[axis]) as f32;
+                    }
+                }
+            }
+            let _ = self.publish_world_pointlikes(member, mapped);
             return;
         }
         if let Some(entry) = self.get_mut(member) {

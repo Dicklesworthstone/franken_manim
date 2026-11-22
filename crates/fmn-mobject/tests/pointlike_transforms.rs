@@ -92,6 +92,138 @@ fn pinned_field_views_observe_every_affine_geometry_channel() {
 }
 
 #[test]
+fn stretched_sheared_and_reflected_normals_agree_after_baking_and_live_views() {
+    for (linear, expected) in [
+        (
+            [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.5]],
+            [0.5, 0.0, 2.0],
+        ),
+        (
+            [[1.0, 0.0, 2.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [1.0, 0.0, -1.0],
+        ),
+        (
+            [[-2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.5]],
+            [-0.5, 0.0, 2.0],
+        ),
+        (
+            [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
+            [0.0; 3],
+        ),
+    ] {
+        let mut materialized = Vec::new();
+        for pinned in [false, true] {
+            let mut stage = Stage::new();
+            let mob = surface(&mut stage);
+            for (row, x) in [0.0_f32, 2.0].into_iter().enumerate() {
+                stage.get_mut(mob).unwrap().buffer.write(
+                    row,
+                    "d_normal_point",
+                    &[x + 0.25, 1.0, 0.25],
+                );
+            }
+            let rgba = column(&stage, mob, "rgba");
+            let view = pinned.then(|| stage.get_mut(mob).unwrap().buffer.export_view(false));
+            stage.apply_affine(mob, Placement::new(linear, [0.5, -0.25, 0.75]));
+            stage.bake_placement(mob).unwrap();
+            let points = column(&stage, mob, "point");
+            let controls = column(&stage, mob, "d_normal_point");
+            let expected_length: f64 = expected.iter().map(|value| value * value).sum();
+            for (point, control) in points
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .zip(controls.as_chunks::<3>().0)
+            {
+                let offset: [f64; 3] =
+                    std::array::from_fn(|axis| f64::from(control[axis]) - f64::from(point[axis]));
+                if expected_length == 0.0 {
+                    assert_eq!(offset, [0.0; 3]);
+                    continue;
+                }
+                let length = offset.iter().map(|value| value * value).sum::<f64>().sqrt();
+                for axis in 0..3 {
+                    assert!(
+                        (offset[axis] / length - expected[axis] / expected_length.sqrt()).abs()
+                            < 2e-6,
+                        "wrong affine normal: {offset:?} versus {expected:?}"
+                    );
+                }
+            }
+            assert_eq!(column(&stage, mob, "rgba"), rgba);
+            if let Some(view) = view {
+                assert!(view.is_attached_to(&stage.get(mob).unwrap().buffer));
+            }
+            materialized.push((points, controls));
+        }
+        assert_eq!(materialized[0], materialized[1]);
+    }
+}
+
+#[test]
+fn collapsed_normals_stay_absent_after_reflection_in_every_materialization_path() {
+    let flatten = Placement::new(
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]],
+        [0.0; 3],
+    );
+    let reflection = Placement::new(
+        [[-1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        [0.0; 3],
+    );
+    let mut results = Vec::new();
+    for route in 0..3 {
+        let mut stage = Stage::new();
+        let mob = surface(&mut stage);
+        let view =
+            (route == 2).then(|| stage.get_mut(mob).unwrap().buffer.export_view(false));
+        stage.apply_affine(mob, flatten);
+        if route == 1 {
+            stage.bake_placement(mob).unwrap();
+        }
+        stage.apply_affine(mob, reflection);
+        stage.bake_placement(mob).unwrap();
+        let points = column(&stage, mob, "point");
+        let controls = column(&stage, mob, "d_normal_point");
+        assert_eq!(controls, points);
+        if let Some(view) = view {
+            assert!(view.is_attached_to(&stage.get(mob).unwrap().buffer));
+        }
+        results.push((points, controls));
+    }
+    assert_eq!(results[0], results[1]);
+    assert_eq!(results[0], results[2]);
+}
+
+#[test]
+fn live_normals_use_the_actual_materialized_anchor_under_large_translation() {
+    let mut stage = Stage::new();
+    let mob = surface(&mut stage);
+    stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .write(0, "point", &[1.0, 1.0, 0.0]);
+    stage
+        .get_mut(mob)
+        .unwrap()
+        .buffer
+        .write(0, "d_normal_point", &[1.25, 1.0, 0.25]);
+    stage.shift(mob, [1e16, 0.0, 0.0]);
+    let view = stage.get_mut(mob).unwrap().buffer.export_view(false);
+    stage.apply_affine(
+        mob,
+        Placement::new(
+            [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+            [-2e16, 0.0, 0.0],
+        ),
+    );
+    // The existing point path computes A(P(p)); composing the affine maps
+    // before evaluating p rounds differently here and would anchor at x=2.
+    assert_eq!(view.read(0, "point").unwrap(), [0.0, 1.0, 0.0]);
+    assert_eq!(view.read(0, "d_normal_point").unwrap(), [0.25, 1.0, 0.5]);
+}
+
+#[test]
 fn pointwise_maps_transform_control_points_in_world_space_about_one_pivot() {
     let mut stage = Stage::new();
     let mob = surface(&mut stage);

@@ -141,10 +141,25 @@ fn world_column(entry: &fmn_mobject::Entry, key: &str) -> PyResult<Vec<f32>> {
     // native-bit contract of sampled surfaces.
     let placement = entry.placement();
     let identity = placement.is_identity();
-    for point in input.as_chunks::<3>().0 {
+    let anchors = if key == "d_normal_point" && !identity {
+        Some(entry.buffer.read_column("point").ok_or_else(|| {
+            PyValueError::new_err("surface normal-control points require primary points")
+        })?)
+    } else {
+        None
+    };
+    let normals = anchors.as_ref().map(|_| placement.normal_transform());
+    for (index, point) in input.as_chunks::<3>().0.iter().enumerate() {
         let local = point.map(f64::from);
         let world = if identity {
             local
+        } else if let (Some(anchors), Some(normals)) = (&anchors, normals) {
+            let anchor = anchors
+                .as_chunks::<3>()
+                .0
+                .get(index)
+                .ok_or_else(|| PyValueError::new_err("surface normal/point lengths differ"))?;
+            normals.apply_control_point(anchor.map(f64::from), local)
         } else {
             placement.apply_point(local)
         };
@@ -348,6 +363,41 @@ pub fn run_portal_gauntlet_surface_holes() -> Result<u64, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_surface_columns_keep_the_affine_normal_and_match_native_baking() {
+        use fmn_mobject::{Mobject, Placement, RecordBuffer, RecordSchema, Stage};
+
+        let schema = RecordSchema::new(
+            &[("point", 3), ("d_normal_point", 3)],
+            &["point"],
+            &["point", "d_normal_point"],
+        )
+        .unwrap();
+        let mut buffer = RecordBuffer::new(schema, 1).unwrap();
+        buffer.write(0, "point", &[0.0, 0.0, 0.0]);
+        buffer.write(0, "d_normal_point", &[0.25, 0.0, 0.25]);
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        stage.apply_affine(
+            mob,
+            Placement::new(
+                [[-2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.5]],
+                [0.5, -0.25, 0.75],
+            ),
+        );
+        let entry = stage.get(mob).unwrap();
+        let points = world_column(entry, "point").unwrap();
+        let controls = world_column(entry, "d_normal_point").unwrap();
+        let offset: [f64; 3] =
+            std::array::from_fn(|axis| f64::from(controls[axis]) - f64::from(points[axis]));
+        assert!(offset[2] > 0.0);
+        assert!((offset[0] / offset[2] + 0.25).abs() < 1e-6);
+        stage.bake_placement(mob).unwrap();
+        let buffer = &stage.get(mob).unwrap().buffer;
+        assert_eq!(points, buffer.read_column("point").unwrap());
+        assert_eq!(controls, buffer.read_column("d_normal_point").unwrap());
+    }
 
     #[test]
     fn explicit_surface_holes_and_native_rendering() {

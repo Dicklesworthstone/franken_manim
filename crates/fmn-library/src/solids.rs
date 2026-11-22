@@ -31,9 +31,11 @@
 //!   cross stays zero (numpy `normalize_along_axis`'s `out=zeros`).
 //!   `d_normal_point = point + normal_nudge · normal` (nudge `1e-3`), and
 //!   unit normals are re-derived on read as `d_normal_point − point`
-//!   normalized — so any transform applied to *both* columns (the
-//!   Reference's `pointlike_data_keys`) preserves normals, which is what
-//!   [`Surface::map_points`] does.
+//!   normalized. Similarity transforms preserve these normal directions by
+//!   mapping both pointlike columns. Affine stretches instead apply the inverse
+//!   transpose to the offset, keeping it perpendicular to the transformed
+//!   surface (BN-07). [`Surface::map_points`] keeps the Reference's general
+//!   callback semantics and maps both points without inferring a Jacobian.
 //! * **Triangles.** The fixed six-index pattern per grid cell —
 //!   `(TL, BL, TR)`, `(TR, BL, BR)` in row-major cell order — `6·(nu−1)·(nv−1)`
 //!   indices ([`Surface::triangle_indices`], [`compute_triangle_indices`]).
@@ -97,7 +99,7 @@ use fmn_core::constants::{BLUE, BLUE_D, BLUE_E, GREY, GREY_A, IN, ORIGIN, OUT, P
 use fmn_core::types::Vec3;
 use fmn_geom::{QuadPath, space_ops};
 use fmn_mobject::uniforms::{JointType, Uniforms};
-use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, RenderPrimitive, ShapeTag};
+use fmn_mobject::{Mobject, Placement, RecordBuffer, RecordSchema, RenderPrimitive, ShapeTag};
 
 use crate::poly::{Polygon, Rectangle};
 use crate::style::Style;
@@ -839,8 +841,9 @@ impl Surface {
     }
 
     /// Apply `f` to both pointlike columns (`point` and `d_normal_point`)
-    /// — the Reference's `apply_points_function` invariant; normals are
-    /// preserved because the difference transforms with the points.
+    /// — the Reference's `apply_points_function` contract. An arbitrary
+    /// callback transforms the normal-control point itself; affine stretch
+    /// helpers separately preserve perpendicular normal directions.
     #[must_use]
     pub fn map_points(mut self, f: impl Fn(Vec3) -> Vec3 + Copy) -> Self {
         for (p, &valid) in self.points.iter_mut().zip(&self.validity) {
@@ -883,7 +886,7 @@ impl Surface {
     #[must_use]
     pub fn stretched_about_center(self, factor: f64, dim: usize) -> Self {
         let center = self.center_point()[dim];
-        self.map_points(move |mut p| {
+        self.map_stretched_points(factor, dim, move |mut p| {
             p[dim] = center + (p[dim] - center) * factor;
             p
         })
@@ -892,10 +895,37 @@ impl Surface {
     /// `stretch(factor, dim)` about the origin.
     #[must_use]
     pub fn stretched(self, factor: f64, dim: usize) -> Self {
-        self.map_points(move |mut p| {
+        self.map_stretched_points(factor, dim, move |mut p| {
             p[dim] *= factor;
             p
         })
+    }
+
+    fn map_stretched_points(
+        mut self,
+        factor: f64,
+        dim: usize,
+        map: impl Fn(Vec3) -> Vec3 + Copy,
+    ) -> Self {
+        if factor.abs() == 1.0 {
+            return self.map_points(map);
+        }
+        let mut linear = Placement::IDENTITY.linear();
+        linear[dim][dim] = factor;
+        let normals = Placement::new(linear, [0.0; 3]).normal_transform();
+        for ((point, control), &valid) in self
+            .points
+            .iter_mut()
+            .zip(&mut self.d_normal_point)
+            .zip(&self.validity)
+        {
+            if valid {
+                let offset = normals.apply_offset(sub(*control, *point));
+                *point = map(*point);
+                *control = add(*point, offset);
+            }
+        }
+        self
     }
 
     /// `rotate(angle, axis)` about the origin.
@@ -3332,6 +3362,35 @@ mod tests {
         let d = surface.d_normal_points()[2];
         let p = surface.points()[2];
         assert_close(sub(d, p), mul(expected, surface.normal_nudge()));
+    }
+
+    #[test]
+    fn detached_surface_stretches_preserve_perpendicular_normals() {
+        let original = ParametricSurface::new(|u, v| [2.0 + u, 3.0 + v, 5.0 + u])
+            .resolution(3, 2)
+            .build();
+        for factor in [2.0, -2.0, 0.0] {
+            for about_center in [false, true] {
+                let stretched = if about_center {
+                    original.clone().stretched_about_center(factor, 0)
+                } else {
+                    original.clone().stretched(factor, 0)
+                };
+                let tangent = [factor, 0.0, 1.0];
+                for normal in stretched.unit_normals() {
+                    assert!(space_ops::dot(normal, tangent).abs() < 1e-9);
+                    if factor == 0.0 {
+                        assert_eq!(normal, [0.0; 3]);
+                    } else {
+                        assert!((space_ops::get_norm(normal) - 1.0).abs() < 1e-9);
+                        assert!(normal[2] > 0.0, "reflection keeps the authored side");
+                    }
+                }
+                if about_center {
+                    assert_close(stretched.center_point(), original.center_point());
+                }
+            }
+        }
     }
 
     #[test]

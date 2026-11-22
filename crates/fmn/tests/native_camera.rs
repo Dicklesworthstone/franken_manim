@@ -1,5 +1,8 @@
 //! Perspective and mixed-primitive export through the public native API.
 
+#[path = "support/surface_normals.rs"]
+mod surface_normals;
+
 use std::path::Path;
 use std::sync::Arc;
 
@@ -161,4 +164,11 @@ fn mismatched_and_invalid_cameras_are_refused_before_construction() {
         assert!(render_with_fs(&mut MustNotRun, options, fs.clone()).is_err());
         assert!(!fs.exists(Path::new("/invalid")));
     }
+}
+
+#[test]
+fn affine_surface_normals_match_authored_normals_in_native_output() {
+    let witness = surface_normals::verify().unwrap();
+    assert_eq!(witness.frames, 88);
+    assert_ne!(witness.first, witness.last);
 }
