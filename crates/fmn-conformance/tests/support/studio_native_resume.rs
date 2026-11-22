@@ -614,6 +614,82 @@ pub(super) fn run_groups(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     run_prepared_checkpoints(ctx, group_program, "group", &[4, 9, 16])
 }
 
+fn indication_program(one_by_one: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 83).map_err(service_error)?;
+    let revealed = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.2).build().into(),
+            fmn_library::Circle::new().radius(0.25).build().into(),
+            fmn_library::Circle::new().radius(0.3).build().into(),
+        ]))
+        .map_err(service_error)?;
+    let children = scene.stage().get(revealed).unwrap().submobjects().to_vec();
+    for (child, y) in children.into_iter().zip([-0.7, 0.0, 0.7]) {
+        scene.stage_mut().shift(child, [-1.1, y, 0.0]);
+    }
+    scene.stage_mut().set_fill(
+        revealed,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    let wiggled = scene
+        .add_mobject(
+            fmn_library::Rectangle::new()
+                .width(0.7)
+                .height(0.4)
+                .build()
+                .map_err(service_error)?,
+        )
+        .map_err(service_error)?;
+    let flashed = scene
+        .add_mobject(fmn_library::Circle::new().radius(0.4).build())
+        .map_err(service_error)?;
+    scene.stage_mut().shift(flashed, [1.1, 0.0, 0.0]);
+    let mut reveal = if one_by_one {
+        fmn_anim::show_submobjects_one_by_one(scene.stage(), revealed)
+    } else {
+        fmn_anim::show_increasing_subsets(scene.stage(), revealed)
+    }
+    .map_err(service_error)?;
+    reveal.state_mut().config.rate_func =
+        fmn_anim::RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack);
+    let wiggle = fmn_anim::WiggleOutThenIn::new(wiggled)
+        .with_scale_value(1.35)
+        .with_rotation_angle(0.45)
+        .with_n_wiggles(2.5)
+        .with_scale_about_point([0.0, -0.1, 0.0])
+        .with_rotate_about_point([0.1, 0.0, 0.0]);
+    let flash = fmn_anim::VShowPassingFlash::new(flashed)
+        .with_time_width(0.6)
+        .with_taper_width(0.2);
+    let inner =
+        fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(wiggle), Box::new(flash)])
+            .map_err(service_error)?;
+    let group =
+        fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(reveal), Box::new(inner)])
+            .map_err(service_error)?;
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(group)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(16),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_indications(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, indication_program, "indication", &[4, 9, 16])
+}
+
 fn schedule_program(empty_wait: bool) -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 79).map_err(service_error)?;
     let drawn = scene

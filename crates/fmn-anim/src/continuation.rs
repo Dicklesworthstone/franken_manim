@@ -16,16 +16,19 @@ use fmn_hash::{Limits, Reader, Schema, SerialError, UnknownPolicy, Writer};
 use fmn_mobject::{Mob, Stage};
 
 use crate::composition::GroupContinuationControls;
-use crate::creation::PartialGeometry;
+use crate::creation::{IntRound, PartialGeometry};
 use crate::transform::TargetPrep;
 use crate::{
     AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FramePosition,
-    OpenSegment, PathFunc, RateFunc, RationalFrameClock, RevealBounds, Rotating, ShowPartial,
-    Transform, VFade,
+    OpenSegment, PathFunc, RateFunc, RationalFrameClock, RevealBounds, Rotating,
+    ShowIncreasingSubsets, ShowPartial, Transform, VFade, VShowPassingFlash, WiggleOutThenIn,
 };
 
-const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 2);
-const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 2);
+// Minor 3 adds structural reveals and the two closed indication carriers.
+// Existing native kind payloads retain their layout and remain readable. Writers
+// retain minor 2 for legacy-only trees so their declaration digests stay stable.
+const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 3);
+const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 3);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_RATE_DEPTH: usize = 32;
@@ -109,6 +112,12 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
         Some(5)
     } else if any.is::<AnimationGroup>() {
         Some(6)
+    } else if any.is::<ShowIncreasingSubsets>() {
+        Some(7)
+    } else if any.is::<WiggleOutThenIn>() {
+        Some(8)
+    } else if any.is::<VShowPassingFlash>() {
+        Some(9)
     } else {
         None
     }
@@ -125,6 +134,12 @@ fn clone_native(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
     } else if let Some(value) = any.downcast_ref::<ShowPartial>() {
         Some(Box::new(value.clone()))
     } else if let Some(value) = any.downcast_ref::<DrawBorderThenFill>() {
+        Some(Box::new(value.clone()))
+    } else if let Some(value) = any.downcast_ref::<ShowIncreasingSubsets>() {
+        Some(Box::new(value.clone()))
+    } else if let Some(value) = any.downcast_ref::<WiggleOutThenIn>() {
+        Some(Box::new(value.clone()))
+    } else if let Some(value) = any.downcast_ref::<VShowPassingFlash>() {
         Some(Box::new(value.clone()))
     } else if let Some(value) = any.downcast_ref::<AnimationGroup>() {
         let children = value
@@ -204,6 +219,32 @@ fn native_play_supported(animations: &[Box<dyn Animation>]) -> bool {
         .all(|animation| native_tree_supported(animation.as_ref(), 0, &mut remaining))
 }
 
+// Call only after native_play_supported has bounded the concrete carrier tree.
+fn has_extended_carrier(animation: &dyn Animation) -> bool {
+    if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
+        group
+            .animations()
+            .iter()
+            .any(|child| has_extended_carrier(child.as_ref()))
+    } else {
+        matches!(native_kind(animation), Some(7..=9))
+    }
+}
+
+fn emission_schema(schema: Schema, animations: &[Box<dyn Animation>]) -> Schema {
+    Schema {
+        minor: if animations
+            .iter()
+            .any(|animation| has_extended_carrier(animation.as_ref()))
+        {
+            3
+        } else {
+            2
+        },
+        ..schema
+    }
+}
+
 fn native_parameters_valid(stage: &Stage, animation: &dyn Animation) -> bool {
     let any: &dyn Any = animation;
     if let Some(value) = any.downcast_ref::<Transform>() {
@@ -276,9 +317,154 @@ fn native_parameters_valid(stage: &Stage, animation: &dyn Animation) -> bool {
                 })
                 .is_ok()
         })
+    } else if let Some(value) = any.downcast_ref::<ShowIncreasingSubsets>() {
+        subsets_parameters_valid(stage, value)
+    } else if let Some(value) = any.downcast_ref::<WiggleOutThenIn>() {
+        wiggle_parameters_valid(value)
+    } else if let Some(value) = any.downcast_ref::<VShowPassingFlash>() {
+        flash_parameters_valid(value) && flash_profiles_valid(stage, value)
     } else {
         false
     }
+}
+
+// A reveal intentionally detaches members from its live root. Validate the
+// complete begin family through the immutable starting copy, not the currently
+// visible prefix. Hidden descendants still own lifetime flags and may reappear.
+fn subsets_parameters_valid(stage: &Stage, value: &ShowIncreasingSubsets) -> bool {
+    let state = &value.state;
+    let Some(starting) = state.starting_mobject() else {
+        return false;
+    };
+    let family = stage.family(starting);
+    let rows = state.families();
+    if rows.len() != family.len()
+        || rows
+            .first()
+            .is_none_or(|row| row.as_slice() != [state.mobject(), starting])
+        || rows.iter().zip(&family).any(|(row, &member)| {
+            row.len() != 2
+                || row[1] != member
+                || !stage.contains(row[0])
+                || !stage.is_animating(row[0])
+                || (state.config.suspend_mobject_updating && !stage.is_updating_suspended(row[0]))
+        })
+    {
+        return false;
+    }
+    let mut by_start: Vec<_> = rows.iter().map(|row| (row[1], row[0])).collect();
+    by_start.sort_unstable_by_key(|&(_, original)| stage.snapshot_handle(original));
+    if by_start.windows(2).any(|pair| pair[0].1 == pair[1].1) {
+        return false;
+    }
+    by_start.sort_unstable_by_key(|&(start, _)| stage.snapshot_handle(start));
+    if by_start.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return false;
+    }
+    let original_for = |start| {
+        by_start
+            .binary_search_by_key(&stage.snapshot_handle(start), |&(candidate, _)| {
+                stage.snapshot_handle(candidate)
+            })
+            .ok()
+            .map(|index| by_start[index].1)
+    };
+    for row in rows {
+        let Some(original) = stage.get(row[0]) else {
+            return false;
+        };
+        let Some(start) = stage.get(row[1]) else {
+            return false;
+        };
+        let declared_children = if row[0] == state.mobject() {
+            let visible = original.submobjects();
+            if value.one_by_one {
+                if visible.len() > 1
+                    || visible
+                        .first()
+                        .is_some_and(|member| !value.all_submobs.contains(member))
+                {
+                    return false;
+                }
+            } else if !value.all_submobs.starts_with(visible) {
+                return false;
+            }
+            value.all_submobs.as_slice()
+        } else {
+            original.submobjects()
+        };
+        if declared_children.len() != start.submobjects().len()
+            || declared_children
+                .iter()
+                .zip(start.submobjects())
+                .any(|(&original, &start)| original_for(start) != Some(original))
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn wiggle_parameters_valid(value: &WiggleOutThenIn) -> bool {
+    value.scale_value.is_finite()
+        && value.rotation_angle.is_finite()
+        && value.n_wiggles.is_finite()
+        && value
+            .scale_about_point
+            .is_none_or(|point| point.iter().all(|value| value.is_finite()))
+        && value
+            .rotate_about_point
+            .is_none_or(|point| point.iter().all(|value| value.is_finite()))
+}
+
+fn flash_parameters_valid(value: &VShowPassingFlash) -> bool {
+    value.time_width.is_finite() && value.time_width > 0.0 && value.taper_width.is_finite()
+}
+
+// Profiles are begin-time data, not the current (gaussian-windowed) widths.
+// Bind them to the original geometry before allowing a restored carrier to
+// index or publish them. This also excludes forged, duplicate or omitted rows.
+fn flash_profiles_valid(stage: &Stage, value: &VShowPassingFlash) -> bool {
+    let mut profiles = value.widths.iter();
+    for row in value.state.families() {
+        if row.len() != 2 {
+            return false;
+        }
+        let (Some(original), Some(start)) = (stage.get(row[0]), stage.get(row[1])) else {
+            return false;
+        };
+        let Some(start_widths) = start.buffer.read_column("stroke_width") else {
+            continue;
+        };
+        let Some((member, profile)) = profiles.next() else {
+            return false;
+        };
+        if *member != row[0]
+            || profile.len() != start_widths.len()
+            || original.buffer.len() != start.buffer.len()
+            || original.buffer.schema() != start.buffer.schema()
+        {
+            return false;
+        }
+        let n = start_widths.len();
+        if start_widths
+            .iter()
+            .zip(profile)
+            .enumerate()
+            .any(|(i, (&width, &saved))| {
+                let x = if n > 1 {
+                    i as f64 / (n as f64 - 1.0)
+                } else {
+                    0.0
+                };
+                let expected = f64::from(width) * value.taper_kernel(x);
+                !saved.is_finite() || saved.to_bits() != expected.to_bits()
+            })
+        {
+            return false;
+        }
+    }
+    profiles.next().is_none()
 }
 
 fn border_parameters_valid(value: &DrawBorderThenFill) -> bool {
@@ -375,6 +561,9 @@ fn charge_carrier(budget: &mut Budget, kind: u8) -> Result<(), Error> {
         4 => budget.charge::<ShowPartial>(1),
         5 => budget.charge::<DrawBorderThenFill>(1),
         6 => budget.charge::<AnimationGroup>(1),
+        7 => budget.charge::<ShowIncreasingSubsets>(1),
+        8 => budget.charge::<WiggleOutThenIn>(1),
+        9 => budget.charge::<VShowPassingFlash>(1),
         _ => Err(Error::Invalid("unknown native animation kind")),
     }
 }
@@ -446,6 +635,17 @@ fn capture_native_budget(
         // Phase membership validation sorts a copy and the live family.
         budget.charge::<Mob>(value.crossed.len())?;
         budget.charge::<Mob>(state.families().len())?;
+    } else if let Some(value) = any.downcast_ref::<ShowIncreasingSubsets>() {
+        budget.charge::<Mob>(value.all_submobs.len())?;
+        // The starting family's DFS and the sorted reverse handle map.
+        budget.charge::<Mob>(state.families().len())?;
+        budget.charge::<(Mob, Mob)>(state.families().len())?;
+    } else if let Some(value) = any.downcast_ref::<VShowPassingFlash>() {
+        budget.charge::<(Mob, Vec<f64>)>(value.widths.len())?;
+        for (_, profile) in &value.widths {
+            budget.charge::<f64>(profile.len())?;
+            budget.charge::<f32>(profile.len())?;
+        }
     } else if let Some(group) = any.downcast_ref::<AnimationGroup>() {
         charge_group_timing(budget, group.animations().len())?;
         charge_rate(budget, &state.config.rate_func)?;
@@ -878,6 +1078,42 @@ fn put_native_node(
                 put_mob(writer, stage, mob)?;
             }
         }
+    } else if let Some(value) = any.downcast_ref::<ShowIncreasingSubsets>() {
+        put_count(writer, value.all_submobs.len())?;
+        for &mob in &value.all_submobs {
+            put_mob(writer, stage, mob)?;
+        }
+        writer
+            .put_u8(match value.int_round {
+                IntRound::Round => 0,
+                IntRound::Ceil => 1,
+            })
+            .put_bool(value.one_by_one);
+    } else if let Some(value) = any.downcast_ref::<WiggleOutThenIn>() {
+        if !wiggle_parameters_valid(value) {
+            return Err(Error::Invalid("invalid wiggle parameters"));
+        }
+        put_float(writer, value.scale_value);
+        put_float(writer, value.rotation_angle);
+        put_float(writer, value.n_wiggles);
+        put_optional_vec(writer, value.scale_about_point);
+        put_optional_vec(writer, value.rotate_about_point);
+    } else if let Some(value) = any.downcast_ref::<VShowPassingFlash>() {
+        if !flash_parameters_valid(value) {
+            return Err(Error::Invalid("invalid passing-flash parameters"));
+        }
+        put_float(writer, value.time_width);
+        put_float(writer, value.taper_width);
+        if prepared {
+            put_count(writer, value.widths.len())?;
+            for (member, profile) in &value.widths {
+                put_mob(writer, stage, *member)?;
+                put_count(writer, profile.len())?;
+                for &width in profile {
+                    put_float(writer, width);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -900,8 +1136,13 @@ fn get_native_node(
 ) -> Result<Box<dyn Animation>, Error> {
     budget.native_node(depth)?;
     let kind = reader.get_u8()?;
-    if !(1..=6).contains(&kind) {
+    if !(1..=9).contains(&kind) {
         return Err(Error::Invalid("unknown native animation kind"));
+    }
+    if kind >= 7 && reader.version().1 < 3 {
+        return Err(Error::Invalid(
+            "native animation kind requires FMPC minor 3",
+        ));
     }
     charge_carrier(budget, kind)?;
     if kind == 6 {
@@ -1030,6 +1271,68 @@ fn get_native_node(
             }
             Box::new(value)
         }
+        7 => {
+            let count = get_count(reader, 8)?;
+            if count > state.families().len().saturating_sub(1) {
+                return Err(Error::Invalid(
+                    "reveal child count exceeds its prepared family",
+                ));
+            }
+            let mut all_submobs = budget.vector::<Mob>(count)?;
+            budget.charge::<Mob>(state.families().len())?;
+            budget.charge::<(Mob, Mob)>(state.families().len())?;
+            for _ in 0..count {
+                all_submobs.push(get_mob(reader, stage)?);
+            }
+            let int_round = match reader.get_u8()? {
+                0 => IntRound::Round,
+                1 => IntRound::Ceil,
+                _ => return Err(Error::Invalid("unknown reveal rounding rule")),
+            };
+            Box::new(ShowIncreasingSubsets {
+                state,
+                all_submobs,
+                int_round,
+                one_by_one: reader.get_bool()?,
+            })
+        }
+        8 => {
+            let mut value = WiggleOutThenIn::new(state.mobject());
+            value.state = state;
+            value.scale_value = get_float(reader)?;
+            value.rotation_angle = get_float(reader)?;
+            value.n_wiggles = get_float(reader)?;
+            value.scale_about_point = get_optional_vec(reader)?;
+            value.rotate_about_point = get_optional_vec(reader)?;
+            Box::new(value)
+        }
+        9 => {
+            let mut value = VShowPassingFlash::new(state.mobject());
+            value.state = state;
+            value.time_width = get_float(reader)?;
+            value.taper_width = get_float(reader)?;
+            if !flash_parameters_valid(&value) {
+                return Err(Error::Invalid("invalid passing-flash parameters"));
+            }
+            let count = get_count(reader, 12)?;
+            if count > value.state.families().len() {
+                return Err(Error::Invalid(
+                    "flash profile count exceeds its prepared family",
+                ));
+            }
+            value.widths = budget.vector::<(Mob, Vec<f64>)>(count)?;
+            for _ in 0..count {
+                let member = get_mob(reader, stage)?;
+                let count = get_count(reader, 8)?;
+                let mut profile = budget.vector::<f64>(count)?;
+                budget.charge::<f32>(count)?;
+                for _ in 0..count {
+                    profile.push(get_float(reader)?);
+                }
+                value.widths.push((member, profile));
+            }
+            Box::new(value)
+        }
         _ => return Err(Error::Invalid("unknown native animation kind")),
     })
 }
@@ -1073,6 +1376,12 @@ fn prepared_valid(stage: &Stage, animation: &dyn Animation, fps: u32) -> Result<
         || state.frame_units() != duration.is_frame_native().then(|| duration.frame_units())
     {
         return Ok(false);
+    }
+    if (animation as &dyn Any).is::<ShowIncreasingSubsets>() {
+        // Its changing root family was checked against the complete starting
+        // graph above. Comparing with today's visible family would discard
+        // the hidden members that finish/abort still have to release.
+        return Ok(true);
     }
     let family_roots = animation.all_mobjects();
     let width = if matches!(native_kind(animation), Some(1 | 5)) {
@@ -1135,7 +1444,7 @@ pub fn capture(
         return Ok(None);
     }
     OpenSegment::resume_closed(clock, grid, open.report().base_frame, open.stepped())?;
-    let mut writer = Writer::with_limits(SCHEMA, limits(max_bytes));
+    let mut writer = Writer::with_limits(emission_schema(SCHEMA, animations), limits(max_bytes));
     writer
         .put_u32(clock.fps())
         .put_i64(open.report().base_frame)
@@ -1219,7 +1528,10 @@ pub fn declaration_bytes(
     {
         return Ok(None);
     }
-    let mut writer = Writer::with_limits(DECLARATION_SCHEMA, limits(max_bytes));
+    let mut writer = Writer::with_limits(
+        emission_schema(DECLARATION_SCHEMA, animations),
+        limits(max_bytes),
+    );
     put_count(&mut writer, animations.len())?;
     for animation in animations {
         let Some(mut owned) = clone_native(animation.as_ref()) else {
@@ -1262,6 +1574,8 @@ fn declaration_is_fresh(animation: &dyn Animation) -> bool {
         transform.target_copy.is_none()
     } else if let Some(drawing) = any.downcast_ref::<DrawBorderThenFill>() {
         drawing.outline.is_none() && drawing.crossed.is_empty()
+    } else if let Some(flash) = any.downcast_ref::<VShowPassingFlash>() {
+        flash.widths.is_empty()
     } else {
         true
     }
@@ -1335,7 +1649,7 @@ mod tests {
         (stage, animation)
     }
 
-    fn decode_border(stage: &Stage, value: &DrawBorderThenFill) -> Result<bool, Error> {
+    fn decode_prepared(stage: &Stage, value: &dyn Animation) -> Result<bool, Error> {
         let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
         put_native(&mut writer, stage, value, true)?;
         let bytes = writer.finish()?;
@@ -1352,19 +1666,19 @@ mod tests {
     #[test]
     fn border_continuation_rejects_forged_phase_members_and_geometry() {
         let (mut stage, animation) = prepared_border();
-        assert!(decode_border(&stage, &animation).unwrap());
+        assert!(decode_prepared(&stage, &animation).unwrap());
         let mut forged = animation.clone();
         forged.crossed = vec![animation.outline.unwrap()];
-        assert!(!decode_border(&stage, &forged).unwrap());
+        assert!(!decode_prepared(&stage, &forged).unwrap());
         forged.crossed = vec![animation.state.mobject(); 2];
-        assert!(decode_border(&stage, &forged).is_err());
+        assert!(decode_prepared(&stage, &forged).is_err());
         forged = animation.clone();
         forged.outline = Some(stage.add(Mobject::from_points(&[[0.0, 0.0, 0.0]])));
-        assert!(!decode_border(&stage, &forged).unwrap());
+        assert!(!decode_prepared(&stage, &forged).unwrap());
         let foreign = Stage::new().add(Mobject::new());
         forged = animation.clone();
         forged.crossed = vec![foreign];
-        assert!(decode_border(&stage, &forged).is_err());
+        assert!(decode_prepared(&stage, &forged).is_err());
     }
 
     #[test]
@@ -1372,12 +1686,12 @@ mod tests {
         let (stage, animation) = prepared_border();
         for width in [f64::NAN, f64::INFINITY, -1.0, f64::from(f32::MAX) * 2.0] {
             let forged = animation.clone().with_stroke_width(width);
-            assert!(decode_border(&stage, &forged).is_err());
+            assert!(decode_prepared(&stage, &forged).is_err());
         }
         let forged = animation
             .clone()
             .with_stroke_color(Some([1.0, f32::NAN, 0.0]));
-        assert!(decode_border(&stage, &forged).is_err());
+        assert!(decode_prepared(&stage, &forged).is_err());
         let declared: Vec<Box<dyn Animation>> =
             vec![Box::new(DrawBorderThenFill::new(animation.state.mobject()))];
         let first = declaration_bytes(
@@ -1396,6 +1710,262 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert_ne!(first, second);
+    }
+
+    fn indication_family() -> (Stage, Mob) {
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::vector_from_points(&[]));
+        for x in [0.0, 2.0, 4.0] {
+            let child = stage.add(Mobject::vector_from_points(&[
+                [x, 0.0, 0.0],
+                [x + 0.5, 1.0, 0.0],
+                [x + 1.0, 0.0, 0.0],
+            ]));
+            stage
+                .get_mut(child)
+                .unwrap()
+                .buffer
+                .write_range("stroke_width", 0, &[2.0, 4.0, 3.0]);
+            stage.attach(root, child).unwrap();
+            let grandchild = stage.add(Mobject::from_points(&[[x, -1.0, 0.0]]));
+            stage.attach(child, grandchild).unwrap();
+        }
+        stage.add_to_scene(root).unwrap();
+        (stage, root)
+    }
+
+    #[test]
+    fn reveal_continuation_rejects_forged_hidden_inventory_and_family_links() {
+        let (mut stage, root) = indication_family();
+        let mut animation = crate::show_increasing_subsets(&stage, root).unwrap();
+        animation.state.config.suspend_mobject_updating = true;
+        animation.prepare_timing(30).unwrap();
+        animation.begin(&mut stage).unwrap();
+        assert!(stage.get(root).unwrap().submobjects().is_empty());
+        assert!(decode_prepared(&stage, &animation).unwrap());
+        let before = stage.snapshot().to_bytes().unwrap();
+        for case in 0..5 {
+            let mut forged = animation.clone();
+            match case {
+                0 => forged.all_submobs.swap(0, 1),
+                1 => forged.all_submobs[1] = forged.all_submobs[0],
+                2 => {
+                    forged.all_submobs.pop();
+                }
+                3 => forged.all_submobs[0] = root,
+                _ => {
+                    let mut rows = forged.state.families().to_vec();
+                    rows[1][0] = rows[2][0];
+                    forged.state.families = Arc::from(rows);
+                }
+            }
+            assert!(!decode_prepared(&stage, &forged).unwrap(), "case={case}");
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        }
+        let hidden = animation.all_submobs[2];
+        stage.set_animating_status(hidden, false, false);
+        assert!(!decode_prepared(&stage, &animation).unwrap());
+        stage.set_animating_status(hidden, true, false);
+        let grandchild = stage.get(hidden).unwrap().submobjects()[0];
+        stage.detach(hidden, grandchild);
+        assert!(!decode_prepared(&stage, &animation).unwrap());
+    }
+
+    #[test]
+    fn passing_flash_continuation_binds_exact_profiles_to_the_prepared_geometry() {
+        let (mut stage, root) = indication_family();
+        let mut animation = VShowPassingFlash::new(root)
+            .with_time_width(0.7)
+            .with_taper_width(0.2);
+        animation.prepare_timing(30).unwrap();
+        animation.begin(&mut stage).unwrap();
+        animation.interpolate(&mut stage, 0.4);
+        assert!(decode_prepared(&stage, &animation).unwrap());
+        let before = stage.snapshot().to_bytes().unwrap();
+        for case in 0..5 {
+            let mut forged = animation.clone();
+            match case {
+                0 => forged.widths[1].0 = root,
+                1 => forged.widths[1].1[1] += 0.125,
+                2 => {
+                    forged.widths.pop();
+                }
+                3 => forged.widths[1].1.push(1.0),
+                _ => forged.widths.swap(0, 1),
+            }
+            assert!(!decode_prepared(&stage, &forged).unwrap(), "case={case}");
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        }
+        let mut nonfinite = animation.clone();
+        nonfinite.widths[1].1[1] = f64::NAN;
+        assert!(decode_prepared(&stage, &nonfinite).is_err());
+        for time_width in [0.0, -0.5, f64::INFINITY] {
+            assert!(
+                decode_prepared(&stage, &animation.clone().with_time_width(time_width)).is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn new_carrier_declarations_bind_parameters_without_preparing_the_scene() {
+        let (stage, root) = indication_family();
+        let before = stage.snapshot().to_bytes().unwrap();
+        for kind in 0..3 {
+            let first: Box<dyn Animation> = match kind {
+                0 => Box::new(crate::show_increasing_subsets(&stage, root).unwrap()),
+                1 => Box::new(WiggleOutThenIn::new(root)),
+                _ => Box::new(VShowPassingFlash::new(root)),
+            };
+            let changed: Box<dyn Animation> = match kind {
+                0 => Box::new(crate::show_submobjects_one_by_one(&stage, root).unwrap()),
+                1 => Box::new(WiggleOutThenIn::new(root).with_rotate_about_point([1.0, 2.0, 3.0])),
+                _ => Box::new(VShowPassingFlash::new(root).with_taper_width(0.2)),
+            };
+            let overrides = DeclarationOverrides {
+                run_time_frames: Some(7),
+                ..DeclarationOverrides::default()
+            };
+            let (first, frames) = fresh_declaration(&stage, &[first], overrides, 30, MAX_BYTES)
+                .unwrap()
+                .unwrap();
+            let (changed, changed_frames) =
+                fresh_declaration(&stage, &[changed], overrides, 30, MAX_BYTES)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!((frames, changed_frames), (7, 7));
+            assert_ne!(first, changed, "kind={kind}");
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        }
+        for nonfinite in [f64::NAN, f64::INFINITY] {
+            let animation: Box<dyn Animation> =
+                Box::new(WiggleOutThenIn::new(root).with_n_wiggles(nonfinite));
+            assert!(
+                declaration_bytes(
+                    &stage,
+                    &[animation],
+                    DeclarationOverrides::default(),
+                    MAX_BYTES
+                )
+                .is_err()
+            );
+        }
+        let mut stale = VShowPassingFlash::new(root);
+        stale.widths.push((root, Vec::new()));
+        assert!(
+            fresh_declaration(
+                &stage,
+                &[Box::new(stale)],
+                DeclarationOverrides::default(),
+                30,
+                MAX_BYTES
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn new_carrier_decode_enforces_version_counts_and_allocation_limits() {
+        let (mut stage, root) = indication_family();
+        let mut reveal = crate::show_increasing_subsets(&stage, root).unwrap();
+        reveal.prepare_timing(30).unwrap();
+        reveal.begin(&mut stage).unwrap();
+        let before = stage.snapshot().to_bytes().unwrap();
+        for case in 0..4 {
+            let schema = if case == 0 {
+                Schema::new(*b"FMPC", 1, 1, 2)
+            } else {
+                SCHEMA
+            };
+            let mut writer = Writer::with_limits(schema, limits(MAX_BYTES));
+            if case < 2 {
+                put_native(&mut writer, &stage, &reveal, true).unwrap();
+            } else {
+                writer.put_u8(if case == 2 { 7 } else { 9 });
+                put_state(&mut writer, &stage, &reveal.state, true).unwrap();
+                if case == 3 {
+                    put_float(&mut writer, 0.3);
+                    put_float(&mut writer, 0.05);
+                }
+                writer.put_u32(u32::MAX);
+            }
+            let bytes = writer.finish().unwrap();
+            let mut reader =
+                Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+            let mut budget = Budget {
+                remaining: if case == 1 { 16 } else { MAX_BYTES },
+                native_items: 0,
+            };
+            assert!(
+                get_native(&mut reader, &stage, &mut budget, 30).is_err(),
+                "case={case}"
+            );
+        }
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn legacy_only_trees_keep_declaration_and_checkpoint_bytes_stable() {
+        for nested in [false, true] {
+            for new_carrier in [false, true] {
+                let (mut stage, root) = indication_family();
+                let mut animation: Box<dyn Animation> = if new_carrier {
+                    Box::new(WiggleOutThenIn::new(root))
+                } else {
+                    Box::new(Rotating::new(root))
+                };
+                if nested {
+                    animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+                    animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+                }
+                let mut animations = vec![animation];
+                let declaration = declaration_bytes(
+                    &stage,
+                    &animations,
+                    DeclarationOverrides::default(),
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .unwrap();
+                let expected_minor = if new_carrier { 3 } else { 2 };
+                let reader = Reader::open(
+                    &declaration,
+                    DECLARATION_SCHEMA,
+                    limits(MAX_BYTES),
+                    UnknownPolicy::Strict,
+                )
+                .unwrap();
+                assert_eq!(reader.version(), (1, expected_minor));
+                if !new_carrier {
+                    let legacy = Schema::new(*b"FMPC", 2, 1, 2);
+                    let mut writer = Writer::with_limits(legacy, limits(MAX_BYTES));
+                    writer.put_u32(1);
+                    put_native(&mut writer, &stage, animations[0].as_ref(), false).unwrap();
+                    assert_eq!(declaration, writer.finish().unwrap());
+                }
+
+                let clock = RationalFrameClock::new(30).unwrap();
+                let open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+                let checkpoint = capture(&stage, &clock, &animations, &open, MAX_BYTES)
+                    .unwrap()
+                    .unwrap();
+                let reader = Reader::open(
+                    &checkpoint,
+                    SCHEMA,
+                    limits(MAX_BYTES),
+                    UnknownPolicy::Strict,
+                )
+                .unwrap();
+                assert_eq!(reader.version(), (1, expected_minor));
+                if !new_carrier {
+                    let legacy = Schema::new(*b"FMPC", 1, 1, 2);
+                    let mut writer = Writer::with_limits(legacy, limits(MAX_BYTES));
+                    writer.put_u32(30).put_i64(0).put_i64(0).put_u32(1);
+                    put_native(&mut writer, &stage, animations[0].as_ref(), true).unwrap();
+                    assert_eq!(checkpoint, writer.finish().unwrap());
+                }
+            }
+        }
     }
 
     #[test]

@@ -6,7 +6,7 @@ use fmn_anim::{
     open_play,
 };
 use fmn_core::{rate::CatalogRate, rng::RngRoot};
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{Mob, Mobject, Snapshot, Stage};
 
 fn family(stage: &mut Stage, x: f64) -> Mob {
     let root = stage.add(Mobject::vector_from_points(&[]));
@@ -199,6 +199,110 @@ fn passing_flash_keeps_tapered_widths_and_cleanup_across_workers() {
             nested,
             false,
         );
+    }
+}
+
+#[test]
+fn durable_indications_keep_pivots_width_profiles_and_every_remaining_frame() {
+    let rng = RngRoot::from_seed(57);
+    for kind in [2, 3] {
+        for nested in [false, true] {
+            for pivots in [false, true] {
+                for checkpoint_frame in [0, 1, 5, 15, 16] {
+                    let (mut serial, mut animations) = scene(
+                        kind,
+                        RateFunc::Catalog(CatalogRate::ThereAndBack),
+                        nested,
+                        pivots,
+                    );
+                    let mut clock = RationalFrameClock::new(32).unwrap();
+                    clock.advance_frames(3).unwrap();
+                    serial.set_time_from_clock(clock.now().to_f64());
+                    let mut open = open_play(&mut serial, &clock, &mut animations).unwrap();
+                    advance_play(
+                        &mut serial,
+                        &mut clock,
+                        &rng,
+                        &mut animations,
+                        &mut open,
+                        checkpoint_frame,
+                        &mut |_| {},
+                    )
+                    .unwrap();
+                    let checkpoint = fmn_anim::continuation::capture(
+                        &serial,
+                        &clock,
+                        &animations,
+                        &open,
+                        1024 * 1024,
+                    )
+                    .unwrap()
+                    .expect("closed indication must retain its prepared data");
+                    let snapshot = serial.snapshot().to_bytes().unwrap();
+                    let mut restored = Stage::new();
+                    let decoded = Snapshot::from_bytes(&snapshot, &restored).unwrap();
+                    restored.restore(&decoded.snapshot);
+                    restored.set_time_from_clock(clock.now().to_f64());
+                    let (mut resumed, mut resumed_open) =
+                        fmn_anim::continuation::restore(&restored, &clock, &checkpoint).unwrap();
+                    let mut resumed_clock = clock;
+                    assert_eq!(restored.snapshot().to_bytes().unwrap(), snapshot);
+                    assert_eq!(
+                        fmn_anim::continuation::capture(
+                            &restored,
+                            &clock,
+                            &resumed,
+                            &resumed_open,
+                            1024 * 1024,
+                        )
+                        .unwrap()
+                        .unwrap(),
+                        checkpoint,
+                    );
+                    let mut expected_frames = Vec::new();
+                    let mut actual_frames = Vec::new();
+                    advance_play(
+                        &mut serial,
+                        &mut clock,
+                        &rng,
+                        &mut animations,
+                        &mut open,
+                        16,
+                        &mut |packet| {
+                            expected_frames
+                                .push((packet.metadata(), packet.state().to_bytes().unwrap()))
+                        },
+                    )
+                    .unwrap();
+                    advance_play(
+                        &mut restored,
+                        &mut resumed_clock,
+                        &rng,
+                        &mut resumed,
+                        &mut resumed_open,
+                        16,
+                        &mut |packet| {
+                            actual_frames
+                                .push((packet.metadata(), packet.state().to_bytes().unwrap()))
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        actual_frames, expected_frames,
+                        "kind={kind}, nested={nested}, pivots={pivots}, checkpoint={checkpoint_frame}"
+                    );
+                    finish_open_play(&mut serial, &mut animations, open).unwrap();
+                    finish_open_play(&mut restored, &mut resumed, resumed_open).unwrap();
+                    assert_eq!(clock.now(), resumed_clock.now());
+                    assert_eq!(clock.fps(), resumed_clock.fps());
+                    assert_eq!(
+                        restored.snapshot().to_bytes().unwrap(),
+                        serial.snapshot().to_bytes().unwrap(),
+                        "the saved last sample must still restore all styles during finish",
+                    );
+                }
+            }
+        }
     }
 }
 #[test]

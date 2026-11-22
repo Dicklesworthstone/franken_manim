@@ -147,12 +147,12 @@ pub fn turn_inside_out(
 /// worker reconstruction produce the same pose at the same alpha.
 #[derive(Debug, Clone)]
 pub struct WiggleOutThenIn {
-    state: AnimState,
-    scale_value: f64,
-    rotation_angle: f64,
-    n_wiggles: f64,
-    scale_about_point: Option<Vec3>,
-    rotate_about_point: Option<Vec3>,
+    pub(crate) state: AnimState,
+    pub(crate) scale_value: f64,
+    pub(crate) rotation_angle: f64,
+    pub(crate) n_wiggles: f64,
+    pub(crate) scale_about_point: Option<Vec3>,
+    pub(crate) rotate_about_point: Option<Vec3>,
 }
 
 impl WiggleOutThenIn {
@@ -282,10 +282,10 @@ impl Animation for WiggleOutThenIn {
 /// defaults: `time_width = 0.3`, `taper_width = 0.05`, remover.
 #[derive(Debug, Clone)]
 pub struct VShowPassingFlash {
-    state: AnimState,
-    time_width: f64,
-    taper_width: f64,
-    widths: Vec<(Mob, Vec<f64>)>,
+    pub(crate) state: AnimState,
+    pub(crate) time_width: f64,
+    pub(crate) taper_width: f64,
+    pub(crate) widths: Vec<(Mob, Vec<f64>)>,
 }
 
 impl VShowPassingFlash {
@@ -327,7 +327,7 @@ impl VShowPassingFlash {
     }
 
     /// indication.py:198 `taper_kernel`.
-    fn taper_kernel(&self, x: f64) -> f64 {
+    pub(crate) fn taper_kernel(&self, x: f64) -> f64 {
         if x < self.taper_width {
             x
         } else if x > 1.0 - self.taper_width {

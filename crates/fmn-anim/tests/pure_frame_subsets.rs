@@ -7,7 +7,7 @@ use fmn_anim::{
 };
 use fmn_core::rate::CatalogRate;
 use fmn_core::rng::RngRoot;
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{Mob, Mobject, Snapshot, Stage};
 
 fn family(stage: &mut Stage, count: usize) -> (Mob, Vec<Mob>) {
     let root = stage.add(Mobject::vector_from_points(&[]));
@@ -131,6 +131,129 @@ fn structural_reveals_reconstruct_every_serial_sample_out_of_order() {
                 }
                 finish_open_play(&mut stage, &mut animations, open).unwrap();
                 assert!(children.iter().all(|child| stage.contains(*child)));
+            }
+        }
+    }
+}
+
+#[test]
+fn durable_reveals_resume_hidden_families_and_pending_cleanup_without_begin() {
+    let rng = RngRoot::from_seed(73);
+    for kind in 0..4 {
+        for nested in [false, true] {
+            for checkpoint_frame in [0, 1, 7, 16, 17] {
+                let mut serial = Stage::new();
+                let (root, children) = family(&mut serial, 5);
+                let animation = reveal(&serial, root, kind).with_config(AnimConfig {
+                    run_time_frames: Some(17),
+                    final_alpha_value: 0.4,
+                    suspend_mobject_updating: true,
+                    rate_func: RateFunc::Catalog(CatalogRate::ThereAndBack),
+                    ..AnimConfig::default()
+                });
+                let animation: Box<dyn Animation> = if nested {
+                    let inner =
+                        AnimationGroup::new(&mut serial, vec![Box::new(animation)]).unwrap();
+                    Box::new(
+                        AnimationGroup::with_lag_ratio(&mut serial, vec![Box::new(inner)], 0.3)
+                            .unwrap()
+                            .with_run_time_frames(17),
+                    )
+                } else {
+                    Box::new(animation)
+                };
+                let mut animations = vec![animation];
+                let mut clock = RationalFrameClock::new(24).unwrap();
+                clock.advance_frames(5).unwrap();
+                serial.set_time_from_clock(clock.now().to_f64());
+                let mut open = open_play(&mut serial, &clock, &mut animations).unwrap();
+                advance_play(
+                    &mut serial,
+                    &mut clock,
+                    &rng,
+                    &mut animations,
+                    &mut open,
+                    checkpoint_frame,
+                    &mut |_| {},
+                )
+                .unwrap();
+                let checkpoint = fmn_anim::continuation::capture(
+                    &serial,
+                    &clock,
+                    &animations,
+                    &open,
+                    1024 * 1024,
+                )
+                .unwrap()
+                .expect("reveals must retain their hidden prepared family");
+                let snapshot = serial.snapshot().to_bytes().unwrap();
+                let mut restored = Stage::new();
+                let decoded = Snapshot::from_bytes(&snapshot, &restored).unwrap();
+                restored.restore(&decoded.snapshot);
+                restored.set_time_from_clock(clock.now().to_f64());
+                let (mut resumed, mut resumed_open) =
+                    fmn_anim::continuation::restore(&restored, &clock, &checkpoint).unwrap();
+                let mut resumed_clock = clock;
+                assert_eq!(restored.snapshot().to_bytes().unwrap(), snapshot);
+                assert_eq!(
+                    fmn_anim::continuation::capture(
+                        &restored,
+                        &clock,
+                        &resumed,
+                        &resumed_open,
+                        1024 * 1024,
+                    )
+                    .unwrap()
+                    .unwrap(),
+                    checkpoint,
+                );
+                let mut expected_frames = Vec::new();
+                let mut actual_frames = Vec::new();
+                advance_play(
+                    &mut serial,
+                    &mut clock,
+                    &rng,
+                    &mut animations,
+                    &mut open,
+                    17,
+                    &mut |packet| {
+                        expected_frames
+                            .push((packet.metadata(), packet.state().to_bytes().unwrap()))
+                    },
+                )
+                .unwrap();
+                advance_play(
+                    &mut restored,
+                    &mut resumed_clock,
+                    &rng,
+                    &mut resumed,
+                    &mut resumed_open,
+                    17,
+                    &mut |packet| {
+                        actual_frames.push((packet.metadata(), packet.state().to_bytes().unwrap()))
+                    },
+                )
+                .unwrap();
+                assert_eq!(
+                    actual_frames, expected_frames,
+                    "kind={kind}, nested={nested}, checkpoint={checkpoint_frame}"
+                );
+                finish_open_play(&mut serial, &mut animations, open).unwrap();
+                finish_open_play(&mut restored, &mut resumed, resumed_open).unwrap();
+                assert_eq!(
+                    restored.snapshot().to_bytes().unwrap(),
+                    serial.snapshot().to_bytes().unwrap()
+                );
+                assert_eq!(clock.now(), resumed_clock.now());
+                assert_eq!(clock.fps(), resumed_clock.fps());
+                for child in children {
+                    assert!(!serial.is_animating(child));
+                    assert!(!serial.is_updating_suspended(child));
+                    for descendant in serial.family(child) {
+                        assert!(!serial.is_animating(descendant));
+                        assert!(!serial.is_updating_suspended(descendant));
+                    }
+                }
             }
         }
     }

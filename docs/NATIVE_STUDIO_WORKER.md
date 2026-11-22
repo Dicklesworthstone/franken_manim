@@ -366,12 +366,23 @@ prevent the jump, normal per-frame stepping remains available.
 A terminal `NativeSegment::Play` followed only by its original declarative
 wait suffix can resume supported native animations without replaying its
 prefix or rerunning `begin()`. The closed carriers include `Transform`,
-`Rotating`, `VFade`, `ShowPartial`, and `DrawBorderThenFill` (including `Write`),
-plus eager `AnimationGroup` and `LaggedStart` compositions of supported carriers.
+`Rotating`, `VFade`, `ShowPartial`, `DrawBorderThenFill` (including `Write`),
+`ShowIncreasingSubsets`, `ShowSubmobjectsOneByOne`, `WiggleOutThenIn`, and
+`VShowPassingFlash` (including `FlashAround`), plus eager `AnimationGroup` and
+`LaggedStart` compositions of supported carriers. Native word and letter reveals
+that use the subset carriers share this recovery path.
 The continuation preserves the prepared copies, family alignment, timing,
 rate function and updater-suspension state. Drawing animations also retain
 their outline and each family member's draw/fill phase, so a reversing rate
-curve resumes the same visible frame and subsequent transitions.
+curve resumes the same visible frame and subsequent transitions. Subset reveals
+retain their complete original child inventory even when those children are
+temporarily hidden. Stroke flashes retain their begin-time tapered width
+profiles, and wiggles retain their explicit scale and rotation pivots.
+
+The animation continuation format (`FMPC`) uses additive minor version 3 for
+these carriers. Earlier supported documents remain readable, and their carrier
+payload layouts are unchanged. Restoring a continuation does not rerun `begin()`
+or allocate new stage mobjects.
 
 The saved cursor can sit on the last nominal capture with `finish()` and
 cleanup still pending. Restoration performs that epilogue exactly once when

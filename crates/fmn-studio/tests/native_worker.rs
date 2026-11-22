@@ -1912,6 +1912,10 @@ enum TerminalPlayKind {
     BorderFill,
     Write,
     ReverseWrite,
+    IncreasingSubsets,
+    OneByOne,
+    Wiggle,
+    StrokeFlash,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2002,12 +2006,22 @@ fn terminal_play_program(
         buffer.write(index, "point", point);
         buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 1.0]);
         buffer.write(index, "stroke_width", &[0.0]);
+        if matches!(kind, TerminalPlayKind::StrokeFlash) {
+            buffer.write(index, "fill_rgba", &[0.25, 1.0, 0.125, 0.0]);
+            buffer.write(index, "stroke_rgba", &[0.7, 0.1, 0.9, 1.0]);
+            buffer.write(index, "stroke_width", &[2.0 + index as f32 * 0.5]);
+        }
     }
     let root = scene.stage_mut().add(Mobject::from_buffer(buffer));
     scene.add(&[root]).unwrap();
     if matches!(
         kind,
-        TerminalPlayKind::Write | TerminalPlayKind::ReverseWrite
+        TerminalPlayKind::Write
+            | TerminalPlayKind::ReverseWrite
+            | TerminalPlayKind::IncreasingSubsets
+            | TerminalPlayKind::OneByOne
+            | TerminalPlayKind::Wiggle
+            | TerminalPlayKind::StrokeFlash
     ) {
         // Family lag leaves different members in different drawing/filling
         // phases at a checkpoint. Their private phase state must survive too.
@@ -2056,6 +2070,25 @@ fn terminal_play_program(
             }
             Box::new(animation)
         }
+        TerminalPlayKind::IncreasingSubsets => {
+            Box::new(fmn_anim::show_increasing_subsets(scene.stage(), root).unwrap())
+        }
+        TerminalPlayKind::OneByOne => {
+            Box::new(fmn_anim::show_submobjects_one_by_one(scene.stage(), root).unwrap())
+        }
+        TerminalPlayKind::Wiggle => Box::new(
+            fmn_anim::WiggleOutThenIn::new(root)
+                .with_scale_value(1.4)
+                .with_rotation_angle(angle)
+                .with_n_wiggles(2.5)
+                .with_scale_about_point([0.2, -0.1, 0.0])
+                .with_rotate_about_point([-0.2, 0.15, 0.0]),
+        ),
+        TerminalPlayKind::StrokeFlash => Box::new(
+            fmn_anim::VShowPassingFlash::new(root)
+                .with_time_width(0.65)
+                .with_taper_width(0.2),
+        ),
     };
     animation.state_mut().config.suspend_mobject_updating = true;
     match policy {
@@ -2135,6 +2168,10 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
         TerminalPlayKind::BorderFill,
         TerminalPlayKind::Write,
         TerminalPlayKind::ReverseWrite,
+        TerminalPlayKind::IncreasingSubsets,
+        TerminalPlayKind::OneByOne,
+        TerminalPlayKind::Wiggle,
+        TerminalPlayKind::StrokeFlash,
     ] {
         for saved_frame in [7, 10, 14] {
             let mut original = terminal_play_worker(kind, TerminalPlayPolicy::Native, true, 1, 100);
@@ -2210,10 +2247,14 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
                             TerminalPlayKind::Rotation
                             | TerminalPlayKind::BorderFill
                             | TerminalPlayKind::Write
-                            | TerminalPlayKind::ReverseWrite => assert_eq!(stage.roots(), &[root]),
+                            | TerminalPlayKind::ReverseWrite
+                            | TerminalPlayKind::IncreasingSubsets
+                            | TerminalPlayKind::OneByOne
+                            | TerminalPlayKind::Wiggle => assert_eq!(stage.roots(), &[root]),
                             TerminalPlayKind::FadeOut
                             | TerminalPlayKind::VectorFade
-                            | TerminalPlayKind::PassingFlash => assert!(stage.roots().is_empty()),
+                            | TerminalPlayKind::PassingFlash
+                            | TerminalPlayKind::StrokeFlash => assert!(stage.roots().is_empty()),
                             TerminalPlayKind::Replacement => {
                                 assert_eq!(stage.roots().len(), 1);
                                 assert_ne!(stage.roots()[0], root);

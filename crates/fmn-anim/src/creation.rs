@@ -695,10 +695,10 @@ impl IntRound {
 /// the construction-time snapshot of its children.
 #[derive(Debug, Clone)]
 pub struct ShowIncreasingSubsets {
-    state: AnimState,
-    all_submobs: Vec<Mob>,
-    int_round: IntRound,
-    one_by_one: bool,
+    pub(crate) state: AnimState,
+    pub(crate) all_submobs: Vec<Mob>,
+    pub(crate) int_round: IntRound,
+    pub(crate) one_by_one: bool,
 }
 
 impl ShowIncreasingSubsets {
