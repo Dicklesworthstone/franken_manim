@@ -3910,6 +3910,28 @@ fn native_soundtrack_run(ctx: &mut RunCtx, in_memory: bool) -> Result<RunOutcome
         .with_counter("native_soundtrack_sample_frames", total_samples))
 }
 
+/// The public Python entry point reaches the same native input, process and
+/// create-only publication contracts as the Rust facade.
+#[cfg(unix)]
+fn python_video_concat_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let root = scenario_dir("python_video_concat")?;
+    let executable = PathBuf::from(env!("CARGO_BIN_FILE_FMN_OUTPUT_fmn-ffmpeg-test-fixture"));
+    let clips = manimlib::run_portal_gauntlet_video_concat(&executable, &root)
+        .map_err(|error| fail(format!("Python video composition: {error}")))?;
+    let output = std::fs::read(root.join("joined.mp4")).map_err(|error| fail(error.to_string()))?;
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.python_video_concat")
+            .field("input_positions", clips)
+            .field("process_order", "A,B,A")
+            .field("source_receipts", "verified")
+            .field("create_only", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_concat_input_positions", clips)
+        .with_counter("python_concat_output_bytes", output.len() as u64)
+        .with_artifact("python-video-concat.fixture", output))
+}
+
 /// A native fake-ffmpeg child consumes the frozen A/B/A clip sequence through
 /// the public facade. This checks composition, input evidence and publication;
 /// the fixture output is not presented as an encoded movie or a timing result.
@@ -21715,6 +21737,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    #[cfg(unix)]
+    specs.push(spec(
+        "lifecycle.python_video_concat.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_video_concat_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_concat_input_positions", 3),
+            counter_ge("python_concat_output_bytes", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.python_video_concat",
+            vec![
+                FieldPred::u64_eq("input_positions", 3),
+                FieldPred::str_eq("process_order", "A,B,A"),
+                FieldPred::str_eq("source_receipts", "verified"),
+                FieldPred::str_eq("create_only", "true"),
+            ],
+        )],
+    ));
     specs.push(spec(
         "failure_path.facade_video_requires_ffmpeg_capability.v1",
         ScenarioClass::FailurePath,
@@ -23632,6 +23675,17 @@ fn native_video_concat_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.native_video_concat.v1")
         .expect("native video concat scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[cfg(unix)]
+#[test]
+fn python_video_concat_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_video_concat.v1")
+        .expect("Python video composition scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

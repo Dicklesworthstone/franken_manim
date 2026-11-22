@@ -4,7 +4,12 @@
 //! defaults are promoted to RGBA/qtrle. Explicit incompatible choices fail
 //! before opening the encoder or reserving an output generation.
 
+mod concatenating;
 mod quality;
+
+pub(crate) use concatenating::install_concatenation;
+#[cfg(any(test, feature = "gauntlet"))]
+pub use concatenating::run_portal_gauntlet_video_concat;
 
 #[cfg(test)]
 mod conversion_tests;

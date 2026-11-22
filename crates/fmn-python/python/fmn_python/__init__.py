@@ -89,6 +89,10 @@ def _ensure_exclusive_manimlib_namespace():
 
 
 def __getattr__(name):
+    if name in {"VideoClipResult", "VideoConcatResult", "concatenate_video"}:
+        from . import video_composition
+
+        return getattr(video_composition, name)
     if name == "SoundData":
         _ensure_exclusive_manimlib_namespace()
         import manimlib

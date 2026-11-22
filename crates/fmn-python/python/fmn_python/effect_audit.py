@@ -38,7 +38,7 @@ from .runtime_paths import library_roots
 _LISTINGS = frozenset({"os.listdir", "os.scandir", "glob.glob", "glob.glob/2"})
 _PROCESSES = frozenset({
     "subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.spawn",
-    "os.fork", "os.forkpty", "os.startfile",
+    "os.fork", "os.forkpty", "os.startfile", "fmn.video_concat",
 })
 _NETWORK = frozenset({
     "socket.connect", "socket.sendto", "socket.sendmsg", "socket.getaddrinfo",

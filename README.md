@@ -178,6 +178,27 @@ Repeated inputs count each time. `--timeout`, `--max-log-bytes` and
 `--max-output-bytes` bound the process separately. Robot output includes the
 ordered input hashes, output hash, effective limits and process provenance.
 
+Python callers can assemble the same clips through the native boundary:
+
+```python
+from fmn_python import concatenate_video
+
+movie = concatenate_video(
+    ["intro.mp4", "lesson.mp4", "outro.mp4"],
+    "complete.mp4",
+    max_input_bytes=512 * 1024 * 1024,
+)
+print(movie.destination, movie.bytes, movie.digest)
+print(movie.as_dict())  # ordered input receipts, effective limits and tool provenance
+```
+
+`VideoConcatResult` and its `VideoClipResult` entries expose the native receipt.
+The iterable is consumed once under `max_clips`; relative paths anchor to the
+working directory at entry, including when a generator or `PathLike` runs user
+code. Optional `workdir` selects an existing parent for private process jobs.
+The native call releases the GIL during reads, process waits and publication.
+It refuses active certified captures and preserves existing destinations.
+
 
 Native Rust video can opt into **BT.2020/PQ HDR** with an explicit luminance
 profile:

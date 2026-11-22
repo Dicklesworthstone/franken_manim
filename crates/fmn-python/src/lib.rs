@@ -60,6 +60,8 @@ mod portal_video;
 #[cfg(any(test, feature = "gauntlet"))]
 pub use portal_video::run_portal_gauntlet_hdr_video;
 #[cfg(any(test, feature = "gauntlet"))]
+pub use portal_video::run_portal_gauntlet_video_concat;
+#[cfg(any(test, feature = "gauntlet"))]
 mod structural_parity;
 #[cfg(feature = "gauntlet")]
 pub use portal_texture::{
@@ -9424,55 +9426,7 @@ impl PyScene {
 
     #[getter]
     fn _render_invocations(slf: &Bound<'_, Self>) -> PyResult<Py<PyList>> {
-        let invocations = PyList::empty(slf.py());
-        for invocation in &slf.borrow().render_invocations {
-            let fact = PyDict::new(slf.py());
-            let provenance = &invocation.provenance;
-            fact.set_item("tool_path", provenance.tool_path.to_string_lossy().as_ref())?;
-            fact.set_item("tool_sha256", &provenance.tool_sha256_hex)?;
-            fact.set_item("tool_version", &provenance.tool_version)?;
-            fact.set_item(
-                "bound_tool_path",
-                provenance.bound_tool_path.to_string_lossy().as_ref(),
-            )?;
-            fact.set_item("process_mechanism", &provenance.process_mechanism)?;
-            fact.set_item("process_policy_version", provenance.process_policy_version)?;
-            let image = PyDict::new(slf.py());
-            image.set_item(
-                "format",
-                match provenance.native_image.format {
-                    fmn_platform::process::NativeExecutableFormat::Elf64 => "elf64",
-                    fmn_platform::process::NativeExecutableFormat::MachO64 => "macho64",
-                    fmn_platform::process::NativeExecutableFormat::MachOUniversal => {
-                        "macho-universal"
-                    }
-                    fmn_platform::process::NativeExecutableFormat::Pe32Plus => "pe32plus",
-                },
-            )?;
-            image.set_item(
-                "architecture",
-                match provenance.native_image.architecture {
-                    fmn_platform::process::NativeExecutableArchitecture::X86_64 => "x86_64",
-                    fmn_platform::process::NativeExecutableArchitecture::Aarch64 => "aarch64",
-                },
-            )?;
-            image.set_item("file_bytes", provenance.native_image.file_bytes)?;
-            image.set_item("policy_version", provenance.native_image.policy_version)?;
-            fact.set_item("native_image", image)?;
-            fact.set_item("encoder", &provenance.encoder)?;
-            if let Some(probe) = &provenance.hardware_encoder_probe {
-                let observation = PyDict::new(slf.py());
-                observation.set_item("encoder", &probe.encoder)?;
-                observation.set_item("available", probe.available)?;
-                observation.set_item("detail", &probe.detail)?;
-                fact.set_item("hardware_encoder_probe", observation)?;
-            } else {
-                fact.set_item("hardware_encoder_probe", slf.py().None())?;
-            }
-            fact.set_item("argv", &provenance.argv)?;
-            invocations.append(fact)?;
-        }
-        Ok(invocations.unbind())
+        ffmpeg_invocation_facts(slf.py(), &slf.borrow().render_invocations)
     }
 
     #[pyo3(signature = (*mobjects))]
@@ -12176,6 +12130,60 @@ fn with_font_book<T>(operation: impl FnOnce(&fmn_library::FontBook) -> PyResult<
 
 fn native_error(error: impl std::fmt::Display) -> PyErr {
     PyValueError::new_err(error.to_string())
+}
+
+/// The shared receipt shape for rendering and encoded-clip composition.
+fn ffmpeg_invocation_facts(
+    py: Python<'_>,
+    reports: &[fmn_output::InvocationReport],
+) -> PyResult<Py<PyList>> {
+    let invocations = PyList::empty(py);
+    for invocation in reports {
+        let fact = PyDict::new(py);
+        let provenance = &invocation.provenance;
+        fact.set_item("tool_path", provenance.tool_path.to_string_lossy().as_ref())?;
+        fact.set_item("tool_sha256", &provenance.tool_sha256_hex)?;
+        fact.set_item("tool_version", &provenance.tool_version)?;
+        fact.set_item(
+            "bound_tool_path",
+            provenance.bound_tool_path.to_string_lossy().as_ref(),
+        )?;
+        fact.set_item("process_mechanism", &provenance.process_mechanism)?;
+        fact.set_item("process_policy_version", provenance.process_policy_version)?;
+        let image = PyDict::new(py);
+        image.set_item(
+            "format",
+            match provenance.native_image.format {
+                fmn_platform::process::NativeExecutableFormat::Elf64 => "elf64",
+                fmn_platform::process::NativeExecutableFormat::MachO64 => "macho64",
+                fmn_platform::process::NativeExecutableFormat::MachOUniversal => "macho-universal",
+                fmn_platform::process::NativeExecutableFormat::Pe32Plus => "pe32plus",
+            },
+        )?;
+        image.set_item(
+            "architecture",
+            match provenance.native_image.architecture {
+                fmn_platform::process::NativeExecutableArchitecture::X86_64 => "x86_64",
+                fmn_platform::process::NativeExecutableArchitecture::Aarch64 => "aarch64",
+            },
+        )?;
+        image.set_item("file_bytes", provenance.native_image.file_bytes)?;
+        image.set_item("policy_version", provenance.native_image.policy_version)?;
+        fact.set_item("native_image", image)?;
+        fact.set_item("encoder", &provenance.encoder)?;
+        if let Some(probe) = &provenance.hardware_encoder_probe {
+            let observation = PyDict::new(py);
+            observation.set_item("encoder", &probe.encoder)?;
+            observation.set_item("available", probe.available)?;
+            observation.set_item("detail", &probe.detail)?;
+            fact.set_item("hardware_encoder_probe", observation)?;
+        } else {
+            fact.set_item("hardware_encoder_probe", py.None())?;
+        }
+        fact.set_item("argv", &provenance.argv)?;
+        invocations.append(fact)?;
+    }
+    Ok(invocations.unbind())
 }
 
 /// Read one user SVG file under the processor's byte budget. The size is
