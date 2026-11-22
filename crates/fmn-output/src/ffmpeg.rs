@@ -1104,6 +1104,11 @@ pub struct BoundaryReport {
     pub artifact_digest: Digest,
 }
 
+/// Maximum number of encoded clips in one concat job. This bounds the list
+/// and per-file staging overhead independently of the clip-byte budget.
+// Reserve entries for the private executable, concat list and joined output.
+pub const MAX_CONCAT_INPUTS: usize = watch::MAX_ENTRIES - 3;
+
 const WORKDIR_CREATE_ATTEMPTS: u64 = 128;
 
 #[cfg(unix)]
@@ -1922,7 +1927,10 @@ impl Boundary {
     }
 
     /// Concatenate already-encoded partial files with stream copy (the
-    /// insert-file mechanism).
+    /// insert-file mechanism), replacing an existing destination atomically.
+    ///
+    /// Use [`Self::prepare_concat`] followed by
+    /// [`PreparedFfmpegArtifact::commit_new`] for create-only publication.
     ///
     /// # Errors
     /// Every refusal in [`BoundaryError`]; single quotes in input paths
@@ -1932,10 +1940,30 @@ impl Boundary {
         inputs: &[PathBuf],
         destination: &Path,
     ) -> Result<BoundaryReport, BoundaryError> {
+        self.prepare_concat(inputs, destination)?.commit()
+    }
+
+    /// Concatenate existing encoded files without publishing the result.
+    ///
+    /// Input streams must already have compatible codecs, time bases and
+    /// stream layouts. All streams are copied in the supplied clip order,
+    /// including repeated clips. This low-level path reads the caller's live
+    /// files; use [`Self::prepare_concat_bytes`] to bind a composition to
+    /// immutable input bytes.
+    ///
+    /// # Errors
+    /// Every refusal in [`BoundaryError`]; input paths containing a single
+    /// quote or line break cannot be represented by this path-based interface.
+    pub fn prepare_concat(
+        &self,
+        inputs: &[PathBuf],
+        destination: &Path,
+    ) -> Result<PreparedFfmpegArtifact, BoundaryError> {
         if inputs.is_empty() {
-            return Err(BoundaryError::Negotiation(NegotiationError(
-                "concat of zero inputs",
-            )));
+            return Err(NegotiationError("concat of zero inputs").into());
+        }
+        if inputs.len() > MAX_CONCAT_INPUTS {
+            return Err(NegotiationError("concat input count exceeds the boundary entry budget").into());
         }
         let mut listing = String::new();
         for input in inputs {
@@ -1944,40 +1972,149 @@ impl Boundary {
             })?;
             let text = input
                 .to_str()
-                .ok_or(BoundaryError::Negotiation(NegotiationError(
-                    "concat input path is not valid UTF-8",
-                )))?;
+                .ok_or(NegotiationError("concat input path is not valid UTF-8"))?;
             if text.contains('\'') || text.contains('\n') || text.contains('\r') {
-                return Err(BoundaryError::Negotiation(NegotiationError(
-                    "concat input path contains a quote or line break",
-                )));
+                return Err(
+                    NegotiationError("concat input path contains a quote or line break").into(),
+                );
             }
             listing.push_str(&format!("file '{text}'\n"));
         }
         let workdir = self.make_workdir()?;
-        let result = (|| {
-            let mut bound_tool = self.tool.bind_into(&workdir)?;
-            let list_file = workdir.join("concat.txt");
-            std::fs::write(&list_file, listing).map_err(|e| BoundaryError::Workdir {
-                detail: format!("write {}: {e}", list_file.display()),
-            })?;
-            let ext = destination
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("mp4");
-            let artifact = workdir.join(format!("joined.{ext}"));
-            let argv = crate::negotiate::concat_argv(&list_file, &artifact);
-            self.run_publishing(
-                &mut bound_tool,
-                argv,
-                &workdir,
-                &artifact,
-                destination,
-                None,
-            )
-        })();
-        self.cleanup(&workdir);
+        let result = self.prepare_concat_in(&workdir, &listing, destination);
+        if result.is_err() {
+            self.cleanup(&workdir);
+        }
         result
+    }
+
+    /// Concatenate frozen encoded clips without exposing their source paths
+    /// to ffmpeg and without publishing the result.
+    ///
+    /// Each clip is copied to a distinct file in the private job directory.
+    /// The list contains only generated relative names, so source names,
+    /// quotes and line breaks cannot become concat-demuxer directives.
+    /// `max_input_bytes` independently bounds the total staged clip bytes;
+    /// the ordinary job limits still bound output, scratch, logs and time.
+    /// Callers retain ownership of the supplied buffers and can hash exactly
+    /// these bytes for their input receipts.
+    ///
+    /// Only self-contained MP4/MOV clips are admitted to the MOV demuxer;
+    /// nested playlists, network protocols and external MOV data references
+    /// are disabled. This is stream copy: codecs, time bases and stream
+    /// layouts must be compatible. No clip is decoded, rendered or silently
+    /// transcoded. At most [`MAX_CONCAT_INPUTS`] clips may be staged.
+    ///
+    /// # Errors
+    /// Refuses empty clips, zero/exceeded input budgets, staging failures, or
+    /// any process/artifact refusal in [`BoundaryError`].
+    pub fn prepare_concat_bytes(
+        &self,
+        inputs: &[&[u8]],
+        destination: &Path,
+        max_input_bytes: u64,
+    ) -> Result<PreparedFfmpegArtifact, BoundaryError> {
+        if inputs.is_empty() {
+            return Err(NegotiationError("concat of zero inputs").into());
+        }
+        if inputs.len() > MAX_CONCAT_INPUTS {
+            return Err(NegotiationError("concat input count exceeds the boundary entry budget").into());
+        }
+        if max_input_bytes == 0 {
+            return Err(NegotiationError("concat input byte limit must be nonzero").into());
+        }
+        let mut total = 0_u64;
+        for input in inputs {
+            if input.is_empty() {
+                return Err(NegotiationError("concat input clip is empty").into());
+            }
+            total = u64::try_from(input.len())
+                .ok()
+                .and_then(|bytes| total.checked_add(bytes))
+                .filter(|bytes| *bytes <= max_input_bytes)
+                .ok_or(NegotiationError("concat input byte limit exceeded"))?;
+        }
+        let workdir = self.make_workdir()?;
+        let result = (|| {
+            let mut listing = String::new();
+            for (index, input) in inputs.iter().enumerate() {
+                workdir.verify_current("stage concat input")?;
+                let name = format!("clip-{index:06}.media");
+                let path = workdir.join(&name);
+                File::create_new(&path)
+                    .and_then(|mut file| file.write_all(input))
+                    .map_err(|error| BoundaryError::Workdir {
+                        detail: format!("stage concat input {}: {error}", path.display()),
+                    })?;
+                listing.push_str(&format!("file '{name}'\n"));
+                listing.push_str(
+                    "option format_whitelist mov\n\
+                     option protocol_whitelist file\n\
+                     option enable_drefs 0\n",
+                );
+            }
+            self.prepare_concat_in(&workdir, &listing, destination)
+        })();
+        if result.is_err() {
+            self.cleanup(&workdir);
+        }
+        result
+    }
+
+    fn prepare_concat_in(
+        &self,
+        workdir: &OwnedWorkdir,
+        listing: &str,
+        destination: &Path,
+    ) -> Result<PreparedFfmpegArtifact, BoundaryError> {
+        workdir.verify_current("prepare concat inputs")?;
+        let mut bound_tool = self.tool.bind_into(workdir)?;
+        let list_file = workdir.join("concat.txt");
+        File::create_new(&list_file)
+            .and_then(|mut file| file.write_all(listing.as_bytes()))
+            .map_err(|error| BoundaryError::Workdir {
+                detail: format!("write {}: {error}", list_file.display()),
+            })?;
+        let artifact = workdir.join(format!(
+            "joined.{}",
+            destination
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or("mp4")
+        ));
+        let argv = crate::negotiate::concat_argv(&list_file, &artifact);
+        workdir.verify_current("start concat invocation")?;
+        bound_tool.verify_current(&self.tool)?;
+        let spec = self.spec(bound_tool.path(), argv.clone(), workdir, None);
+        let outcome = self.run_artifact_process(
+            &mut bound_tool,
+            &spec,
+            workdir,
+            &artifact,
+            self.limits.max_artifact_bytes,
+        );
+        workdir.verify_current("finish concat invocation")?;
+        bound_tool.verify_current(&self.tool)?;
+        let outcome = outcome?;
+        self.check_outcome(&outcome)?;
+        verify_private_artifact(&artifact, self.limits.max_artifact_bytes)?;
+        let invocations = vec![invocation_report(
+            &self.tool,
+            bound_tool.path(),
+            self.runner.mechanism(),
+            None,
+            argv,
+            artifact.clone(),
+            outcome.stderr,
+        )];
+        Ok(PreparedFfmpegArtifact {
+            limits: self.limits.clone(),
+            workdir: workdir.clone(),
+            artifact,
+            destination: destination.to_path_buf(),
+            invocations,
+            cleanup: true,
+        })
     }
 }
 

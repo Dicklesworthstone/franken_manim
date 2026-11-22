@@ -254,6 +254,58 @@ fn run() -> Result<u8, Box<dyn std::error::Error>> {
             std::fs::write(artifact, png)?;
             Ok(0)
         }
+        "concat-ordered" => {
+            for (flag, value) in [("-f", "concat"), ("-map", "0"), ("-c", "copy")] {
+                if !argv
+                    .windows(2)
+                    .any(|pair| pair[0] == flag && pair[1] == value)
+                {
+                    return Err(format!("video concat omitted {flag} {value}").into());
+                }
+            }
+            let input_index = argv
+                .iter()
+                .position(|arg| arg == "-i")
+                .ok_or("video concat has no list")?;
+            let list = argv
+                .get(input_index + 1)
+                .map(Path::new)
+                .ok_or("video concat has no list path")?;
+            if list != private_dir.join("concat.txt") {
+                return Err("video concat list escaped its private job".into());
+            }
+            let listing = std::fs::read_to_string(list)?;
+            let lines: Vec<_> = listing.lines().collect();
+            let expected: [&[u8]; 3] = [
+                b"fmn-concat-clip-A",
+                b"fmn-concat-clip-B",
+                b"fmn-concat-clip-A",
+            ];
+            if lines.len() != expected.len() * 4 {
+                return Err("video concat lost an input or its demuxer restrictions".into());
+            }
+            for (index, expected) in expected.iter().enumerate() {
+                let name = format!("clip-{index:06}.media");
+                let start = index * 4;
+                if lines[start] != format!("file '{name}'")
+                    || lines[start + 1] != "option format_whitelist mov"
+                    || lines[start + 2] != "option protocol_whitelist file"
+                    || lines[start + 3] != "option enable_drefs 0"
+                {
+                    return Err("video concat list did not bind a private movie clip".into());
+                }
+                let actual = std::fs::read(private_dir.join(name))?;
+                if actual.as_slice() != *expected {
+                    return Err(format!("video concat changed staged clip {index}").into());
+                }
+            }
+            let artifact = artifact_path(&argv)?;
+            if artifact.parent() != Some(private_dir.as_path()) {
+                return Err("video concat output escaped its private job".into());
+            }
+            std::fs::write(artifact, b"FMN_CONCAT_ORDER:A,B,A\n")?;
+            Ok(0)
+        }
         "timeout" => {
             let mut child = Command::new(std::env::current_exe()?)
                 .arg("--fmn-sleep-child")

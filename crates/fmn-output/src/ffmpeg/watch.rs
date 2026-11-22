@@ -13,7 +13,7 @@ use super::*;
 /// Maximum idle delay between disk-budget inspections, excluding scan time,
 /// the process mechanism's cancellation polling, and host scheduling delay.
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
-const MAX_ENTRIES: usize = 4096;
+pub(super) const MAX_ENTRIES: usize = 4096;
 const MAX_DEPTH: usize = 32;
 
 fn failure(detail: impl Into<String>) -> BoundaryError {

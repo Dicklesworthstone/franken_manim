@@ -2976,6 +2976,133 @@ mod private_boundary {
         ));
     }
 
+    #[test]
+    fn frozen_concat_admits_bounds_before_staging_and_preserves_clip_order() {
+        let (dir, _gate) = scratch("frozen-concat-inputs");
+        let (tool_path, mut runner) = scripted_tool(&dir);
+        let tool = resolve_tool(&tool_path, &runner, &dir).unwrap();
+        runner.script(first_bound_tool(&dir), successful_scripted_outcome());
+        let runner = Arc::new(runner);
+        let boundary = Boundary::new(
+            tool,
+            runner.clone(),
+            JobLimits {
+                keep_workdir: true,
+                ..JobLimits::default()
+            },
+            dir.clone(),
+        )
+        .unwrap();
+        let destination = dir.join("unpublished.mp4");
+        let inputs: &[&[u8]] = &[b"alpha", b"beta", b"alpha"];
+        for (clips, limit) in [
+            (&[][..], 14),
+            (&[b"".as_slice()][..], 14),
+            (inputs, 0),
+            (inputs, 13),
+        ] {
+            assert!(matches!(
+                boundary.prepare_concat_bytes(clips, &destination, limit),
+                Err(BoundaryError::Negotiation(_))
+            ));
+        }
+        let too_many = vec![b"x".as_slice(); fmn_output::ffmpeg::MAX_CONCAT_INPUTS + 1];
+        assert!(matches!(
+            boundary.prepare_concat_bytes(&too_many, &destination, u64::MAX),
+            Err(BoundaryError::Negotiation(_))
+        ));
+        assert_eq!(runner.runs().len(), 1, "only the initial tool probe");
+        assert!(
+            !first_bound_tool(&dir).parent().unwrap().exists(),
+            "refused input must not allocate a job directory"
+        );
+
+        assert!(matches!(
+            boundary.prepare_concat_bytes(inputs, &destination, 14),
+            Err(BoundaryError::ArtifactMissing)
+        ));
+        assert!(!destination.exists());
+        let runs = runner.runs();
+        assert_eq!(runs.len(), 2, "probe, then one bounded concat");
+        let invocation = &runs[1];
+        assert!(invocation.cwd.is_none());
+        assert!(invocation.argv.windows(2).any(|args| args == ["-map", "0"]));
+        assert!(invocation.argv.windows(2).any(|args| args == ["-c", "copy"]));
+        let list_at = invocation
+            .argv
+            .iter()
+            .position(|argument| argument == "-i")
+            .unwrap()
+            + 1;
+        let list = Path::new(&invocation.argv[list_at]);
+        let directory = list.parent().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(list).unwrap(),
+            concat!(
+                "file 'clip-000000.media'\n",
+                "option format_whitelist mov\n",
+                "option protocol_whitelist file\n",
+                "option enable_drefs 0\n",
+                "file 'clip-000001.media'\n",
+                "option format_whitelist mov\n",
+                "option protocol_whitelist file\n",
+                "option enable_drefs 0\n",
+                "file 'clip-000002.media'\n",
+                "option format_whitelist mov\n",
+                "option protocol_whitelist file\n",
+                "option enable_drefs 0\n",
+            )
+        );
+        for (index, expected) in inputs.iter().enumerate() {
+            assert_eq!(
+                std::fs::read(directory.join(format!("clip-{index:06}.media"))).unwrap(),
+                *expected,
+                "each authored occurrence has its own immutable staged bytes"
+            );
+        }
+    }
+
+    #[cfg(all(unix, feature = "ffmpeg-test-fixture"))]
+    #[test]
+    fn prepared_concat_defers_publication_and_commit_new_preserves_existing_output() {
+        let (dir, _gate) = scratch("prepared-concat-publication");
+        let (tool, runner) = real_tool(&dir);
+        let boundary =
+            Boundary::new(tool, Arc::new(runner), JobLimits::default(), dir.clone()).unwrap();
+        let part = dir.join("part.mp4");
+        std::fs::write(&part, b"encoded source fixture").unwrap();
+        let destination = dir.join("joined.mp4");
+
+        let abandoned = boundary
+            .prepare_concat(std::slice::from_ref(&part), &destination)
+            .unwrap();
+        assert!(!destination.exists(), "preparation must remain private");
+        drop(abandoned);
+        assert!(!destination.exists(), "dropping a prepared job never publishes");
+
+        let prepared = boundary
+            .prepare_concat_bytes(&[b"frozen encoded clip"], &destination, 64)
+            .unwrap();
+        assert!(!destination.exists());
+        let report = prepared.commit_new().unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"FAKEVIDEO");
+        assert_eq!(report.artifact_bytes, 9);
+        assert_eq!(report.artifact_digest, sha256(b"FAKEVIDEO"));
+        assert_eq!(report.invocations.len(), 1);
+
+        let raced = dir.join("another.mp4");
+        let prepared = boundary
+            .prepare_concat_bytes(&[b"frozen encoded clip"], &raced, 64)
+            .unwrap();
+        std::fs::write(&raced, b"another writer published first").unwrap();
+        assert!(prepared.commit_new().is_err());
+        assert_eq!(
+            std::fs::read(&raced).unwrap(),
+            b"another writer published first"
+        );
+        assert_eq!(std::fs::read(&part).unwrap(), b"encoded source fixture");
+    }
+
     // ---- the real thing, behind an env flag ----------------------------
 
     #[test]
@@ -3003,6 +3130,37 @@ mod private_boundary {
         let bytes = std::fs::read(&destination).unwrap();
         assert!(bytes.len() > 100, "suspiciously small mp4");
         assert!(report.invocations[0].provenance.tool_sha256_hex.len() == 64);
+
+        // Use the same real encoder output twice: this exercises the MOV
+        // whitelist and per-file options, which the fake process cannot parse.
+        let joined = dir.join("joined.mp4");
+        let prepared = boundary
+            .prepare_concat_bytes(&[&bytes, &bytes], &joined, (bytes.len() as u64) * 2)
+            .expect("self-contained encoded clips pass the MOV-only route");
+        assert!(!joined.exists());
+        let concatenated = prepared.commit_new().unwrap();
+        assert!(concatenated.artifact_bytes > 100);
+        assert_eq!(concatenated.invocations.len(), 1);
+        assert!(
+            concatenated.invocations[0]
+                .provenance
+                .argv
+                .windows(2)
+                .any(|args| args == ["-map", "0"])
+        );
+
+        // A frozen top-level playlist is not a frozen input closure. It must
+        // fail instead of causing ffmpeg to read another, unhashed clip.
+        let nested = format!(
+            "ffconcat version 1.0\nfile '{}'\n",
+            destination.display()
+        );
+        let refused = dir.join("nested-playlist.mp4");
+        assert!(matches!(
+            boundary.prepare_concat_bytes(&[nested.as_bytes()], &refused, 4096),
+            Err(BoundaryError::EncodeFailed { .. })
+        ));
+        assert!(!refused.exists());
         println!(
             "real ffmpeg smoke OK: {} bytes via {}",
             bytes.len(),

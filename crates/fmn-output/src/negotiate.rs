@@ -587,7 +587,7 @@ pub fn concat_argv(list_file: &Path, out: &Path) -> Vec<String> {
     let mut argv = base_argv();
     push(&mut argv, &["-f", "concat", "-safe", "0", "-i"]);
     argv.push(list_file.display().to_string());
-    push(&mut argv, &["-c", "copy"]);
+    push(&mut argv, &["-map", "0", "-c", "copy"]);
     argv.push("-y".into());
     argv.push(out.display().to_string());
     argv
