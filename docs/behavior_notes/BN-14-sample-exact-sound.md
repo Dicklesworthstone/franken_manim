@@ -71,8 +71,13 @@ collide. Existing mono/stereo identities retain their v1 domain.
 
 File sources, Rust memory sources, Python `SoundData.from_wav_bytes`, native
 WAV rendering, soundtrack windows, and portable bundles share this path.
-Python's raw-sample `SoundData(samples, ...)` constructor remains mono/stereo;
-use an explicitly labelled WAV for surround input. Output remains mono/stereo.
+Python's raw-sample constructor accepts the same layouts through its explicit
+`channel_mask` keyword. For example, `SoundData(samples, channels=6,
+channel_mask=0x3f)` admits interleaved front-left, front-right, front-center,
+LFE, back-left, and back-right samples. The mask is an integer speaker-bit
+mask, not a channel count. Omit it for conventional mono/stereo; multichannel
+samples without a supported mask are refused before the sample sequence is
+read. Output remains mono/stereo.
 
 ## What stayed familiar
 
@@ -121,12 +126,17 @@ both through `add_sound_source`.
 
 Python callers import `SoundData` from `fmn_python` and pass it directly to
 `Scene.add_sound`. `SoundData(samples, sample_rate=48000, channels=1)` freezes a
-finite, indexable sequence of interleaved floating-point PCM; flatten a stereo
-NumPy array before passing it. `SoundData.from_wav_bytes(data)` admits native
+finite, indexable sequence of interleaved floating-point PCM; flatten a NumPy
+array before passing it. Supply `channel_mask` for an explicit surround
+layout. `SoundData.from_wav_bytes(data)` admits native
 PCM WAV bytes. Both accept smaller `max_samples` and `max_bytes` budgets, with
 hard ceilings of 16,777,216 interleaved samples and 64 MiB. Source data and
 metadata are immutable after construction. `wav_bytes()`, `sha256`, `channels`,
-`sample_rate`, `sample_frames`, and `duration_seconds` expose the frozen asset.
+`channel_mask`, `sample_rate`, `sample_frames`, and `duration_seconds` expose
+the frozen asset. `channel_mask` is `None` for canonical mono/stereo and an
+integer for surround sources. Saved render and bundle receipts preserve
+file/memory source identities and the source channel count; their output
+channel count continues to describe the completed mono/stereo mix.
 This extension leaves the Reference's `manimlib` wildcard namespace unchanged.
 
 The Python writer also accepts native sound: `SceneFileWriter.add_sound` accepts

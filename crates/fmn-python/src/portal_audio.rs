@@ -10,7 +10,7 @@ use fmn_output::{
 };
 use fmn_scene::{SoundData, SoundDataLimits, SoundSource, SoundTime};
 use pyo3::exceptions::PyAttributeError;
-use pyo3::types::{PyBool, PyBytes};
+use pyo3::types::{PyBool, PyBytes, PyInt};
 use std::borrow::Cow;
 
 /// Immutable, owned PCM. Construction admits the complete size before reading
@@ -23,25 +23,43 @@ pub(crate) struct PySoundData {
 
 #[pymethods]
 impl PySoundData {
-    /// Freeze a finite, indexable sequence of interleaved mono/stereo samples.
+    /// Freeze a finite, indexable sequence of interleaved PCM samples.
     /// Samples are normalized floating point PCM; amplitudes outside [-1, 1]
     /// remain available to the native mixer's gain and clipping policy.
+    /// Surround samples require an explicit supported WAV speaker mask.
     #[new]
-    #[pyo3(signature = (samples, sample_rate=48000, channels=1, *, max_samples=16_777_216, max_bytes=67_108_864))]
+    #[pyo3(signature = (samples, sample_rate=48000, channels=1, *, channel_mask=None, max_samples=16_777_216, max_bytes=67_108_864))]
     fn new(
         samples: &Bound<'_, PyAny>,
         sample_rate: u32,
         channels: u16,
+        channel_mask: Option<&Bound<'_, PyAny>>,
         max_samples: usize,
         max_bytes: usize,
     ) -> PyResult<Self> {
         let limits = sound_data_limits(max_samples, max_bytes)?;
-        if !matches!(channels, 1 | 2)
-            || sample_rate == 0
-            || sample_rate.checked_mul(u32::from(channels) * 4).is_none()
-        {
+        let channel_mask = channel_mask
+            .map(|value| {
+                if value.is_instance_of::<PyBool>() || !value.is_instance_of::<PyInt>() {
+                    return Err(PyTypeError::new_err(
+                        "SoundData channel_mask must be a Python integer or None, not bool",
+                    ));
+                }
+                value.extract::<u32>()
+            })
+            .transpose()?;
+        fmn_codec::ChannelLayout::from_mask(channels, channel_mask).map_err(native_error)?;
+        if sample_rate == 0 || sample_rate.checked_mul(u32::from(channels) * 4).is_none() {
             return Err(PyValueError::new_err(
-                "SoundData requires mono/stereo channels and a valid nonzero sample rate",
+                "SoundData requires a valid nonzero sample rate",
+            ));
+        }
+        // Native SoundData canonicalizes conventional mono/stereo masks away,
+        // while surround retains its extensible WAV header and speaker order.
+        let header_bytes = if channels > 2 { 68 } else { 44 };
+        if limits.max_bytes < header_bytes {
+            return Err(PyValueError::new_err(
+                "SoundData samples exceed the admitted PCM budget",
             ));
         }
         let count = samples.len().map_err(|_| {
@@ -52,7 +70,7 @@ impl PySoundData {
         if count > limits.max_samples
             || count
                 .checked_mul(4)
-                .and_then(|n| n.checked_add(44))
+                .and_then(|n| n.checked_add(header_bytes))
                 .is_none_or(|bytes| bytes > limits.max_bytes)
         {
             return Err(PyValueError::new_err(
@@ -86,7 +104,7 @@ impl PySoundData {
         let data = SoundData::from_audio(
             &fmn_codec::WavAudio {
                 channels,
-                channel_mask: None,
+                channel_mask,
                 sample_rate,
                 format: fmn_codec::SampleFormat::F32,
                 samples: values,
@@ -110,6 +128,12 @@ impl PySoundData {
     #[getter]
     fn channels(&self) -> u16 {
         self.data.channels()
+    }
+
+    /// Explicit WAV speaker mask for surround; conventional mono/stereo is None.
+    #[getter]
+    fn channel_mask(&self) -> Option<u32> {
+        self.data.channel_mask()
     }
 
     #[getter]
@@ -903,7 +927,7 @@ pub(crate) fn shared_bundle_input_reports(scene: &Bound<'_, PyScene>) -> PyResul
     Ok(inputs.len() == 2 && Arc::ptr_eq(&inputs[0].report, &inputs[1].report))
 }
 
-/// Exercise immutable Python PCM through native writer timing, WAV publication
+/// Exercise immutable Python surround PCM through native writer timing, WAV publication
 /// and overlapping live inserts at three worker counts. Returns verified files.
 ///
 /// # Errors
@@ -924,10 +948,15 @@ def read_pcm(path):
         assert (stream.getframerate(), stream.getnchannels(), stream.getsampwidth()) == (48000, 2, 2)
         return np.frombuffer(stream.readframes(stream.getnframes()), dtype='<i2').reshape(-1, 2)
 
-original = np.array([.25, -.5] * 32, dtype=np.float32)
-sound = SoundData(original, channels=2)
+original = np.array([.25, -.5, .125, 1.0, -.125, .25] * 32, dtype=np.float32)
+sound = SoundData(original, channels=6, channel_mask=0x3f)
 original[:] = 0
-expected = np.tile(np.array([[8192, -16384]], dtype=np.int16), (32, 1))
+assert sound.channel_mask == 0x3f and sound.channels == 6
+# Independent front/center/back matrix; the full-scale LFE is excluded.
+mapped = np.array([[.25, -.5 + .375 * (0.5 ** 0.5)]], dtype=np.float32)
+scaled = mapped.astype(np.float64) * 32768
+quantized = np.where(scaled >= 0, np.floor(scaled + .5), np.ceil(scaled - .5)).astype(np.int16)
+expected = np.tile(quantized, (32, 1))
 verified_files = 0
 digests = []
 with tempfile.TemporaryDirectory(prefix='fmn sound data e2e ') as directory:
@@ -943,6 +972,7 @@ with tempfile.TemporaryDirectory(prefix='fmn sound data e2e ') as directory:
         np.testing.assert_array_equal(pcm[9:41], expected)
         assert whole.result.ffmpeg_invocations == ()
         assert whole.result.audio_inputs[0]['source_sha256'] == sound.sha256
+        assert whole.result.audio_inputs[0]['channels'] == 6
         verified_files += 1
         with record_scene(scene, root / f'insert-{threads}.wav', threads=threads) as insert:
             scene.file_writer.add_sound(sound, time=2 / 29 - 2 / 48000)

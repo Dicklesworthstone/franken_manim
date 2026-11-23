@@ -48,16 +48,26 @@ def _restore_audio_provenance(data, options):
         raise ValueError("invalid checkpoint bundle decoder limits")
     expected_input = {"path", "source_sha256", "pcm_sha256", "container",
                       "sample_rate", "channels", "sample_frames", "decoder", "decoder_sha256"}
+    expected_memory = expected_input | {"source_kind", "source"}
     sources, external_sources, tool_hashes = {}, set(), set()
     for item in inputs:
-        if (not isinstance(item, dict) or set(item) != expected_input
-                or not text(item["path"], path=True)
+        if (not isinstance(item, dict) or set(item) not in (expected_input, expected_memory)
                 or not digest(item["source_sha256"]) or not digest(item["pcm_sha256"])
                 or item["container"] not in ("wav", "flac", "mp3", "aac", "ogg", "mov", "aiff")
                 or not integer(item["sample_rate"], 1, (1 << 32) - 1)
-                or not integer(item["channels"], 1, 2)
+                or not integer(item["channels"], 1, 8)
                 or not integer(item["sample_frames"])):
             raise ValueError("invalid checkpoint bundle audio input")
+        if set(item) == expected_memory:
+            if (item["path"] is not None or item["source_kind"] != "memory-wav"
+                    or item["source"] != "memory:sha256:" + item["source_sha256"]
+                    or item["container"] != "wav" or item["decoder"] != "native-wav"):
+                raise ValueError("invalid checkpoint memory WAV source identity")
+            source_key = ("memory-wav", item["source"])
+        else:
+            if not text(item["path"], path=True):
+                raise ValueError("invalid checkpoint bundle audio source path")
+            source_key = ("file", item["path"])
         if item["decoder"] == "native-wav":
             if item["container"] != "wav" or item["decoder_sha256"] is not None:
                 raise ValueError("invalid checkpoint native WAV decoder identity")
@@ -66,7 +76,7 @@ def _restore_audio_provenance(data, options):
             tool_hashes.add(item["decoder_sha256"])
         else:
             raise ValueError("invalid checkpoint bundle audio decoder")
-        previous = sources.setdefault(item["path"], item)
+        previous = sources.setdefault(source_key, item)
         if previous != item:
             raise ValueError("checkpoint repeated audio source has inconsistent observations")
         if (options is not None and item["sample_frames"] * item["channels"] * 4

@@ -16,6 +16,7 @@ import wave
 import numpy as np
 import manimlib as m
 from fmn_python import SoundData, export_bundle, record_scene, render_scene, render_session
+from fmn_python.bundle_checkpoint import restore_bundle_receipt
 from fmn_python.console_rendering import try_render_cli
 
 
@@ -283,10 +284,183 @@ def sample_boundary(frame, fps):
     return (2 * frame * 48000 + fps) // (2 * fps)
 
 
+def surround_sound_inputs(root):
+    """Independent speaker impulses survive every public sound authoring route."""
+    for channels, mask in ((1, 4), (2, 3)):
+        values = [0.125] * channels
+        legacy = SoundData(values, channels=channels)
+        for explicit in (0, mask):
+            source = SoundData(values, channels=channels, channel_mask=explicit,
+                               max_bytes=44 + 4 * channels)
+            assert source.channel_mask is None
+            assert source.wav_bytes() == legacy.wav_bytes() and source.sha256 == legacy.sha256
+    for channels, mask in ((3, 0x7), (3, 0xb), (4, 0x33), (4, 0x107),
+                            (5, 0x37), (5, 0x607), (6, 0x3f), (6, 0x60f),
+                            (7, 0x70f), (8, 0x63f)):
+        source = SoundData([0.0] * channels, channels=channels, channel_mask=mask)
+        assert (source.channels, source.channel_mask, source.sample_frames) == (channels, mask, 1)
+
+    class Untouched:
+        touched = False
+        def __len__(self):
+            self.touched = True
+            raise AssertionError('invalid layout inspected samples')
+        def __getitem__(self, index):
+            self.touched = True
+            raise AssertionError('invalid layout read samples')
+
+    for mask, error in ((True, TypeError), (False, TypeError), (63.0, TypeError),
+                        ('0x3f', TypeError), (object(), TypeError), (np.int64(63), TypeError),
+                        (-1, OverflowError), (1 << 32, OverflowError),
+                        (None, ValueError), (0, ValueError), (0x7, ValueError), (0x18f, ValueError)):
+        samples = Untouched()
+        try:
+            SoundData(samples, channels=6, channel_mask=mask)
+        except error:
+            pass
+        else:
+            raise AssertionError(f'invalid speaker mask admitted: {mask!r}')
+        assert not samples.touched
+    samples = Untouched()
+    try:
+        SoundData(samples, channels=6, channel_mask=0x3f, max_bytes=67)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('surround WAV header exceeded its byte budget')
+    assert not samples.touched
+
+    class UnreadFrame:
+        def __len__(self):
+            return 6
+        def __getitem__(self, index):
+            raise AssertionError('surround samples read before budget admission')
+    for limits in ({'max_samples': 5}, {'max_bytes': 91}):
+        try:
+            SoundData(UnreadFrame(), channels=6, channel_mask=0x3f, **limits)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError('surround sample budget was ignored')
+    assert len(SoundData([0.0] * 6, channels=6, channel_mask=0x3f, max_bytes=92).wav_bytes()) == 92
+    assert len(SoundData([], channels=6, channel_mask=0x3f, max_bytes=68).wav_bytes()) == 68
+
+    def score(source):
+        class Surround(m.Scene):
+            def construct(self):
+                self.add_sound(source)
+                self.file_writer.add_sound(source, time=0)
+                self.wait_frames(1)
+        return Surround(file_writer_config={'ffmpeg_bin': str(root / 'no-surround-decoder')})
+
+    # RIFF/WAVE_FORMAT_EXTENSIBLE fixtures are independently authored S16, with
+    # one isolated impulse for every speaker in increasing WAV mask-bit order.
+    # The oracle never consumes native downmix or WAV serialization helpers.
+    gain = 0.5 ** 0.5
+    for channels, mask in ((6, 0x3f), (8, 0x63f)):
+        samples = np.zeros((8, channels), dtype=np.float32)
+        samples[np.arange(channels), np.arange(channels)] = 0.125
+        payload = (samples * 32768).astype('<i2').tobytes()
+        fmt = struct.pack('<HHIIHHHHI', 0xfffe, channels, 48000, 48000 * channels * 2,
+                          channels * 2, 16, 22, 16, mask)
+        fmt += bytes.fromhex('0100000000001000800000aa00389b71')
+        encoded = (b'RIFF' + struct.pack('<I', 60 + len(payload)) + b'WAVEfmt ' +
+                   struct.pack('<I', 40) + fmt + b'data' + struct.pack('<I', len(payload)) + payload)
+        asset = root / f'surround-{channels}.wav'
+        asset.write_bytes(encoded)
+        raw = SoundData(samples.ravel(), channels=channels, channel_mask=mask)
+        decoded = SoundData.from_wav_bytes(encoded)
+        samples[:] = 0
+        assert raw.wav_bytes() == decoded.wav_bytes() and raw.sha256 == decoded.sha256
+        assert raw.channel_mask == decoded.channel_mask == mask
+        assert struct.unpack_from('<I', raw.wav_bytes(), 40)[0] == mask
+        assert copy.copy(raw).channel_mask == copy.deepcopy(raw).channel_mask == mask
+        assert SoundData.from_wav_bytes(raw.wav_bytes()).sha256 == raw.sha256
+        try:
+            raw.channel_mask = 0
+        except AttributeError:
+            pass
+        else:
+            raise AssertionError('speaker layout metadata was writable')
+        for invalid_mask in (0, 0x7, 0x18f):
+            invalid = bytearray(encoded)
+            struct.pack_into('<I', invalid, 40, invalid_mask)
+            try:
+                SoundData.from_wav_bytes(bytes(invalid))
+            except ValueError:
+                pass
+            else:
+                raise AssertionError('ambiguous WAV speaker layout was admitted')
+
+        oracle = np.array([[0.125, 0], [0, 0.125], [0.125 * gain, 0.125 * gain],
+                           [0, 0], [0.125 * gain, 0], [0, 0.125 * gain],
+                           [0.125 * gain, 0], [0, 0.125 * gain]], dtype=np.float32)
+        oracle[channels:] = 0
+        scene = m.Scene()
+        scene.file_writer.add_audio_segment(raw)
+        frozen = scene.file_writer.audio_segment
+        assert (frozen.channels, frozen.channel_mask, frozen.sample_frames) == (2, None, 8)
+        np.testing.assert_array_equal(
+            np.frombuffer(frozen.wav_bytes(), dtype='<f4', offset=44).reshape(-1, 2), oracle)
+        scene.file_writer.add_audio_segment(decoded)
+        assert frozen.sample_frames == 8 and scene.file_writer.audio_segment.sample_frames == 16
+        np.testing.assert_array_equal(
+            np.frombuffer(scene.file_writer.audio_segment.wav_bytes(), dtype='<f4', offset=44)
+            .reshape(-1, 2), np.tile(oracle, (2, 1)))
+
+        expected = np.zeros((400, 2), dtype=np.int16)
+        expected[:8] = np.floor(oracle.astype(np.float64) * 2 * 32768 + 0.5).astype(np.int16)
+        outputs, pcm_hashes = [], set()
+        for name, source in (('raw', raw), ('decoded', decoded), ('file', asset)):
+            for threads in (1, 4, 16):
+                target = root / f'surround-{channels}-{name}-{threads}.wav'
+                result = render_scene(score(source), target, fps=120, threads=threads)
+                np.testing.assert_array_equal(pcm(target), expected)
+                outputs.append(target.read_bytes())
+                assert result.ffmpeg_invocations == () and len(result.audio_inputs) == 2
+                for fact in result.audio_inputs:
+                    assert (fact['channels'], fact['sample_rate'], fact['sample_frames']) == (channels, 48000, 8)
+                    assert fact['decoder'] == 'native-wav' and fact['decoder_sha256'] is None
+                    pcm_hashes.add(fact['pcm_sha256'])
+                    if name == 'file':
+                        assert Path(fact['path']).samefile(asset)
+                        assert fact['source_sha256'] == hashlib.sha256(encoded).hexdigest()
+                    else:
+                        assert fact['path'] is None and fact['source_kind'] == 'memory-wav'
+                        assert fact['source'] == 'memory:sha256:' + raw.sha256
+        assert all(output == outputs[0] for output in outputs) and len(pcm_hashes) == 1
+
+        # Compare the full published FMTL against independent stereo impulses,
+        # including the native mono fold. Restore the actual durable receipt;
+        # this exercises memory source identities as well as surround counts.
+        stereo = SoundData(oracle.ravel(), channels=2)
+        for output_channels in (1, 2):
+            options = dict(audio=True, audio_ffmpeg=True, audio_channels=output_channels,
+                           audio_threads=4, fps=120, resolution=(16, 9))
+            reference = root / f'surround-{channels}-reference-{output_channels}.fmtl'
+            export_bundle(score(stereo), reference, **options)
+            plan = {'bundle_camera': False, 'bundle_audio': True, 'fps': 120,
+                    'resolution': (16, 9),
+                    'bundle_limits': {'max_frames': 1, 'max_output_bytes': 64 * 1024 * 1024},
+                    'bundle_audio_options': {'audio_ffmpeg': True, 'audio_sample_rate': 48000,
+                                            'audio_channels': output_channels,
+                                            'max_audio_bytes': 64 * 1024 * 1024}}
+            for name, source in (('raw', raw), ('decoded', decoded), ('file', asset)):
+                target = root / f'surround-{channels}-{name}-{output_channels}.fmtl'
+                result = export_bundle(score(source), target, **options)
+                assert target.read_bytes() == reference.read_bytes()
+                assert (result.soundtrack.channels, result.soundtrack.sample_frames) == (output_channels, 400)
+                assert result.ffmpeg_invocations == () and len(result.audio_inputs) == 2
+                assert all(fact['channels'] == channels for fact in result.audio_inputs)
+                restored = restore_bundle_receipt(result.as_dict(), options=plan)
+                assert restored.as_dict() == result.as_dict()
+
+
 with tempfile.TemporaryDirectory(prefix="fmn sound inputs ") as directory:
     root = Path(directory)
     memory_sound_inputs(root)
     writer_sound_inputs(root)
+    surround_sound_inputs(root)
     native_asset = root / "native.wav"
     float_wav(native_asset, [0.125, -0.25] * 128, 2, 48000)
     # A missing optional tool cannot turn PCM-only WAV export into a capability

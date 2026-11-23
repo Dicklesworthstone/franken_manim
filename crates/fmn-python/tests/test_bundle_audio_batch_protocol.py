@@ -354,6 +354,13 @@ class AudioReceiptProtocol(unittest.TestCase):
                     "audio_sample_rate": 32_000, "audio_channels": 1,
                     "max_audio_bytes": budget, "audio_ffmpeg": opted_in}}
 
+    def memory_receipt(self, channels=6):
+        data = self.observed_receipt(external=False)
+        for item in data["audio_inputs"]:
+            item.update(path=None, source_kind="memory-wav", channels=channels,
+                        source="memory:sha256:" + item["source_sha256"])
+        return data
+
     def test_decoder_observations_round_trip_without_reopening_sources(self):
         for external in (False, True):
             with self.subTest(external=external):
@@ -379,6 +386,62 @@ class AudioReceiptProtocol(unittest.TestCase):
         restored = restore_bundle_receipt(data, options=self.audio_plan())
         self.assertEqual(restored.as_dict(), data)
         self.assertEqual(len(restored.ffmpeg_invocations), 1)
+
+    def test_surround_source_observations_preserve_the_mono_output_contract(self):
+        for channels in (6, 8):
+            for external in (False, True):
+                data = self.observed_receipt(external=external)
+                for item in data["audio_inputs"]:
+                    item["channels"] = channels
+                with self.subTest(channels=channels, external=external):
+                    restored = restore_bundle_receipt(data, options=self.audio_plan())
+                    self.assertEqual(restored.as_dict(), data)
+                    self.assertEqual(restored.soundtrack.channels, 1)
+                    self.assertEqual(set(restored.audio_inputs[0]), {
+                        "path", "source_sha256", "pcm_sha256", "container", "sample_rate",
+                        "channels", "sample_frames", "decoder", "decoder_sha256"})
+
+    def test_memory_sources_round_trip_the_existing_receipt_variant(self):
+        for channels in (1, 2, 6, 8):
+            data = self.memory_receipt(channels)
+            with self.subTest(channels=channels):
+                restored = restore_bundle_receipt(data, options=self.audio_plan())
+                self.assertEqual(restored.as_dict(), data)
+                self.assertEqual(restored.ffmpeg_invocations, ())
+                data["audio_inputs"][0]["source"] = "mutated"
+                self.assertEqual(restored.audio_inputs[0]["source"], "memory:sha256:" + "a" * 64)
+
+    def test_memory_identity_cannot_alias_a_file_path(self):
+        data = self.memory_receipt()
+        file = data["audio_inputs"][1]
+        file["path"] = file.pop("source")
+        file.pop("source_kind")
+        file.update(source_sha256="d" * 64, pcm_sha256="e" * 64)
+        restored = restore_bundle_receipt(data, options=self.audio_plan())
+        self.assertEqual(restored.as_dict(), data)
+
+    def test_memory_identity_and_source_width_admission_remain_strict(self):
+        for change in ({"path": "source.wav"}, {"source_kind": "file"},
+                       {"source": "memory:sha256:" + "d" * 64}, {"source": []},
+                       {"container": "flac"}, {"decoder": "ffmpeg", "decoder_sha256": "c" * 64},
+                       {"decoder_sha256": "c" * 64}, {"channel_mask": 0x3f},
+                       {"channels": True}, {"channels": 0}, {"channels": 9}):
+            data = self.memory_receipt()
+            data["audio_inputs"][0].update(change)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                restore_bundle_receipt(data, options=self.audio_plan())
+        for field in ("path", "source", "source_kind"):
+            data = self.memory_receipt()
+            data["audio_inputs"][0].pop(field)
+            with self.subTest(missing=field), self.assertRaises(ValueError):
+                restore_bundle_receipt(data, options=self.audio_plan())
+        data = self.memory_receipt()
+        data["audio_inputs"][1]["pcm_sha256"] = "d" * 64
+        with self.assertRaisesRegex(ValueError, "inconsistent"):
+            restore_bundle_receipt(data, options=self.audio_plan())
+        # The final mono PCM fits; its eight-channel decoded source does not.
+        with self.assertRaisesRegex(ValueError, "decoded source"):
+            restore_bundle_receipt(self.memory_receipt(8), options=self.audio_plan(budget=128))
 
     def test_invalid_decoder_observations_and_missing_capability_are_refused(self):
         for mutate in (
