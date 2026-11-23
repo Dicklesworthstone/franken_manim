@@ -10,10 +10,10 @@ from __future__ import annotations
 import hashlib
 import importlib.machinery
 import importlib.util
-import marshal
 import os
 from pathlib import Path
 import stat
+import struct
 import sys
 from types import CodeType
 
@@ -21,12 +21,13 @@ _MODULE = "fmn_python._embedded_bootstrap"
 _SOURCE = Path(__file__).with_name("_embedded_bootstrap.py")
 _MAX_SOURCE_BYTES = 4 * 1024 * 1024
 _MAX_BYTECODE_BYTES = 32 * 1024 * 1024
+_MAX_IDENTITY_BYTES = 32 * 1024 * 1024
 _FILENAME = "<string>"
 _CODE_FIELDS = (
     "co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
     "co_stacksize", "co_flags", "co_code", "co_consts", "co_names",
-    "co_varnames", "co_filename", "co_name", "co_qualname", "co_firstlineno",
-    "co_linetable", "co_exceptiontable", "co_freevars", "co_cellvars",
+    "co_varnames", "co_freevars", "co_cellvars", "co_filename", "co_name",
+    "co_qualname", "co_firstlineno", "co_linetable", "co_exceptiontable",
 )
 
 
@@ -84,49 +85,91 @@ class _VerifiedSourceLoader(importlib.machinery.SourceFileLoader):
 
 def _canonical_filename(code):
     """Keep installed/embedded tracebacks and code identity path-independent."""
-    return code.replace(
-        co_filename=_FILENAME,
-        co_consts=tuple(_canonical_filename(value) if isinstance(value, CodeType) else value
-                       for value in code.co_consts),
-    )
+    memo = {}
+    remaining = _MAX_IDENTITY_BYTES
 
+    def visit(current, depth=0):
+        nonlocal remaining
+        if depth > 128:
+            raise ImportError("bootstrap executable identity exceeds its resource budget")
+        if id(current) in memo:
+            return memo[id(current)]
+        # Code objects are immutable and kept alive by the original root.
+        # Preserve a cache's shared code graph instead of expanding every
+        # path through it before the digest can enforce its own budget.
+        remaining -= 256 + len(current.co_code) + 8 * len(current.co_consts)
+        if remaining < 0:
+            raise ImportError("bootstrap executable identity exceeds its resource budget")
+        normalized = current.replace(
+            co_filename=_FILENAME,
+            co_consts=tuple(visit(value, depth + 1) if isinstance(value, CodeType) else value
+                           for value in current.co_consts),
+        )
+        memo[id(current)] = normalized
+        return normalized
 
-def _code_identity_value(value):
-    """Encode executable structure without marshal's object-reference state.
-
-    A raw code object cannot always use marshal v2: CPython 3.14 adds slice
-    constants, which require v5. Newer marshal formats also encode interning
-    and reference sharing, so merely selecting the host's latest format would
-    make fresh compilation and a cache load hash differently. Normalize every
-    supported constant into tagged v2-compatible values instead. Tags retain
-    type distinctions, and sorting frozensets removes hash-seed dependence.
-    """
-    kind = type(value)
-    if kind is CodeType:
-        return ("code", tuple(_code_identity_value(getattr(value, field))
-                              for field in _CODE_FIELDS))
-    if kind is tuple:
-        return ("tuple", tuple(_code_identity_value(item) for item in value))
-    if kind is frozenset:
-        return ("frozenset", tuple(sorted(marshal.dumps(_code_identity_value(item), 2)
-                                         for item in value)))
-    if kind is slice:
-        return ("slice", _code_identity_value(value.start),
-                _code_identity_value(value.stop), _code_identity_value(value.step))
-    if value is None:
-        return ("none",)
-    if value is Ellipsis:
-        return ("ellipsis",)
-    if kind in (bool, int, float, complex, str, bytes):
-        # Marshal v2 preserves the exact floating-point bits, including signed
-        # zero, without the reference/interning flags of newer formats.
-        return (kind.__name__, value)
-    raise TypeError("unsupported bootstrap code constant type: " + kind.__name__)
+    return visit(code)
 
 
 def _code_digest(code):
-    payload = marshal.dumps(_code_identity_value(code), 2)
-    return hashlib.sha256(b"fmn-bootstrap-code-v1\x00" + payload).hexdigest()
+    """Hash executable contents independently of marshal's object encoding.
+
+    Marshal v2 cannot represent CPython 3.14's constant slices, while newer
+    versions encode sharing/interning that can differ after a cache load.
+    This versioned, typed encoding covers the code constructor's fields and
+    immutable compiler constants, including nested code and slices. It ignores
+    object sharing and sorts frozensets; float bits (including signed zero)
+    remain distinct. Interpreter/optimization identity is recorded separately.
+    """
+    remaining = _MAX_IDENTITY_BYTES
+
+    def encode(value, depth=0):
+        nonlocal remaining
+        if depth > 128 or remaining < 9:
+            raise ImportError("bootstrap executable identity exceeds its resource budget")
+        kind = type(value)
+        if value is None:
+            tag, payload = b"n", b""
+        elif value is Ellipsis:
+            tag, payload = b"e", b""
+        elif kind is bool:
+            tag, payload = b"b", bytes((value,))
+        elif kind is int:
+            size = (value.bit_length() + 7) // 8
+            if size + 10 > remaining:
+                raise ImportError("bootstrap executable identity exceeds its resource budget")
+            tag = b"i"
+            payload = (b"-" if value < 0 else b"+") + abs(value).to_bytes(size, "big")
+        elif kind is float:
+            tag, payload = b"f", struct.pack(">d", value)
+        elif kind is complex:
+            tag, payload = b"j", struct.pack(">dd", value.real, value.imag)
+        elif kind is str:
+            tag, payload = b"u", value.encode("utf-8", "surrogatepass")
+        elif kind is bytes:
+            tag, payload = b"y", value
+        elif kind in (tuple, frozenset):
+            parts = [encode(item, depth + 1) for item in value]
+            if kind is frozenset:
+                parts.sort()
+            tag, payload = (b"t" if kind is tuple else b"r"), b"".join(parts)
+        elif kind is slice:
+            tag, payload = b"s", encode((value.start, value.stop, value.step), depth + 1)
+        elif kind is CodeType:
+            tag, payload = b"c", encode(tuple(getattr(value, field) for field in _CODE_FIELDS), depth + 1)
+        else:
+            # A cache containing a foreign constant is not identified by repr
+            # (which may carry an address) or silently reduced to its source.
+            raise TypeError("unsupported bootstrap code constant type: " + kind.__name__)
+        size = len(payload) + 9
+        if size > remaining:
+            raise ImportError("bootstrap executable identity exceeds its resource budget")
+        # Charge every materialized subtree, bounding even a compact marshal
+        # payload that expands through heavily shared constants.
+        remaining -= size
+        return tag + len(payload).to_bytes(8, "big") + payload
+
+    return hashlib.sha256(b"fmn-python.bootstrap-code.v1\0" + encode(code)).hexdigest()
 
 
 def load_bootstrap(source):
@@ -160,23 +203,23 @@ def load_bootstrap(source):
             code = _VerifiedSourceLoader(_SOURCE, source, ignore_bytecode=True).get_code(_MODULE)
     try:
         code = _canonical_filename(code)
-        code_sha256 = _code_digest(code)
-    except (TypeError, ValueError, RecursionError):
+        code_digest = _code_digest(code)
+    except (ImportError, TypeError, ValueError, RecursionError):
         if source_path is None:
             raise
-        # A valid pyc header and marshal body can still contain constants
-        # that the compiler never emits, or an excessively nested code tree.
-        # The optional cache must not prevent importing verified source.
-        # Retry outside this handler so genuine compilation or identity
-        # failures propagate, and let importlib repair the checked cache.
-        code = _VerifiedSourceLoader(_SOURCE, source, ignore_bytecode=True).get_code(_MODULE)
-        code = _canonical_filename(code)
-        code_sha256 = _code_digest(code)
+        # A valid marshal header/body can still contain foreign constants or
+        # an expanding code graph. Such a cache is a miss, just like malformed
+        # bytecode; retry once from the source already verified above. A refusal
+        # on that trusted source propagates instead of retrying indefinitely.
+        code = _canonical_filename(
+            _VerifiedSourceLoader(_SOURCE, source, ignore_bytecode=True).get_code(_MODULE)
+        )
+        code_digest = _code_digest(code)
     identity = {
         "source_sha256": hashlib.sha256(source).hexdigest(),
-        # Bind actual executable code, not the cache filename or cache
-        # warmness, into the certified runtime's ABI inventory.
-        "code_sha256": code_sha256,
+        # This digest binds actual executable code, not the cache filename or
+        # cache warmness, into the certified runtime's ABI inventory.
+        "code_sha256": code_digest,
         "cache_tag": sys.implementation.cache_tag,
         "magic": importlib.util.MAGIC_NUMBER.hex(),
         "optimization": sys.flags.optimize,

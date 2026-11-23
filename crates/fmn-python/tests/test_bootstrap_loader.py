@@ -29,6 +29,8 @@ class Example:
         return (x + 4, ROOT, __name__)
     def selection(self, x):
         return x[1:5:2]
+    def window(self, x):
+        return x[1:4], x[::-2]
 MEMBERS = frozenset({"alpha", "beta", "gamma"})
 '''
 
@@ -64,6 +66,7 @@ class BootstrapLoaderTests(unittest.TestCase):
             self.assertIs(native.Example().value()[1], native)
             self.assertEqual(native.Example().selection(range(8)), range(1, 5, 2))
             self.assertEqual(native.Example.value.__code__.co_filename, "<string>")
+            self.assertEqual(native.Example().window("abcdef"), ("bcd", "fdb"))
 
     def test_slice_constants_do_not_require_a_new_marshal_format(self):
         # CPython 3.14 folds constant slices into co_consts; older hosts can
@@ -131,6 +134,115 @@ class BootstrapLoaderTests(unittest.TestCase):
         self.assertEqual(cold, compile(source, "<string>", "exec", dont_inherit=True))
         self.assertEqual(cold, warm)
         self.assertEqual(identity, cached_identity)
+        with patch.object(loader, "_SOURCE", self.root / "missing_bootstrap.py"):
+            embedded, embedded_identity = self.load(source)
+        self.assertEqual(cold, embedded)
+        self.assertEqual(identity["code_sha256"], embedded_identity["code_sha256"])
+        self.assertEqual(identity["source_sha256"], embedded_identity["source_sha256"])
+        self.assertIsNone(embedded_identity["source_path"])
+
+    def test_slice_constants_execute_and_every_bound_participates_in_identity(self):
+        # CPython 3.14 folds literal slices into co_consts. Construct that
+        # representation explicitly so the startup regression is exercised
+        # on earlier interpreters too, without requiring marshal v5 to write it.
+        template = compile('WINDOW = "placeholder"', "<string>", "exec")
+        identities = set()
+        constants = (
+            slice(1, 4, None), slice(2, 4, None), slice(1, 5, None),
+            slice(1, 4, 2), (1, 4, None),
+        )
+        for constant in constants:
+            with self.subTest(constant=constant):
+                compiled = template.replace(co_consts=(constant, None))
+                if isinstance(constant, slice):
+                    with self.assertRaises(ValueError):
+                        marshal.dumps(compiled, 2)
+                with patch.object(loader._VerifiedSourceLoader, "get_code", return_value=compiled):
+                    code, identity = self.load()
+                namespace = {}
+                exec(code, namespace, namespace)  # ubs:ignore[py.security.eval-exec-usage,py.eval-exec] -- fixed constant-only code, exercising the CPython 3.14 slice representation.
+                self.assertEqual(namespace["WINDOW"], constant)
+                self.assertIs(type(namespace["WINDOW"]), type(constant))
+                identities.add(identity["code_sha256"])
+        self.assertEqual(len(identities), len(constants))
+
+    def test_executable_identity_distinguishes_constant_types_and_float_bits(self):
+        template = compile('VALUE = "placeholder"', "<string>", "exec")
+        constants = (
+            None, Ellipsis, False, True, 0, 1, 2**200, -(2**200),
+            0.0, -0.0, 1.0, complex(0.0, 0.0), complex(-0.0, 0.0),
+            complex(0.0, -0.0), "1", b"1", "\ud800", (1,), frozenset({1}),
+        )
+        identities = set()
+        for constant in constants:
+            compiled = template.replace(co_consts=(constant, None))
+            with patch.object(loader._VerifiedSourceLoader, "get_code", return_value=compiled):
+                _, identity = self.load()
+            identities.add(identity["code_sha256"])
+        self.assertEqual(len(identities), len(constants))
+
+    def test_executable_metadata_participates_in_identity(self):
+        compiled = compile('def f(value):\n    return value + 1\n', "<string>", "exec")
+        function = compiled.co_consts[0]
+        expected = loader._code_digest(compiled)
+        for field, value in (
+            ("co_name", "other"), ("co_qualname", "Other.f"),
+            ("co_varnames", ("renamed",)), ("co_firstlineno", 10),
+            ("co_linetable", b""), ("co_flags", function.co_flags ^ 0x40),
+        ):
+            with self.subTest(field=field):
+                changed = compiled.replace(co_consts=(function.replace(**{field: value}), None))
+                self.assertNotEqual(expected, loader._code_digest(changed))
+        guarded = compile('try:\n    int("x")\nexcept ValueError:\n    pass\n', "<string>", "exec")
+        self.assertTrue(guarded.co_exceptiontable)
+        self.assertNotEqual(loader._code_digest(guarded),
+                            loader._code_digest(guarded.replace(co_exceptiontable=b"")))
+
+    def test_unexpected_or_excessively_nested_cache_constants_are_refused(self):
+        template = compile('VALUE = "placeholder"', "<string>", "exec")
+        nested = 1
+        for _ in range(140):
+            nested = (nested,)
+        for constant, error, message in (([], TypeError, "unsupported bootstrap code constant"),
+                                        (nested, ImportError, "resource budget")):
+            with self.subTest(message=message):
+                compiled = template.replace(co_consts=(constant, None))
+                with patch.object(loader._VerifiedSourceLoader, "get_code", return_value=compiled):
+                    with self.assertRaisesRegex(error, message):
+                        self.load()
+
+    def test_shared_code_graph_is_preserved_before_identity_budget_checks(self):
+        code = compile('VALUE = "placeholder"', "cache/location.py", "exec")
+        for _ in range(12):
+            code = code.replace(co_consts=(code, code))
+        normalized = loader._canonical_filename(code)
+        for _ in range(12):
+            self.assertEqual(normalized.co_filename, "<string>")
+            self.assertIs(normalized.co_consts[0], normalized.co_consts[1])
+            normalized = normalized.co_consts[0]
+        # The compact cache is not permitted to expand without bound when
+        # its identity is serialized, even after filename normalization.
+        with patch.object(loader, "_MAX_IDENTITY_BYTES", 4096):
+            with self.assertRaisesRegex(ImportError, "resource budget"):
+                loader._code_digest(loader._canonical_filename(code))
+
+    def test_shared_and_distinct_equal_constants_have_the_same_identity(self):
+        template = compile('VALUE = "placeholder"', "<string>", "exec")
+        shared = ("non-interned string", b"non-interned bytes", (1, 2, 3))
+        separate = tuple(marshal.loads(marshal.dumps(shared)) for _ in range(2))
+        self.assertIsNot(separate[0], separate[1])
+        codes = (template.replace(co_consts=(shared, shared)),
+                 template.replace(co_consts=separate))
+        self.assertEqual(loader._code_digest(codes[0]), loader._code_digest(codes[1]))
+        for budget in (128, 1024, 4096):
+            outcomes = []
+            with patch.object(loader, "_MAX_IDENTITY_BYTES", budget):
+                for code in codes:
+                    try:
+                        outcomes.append(loader._code_digest(code))
+                    except ImportError as error:
+                        outcomes.append(str(error))
+            self.assertEqual(outcomes[0], outcomes[1])
 
     def test_missing_generated_source_uses_only_embedded_source(self):
         path = self.root / "direct_extension.py"
@@ -203,6 +315,35 @@ class BootstrapLoaderTests(unittest.TestCase):
         self.cache.write_bytes(header + marshal.dumps(damaged))
         with self.assertRaises(SyntaxError):
             self.load(source)
+
+    def test_unidentifiable_cache_code_recompiles_the_verified_source(self):
+        _, expected = self.load()
+        header = self.cache.read_bytes()[:16]
+        template = compile('VALUE = "placeholder"', str(self.path), "exec")
+        foreign = template.replace(co_consts=({}, None))
+        expanding = template
+        for _ in range(16):
+            expanding = template.replace(co_consts=(expanding, expanding))
+        for cached in (foreign, expanding):
+            with self.subTest(kind="foreign" if cached is foreign else "expanding"):
+                self.cache.write_bytes(header + marshal.dumps(cached))
+                code, observed = self.load()
+                self.assertEqual(observed, expected)
+                self.assertEqual(code, compile(_SKIN, "<string>", "exec", dont_inherit=True))
+                # The rejected cache is replaced; the next load must use the
+                # repaired bytecode without recompiling yet again.
+                with patch.object(loader._VerifiedSourceLoader, "source_to_code",
+                                  side_effect=AssertionError("repaired cache was not reused")):
+                    _, repaired = self.load()
+                self.assertEqual(repaired, expected)
+
+    def test_embedded_identity_refusal_is_not_retried_as_a_cache_miss(self):
+        with patch.object(loader, "_SOURCE", self.root / "missing_bootstrap.py"), \
+                patch.object(loader, "_MAX_IDENTITY_BYTES", 1), \
+                patch.object(loader._VerifiedSourceLoader, "get_code",
+                             side_effect=AssertionError("embedded source retried through cache")):
+            with self.assertRaisesRegex(ImportError, "resource budget"):
+                self.load()
 
     def test_content_hash_is_checked_even_if_host_disables_hash_pyc_checks(self):
         import _imp
