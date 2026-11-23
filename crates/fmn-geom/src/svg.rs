@@ -876,8 +876,8 @@ impl<'a> Lexer<'a> {
                      CDATA, and processing instructions are accepted)",
                 ));
             }
-            if rest.starts_with("<?") {
-                let target = rest[2..]
+            if let Some(instruction) = rest.strip_prefix("<?") {
+                let target = instruction
                     .split(|ch: char| ch.is_ascii_whitespace() || ch == '?')
                     .next()
                     .unwrap_or("");

@@ -28,6 +28,13 @@ fn square(stage: &mut Stage) -> Mob {
     ]))
 }
 
+fn scene_contains(stage: &Stage, mob: Mob) -> bool {
+    stage
+        .roots()
+        .iter()
+        .any(|&root| stage.family(root).contains(&mob))
+}
+
 /// A linear-rate `.animate` shift of `dx`, prepared into a boxed animation.
 fn shift_animation(stage: &mut Stage, mob: Mob, dx: f64, run_time: f64) -> Box<dyn Animation> {
     let builder = mob
@@ -1299,8 +1306,11 @@ fn deferred_final_sample_aborts_callbacks_and_removers_in_both_drivers() {
                 let refusal = expected.clone();
                 let failures = Rc::new(RefCell::new(0));
                 let observed_failures = Rc::clone(&failures);
+                let failure_roots = Rc::new(RefCell::new(None));
+                let observed_roots = Rc::clone(&failure_roots);
                 let failing = UpdateFromFunc::try_new_alpha(first, move |stage, mob, alpha| {
                     if alpha > 1.0 {
+                        *observed_roots.borrow_mut() = Some(stage.roots().to_vec());
                         *observed_failures.borrow_mut() += 1;
                         return Err(refusal.clone());
                     }
@@ -1374,8 +1384,18 @@ fn deferred_final_sample_aborts_callbacks_and_removers_in_both_drivers() {
                     "failure cannot resume callbacks"
                 );
                 assert_eq!(*failures.borrow(), 1);
+                // Admission replaces member roots with a composition's
+                // container. Failure must preserve that exact draw list and
+                // the members reachable through it, without running removers.
+                let expected_roots = failure_roots.borrow().clone().unwrap();
+                if grouped {
+                    assert!(expected_roots.contains(&animations[0].state().mobject()));
+                    assert!(!expected_roots.contains(&first));
+                    assert!(!expected_roots.contains(&second));
+                }
+                assert_eq!(stage.roots(), expected_roots);
                 for mob in [first, second] {
-                    assert!(stage.roots().contains(&mob), "failure cannot run removers");
+                    assert!(scene_contains(&stage, mob), "failure cannot run removers");
                     assert!(!stage.is_animating(mob));
                     assert!(!stage.is_updating_suspended(mob));
                 }
@@ -1388,8 +1408,9 @@ fn deferred_final_sample_aborts_callbacks_and_removers_in_both_drivers() {
                 assert_eq!(*failures.borrow(), 1);
                 assert!(resumed.borrow().is_empty());
                 assert_eq!(*scene_ticks.borrow(), vec![1.0]);
-                assert!(stage.roots().contains(&first));
-                assert!(stage.roots().contains(&second));
+                assert_eq!(stage.roots(), expected_roots);
+                assert!(scene_contains(&stage, first));
+                assert!(scene_contains(&stage, second));
             }
         }
     }
@@ -1423,8 +1444,11 @@ fn succession_final_sample_failure_never_begins_the_next_member() {
         let refusal = expected.clone();
         let failures = Rc::new(RefCell::new(0));
         let observed_failures = Rc::clone(&failures);
+        let failure_roots = Rc::new(RefCell::new(None));
+        let observed_roots = Rc::clone(&failure_roots);
         let failing = UpdateFromFunc::try_new_alpha(first, move |stage, mob, alpha| {
             if alpha > 1.0 {
+                *observed_roots.borrow_mut() = Some(stage.roots().to_vec());
                 *observed_failures.borrow_mut() += 1;
                 return Err(refusal.clone());
             }
@@ -1478,8 +1502,13 @@ fn succession_final_sample_failure_never_begins_the_next_member() {
             "even alpha-zero begin is forbidden"
         );
         assert_eq!(*failures.borrow(), 1);
+        let expected_roots = failure_roots.borrow().clone().unwrap();
+        assert!(expected_roots.contains(&animations[0].state().mobject()));
+        assert!(!expected_roots.contains(&first));
+        assert!(!expected_roots.contains(&second));
+        assert_eq!(stage.roots(), expected_roots);
         for mob in [first, second] {
-            assert!(stage.roots().contains(&mob));
+            assert!(scene_contains(&stage, mob));
             assert!(!stage.is_animating(mob));
             assert!(!stage.is_updating_suspended(mob));
         }
@@ -1490,8 +1519,9 @@ fn succession_final_sample_failure_never_begins_the_next_member() {
         assert_eq!(*later_calls.borrow(), 0);
         assert_eq!(*resumed.borrow(), 0);
         assert_eq!(*failures.borrow(), 1);
-        assert!(stage.roots().contains(&first));
-        assert!(stage.roots().contains(&second));
+        assert_eq!(stage.roots(), expected_roots);
+        assert!(scene_contains(&stage, first));
+        assert!(scene_contains(&stage, second));
     }
 }
 

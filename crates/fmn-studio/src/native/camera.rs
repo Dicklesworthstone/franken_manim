@@ -34,7 +34,7 @@ impl CameraCapture {
         renderer
             .engine
             .validate_cpu()
-            .map_err(|error| invalid(&error.to_string()))?;
+            .map_err(|error| invalid(error.to_string()))?;
         let camera = Camera::new(config).map_err(execution_error)?;
         let backend = camera_capture_backend(&camera, renderer)?;
         Ok(Self { camera, backend })
@@ -51,7 +51,7 @@ pub fn camera_capture_backend(
     renderer
         .engine
         .validate_cpu()
-        .map_err(|error| invalid(&error.to_string()))?;
+        .map_err(|error| invalid(error.to_string()))?;
     if camera.pixel_shape()
         != (
             renderer.frame.viewport.width,

@@ -2831,6 +2831,291 @@ fn declared_schedule_resumes_a_stateful_intermediate_wait_without_zero_dt_reentr
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+enum FutureDeclarationKind {
+    Succession,
+    MatchingParts,
+}
+
+struct FutureDeclarationFixture {
+    program: NativeSceneProgram,
+    source: (u32, u32),
+    first_piece: (u32, u32),
+    target: (u32, u32),
+}
+
+fn future_declaration_program(
+    kind: FutureDeclarationKind,
+    future_frames: u64,
+    changed_plan: bool,
+) -> Result<FutureDeclarationFixture, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 76).unwrap();
+    let _ = scene.rng_mut().next_u64();
+    let _ = scene.rng_mut().next_u64();
+    let source = scene.stage_mut().add(Mobject::new());
+    let first_piece = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [-1.2, -0.4, 0.0],
+        [-0.8, 0.6, 0.0],
+        [-0.4, -0.4, 0.0],
+    ]));
+    let leftover = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [0.2, -0.4, 0.0],
+        [0.6, -0.1, 0.0],
+        [1.0, -0.4, 0.0],
+    ]));
+    scene.stage_mut().attach(source, first_piece).unwrap();
+    scene.stage_mut().attach(source, leftover).unwrap();
+    let target = scene.stage_mut().add(Mobject::new());
+    let matched = scene.stage_mut().copy_family(first_piece).unwrap();
+    scene.stage_mut().shift(matched, [0.3, 0.6, 0.0]);
+    let appearing = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [0.5, -0.5, 0.0],
+        [0.7, 0.25, 0.0],
+        [0.9, -0.5, 0.0],
+        [1.1, -1.25, 0.0],
+        [1.3, -0.5, 0.0],
+    ]));
+    scene.stage_mut().attach(target, matched).unwrap();
+    scene.stage_mut().attach(target, appearing).unwrap();
+    scene.add(&[source]).unwrap();
+    let first = fmn_anim::write(scene.stage(), source);
+    let future: Box<dyn Animation> = match kind {
+        FutureDeclarationKind::Succession => {
+            // Both members own the SAME source. The second rotation must
+            // capture its starting state only after the first has finished.
+            let a = fmn_anim::Rotating::new(source)
+                .with_angle(0.6)
+                .with_about_point([0.0; 3])
+                .with_config(fmn_anim::AnimConfig {
+                    run_time_frames: Some(3),
+                    rate_func: fmn_anim::RateFunc::linear(),
+                    ..fmn_anim::AnimConfig::default()
+                });
+            let b = fmn_anim::Rotating::new(source)
+                .with_angle(if changed_plan { -0.1 } else { -0.25 })
+                .with_about_point([0.0; 3])
+                .with_config(fmn_anim::AnimConfig {
+                    run_time_frames: Some(4),
+                    rate_func: fmn_anim::RateFunc::linear(),
+                    ..fmn_anim::AnimConfig::default()
+                });
+            Box::new(
+                fmn_anim::Succession::new(scene.stage_mut(), vec![Box::new(a), Box::new(b)])
+                    .unwrap()
+                    .with_rate_func(fmn_anim::RateFunc::linear()),
+            )
+        }
+        FutureDeclarationKind::MatchingParts => {
+            // One explicit match, one disappearing piece and one appearing
+            // piece require the complete replacement cleanup, not only the
+            // underlying eager group's interpolation.
+            let matched_source = if changed_plan { leftover } else { first_piece };
+            Box::new(
+                fmn_anim::TransformMatchingParts::with_matched_pairs(
+                    scene.stage_mut(),
+                    source,
+                    target,
+                    &[(matched_source, matched)],
+                )
+                .unwrap(),
+            )
+        }
+    };
+    let source_id = scene.stage().snapshot_handle(source).unwrap();
+    let first_piece_id = scene.stage().snapshot_handle(first_piece).unwrap();
+    let target_id = scene.stage().snapshot_handle(target).unwrap();
+    let program = NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(first)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(6),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+            NativeSegment::Play {
+                animations: vec![future],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(future_frames),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 3 },
+        ],
+        18,
+    )?;
+    Ok(FutureDeclarationFixture {
+        program,
+        source: source_id,
+        first_piece: first_piece_id,
+        target: target_id,
+    })
+}
+
+fn future_declaration_worker(
+    kind: FutureDeclarationKind,
+    future_frames: u64,
+    changed_plan: bool,
+    threads: usize,
+    replay_budget: u64,
+) -> NativeSceneWorker {
+    let mut config = terminal_play_config(false);
+    config.frame_count = 19;
+    config.source_digest = protocol_digest(b"fresh-native-future-declarations-v1");
+    config.renderer.threads = threads;
+    config.max_replay_frames = replay_budget;
+    NativeSceneWorker::new(config, move || {
+        future_declaration_program(kind, future_frames, changed_plan).map(|fixture| fixture.program)
+    })
+    .unwrap()
+}
+
+#[test]
+fn future_native_succession_and_matching_restore_prefixes_and_later_lifecycles() {
+    for kind in [
+        FutureDeclarationKind::Succession,
+        FutureDeclarationKind::MatchingParts,
+    ] {
+        let fixture = future_declaration_program(kind, 7, false).unwrap();
+        for saved_frame in [3, 6, 7, 8] {
+            let mut original = future_declaration_worker(kind, 7, false, 1, 100);
+            let entry = commit(&mut original, saved_frame);
+            let saved = checkpoint(&entry, 0);
+            assert_eq!(&saved.state[..8], b"FMNR\x04\0\0\0", "{kind:?}");
+            let at_checkpoint = checkpoint_observation(&original);
+            let checkpoint_png = seek(&mut original, saved_frame);
+            let mut expected = Vec::new();
+            for frame in saved_frame + 1..=18 {
+                expected.push((
+                    frame,
+                    seek(&mut original, frame),
+                    checkpoint_observation(&original),
+                ));
+            }
+            let expected_final = commit(&mut original, 18);
+            for threads in [1, 4] {
+                let mut resumed = future_declaration_worker(kind, 7, false, threads, 1);
+                resumed
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                    .unwrap();
+                let report = resumed.last_restore().unwrap();
+                assert_eq!(report.mode, NativeRestoreMode::Checkpoint, "{kind:?}");
+                assert_eq!(report.frame, u64::try_from(saved_frame).unwrap());
+                assert_eq!(report.fallback, None);
+                assert_eq!(resumed.last_state_hash(), Some(entry.state_hash));
+                assert_eq!(checkpoint_observation(&resumed), at_checkpoint);
+                assert_eq!(png(&seek(&mut resumed, saved_frame)), png(&checkpoint_png));
+                for (frame, pixels, observation) in &expected {
+                    assert_eq!(
+                        png(&seek(&mut resumed, *frame)),
+                        png(pixels),
+                        "{kind:?}, saved {saved_frame}, next {frame}, threads {threads}"
+                    );
+                    assert_eq!(
+                        &checkpoint_observation(&resumed),
+                        observation,
+                        "{kind:?}, saved {saved_frame}, next {frame}, threads {threads}"
+                    );
+                }
+                let stage = resumed.program().unwrap().preview().stage();
+                let source = stage
+                    .resolve_snapshot_handle(fixture.source.0, fixture.source.1)
+                    .unwrap();
+                let target = stage
+                    .resolve_snapshot_handle(fixture.target.0, fixture.target.1)
+                    .unwrap();
+                assert!(!stage.is_animating(source));
+                assert!(!stage.is_updating_suspended(source));
+                match kind {
+                    FutureDeclarationKind::MatchingParts => {
+                        assert_eq!(stage.roots(), &[target]);
+                        assert!(!stage.roots().contains(&source));
+                    }
+                    FutureDeclarationKind::Succession => {
+                        let piece = stage
+                            .resolve_snapshot_handle(fixture.first_piece.0, fixture.first_piece.1)
+                            .unwrap();
+                        let point = stage.get_points(piece).unwrap()[0];
+                        let (sin, cos) = 0.35_f64.sin_cos();
+                        assert!((point[0] - (-1.2 * cos + 0.4 * sin)).abs() < 1e-6);
+                        assert!((point[1] - (-1.2 * sin - 0.4 * cos)).abs() < 1e-6);
+                        assert!(!stage.roots().contains(&target));
+                    }
+                }
+                // The complete canonical state also binds RNG/cursor data
+                // which visible frame and arena comparisons alone omit.
+                let actual_final = commit(&mut resumed, 18);
+                assert_eq!(actual_final.state_hash, expected_final.state_hash);
+                assert_eq!(actual_final.checkpoint, expected_final.checkpoint);
+            }
+        }
+    }
+}
+
+#[test]
+fn future_native_declaration_changes_refuse_restore_without_mutating_current_state() {
+    for kind in [
+        FutureDeclarationKind::Succession,
+        FutureDeclarationKind::MatchingParts,
+    ] {
+        let mut original = future_declaration_worker(kind, 7, false, 1, 100);
+        let entry = commit(&mut original, 3);
+        let saved = checkpoint(&entry, 0);
+        for (frames, changed_plan) in [(8, false), (7, true)] {
+            let mut changed = future_declaration_worker(kind, frames, changed_plan, 1, 100);
+            let _ = seek(&mut changed, 1);
+            let before = checkpoint_observation(&changed);
+            assert!(
+                changed
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                    .is_err(),
+                "{kind:?}, frames {frames}, changed plan {changed_plan}"
+            );
+            assert_eq!(checkpoint_observation(&changed), before);
+        }
+    }
+}
+
+#[test]
+fn active_succession_and_matching_keep_verified_cold_recovery() {
+    for kind in [
+        FutureDeclarationKind::Succession,
+        FutureDeclarationKind::MatchingParts,
+    ] {
+        for frame in [10, 15] {
+            let mut original = future_declaration_worker(kind, 7, false, 1, 100);
+            let entry = commit(&mut original, frame);
+            let expected = checkpoint_observation(&original);
+            let expected_png = seek(&mut original, frame);
+            let mut resumed = future_declaration_worker(kind, 7, false, 4, 100);
+            resumed
+                .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+                .unwrap();
+            let report = resumed.last_restore().unwrap();
+            assert_eq!(
+                report.mode,
+                NativeRestoreMode::ColdVerified,
+                "{kind:?}, frame {frame}"
+            );
+            assert!(report.fallback.is_some());
+            assert_eq!(checkpoint_observation(&resumed), expected);
+            assert_eq!(png(&seek(&mut resumed, frame)), png(&expected_png));
+            for next in frame + 1..=18 {
+                assert_eq!(
+                    png(&seek(&mut resumed, next)),
+                    png(&seek(&mut original, next))
+                );
+                assert_eq!(
+                    checkpoint_observation(&resumed),
+                    checkpoint_observation(&original)
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn active_play_restore_rejects_changed_factory_animation_declaration_atomically() {
     let chosen_angle = Rc::new(Cell::new(1.25));

@@ -1032,6 +1032,84 @@ pub(super) fn run_schedules(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     run_prepared_checkpoints(ctx, schedule_program, "schedule", &[3, 6, 7, 8])
 }
 
+fn future_native_program(matching: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 89).map_err(service_error)?;
+    let root = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.2).build().into(),
+            fmn_library::Rectangle::new()
+                .width(0.6)
+                .height(0.4)
+                .build()
+                .map_err(service_error)?
+                .into(),
+        ]))
+        .map_err(service_error)?;
+    let children = scene.stage().get(root).unwrap().submobjects().to_vec();
+    scene.stage_mut().shift(children[0], [-0.8, -0.4, 0.0]);
+    scene.stage_mut().shift(children[1], [-0.8, 0.4, 0.0]);
+    scene.stage_mut().set_fill(
+        root,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    let target = scene.stage_mut().copy_family(root).map_err(service_error)?;
+    scene.stage_mut().shift(target, [1.6, 0.2, 0.0]);
+    // Both plans are built before Write temporarily changes the source's
+    // drawing state. Their later begin hooks must still run just in time.
+    let future: Box<dyn Animation> = if matching {
+        Box::new(
+            fmn_anim::TransformMatchingParts::new(scene.stage_mut(), root, target)
+                .map_err(service_error)?,
+        )
+    } else {
+        let intermediate = scene.stage_mut().copy_family(root).map_err(service_error)?;
+        scene.stage_mut().shift(intermediate, [0.7, -0.2, 0.0]);
+        let first =
+            fmn_anim::Transform::new(root, intermediate).with_config(fmn_anim::AnimConfig {
+                run_time_frames: Some(3),
+                ..fmn_anim::AnimConfig::default()
+            });
+        let second = fmn_anim::Transform::new(root, target).with_config(fmn_anim::AnimConfig {
+            run_time_frames: Some(4),
+            ..fmn_anim::AnimConfig::default()
+        });
+        Box::new(
+            fmn_anim::Succession::new(scene.stage_mut(), vec![Box::new(first), Box::new(second)])
+                .map_err(service_error)?,
+        )
+    };
+    let drawing = fmn_anim::write(scene.stage(), root);
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(drawing)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(6),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+            NativeSegment::Play {
+                animations: vec![future],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(7),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 3 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_future_native(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, future_native_program, "future_native", &[3, 6, 7, 8])
+}
+
 fn run_prepared_checkpoints(
     ctx: &mut RunCtx,
     factory: fn(bool) -> Result<NativeSceneProgram, ServiceError>,

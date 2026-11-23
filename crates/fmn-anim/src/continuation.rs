@@ -22,15 +22,17 @@ use crate::transform::TargetPrep;
 use crate::{
     AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FadeTransform,
     FramePosition, MethodAnimation, MoveAlongPath, OpenSegment, PathFunc, RateFunc,
-    RationalFrameClock, RevealBounds, Rotating, ShowIncreasingSubsets, ShowPartial, Transform,
-    VFade, VShowPassingFlash, WiggleOutThenIn,
+    RationalFrameClock, RevealBounds, Rotating, ShowIncreasingSubsets, ShowPartial, Succession,
+    Transform, TransformMatchingParts, VFade, VShowPassingFlash, WiggleOutThenIn,
 };
 
 // Minor 4 adds captured path motion and crossfade lifecycle carriers;
 // minor 5 adds exact prepared rate tables. Existing payload layouts and emitted
 // minor versions stay unchanged for older carrier/rate trees.
 const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 5);
-const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 5);
+// Declaration minor 6 binds untouched future successions and shape matching.
+// Their active lifecycles still have no durable carrier; FMPC/1 is unchanged.
+const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 6);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_RATE_DEPTH: usize = 32;
@@ -137,6 +139,59 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
         Some(11)
     } else {
         None
+    }
+}
+
+// Declaration identity is a separate capability from resuming a prepared
+// lifecycle or running private native-frame preparation. These two extra
+// types remain executable only as untouched values from the fresh factory.
+fn declaration_kind(animation: &dyn Animation) -> Option<u8> {
+    native_kind(animation).or_else(|| {
+        let any = animation as &dyn Any;
+        if any.is::<Succession>() {
+            Some(12)
+        } else if any.is::<TransformMatchingParts>() {
+            Some(13)
+        } else {
+            None
+        }
+    })
+}
+
+fn declaration_composition(
+    animation: &dyn Animation,
+) -> Option<(GroupContinuationControls, &[Box<dyn Animation>])> {
+    let any = animation as &dyn Any;
+    if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+        Some((group.continuation_controls(), group.animations()))
+    } else if let Some(succession) = any.downcast_ref::<Succession>() {
+        Some((succession.declaration_controls(), succession.animations()))
+    } else if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
+        let group = matching.declaration_group();
+        Some((group.continuation_controls(), group.animations()))
+    } else {
+        None
+    }
+}
+
+fn clone_declaration(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
+    let Some((_, children)) = declaration_composition(animation) else {
+        return clone_native(animation);
+    };
+    let children = children
+        .iter()
+        .map(|child| clone_declaration(child.as_ref()))
+        .collect::<Option<Vec<_>>>()?;
+    let any = animation as &dyn Any;
+    if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+        Some(Box::new(group.clone_for_continuation(children)))
+    } else if let Some(succession) = any.downcast_ref::<Succession>() {
+        Some(Box::new(succession.clone_for_declaration(children)))
+    } else {
+        any.downcast_ref::<TransformMatchingParts>()
+            .map(|matching| {
+                Box::new(matching.clone_for_declaration(children)) as Box<dyn Animation>
+            })
     }
 }
 
@@ -323,6 +378,66 @@ fn native_play_supported(animations: &[Box<dyn Animation>]) -> bool {
         .all(|animation| native_tree_supported(animation.as_ref(), 0, &mut remaining))
 }
 
+fn declaration_tree_supported(
+    animation: &dyn Animation,
+    depth: usize,
+    remaining: &mut usize,
+) -> bool {
+    if depth > MAX_NATIVE_DEPTH || *remaining == 0 || declaration_kind(animation).is_none() {
+        return false;
+    }
+    *remaining -= 1;
+    if !config_supported(&animation.state().config) {
+        return false;
+    }
+    let any = animation as &dyn Any;
+    if let Some(motion) = any.downcast_ref::<MoveAlongPath>()
+        && !motion.captured_path().is_some_and(captured_path_valid)
+    {
+        return false;
+    }
+    if let Some((controls, children)) = declaration_composition(animation) {
+        if !group_controls_supported(controls)
+            || !children
+                .iter()
+                .all(|child| declaration_tree_supported(child.as_ref(), depth + 1, remaining))
+        {
+            return false;
+        }
+        // Complete the exact-type walk before the recursive freshness probe.
+        // An arbitrary child must never get a chance to run its trait hooks.
+        if (any.is::<Succession>() || any.is::<TransformMatchingParts>())
+            && !declaration_is_fresh(animation)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn declaration_play_supported(animations: &[Box<dyn Animation>]) -> bool {
+    let mut remaining = MAX_ITEMS;
+    animations
+        .iter()
+        .all(|animation| declaration_tree_supported(animation.as_ref(), 0, &mut remaining))
+}
+
+// Run only after declaration admission and allocation charges. Matching's
+// original graph is an authored plan; an earlier play may temporarily change
+// the live family's shape before the future matching animation begins.
+fn declaration_stage_valid(stage: &Stage, animation: &dyn Animation) -> bool {
+    if let Some(matching) = (animation as &dyn Any).downcast_ref::<TransformMatchingParts>()
+        && !matching.declaration_families_valid(stage)
+    {
+        return false;
+    }
+    declaration_composition(animation).is_none_or(|(_, children)| {
+        children
+            .iter()
+            .all(|child| declaration_stage_valid(stage, child.as_ref()))
+    })
+}
+
 // Call only after rate_supported has bounded every nested combinator.
 fn rate_minor(rate: &RateFunc) -> u16 {
     match rate {
@@ -332,16 +447,21 @@ fn rate_minor(rate: &RateFunc) -> u16 {
     }
 }
 
-// Call only after native_play_supported has bounded the concrete carrier tree.
+// Call only after native or declaration admission has bounded the concrete tree.
 fn carrier_minor(animation: &dyn Animation) -> u16 {
     let own_rate = rate_minor(&animation.state().config.rate_func);
-    let carrier = if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
-        group
-            .animations()
+    let carrier = if let Some((_, children)) = declaration_composition(animation) {
+        let minimum = if native_kind(animation).is_some() {
+            2
+        } else {
+            6
+        };
+        children
             .iter()
             .map(|child| carrier_minor(child.as_ref()))
             .max()
             .unwrap_or(2)
+            .max(minimum)
     } else {
         match native_kind(animation) {
             Some(10 | 11) => 4,
@@ -727,6 +847,8 @@ fn charge_carrier(budget: &mut Budget, kind: u8) -> Result<(), Error> {
         9 => budget.charge::<VShowPassingFlash>(1),
         10 => budget.charge::<MoveAlongPath>(1),
         11 => budget.charge::<FadeTransform>(1),
+        12 => budget.charge::<Succession>(1),
+        13 => budget.charge::<TransformMatchingParts>(1),
         _ => Err(Error::Invalid("unknown native animation kind")),
     }
 }
@@ -779,24 +901,38 @@ fn charge_rate(budget: &mut Budget, rate: &RateFunc) -> Result<(), Error> {
 // Admission uses the same allocation charges as decode, including temporary
 // Vec-to-Arc copies. A checkpoint must never exceed its own restore budget.
 fn capture_budget(animations: &[Box<dyn Animation>]) -> Result<(), Error> {
+    document_budget(animations, false)
+}
+
+fn declaration_budget(animations: &[Box<dyn Animation>]) -> Result<(), Error> {
+    document_budget(animations, true)
+}
+
+fn document_budget(animations: &[Box<dyn Animation>], declaration: bool) -> Result<(), Error> {
     let mut budget = Budget {
         remaining: MAX_BYTES,
         native_items: 0,
     };
     budget.charge::<Box<dyn Animation>>(animations.len())?;
     for animation in animations {
-        capture_native_budget(animation.as_ref(), &mut budget, 0)?;
+        document_native_budget(animation.as_ref(), &mut budget, 0, declaration)?;
     }
     Ok(())
 }
 
-fn capture_native_budget(
+fn document_native_budget(
     animation: &dyn Animation,
     budget: &mut Budget,
     depth: usize,
+    declaration: bool,
 ) -> Result<(), Error> {
     budget.native_node(depth)?;
-    let kind = native_kind(animation).ok_or(Error::Invalid("unsupported native animation"))?;
+    let kind = if declaration {
+        declaration_kind(animation)
+    } else {
+        native_kind(animation)
+    }
+    .ok_or(Error::Invalid("unsupported native animation"))?;
     charge_carrier(budget, kind)?;
     let state = animation.state();
     charge_rate(budget, &state.config.rate_func)?;
@@ -829,13 +965,32 @@ fn capture_native_budget(
         ))?;
         budget.charge::<[f64; 3]>(path.point_count())?;
         charge_path_table(budget, path.point_count())?;
-    } else if let Some(group) = any.downcast_ref::<AnimationGroup>() {
-        charge_group_timing(budget, group.animations().len())?;
+    } else if let Some((_, children)) = declaration_composition(animation) {
+        charge_group_timing(budget, children.len())?;
         charge_rate(budget, &state.config.rate_func)?;
         budget.charge::<u8>(state.config.name.len())?;
-        budget.charge::<Box<dyn Animation>>(group.animations().len())?;
-        for child in group.animations() {
-            capture_native_budget(child.as_ref(), budget, depth + 1)?;
+        budget.charge::<Box<dyn Animation>>(children.len())?;
+        if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
+            for (_, layout) in matching.declaration_families() {
+                if layout.len() > MAX_ITEMS {
+                    return Err(Error::Invalid("matching family exceeds its bound"));
+                }
+                budget.charge::<(Mob, Vec<Mob>, bool)>(layout.len())?;
+                // Clone the original manifest and validate its graph with a
+                // sorted durable-handle index and bounded iterative DFS.
+                budget.charge::<(u32, u32, usize)>(layout.len())?;
+                budget.charge::<u8>(layout.len())?;
+                budget.charge::<(usize, usize)>(layout.len())?;
+                for (_, descendants, _) in layout {
+                    if descendants.len() > MAX_ITEMS {
+                        return Err(Error::Invalid("matching child list exceeds its bound"));
+                    }
+                    budget.charge::<Mob>(descendants.len())?;
+                }
+            }
+        }
+        for child in children {
+            document_native_budget(child.as_ref(), budget, depth + 1, declaration)?;
         }
     }
     Ok(())
@@ -1188,14 +1343,19 @@ fn put_native_node(
         ));
     }
     *remaining -= 1;
-    let kind = native_kind(animation).ok_or(Error::Invalid("unsupported native animation"))?;
+    let kind = if prepared {
+        native_kind(animation)
+    } else {
+        declaration_kind(animation)
+    }
+    .ok_or(Error::Invalid("unsupported native animation"))?;
     writer.put_u8(kind);
     let any: &dyn Any = animation;
-    if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+    if let Some((controls, children)) = declaration_composition(animation) {
         // Eager groups own no starting copy or zipped family table. Each
-        // child's independently prepared state carries those handles.
-        put_state(writer, stage, group.state(), false)?;
-        let controls = group.continuation_controls();
+        // child's independently prepared state carries those handles. The
+        // two declaration-only compositions reach here only while untouched.
+        put_state(writer, stage, animation.state(), false)?;
         if !group_controls_supported(controls) {
             return Err(Error::Invalid("invalid native group controls"));
         }
@@ -1203,8 +1363,22 @@ fn put_native_node(
         put_float(writer, controls.duration_scale);
         put_float(writer, controls.timing_run_time);
         writer.put_bool(controls.run_time_override);
-        put_count(writer, group.animations().len())?;
-        for child in group.animations() {
+        if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
+            for (root, layout) in matching.declaration_families() {
+                put_mob(writer, stage, root)?;
+                put_count(writer, layout.len())?;
+                for &(member, ref descendants, empty) in layout {
+                    put_mob(writer, stage, member)?;
+                    writer.put_bool(empty);
+                    put_count(writer, descendants.len())?;
+                    for &child in descendants {
+                        put_mob(writer, stage, child)?;
+                    }
+                }
+            }
+        }
+        put_count(writer, children.len())?;
+        for child in children {
             put_native_node(
                 writer,
                 stage,
@@ -1818,8 +1992,14 @@ pub fn declaration_bytes(
         || overrides
             .rate_func
             .is_some_and(|rate| !rate_supported(rate, 0))
-        || !native_play_supported(animations)
-        || capture_budget(animations).is_err()
+        || !declaration_play_supported(animations)
+        || declaration_budget(animations).is_err()
+    {
+        return Ok(None);
+    }
+    if !animations
+        .iter()
+        .all(|animation| declaration_stage_valid(stage, animation.as_ref()))
     {
         return Ok(None);
     }
@@ -1835,7 +2015,7 @@ pub fn declaration_bytes(
                 .saturating_mul(std::mem::size_of::<Box<dyn Animation>>()),
         })?;
     for animation in animations {
-        let Some(mut owned) = clone_native(animation.as_ref()) else {
+        let Some(mut owned) = clone_declaration(animation.as_ref()) else {
             return Ok(None);
         };
         owned.update_rate_info(
@@ -1848,7 +2028,7 @@ pub fn declaration_bytes(
         }
         declared.push(owned);
     }
-    if !native_play_supported(&declared) || capture_budget(&declared).is_err() {
+    if !declaration_play_supported(&declared) || declaration_budget(&declared).is_err() {
         return Ok(None);
     }
     let mut writer = Writer::with_limits(
@@ -1879,6 +2059,18 @@ fn declaration_is_fresh(animation: &dyn Animation) -> bool {
                 .animations()
                 .iter()
                 .all(|child| declaration_is_fresh(child.as_ref()))
+    } else if let Some(succession) = any.downcast_ref::<Succession>() {
+        succession.declaration_is_fresh()
+            && succession
+                .animations()
+                .iter()
+                .all(|child| declaration_is_fresh(child.as_ref()))
+    } else if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
+        matching.declaration_is_fresh()
+            && matching
+                .animations()
+                .iter()
+                .all(|child| declaration_is_fresh(child.as_ref()))
     } else if let Some(transform) = native_transform(animation) {
         transform.target_copy.is_none()
     } else if let Some(drawing) = any.downcast_ref::<DrawBorderThenFill>() {
@@ -1906,7 +2098,7 @@ pub fn fresh_declaration(
     fps: u32,
     max_bytes: usize,
 ) -> Result<Option<(Vec<u8>, i64)>, Error> {
-    if !native_play_supported(animations)
+    if !declaration_play_supported(animations)
         || !animations
             .iter()
             .all(|animation| declaration_is_fresh(animation.as_ref()))
@@ -1918,7 +2110,7 @@ pub fn fresh_declaration(
     };
     let mut owned = Vec::with_capacity(animations.len());
     for animation in animations {
-        let Some(mut clone) = clone_native(animation.as_ref()) else {
+        let Some(mut clone) = clone_declaration(animation.as_ref()) else {
             return Ok(None);
         };
         clone.update_rate_info(
@@ -2298,6 +2490,303 @@ mod tests {
             assert_eq!(stage.snapshot().to_bytes().unwrap(), prepared);
             crate::finish_open_play(&mut stage, &mut animations, open).unwrap();
         }
+    }
+
+    fn future_succession(
+        swap: bool,
+        nested: bool,
+        path_arc: f64,
+    ) -> (Stage, Vec<Box<dyn Animation>>) {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::vector_from_points(&[
+            [0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        stage.add_to_scene(source).unwrap();
+        let first = stage.copy_family(source).unwrap();
+        let second = stage.copy_family(source).unwrap();
+        stage.shift(first, [2.0, 1.0, 0.0]);
+        stage.shift(second, [-1.0, -2.0, 0.0]);
+        let mut children: Vec<Box<dyn Animation>> = vec![
+            Box::new(
+                Transform::new(source, first)
+                    .with_config(AnimConfig {
+                        run_time_frames: Some(5),
+                        ..AnimConfig::default()
+                    })
+                    .with_path_arc(path_arc, [0.0, 0.0, 1.0]),
+            ),
+            Box::new(Transform::new(source, second).with_config(AnimConfig {
+                run_time_frames: Some(7),
+                ..AnimConfig::default()
+            })),
+        ];
+        if swap {
+            children.swap(0, 1);
+        }
+        let mut animation: Box<dyn Animation> =
+            Box::new(Succession::new(&mut stage, children).unwrap());
+        if nested {
+            animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+        }
+        (stage, vec![animation])
+    }
+
+    #[test]
+    fn future_successions_bind_order_path_and_exact_timing_without_initializing_children() {
+        for nested in [false, true] {
+            let (stage, animations) = future_succession(false, nested, 0.75);
+            let before = stage.snapshot().to_bytes().unwrap();
+            let declaration = fresh_declaration(
+                &stage,
+                &animations,
+                DeclarationOverrides::default(),
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .expect("an untouched native succession is a closed future declaration");
+            assert_eq!(declaration.1, 12);
+            assert_eq!(
+                Reader::open(
+                    &declaration.0,
+                    DECLARATION_SCHEMA,
+                    limits(MAX_BYTES),
+                    UnknownPolicy::Strict,
+                )
+                .unwrap()
+                .version(),
+                (1, 6)
+            );
+            assert!(
+                Reader::open(
+                    &declaration.0,
+                    Schema {
+                        minor: 5,
+                        ..DECLARATION_SCHEMA
+                    },
+                    limits(MAX_BYTES),
+                    UnknownPolicy::Strict,
+                )
+                .is_err()
+            );
+            assert_eq!(
+                fresh_declaration(
+                    &stage,
+                    &animations,
+                    DeclarationOverrides::default(),
+                    30,
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .unwrap(),
+                declaration
+            );
+            let override_declaration = fresh_declaration(
+                &stage,
+                &animations,
+                DeclarationOverrides {
+                    run_time_frames: Some(19),
+                    ..DeclarationOverrides::default()
+                },
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(override_declaration.1, 19);
+            assert_ne!(override_declaration.0, declaration.0);
+            for (swap, path_arc) in [(true, 0.75), (false, 0.25)] {
+                let (changed_stage, changed) = future_succession(swap, nested, path_arc);
+                assert_eq!(changed_stage.snapshot().to_bytes().unwrap(), before);
+                let changed = fresh_declaration(
+                    &changed_stage,
+                    &changed,
+                    DeclarationOverrides::default(),
+                    30,
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(changed.1, 12);
+                assert_ne!(
+                    changed.0, declaration.0,
+                    "the authored future plan is bound"
+                );
+            }
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+            assert!(!native_preparation_supported(animations[0].as_ref()));
+            assert!(clone_for_native_preparation(animations[0].as_ref()).is_none());
+            assert!(!native_play_supported(&animations));
+        }
+    }
+
+    #[test]
+    fn future_successions_refuse_initialized_and_finished_lifecycles() {
+        for nested in [false, true] {
+            for phase in 0..3 {
+                let (mut stage, mut animations) = future_succession(false, nested, 0.75);
+                if phase == 0 {
+                    animations[0].prepare_timing(30).unwrap();
+                } else {
+                    let clock = RationalFrameClock::new(30).unwrap();
+                    let open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+                    assert!(
+                        capture(&stage, &clock, &animations, &open, MAX_BYTES)
+                            .unwrap()
+                            .is_none(),
+                        "fresh declaration support must not admit active successions"
+                    );
+                    if phase == 2 {
+                        crate::finish_open_play(&mut stage, &mut animations, open).unwrap();
+                    }
+                }
+                let before = stage.snapshot().to_bytes().unwrap();
+                assert!(
+                    fresh_declaration(
+                        &stage,
+                        &animations,
+                        DeclarationOverrides::default(),
+                        30,
+                        MAX_BYTES,
+                    )
+                    .unwrap()
+                    .is_none(),
+                    "phase={phase}, nested={nested}"
+                );
+                assert!(
+                    declaration_bytes(
+                        &stage,
+                        &animations,
+                        DeclarationOverrides::default(),
+                        MAX_BYTES,
+                    )
+                    .unwrap()
+                    .is_none()
+                );
+                assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+            }
+        }
+    }
+
+    #[test]
+    fn future_matching_declarations_bind_the_original_plan_during_an_earlier_reveal() {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::vector_from_points(&[
+            [0.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ]));
+        let target = stage.copy_family(source).unwrap();
+        stage.shift(target, [2.0, 0.0, 0.0]);
+        let animations: Vec<Box<dyn Animation>> = vec![Box::new(
+            TransformMatchingParts::new(&mut stage, source, target).unwrap(),
+        )];
+        let before = stage.snapshot();
+        let original = fresh_declaration(
+            &stage,
+            &animations,
+            DeclarationOverrides::default(),
+            30,
+            MAX_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            Reader::open(
+                &original.0,
+                DECLARATION_SCHEMA,
+                limits(MAX_BYTES),
+                UnknownPolicy::Strict,
+            )
+            .unwrap()
+            .version(),
+            (1, 6)
+        );
+        assert!(!native_preparation_supported(animations[0].as_ref()));
+        stage.get_mut(source).unwrap().buffer.resize(0).unwrap();
+        let during_reveal = stage.snapshot().to_bytes().unwrap();
+        assert_eq!(
+            fresh_declaration(
+                &stage,
+                &animations,
+                DeclarationOverrides::default(),
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .unwrap(),
+            original,
+            "a preceding reveal must not rewrite a future matching declaration"
+        );
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), during_reveal);
+        stage.restore(&before);
+        stage.delete(source).unwrap();
+        assert!(
+            fresh_declaration(
+                &stage,
+                &animations,
+                DeclarationOverrides::default(),
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .is_none(),
+            "a missing authored identity cannot be rebound to a different object"
+        );
+    }
+
+    #[test]
+    fn future_composition_declarations_keep_rate_depth_and_document_limits() {
+        fn opaque_rate(_: f64) -> f64 {
+            panic!("declaring a future composition must not evaluate its rate")
+        }
+
+        let (stage, mut animations) = future_succession(false, false, 0.75);
+        let before = stage.snapshot().to_bytes().unwrap();
+        assert!(
+            fresh_declaration(
+                &stage,
+                &animations,
+                DeclarationOverrides::default(),
+                30,
+                128,
+            )
+            .is_err()
+        );
+        animations[0].state_mut().config.rate_func = RateFunc::Base(opaque_rate);
+        assert!(
+            fresh_declaration(
+                &stage,
+                &animations,
+                DeclarationOverrides::default(),
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+
+        let (mut stage, mut animations) = future_succession(false, false, 0.75);
+        let mut animation = animations.pop().unwrap();
+        for _ in 0..MAX_NATIVE_DEPTH {
+            animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+        }
+        let before = stage.snapshot().to_bytes().unwrap();
+        assert!(
+            fresh_declaration(
+                &stage,
+                &[animation],
+                DeclarationOverrides::default(),
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .is_none()
+        );
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
     }
 
     #[test]
@@ -2826,25 +3315,44 @@ mod tests {
                 panic!("declaration must not invoke interpolation")
             }
         }
-        let mut stage = Stage::new();
-        let mob = stage.add(Mobject::new());
-        let refuse_hooks = Arc::new(AtomicBool::new(false));
-        let unknown = Unknown {
-            state: AnimState::new(mob, AnimConfig::default()),
-            refuse_hooks: refuse_hooks.clone(),
-        };
-        let group = AnimationGroup::new(&mut stage, vec![Box::new(unknown)]).unwrap();
-        refuse_hooks.store(true, Ordering::SeqCst);
-        assert!(
-            declaration_bytes(
-                &stage,
-                &[Box::new(group)],
-                DeclarationOverrides::default(),
-                MAX_BYTES,
-            )
-            .unwrap()
-            .is_none()
-        );
+        for succession in [false, true] {
+            let mut stage = Stage::new();
+            let mob = stage.add(Mobject::new());
+            let refuse_hooks = Arc::new(AtomicBool::new(false));
+            let unknown = Unknown {
+                state: AnimState::new(mob, AnimConfig::default()),
+                refuse_hooks: refuse_hooks.clone(),
+            };
+            let children: Vec<Box<dyn Animation>> = vec![Box::new(unknown)];
+            let composed: Box<dyn Animation> = if succession {
+                Box::new(Succession::new(&mut stage, children).unwrap())
+            } else {
+                Box::new(AnimationGroup::new(&mut stage, children).unwrap())
+            };
+            let animations = vec![composed];
+            refuse_hooks.store(true, Ordering::SeqCst);
+            assert!(
+                declaration_bytes(
+                    &stage,
+                    &animations,
+                    DeclarationOverrides::default(),
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .is_none()
+            );
+            assert!(
+                fresh_declaration(
+                    &stage,
+                    &animations,
+                    DeclarationOverrides::default(),
+                    30,
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .is_none()
+            );
+        }
     }
 }
 

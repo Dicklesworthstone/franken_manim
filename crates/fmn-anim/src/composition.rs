@@ -1722,6 +1722,54 @@ struct MemberPlayback {
 }
 
 impl Succession {
+    /// A future schedule may retain this factory value only before timing or
+    /// any just-in-time child lifecycle has initialized its private state.
+    pub(crate) fn declaration_is_fresh(&self) -> bool {
+        self.active == 0
+            && self.deferred.is_none()
+            && self.playback.is_empty()
+            && !self.replayable
+            && !self.replaying
+            && self.last_time.is_none()
+            && self.last_exact_position.is_none()
+            && self.frame_timings.is_none()
+            && self.max_frame_end.is_none()
+            && self.exact_timings.is_none()
+    }
+
+    pub(crate) fn declaration_controls(&self) -> GroupContinuationControls {
+        GroupContinuationControls {
+            layout_lag_ratio: self.layout_lag_ratio,
+            duration_scale: 1.0,
+            timing_run_time: self.timing_run_time,
+            run_time_override: self.run_time_override,
+        }
+    }
+
+    /// Clone a checked fresh declaration without beginning any child or
+    /// allocating a composition container in the live Stage.
+    pub(crate) fn clone_for_declaration(&self, animations: Vec<Box<dyn Animation>>) -> Self {
+        Self {
+            state: self.state.clone(),
+            animations,
+            timings: self.timings.clone(),
+            max_end_time: self.max_end_time,
+            active: 0,
+            deferred: None,
+            playback: Vec::new(),
+            replayable: false,
+            replaying: false,
+            last_time: None,
+            last_exact_position: None,
+            layout_lag_ratio: self.layout_lag_ratio,
+            timing_run_time: self.timing_run_time,
+            run_time_override: self.run_time_override,
+            frame_timings: None,
+            max_frame_end: None,
+            exact_timings: None,
+        }
+    }
+
     /// A separate closed-program capability, not a generic purity claim.
     /// Later member lifetimes remain just in time on the real scene owner.
     pub(crate) fn can_prepare_native_frames(&self) -> bool {
