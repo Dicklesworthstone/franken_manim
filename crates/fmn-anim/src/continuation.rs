@@ -13,22 +13,23 @@ use std::fmt;
 use std::sync::Arc;
 
 use fmn_hash::{Limits, Reader, Schema, SerialError, UnknownPolicy, Writer};
+use fmn_mobject::path_sampling::PathObservation;
 use fmn_mobject::{Mob, Stage};
 
 use crate::composition::GroupContinuationControls;
 use crate::creation::{IntRound, PartialGeometry};
 use crate::transform::TargetPrep;
 use crate::{
-    AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FramePosition,
-    OpenSegment, PathFunc, RateFunc, RationalFrameClock, RevealBounds, Rotating,
-    ShowIncreasingSubsets, ShowPartial, Transform, VFade, VShowPassingFlash, WiggleOutThenIn,
+    AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FadeTransform,
+    FramePosition, MoveAlongPath, OpenSegment, PathFunc, RateFunc, RationalFrameClock, RevealBounds,
+    Rotating, ShowIncreasingSubsets, ShowPartial, Transform, VFade, VShowPassingFlash, WiggleOutThenIn,
 };
 
-// Minor 3 adds structural reveals and the two closed indication carriers.
+// Minor 4 adds captured path motion and cross-fade lifecycle carriers.
 // Existing native kind payloads retain their layout and remain readable. Writers
-// retain minor 2 for legacy-only trees so their declaration digests stay stable.
-const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 3);
-const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 3);
+// retain minor 2/3 for older trees so their declaration digests stay stable.
+const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 4);
+const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 4);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_RATE_DEPTH: usize = 32;
@@ -118,6 +119,10 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
         Some(8)
     } else if any.is::<VShowPassingFlash>() {
         Some(9)
+    } else if any.is::<MoveAlongPath>() {
+        Some(10)
+    } else if any.is::<FadeTransform>() {
+        Some(11)
     } else {
         None
     }
@@ -140,6 +145,10 @@ fn clone_native(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
     } else if let Some(value) = any.downcast_ref::<WiggleOutThenIn>() {
         Some(Box::new(value.clone()))
     } else if let Some(value) = any.downcast_ref::<VShowPassingFlash>() {
+        Some(Box::new(value.clone()))
+    } else if let Some(value) = any.downcast_ref::<MoveAlongPath>() {
+        Some(Box::new(value.clone()))
+    } else if let Some(value) = any.downcast_ref::<FadeTransform>() {
         Some(Box::new(value.clone()))
     } else if let Some(value) = any.downcast_ref::<AnimationGroup>() {
         let children = value
@@ -201,6 +210,11 @@ fn native_tree_supported(animation: &dyn Animation, depth: usize, remaining: &mu
     if !config_supported(&animation.state().config) {
         return false;
     }
+    if let Some(motion) = (animation as &dyn Any).downcast_ref::<MoveAlongPath>()
+        && !motion.captured_path().is_some_and(captured_path_valid)
+    {
+        return false;
+    }
     if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
         group_controls_supported(group.continuation_controls())
             && group
@@ -220,27 +234,30 @@ fn native_play_supported(animations: &[Box<dyn Animation>]) -> bool {
 }
 
 // Call only after native_play_supported has bounded the concrete carrier tree.
-fn has_extended_carrier(animation: &dyn Animation) -> bool {
+fn carrier_minor(animation: &dyn Animation) -> u16 {
     if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
         group
             .animations()
             .iter()
-            .any(|child| has_extended_carrier(child.as_ref()))
+            .map(|child| carrier_minor(child.as_ref()))
+            .max()
+            .unwrap_or(2)
     } else {
-        matches!(native_kind(animation), Some(7..=9))
+        match native_kind(animation) {
+            Some(10 | 11) => 4,
+            Some(7..=9) => 3,
+            _ => 2,
+        }
     }
 }
 
 fn emission_schema(schema: Schema, animations: &[Box<dyn Animation>]) -> Schema {
     Schema {
-        minor: if animations
+        minor: animations
             .iter()
-            .any(|animation| has_extended_carrier(animation.as_ref()))
-        {
-            3
-        } else {
-            2
-        },
+            .map(|animation| carrier_minor(animation.as_ref()))
+            .max()
+            .unwrap_or(2),
         ..schema
     }
 }
@@ -323,9 +340,48 @@ fn native_parameters_valid(stage: &Stage, animation: &dyn Animation) -> bool {
         wiggle_parameters_valid(value)
     } else if let Some(value) = any.downcast_ref::<VShowPassingFlash>() {
         flash_parameters_valid(value) && flash_profiles_valid(stage, value)
+    } else if let Some(value) = any.downcast_ref::<MoveAlongPath>() {
+        value.captured_path().is_some_and(captured_path_valid)
+    } else if let Some(value) = any.downcast_ref::<FadeTransform>() {
+        fade_parameters_valid(stage, value)
     } else {
         false
     }
+}
+
+fn captured_path_valid(path: &PathObservation) -> bool {
+    path.point_count() > 0
+        && path.point_count() <= MAX_ITEMS
+        && path.world_points().iter().flatten().all(|value| value.is_finite())
+        && path.total_length().is_finite()
+        && path.total_length() >= 0.0
+}
+
+fn fade_source(stage: &Stage, value: &FadeTransform) -> Option<Mob> {
+    let children = stage.get(value.state.mobject())?.submobjects();
+    let [source, _] = children else {
+        return None;
+    };
+    Some(*source)
+}
+
+fn fade_parameters_valid(stage: &Stage, value: &FadeTransform) -> bool {
+    let Some(source) = fade_source(stage, value) else {
+        return false;
+    };
+    let Some(saved) = stage.saved_state(source) else {
+        return false;
+    };
+    value.dim_to_match < 3
+        && saved != source
+        && stage.contains(saved)
+        && stage.contains(value.to_add_on_completion)
+        && [value.state.starting_mobject(), value.ending]
+            .into_iter()
+            .all(|mob| {
+                mob.and_then(|mob| stage.get(mob))
+                    .is_some_and(|entry| entry.submobjects().len() == 2)
+            })
 }
 
 // A reveal intentionally detaches members from its live root. Validate the
@@ -564,8 +620,18 @@ fn charge_carrier(budget: &mut Budget, kind: u8) -> Result<(), Error> {
         7 => budget.charge::<ShowIncreasingSubsets>(1),
         8 => budget.charge::<WiggleOutThenIn>(1),
         9 => budget.charge::<VShowPassingFlash>(1),
+        10 => budget.charge::<MoveAlongPath>(1),
+        11 => budget.charge::<FadeTransform>(1),
         _ => Err(Error::Invalid("unknown native animation kind")),
     }
+}
+
+fn charge_path_table(budget: &mut Budget, points: usize) -> Result<(), Error> {
+    // A path with n = 2c + 1 records builds c lengths and c + 1 cumulative
+    // lengths. Account for that derived table and conservative Arc/Vec headers
+    // before reconstructing the Chisel geometry.
+    budget.charge::<f64>(points)?;
+    budget.charge::<usize>(24)
 }
 
 fn charge_group_timing(budget: &mut Budget, children: usize) -> Result<(), Error> {
@@ -646,6 +712,12 @@ fn capture_native_budget(
             budget.charge::<f64>(profile.len())?;
             budget.charge::<f32>(profile.len())?;
         }
+    } else if let Some(value) = any.downcast_ref::<MoveAlongPath>() {
+        let path = value
+            .captured_path()
+            .ok_or(Error::Invalid("live path motion has no closed continuation"))?;
+        budget.charge::<[f64; 3]>(path.point_count())?;
+        charge_path_table(budget, path.point_count())?;
     } else if let Some(group) = any.downcast_ref::<AnimationGroup>() {
         charge_group_timing(budget, group.animations().len())?;
         charge_rate(budget, &state.config.rate_func)?;
@@ -1114,6 +1186,36 @@ fn put_native_node(
                 }
             }
         }
+    } else if let Some(value) = any.downcast_ref::<MoveAlongPath>() {
+        let path = value
+            .captured_path()
+            .filter(|path| captured_path_valid(path))
+            .ok_or(Error::Invalid("invalid or live path motion"))?;
+        put_count(writer, path.point_count())?;
+        for &point in path.world_points() {
+            put_vec(writer, point);
+        }
+    } else if let Some(value) = any.downcast_ref::<FadeTransform>() {
+        let dim = u8::try_from(value.dim_to_match)
+            .ok()
+            .filter(|&dim| dim < 3)
+            .ok_or(Error::Invalid("invalid cross-fade matching dimension"))?;
+        put_mob(writer, stage, value.to_add_on_completion)?;
+        writer
+            .put_bool(value.stretch)
+            .put_u8(dim)
+            .put_bool(value.pieces);
+        if prepared {
+            put_mob(
+                writer,
+                stage,
+                value.ending.ok_or(Error::Invalid("missing cross-fade ending"))?,
+            )?;
+            let saved = fade_source(stage, value)
+                .and_then(|source| stage.saved_state(source))
+                .ok_or(Error::Invalid("missing cross-fade saved source"))?;
+            put_mob(writer, stage, saved)?;
+        }
     }
     Ok(())
 }
@@ -1136,12 +1238,17 @@ fn get_native_node(
 ) -> Result<Box<dyn Animation>, Error> {
     budget.native_node(depth)?;
     let kind = reader.get_u8()?;
-    if !(1..=9).contains(&kind) {
+    if !(1..=11).contains(&kind) {
         return Err(Error::Invalid("unknown native animation kind"));
     }
     if kind >= 7 && reader.version().1 < 3 {
         return Err(Error::Invalid(
             "native animation kind requires FMPC minor 3",
+        ));
+    }
+    if kind >= 10 && reader.version().1 < 4 {
+        return Err(Error::Invalid(
+            "native animation kind requires FMPC minor 4",
         ));
     }
     charge_carrier(budget, kind)?;
@@ -1175,7 +1282,7 @@ fn get_native_node(
             fps,
         )?));
     }
-    let width = if matches!(kind, 1 | 5) { 3 } else { 2 };
+    let width = if matches!(kind, 1 | 5 | 11) { 3 } else { 2 };
     let state = get_state(reader, stage, budget, fps, width)?;
     Ok(match kind {
         1 => {
@@ -1333,6 +1440,49 @@ fn get_native_node(
             }
             Box::new(value)
         }
+        10 => {
+            let count = get_count(reader, 24)?;
+            if count == 0 || count % 2 == 0 {
+                return Err(Error::Invalid("invalid captured path point count"));
+            }
+            charge_path_table(budget, count)?;
+            let mut points = budget.vector::<[f64; 3]>(count)?;
+            for _ in 0..count {
+                points.push(get_vec(reader)?);
+            }
+            let path = PathObservation::from_world_points(points)
+                .map_err(|_| Error::Invalid("invalid captured path geometry"))?;
+            if !captured_path_valid(&path) {
+                return Err(Error::Invalid("invalid captured path arc length"));
+            }
+            let mut value = MoveAlongPath::from_observation(state.mobject(), path);
+            *value.state_mut() = state;
+            Box::new(value)
+        }
+        11 => {
+            let target = get_mob(reader, stage)?;
+            let stretch = reader.get_bool()?;
+            let dim_to_match = usize::from(reader.get_u8()?);
+            if dim_to_match >= 3 {
+                return Err(Error::Invalid("invalid cross-fade matching dimension"));
+            }
+            let pieces = reader.get_bool()?;
+            let ending = get_mob(reader, stage)?;
+            let saved = get_mob(reader, stage)?;
+            let value = FadeTransform {
+                state,
+                ending: Some(ending),
+                to_add_on_completion: target,
+                stretch,
+                dim_to_match,
+                pieces,
+                interpolation_scratch: Default::default(),
+            };
+            if fade_source(stage, &value).and_then(|source| stage.saved_state(source)) != Some(saved) {
+                return Err(Error::Invalid("cross-fade saved source differs"));
+            }
+            Box::new(value)
+        }
         _ => return Err(Error::Invalid("unknown native animation kind")),
     })
 }
@@ -1384,7 +1534,7 @@ fn prepared_valid(stage: &Stage, animation: &dyn Animation, fps: u32) -> Result<
         return Ok(true);
     }
     let family_roots = animation.all_mobjects();
-    let width = if matches!(native_kind(animation), Some(1 | 5)) {
+    let width = if matches!(native_kind(animation), Some(1 | 5 | 11)) {
         3
     } else {
         2
@@ -1576,6 +1726,8 @@ fn declaration_is_fresh(animation: &dyn Animation) -> bool {
         drawing.outline.is_none() && drawing.crossed.is_empty()
     } else if let Some(flash) = any.downcast_ref::<VShowPassingFlash>() {
         flash.widths.is_empty()
+    } else if let Some(fade) = any.downcast_ref::<FadeTransform>() {
+        fade.ending.is_none()
     } else {
         true
     }
@@ -1632,7 +1784,8 @@ pub fn fresh_declaration(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fmn_mobject::Mobject;
+    use fmn_core::rng::RngRoot;
+    use fmn_mobject::{Mobject, Snapshot};
 
     fn prepared_border() -> (Stage, DrawBorderThenFill) {
         let mut stage = Stage::new();
@@ -1732,6 +1885,312 @@ mod tests {
         }
         stage.add_to_scene(root).unwrap();
         (stage, root)
+    }
+
+    fn motion_scene(kind: u8, nested: bool, remover: bool) -> (Stage, Vec<Box<dyn Animation>>) {
+        let (mut stage, root) = indication_family();
+        let mut animation: Box<dyn Animation> = if kind == 0 {
+            let path = stage.add(Mobject::vector_from_points(&[
+                [-3.0, 0.0, 0.0],
+                [-1.0, 3.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [2.0, -2.0, 0.0],
+                [4.0, 1.0, 0.0],
+            ]));
+            stage.shift(path, [0.100_000_000_003, 0.200_000_000_007, 0.0]);
+            let captured = fmn_mobject::path_sampling::PathSampler::default()
+                .observe(&stage, path)
+                .unwrap();
+            // The continuation owns the exact observation, not a dependency
+            // on whatever now occupies the original path's arena slot.
+            stage.shift(path, [100.0, 100.0, 0.0]);
+            stage.delete(path).unwrap();
+            Box::new(MoveAlongPath::from_observation(root, captured))
+        } else {
+            let target = stage.copy_family(root).unwrap();
+            stage.shift(target, [2.75, -1.25, 0.0]);
+            let fade = if kind == 1 {
+                crate::fade_transform(&mut stage, root, target)
+            } else {
+                crate::fade_transform_pieces(&mut stage, root, target)
+            }
+            .unwrap()
+            .with_stretch(false)
+            .with_dim_to_match(0);
+            Box::new(fade)
+        };
+        animation.state_mut().config.run_time_frames = Some(13);
+        animation.state_mut().config.rate_func =
+            RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack);
+        animation.state_mut().config.final_alpha_value = 0.375;
+        animation.state_mut().config.remover = remover;
+        animation.state_mut().config.suspend_mobject_updating = true;
+        if nested {
+            animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+            animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+        }
+        (stage, vec![animation])
+    }
+
+    #[test]
+    fn captured_motion_and_crossfades_resume_every_remaining_sample_and_cleanup() {
+        let rng = RngRoot::from_seed(17);
+        for kind in 0..3 {
+            for nested in [false, true] {
+                for remover in [false, true] {
+                    for boundary in [0, 1, 6, 12, 13] {
+                        let (mut stage, mut animations) = motion_scene(kind, nested, remover);
+                        let mut clock = RationalFrameClock::new(30).unwrap();
+                        clock.advance_frames(5).unwrap();
+                        stage.set_time_from_clock(clock.now().to_f64());
+                        let mut open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+                        crate::advance_play(
+                            &mut stage,
+                            &mut clock,
+                            &rng,
+                            &mut animations,
+                            &mut open,
+                            boundary,
+                            &mut |_| {},
+                        )
+                        .unwrap();
+                        let checkpoint = capture(&stage, &clock, &animations, &open, MAX_BYTES)
+                            .unwrap()
+                            .expect("closed motion carrier");
+                        let snapshot = stage.snapshot().to_bytes().unwrap();
+                        let mut resumed_stage = Stage::new();
+                        let decoded = Snapshot::from_bytes(&snapshot, &resumed_stage).unwrap();
+                        resumed_stage.restore(&decoded.snapshot);
+                        resumed_stage.set_time_from_clock(clock.now().to_f64());
+                        let mut resumed_clock = clock;
+                        let (mut resumed, mut resumed_open) =
+                            restore(&resumed_stage, &resumed_clock, &checkpoint).unwrap();
+                        // Decode cannot run begin, rebuild ghosts, or save a
+                        // new source. All prepared state survives byte-for-byte.
+                        assert_eq!(resumed_stage.snapshot().to_bytes().unwrap(), snapshot);
+                        assert_eq!(
+                            capture(
+                                &resumed_stage,
+                                &resumed_clock,
+                                &resumed,
+                                &resumed_open,
+                                MAX_BYTES
+                            )
+                            .unwrap()
+                            .unwrap(),
+                            checkpoint
+                        );
+                        let mut serial_frames = Vec::new();
+                        let mut resumed_frames = Vec::new();
+                        crate::advance_play(
+                            &mut stage,
+                            &mut clock,
+                            &rng,
+                            &mut animations,
+                            &mut open,
+                            13,
+                            &mut |packet| {
+                                serial_frames.push((
+                                    packet.metadata(),
+                                    packet.state().to_bytes().unwrap(),
+                                ));
+                            },
+                        )
+                        .unwrap();
+                        crate::advance_play(
+                            &mut resumed_stage,
+                            &mut resumed_clock,
+                            &rng,
+                            &mut resumed,
+                            &mut resumed_open,
+                            13,
+                            &mut |packet| {
+                                resumed_frames.push((
+                                    packet.metadata(),
+                                    packet.state().to_bytes().unwrap(),
+                                ));
+                            },
+                        )
+                        .unwrap();
+                        assert_eq!(
+                            serial_frames, resumed_frames,
+                            "kind={kind}, nested={nested}, remover={remover}, boundary={boundary}"
+                        );
+                        crate::finish_open_play(&mut stage, &mut animations, open).unwrap();
+                        crate::finish_open_play(&mut resumed_stage, &mut resumed, resumed_open)
+                            .unwrap();
+                        assert_eq!(
+                            stage.snapshot().to_bytes().unwrap(),
+                            resumed_stage.snapshot().to_bytes().unwrap(),
+                            "cleanup kind={kind}, nested={nested}, remover={remover}, boundary={boundary}"
+                        );
+                        assert_eq!(clock.now(), resumed_clock.now());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn motion_declarations_bind_captured_points_and_crossfade_controls() {
+        let (mut stage, root) = indication_family();
+        let target = stage.copy_family(root).unwrap();
+        stage.shift(target, [2.0, -1.0, 0.0]);
+        let first = PathObservation::from_world_points(vec![[1.000_000_000_001, -0.0, 0.0]])
+            .unwrap();
+        let changed = PathObservation::from_world_points(vec![[1.000_000_000_002, -0.0, 0.0]])
+            .unwrap();
+        let fade = crate::fade_transform(&mut stage, root, target).unwrap();
+        let variants: Vec<Box<dyn Animation>> = vec![
+            Box::new(MoveAlongPath::from_observation(root, first)),
+            Box::new(MoveAlongPath::from_observation(root, changed)),
+            Box::new(fade.clone()),
+            Box::new(fade.clone().with_stretch(false)),
+            Box::new(fade.with_dim_to_match(2)),
+        ];
+        let before = stage.snapshot().to_bytes().unwrap();
+        let mut declarations = Vec::new();
+        for animation in variants {
+            let (bytes, frames) = fresh_declaration(
+                &stage,
+                &[animation],
+                DeclarationOverrides::default(),
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(frames, 30);
+            let reader = Reader::open(
+                &bytes,
+                DECLARATION_SCHEMA,
+                limits(MAX_BYTES),
+                UnknownPolicy::Strict,
+            )
+            .unwrap();
+            assert_eq!(reader.version(), (1, 4));
+            assert!(!declarations.contains(&bytes));
+            declarations.push(bytes);
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        }
+        assert!(
+            declaration_bytes(
+                &stage,
+                &[Box::new(MoveAlongPath::new(root, target))],
+                DeclarationOverrides::default(),
+                MAX_BYTES,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn captured_motion_decode_enforces_geometry_version_and_memory_bounds() {
+        let (mut stage, mut animations) = motion_scene(0, false, false);
+        let clock = RationalFrameClock::new(30).unwrap();
+        let _open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+        let before = stage.snapshot().to_bytes().unwrap();
+        for case in 0..7 {
+            let schema = if case == 0 {
+                Schema::new(*b"FMPC", 1, 1, 3)
+            } else {
+                SCHEMA
+            };
+            let mut writer = Writer::with_limits(schema, limits(MAX_BYTES));
+            if case < 2 {
+                put_native(&mut writer, &stage, animations[0].as_ref(), true).unwrap();
+            } else {
+                writer.put_u8(10);
+                put_state(&mut writer, &stage, animations[0].state(), true).unwrap();
+                match case {
+                    2 => {
+                        writer.put_u32(0);
+                    }
+                    3 => {
+                        writer.put_u32(2);
+                        put_vec(&mut writer, [0.0; 3]);
+                        put_vec(&mut writer, [1.0; 3]);
+                    }
+                    4 => {
+                        writer.put_u32(u32::MAX);
+                    }
+                    5 => {
+                        writer.put_u32(3);
+                        for point in [[0.0; 3], [f64::NAN, 0.0, 0.0], [1.0; 3]] {
+                            put_vec(&mut writer, point);
+                        }
+                    }
+                    _ => {
+                        writer.put_u32(3);
+                        for point in [
+                            [-f64::MAX, 0.0, 0.0],
+                            [0.0, f64::MAX, 0.0],
+                            [f64::MAX, 0.0, 0.0],
+                        ] {
+                            put_vec(&mut writer, point);
+                        }
+                    }
+                }
+            }
+            let bytes = writer.finish().unwrap();
+            let mut reader =
+                Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+            let mut budget = Budget {
+                remaining: if case == 1 { 16 } else { MAX_BYTES },
+                native_items: 0,
+            };
+            assert!(
+                get_native(&mut reader, &stage, &mut budget, 30).is_err(),
+                "case={case}"
+            );
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn crossfade_decode_binds_saved_source_and_refuses_invalid_lifecycle() {
+        let (mut stage, root) = indication_family();
+        let target = stage.copy_family(root).unwrap();
+        stage.shift(target, [3.0, -1.0, 0.0]);
+        let mut animation = crate::fade_transform_pieces(&mut stage, root, target).unwrap();
+        animation.prepare_timing(30).unwrap();
+        animation.begin(&mut stage).unwrap();
+        animation.interpolate(&mut stage, 0.4);
+        assert!(decode_prepared(&stage, &animation).unwrap());
+        let before = stage.snapshot().to_bytes().unwrap();
+        let mut foreign_stage = Stage::new();
+        let foreign = foreign_stage.add(Mobject::new());
+        for case in 0..4 {
+            let mut forged = animation.clone();
+            match case {
+                0 => forged.dim_to_match = 3,
+                1 => forged.ending = Some(target),
+                2 => forged.to_add_on_completion = foreign,
+                _ => forged.ending = None,
+            }
+            assert!(
+                !matches!(decode_prepared(&stage, &forged), Ok(true)),
+                "case={case}"
+            );
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        }
+        let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+        put_native(&mut writer, &stage, &animation, true).unwrap();
+        let bytes = writer.finish().unwrap();
+        let saved = stage.saved_state(root).unwrap();
+        let different = stage.copy_family(root).unwrap();
+        stage.link_saved_state(root, different).unwrap();
+        let before = stage.snapshot().to_bytes().unwrap();
+        let mut reader =
+            Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+        let mut budget = Budget {
+            remaining: MAX_BYTES,
+            native_items: 0,
+        };
+        assert!(get_native(&mut reader, &stage, &mut budget, 30).is_err());
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        stage.link_saved_state(root, saved).unwrap();
     }
 
     #[test]

@@ -20056,6 +20056,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_motion_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run_motion),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_motion_checkpoint.bin".into(),
+                "native_motion_continued.png".into(),
+            ]),
+            counter_eq("studio_motion_checkpoint_restores", 6),
+            counter_eq("studio_motion_checkpoint_frames", 50),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.motion_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 6),
+                FieldPred::u64_eq("matching_frames", 50),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_indication_checkpoint.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioInProcess,
@@ -24353,6 +24377,16 @@ fn python_hdr_pq_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.python_hdr_pq.v1")
         .expect("Python HDR PQ parity is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_motion_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_motion_checkpoint.v1")
+        .expect("captured motion and crossfade checkpoint lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

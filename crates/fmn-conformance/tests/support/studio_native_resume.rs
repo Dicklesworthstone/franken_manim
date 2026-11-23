@@ -614,6 +614,105 @@ pub(super) fn run_groups(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     run_prepared_checkpoints(ctx, group_program, "group", &[4, 9, 16])
 }
 
+fn motion_program(pieces: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 79).map_err(service_error)?;
+    let moving = scene
+        .add_mobject(fmn_library::Circle::new().radius(0.13).build())
+        .map_err(service_error)?;
+    scene.stage_mut().set_fill(
+        moving,
+        Some(fmn_core::constants::YELLOW),
+        Some(1.0),
+        None,
+        true,
+    );
+    // These captured world coordinates never pass through an f32 Stage
+    // buffer. A durable carrier must retain them, including their low bits.
+    let path = fmn_mobject::path_sampling::PathObservation::from_world_points(vec![
+        [-1.123_456_789_012_3, -0.4, 0.0],
+        [0.234_567_890_123_4, -1.8, 0.0],
+        [1.345_678_901_234_5, -0.4, 0.0],
+    ])
+    .map_err(service_error)?;
+    let motion = fmn_anim::MoveAlongPath::from_observation(moving, path).with_config(
+        fmn_anim::AnimConfig {
+            run_time_frames: Some(12),
+            rate_func: fmn_anim::RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack),
+            ..fmn_anim::AnimConfig::default()
+        },
+    );
+
+    let source = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.2).build().into(),
+            fmn_library::Circle::new().radius(0.3).build().into(),
+        ]))
+        .map_err(service_error)?;
+    let children = scene.stage().get(source).unwrap().submobjects().to_vec();
+    scene.stage_mut().shift(children[0], [-0.8, 0.5, 0.0]);
+    scene.stage_mut().shift(children[1], [-0.2, 0.5, 0.0]);
+    scene.stage_mut().set_fill(
+        source,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    // The real target is absent from scene roots until the crossfade's
+    // cleanup. Restoring the carrier must preserve this pending transition.
+    let target = scene.stage_mut().add(
+        fmn_library::Rectangle::new()
+            .width(1.0)
+            .height(0.5)
+            .build()
+            .map_err(service_error)?,
+    );
+    scene.stage_mut().shift(target, [0.7, 0.5, 0.0]);
+    scene.stage_mut().set_fill(
+        target,
+        Some(fmn_core::constants::RED_C),
+        Some(0.7),
+        None,
+        true,
+    );
+    let fade = if pieces {
+        fmn_anim::fade_transform_pieces(scene.stage_mut(), source, target)
+    } else {
+        fmn_anim::fade_transform(scene.stage_mut(), source, target)
+    }
+    .map_err(service_error)?
+    .with_stretch(!pieces)
+    .with_dim_to_match(0)
+    .with_config(fmn_anim::AnimConfig {
+        run_time_frames: Some(14),
+        ..fmn_anim::AnimConfig::default()
+    });
+    let group = fmn_anim::AnimationGroup::with_lag_ratio(
+        scene.stage_mut(),
+        vec![Box::new(motion), Box::new(fade)],
+        0.2,
+    )
+    .map_err(service_error)?;
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(group)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(16),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_motion(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, motion_program, "motion", &[4, 9, 16])
+}
+
 fn indication_program(one_by_one: bool) -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 83).map_err(service_error)?;
     let revealed = scene

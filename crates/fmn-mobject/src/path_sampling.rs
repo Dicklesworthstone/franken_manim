@@ -1,5 +1,7 @@
 //! Retained world-space path observations for native animation and authoring.
-//! This cache is derived state; it never enters a Stage snapshot or FMTL.
+//! The live cache is derived state; it never enters a Stage snapshot or FMTL.
+//! An explicitly captured observation can be retained by a native animation's
+//! durable continuation.
 //!
 //! The mobject layer owns invalidation and consumes the existing Chisel kernel.
 //! Callers can keep one sampler per active path. Ordinary Stage queries share
@@ -33,6 +35,37 @@ struct PathGeometry {
 }
 
 impl PathObservation {
+    /// Rebuild an immutable observation from exact world-space shared anchors.
+    ///
+    /// This uses the same Chisel path and true-arc-length kernel as live
+    /// observations, without narrowing the coordinates through a record buffer.
+    /// Callers decoding untrusted data must bound the point and table allocations
+    /// before calling this method.
+    ///
+    /// # Errors
+    /// An empty, non-finite or malformed shared-anchor path is refused.
+    pub fn from_world_points(points: Vec<Vec3>) -> Result<Self, StageError> {
+        if points.is_empty() {
+            return Err(StageError::SchemaMismatch);
+        }
+        if points.iter().flatten().any(|value| !value.is_finite()) {
+            return Err(StageError::InvalidPointMap(
+                "path observation needs finite world-space points",
+            ));
+        }
+        let path = QuadPath::from_points(points).map_err(StageError::Geometry)?;
+        let table = ArcLengthTable::for_path(&path);
+        Ok(Self {
+            geometry: Arc::new(PathGeometry { path, table }),
+        })
+    }
+
+    /// The exact captured shared-anchor records, before any f32 narrowing.
+    #[must_use]
+    pub fn world_points(&self) -> &[Vec3] {
+        self.geometry.path.points()
+    }
+
     /// Sample the captured path by true world-space arc length (BN-03).
     ///
     /// This uses the same kernel and clamping as [`PathSampler::sample`].

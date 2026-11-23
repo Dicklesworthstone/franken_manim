@@ -761,6 +761,15 @@ impl MoveAlongPath {
         self
     }
 
+    // Only the explicit absolute-pose mode has a closed continuation. A live
+    // path's incremental arithmetic and source edits must retain serial replay.
+    pub(crate) fn captured_path(&self) -> Option<&PathObservation> {
+        match &self.path {
+            MotionPath::Captured(path) if self.error.is_none() => Some(path),
+            _ => None,
+        }
+    }
+
     fn sample_path(&mut self, stage: &Stage, alpha: f64) -> Result<Vec3, AnimError> {
         let point = match &self.path {
             MotionPath::Live(mob) => {

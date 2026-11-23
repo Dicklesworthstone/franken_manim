@@ -291,13 +291,13 @@ fn replace_bbox(stage: &mut Stage, mob: Mob, target: Mob, stretch: bool, dim_to_
 /// target's box, and interpolation is the plain field lerp between them.
 #[derive(Debug, Clone)]
 pub struct FadeTransform {
-    state: AnimState,
-    ending: Option<Mob>,
-    to_add_on_completion: Mob,
-    stretch: bool,
-    dim_to_match: usize,
-    pieces: bool,
-    interpolation_scratch: FieldInterpolationScratch,
+    pub(crate) state: AnimState,
+    pub(crate) ending: Option<Mob>,
+    pub(crate) to_add_on_completion: Mob,
+    pub(crate) stretch: bool,
+    pub(crate) dim_to_match: usize,
+    pub(crate) pieces: bool,
+    pub(crate) interpolation_scratch: FieldInterpolationScratch,
 }
 
 impl FadeTransform {
