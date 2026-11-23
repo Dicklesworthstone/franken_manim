@@ -15,7 +15,7 @@ use std::borrow::Cow;
 
 /// Immutable, owned PCM. Construction admits the complete size before reading
 /// samples, and native SoundData owns canonicalization and content identity.
-#[pyclass(frozen, name = "SoundData", module = "fmn_python")]
+#[pyclass(frozen, skip_from_py_object, name = "SoundData", module = "fmn_python")]
 #[derive(Clone)]
 pub(crate) struct PySoundData {
     data: SoundData,
@@ -228,7 +228,7 @@ pub(crate) fn writer_snapshot(
     let mut audio = PortalAudio::from_writer(Some(writer), &PortalOutputFormat::Wav, None)?;
     let engine = Rc::clone(&scene.borrow().engine);
     let requests = {
-        let scene = engine.try_borrow().map_err(|_| {
+        let scene = engine.scene.try_borrow().map_err(|_| {
             PyRuntimeError::new_err("audio snapshot cannot read a mutably borrowed Scene")
         })?;
         if scene.sound_requests().len() > 4096 {
@@ -285,7 +285,7 @@ pub(crate) fn writer_end(
     let mut audio = PortalAudio::from_writer(Some(writer), &PortalOutputFormat::Wav, None)?;
     let engine = Rc::clone(&scene.borrow().engine);
     let requests = {
-        let scene = engine.try_borrow().map_err(|_| {
+        let scene = engine.scene.try_borrow().map_err(|_| {
             PyRuntimeError::new_err("audio duration cannot read a mutably borrowed Scene")
         })?;
         if scene.sound_requests().len() > 4096 {
@@ -960,7 +960,7 @@ assert len(set(digests)) == 1
             .get_item("verified_files")
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "sound data scenario omitted its verification count".to_owned())?
-            .extract()
+            .extract::<u64>()
             .map_err(|error| error.to_string())
     })
 }

@@ -2219,10 +2219,10 @@ impl Animation for Succession {
         }
         let final_alpha = self.state.config.final_alpha_value;
         self.interpolate(stage, final_alpha);
-        if self.deferred.is_none() {
-            if let Err(error) = self.finish_member(stage, self.active) {
-                self.deferred = Some(error);
-            }
+        if self.deferred.is_none()
+            && let Err(error) = self.finish_member(stage, self.active)
+        {
+            self.deferred = Some(error);
         }
         if retain_updater_error(stage, &mut self.deferred) {
             // Failed interpolation or finish must release every remaining

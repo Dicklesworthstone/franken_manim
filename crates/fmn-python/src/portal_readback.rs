@@ -16,10 +16,10 @@ use fmn_core::color::Srgb;
 use fmn_frame::{FrameBuffer, FrameLayout, PixelFormat};
 use fmn_mobject::{FrozenRenderState, Mob, Mobject, Stage};
 use fmn_render::{
-    EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
-    Tiling, Viewport,
+    Camera, EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig,
+    ScreenMap, Tiling, Viewport,
 };
-use fmn_scene::studio_bridge::{Camera, FramePacket};
+use fmn_scene::studio_bridge::FramePacket;
 use fmn_studio::{TerminalPreview, TerminalProtocol, TuiLimits};
 use pyo3::prelude::*;
 #[cfg(any(test, feature = "gauntlet"))]
@@ -899,7 +899,7 @@ mod tests {
 
     #[test]
     fn production_camera_readback_acceptance_suite() {
-        let cases = run_portal_gauntlet_scene_readback()
+        let cases = super::run_portal_gauntlet_scene_readback()
             .expect("native camera readback preserves scene state and pixels");
         assert_eq!(cases, 20, "native updater observer cases must also run");
     }

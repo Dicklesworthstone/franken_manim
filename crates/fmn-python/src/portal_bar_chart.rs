@@ -165,8 +165,6 @@ pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use pyo3::prelude::*;
-
     #[test]
     fn native_bar_chart_batch() {
         crate::with_python_test_module("native bar-chart batch", |py, _module, globals| {

@@ -24,7 +24,7 @@ use pyo3::exceptions::{PyAttributeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::PyBool;
 
-use crate::{CapabilityError, PortalFrameFormat, PyRuntimeError, PyScene, PyValueError};
+use crate::{PortalFrameFormat, PyRuntimeError, PyScene, PyValueError};
 
 pub(crate) struct PortalVideoConfig {
     pub(crate) ffmpeg_bin: String,

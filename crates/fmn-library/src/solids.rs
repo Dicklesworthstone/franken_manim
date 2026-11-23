@@ -3874,7 +3874,9 @@ mod tests {
             .build()
             .with_z_index(4)
             .with_stroke_profile([1.0, 3.0, 2.0]);
-        let child = Rectangle::new(2.0, 1.0)
+        let child = Rectangle::new()
+            .width(2.0)
+            .height(1.0)
             .style(Style::default().fill(GREY, 0.5).stroke(BLUE_E, 6.0, 0.4))
             .build()
             .unwrap()
