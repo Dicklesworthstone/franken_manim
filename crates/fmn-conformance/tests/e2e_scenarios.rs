@@ -12301,7 +12301,7 @@ fn obj_scale_invariance_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     ctx.event(
         LogEvent::new("e2e.obj.scale_invariance")
             .field("frames", witness.frames)
-            .field("scale_cases", 6_u64)
+            .field("scale_cases", 8_u64)
             .field("import_routes", 2_u64)
             .field("thread_counts", 2_u64)
             .field("explicit_normals_match", "true"),
@@ -19626,12 +19626,12 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
         Invocation::new(obj_scale_invariance_run),
-        vec![Assertion::ExitCode(0), counter_eq("obj_scale_frames", 78)],
+        vec![Assertion::ExitCode(0), counter_eq("obj_scale_frames", 102)],
         vec![LogExpect::span_present(
             "e2e.obj.scale_invariance",
             vec![
-                FieldPred::u64_eq("frames", 78),
-                FieldPred::u64_eq("scale_cases", 6),
+                FieldPred::u64_eq("frames", 102),
+                FieldPred::u64_eq("scale_cases", 8),
                 FieldPred::u64_eq("import_routes", 2),
                 FieldPred::u64_eq("thread_counts", 2),
                 FieldPred::str_eq("explicit_normals_match", "true"),

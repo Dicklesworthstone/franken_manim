@@ -210,6 +210,86 @@ fn extreme_source_units_share_native_and_material_geometry() {
 }
 
 #[test]
+fn unrepresentable_midpoints_share_native_and_material_geometry() {
+    let materials = BTreeMap::from([("A".into(), material())]);
+    for (low, side) in [
+        ([1e16; 3], 2.0),
+        ([-1e16; 3], 2.0),
+        ([1e16, -1e16, 1e16], 2.0),
+        ([0.0; 3], f64::from_bits(1)),
+    ] {
+        let [x0, y0, z0] = low;
+        let [x1, y1, z1] = low.map(|value| value + side);
+        let source = format!(
+            "v {x0:e} {y0:e} {z0:e}\nv {x1:e} {y0:e} {z1:e}\nv {x0:e} {y1:e} {z0:e}\nusemtl A\nf 1 2 3\n"
+        );
+        let document = ObjDocument::parse(source.as_bytes()).unwrap();
+        for height in [3.0, 7.5, 1e-17] {
+            let imported = document
+                .to_mobject(height, &materials, &BTreeMap::new())
+                .expect("a rounded source midpoint must not change model placement");
+            let native: Mobject = fmn_library::ThreeDModel::from_obj(source.as_bytes())
+                .unwrap()
+                .with_height(height)
+                .into();
+            let reference: Mobject =
+                fmn_library::ThreeDModel::from_obj(b"v 0 0 0\nv 2 0 2\nv 0 2 0\nf 1 2 3\n")
+                    .unwrap()
+                    .with_height(height)
+                    .into();
+            assert_eq!(imported.submobjects.len(), 1);
+            for field in ["point", "d_normal_point"] {
+                let expected = reference.buffer.read_column(field);
+                assert_eq!(
+                    native.buffer.read_column(field),
+                    expected,
+                    "{low:?}, side {side:e}, height {height:e}, {field}"
+                );
+                assert_eq!(
+                    imported.submobjects[0].buffer.read_column(field),
+                    expected,
+                    "{low:?}, side {side:e}, height {height:e}, {field}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn translated_heightless_models_keep_their_center_and_unit_scale() {
+    let materials = BTreeMap::from([("A".into(), material())]);
+    for low in [1e16, -1e16] {
+        let high = low + 2.0;
+        let source = format!(
+            "v {low:e} {low:e} {low:e}\nv {high:e} {low:e} {low:e}\nv {low:e} {low:e} {high:e}\nusemtl A\nf 1 2 3\n"
+        );
+        let document = ObjDocument::parse(source.as_bytes()).unwrap();
+        for height in [3.0, 7.5] {
+            let imported = document
+                .to_mobject(height, &materials, &BTreeMap::new())
+                .unwrap();
+            let native: Mobject = fmn_library::ThreeDModel::from_obj(source.as_bytes())
+                .unwrap()
+                .with_height(height)
+                .into();
+            assert_eq!(imported.submobjects.len(), 1);
+            for buffer in [&native.buffer, &imported.submobjects[0].buffer] {
+                assert_eq!(
+                    buffer.read_column("point").unwrap(),
+                    vec![-1.0, 0.0, -1.0, 1.0, 0.0, -1.0, -1.0, 0.0, 1.0],
+                    "offset {low:e}, height {height:e}"
+                );
+                assert_eq!(
+                    buffer.read_column("d_normal_point").unwrap(),
+                    vec![-1.0, -1.0, -1.0, 1.0, -1.0, -1.0, -1.0, -1.0, 1.0],
+                    "offset {low:e}, height {height:e}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn native_mtl_rgb_opacity_map_precedence_and_spaced_paths() {
     let materials = parse_mtl(b"# appearance\nnewmtl wood\nKd .2 .4 .6\nd .8\nTr .25\nmap_Ka fallback.png\nmap_Kd textures/wood grain.png\nmap_Ka ignored.png\nnewmtl plain\nKd 1 0 0\n", &ObjAssetLimits::default()).unwrap();
     assert_eq!(

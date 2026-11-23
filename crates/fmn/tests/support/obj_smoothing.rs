@@ -190,6 +190,11 @@ pub fn verify_scale_invariance() -> Result<Witness, String> {
         ("subnormal", f64::from_bits(1_u64 << 34), [0.0; 3]),
         ("tiny", f64::from_bits(423_u64 << 52), [0.0; 3]),
         ("ordinary", 1.0, [0.0; 3]),
+        // The vertices remain exact, but the z midpoint lies halfway between
+        // representable numbers at either translation. Normalize in local
+        // coordinates so that source placement cannot shift the visible mesh.
+        ("rounded-translated-midpoint", 2.0, [5.0e15; 3]),
+        ("negative-rounded-translated-midpoint", 2.0, [-5.0e15; 3]),
         ("huge", f64::from_bits(1623_u64 << 52), [0.0; 3]),
         (
             "overflowing-extent",

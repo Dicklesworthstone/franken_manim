@@ -831,13 +831,18 @@ fn normalized(v: Vec3) -> Vec3 {
 // -------------------------------------------------------------- ThreeDModel
 
 /// The shared geometry placement for plain and material-bearing OBJ models.
-/// An affine factor preserves the established arithmetic whenever representable;
-/// otherwise ratios apply the same center/height transform without constructing
-/// an overflowing extent or scale. Validation of requested heights and of the
-/// final f32 record values remains with each front door.
+/// Exact affine centers preserve the established arithmetic. Compensated
+/// centers and bounded ratios avoid overflowing an extent or scale and retain
+/// midpoint residuals. Validation of requested heights and final f32 record
+/// values remains with each front door.
 pub(crate) enum ObjPlacement {
     Affine {
         center: Vec3,
+        scale: f64,
+    },
+    Centered {
+        center: Vec3,
+        twice_error: Vec3,
         scale: f64,
     },
     Ratio {
@@ -864,22 +869,23 @@ impl ObjPlacement {
                 max[axis] = max[axis].max(point[axis]);
             }
         }
-        let center = std::array::from_fn(|axis| {
-            let sum = min[axis] + max[axis];
-            if sum.is_finite() {
-                sum * 0.5
-            } else {
-                min[axis] * 0.5 + max[axis] * 0.5
-            }
-        });
+        let midpoints: [(f64, f64); 3] =
+            std::array::from_fn(|axis| Self::midpoint(min[axis], max[axis]));
+        let center = midpoints.map(|(value, _)| value);
+        let twice_error = midpoints.map(|(_, error)| error);
         let extent = max[1] - min[1];
-        if extent == 0.0 {
-            // A heightless source has always been centered without rescaling.
-            return Self::Affine { center, scale: 1.0 };
-        }
-        let scale = height / extent;
+        // A heightless source has always been centered without rescaling.
+        let scale = if extent == 0.0 { 1.0 } else { height / extent };
         if extent.is_finite() && scale.is_finite() && (scale != 0.0 || height == 0.0) {
-            return Self::Affine { center, scale };
+            return if twice_error == [0.0; 3] {
+                Self::Affine { center, scale }
+            } else {
+                Self::Centered {
+                    center,
+                    twice_error,
+                    scale,
+                }
+            };
         }
         let divisor = if extent.is_finite() {
             extent
@@ -893,6 +899,29 @@ impl ObjPlacement {
             extent: Self::difference(max[1], min[1], divisor),
             height,
         }
+    }
+
+    /// Return the rounded midpoint and twice its residual. Keeping twice the
+    /// residual preserves a half-subnormal until the requested scale is applied.
+    fn midpoint(low: f64, high: f64) -> (f64, f64) {
+        let sum = low + high;
+        let (left, right, sum, half) = if sum.is_finite() {
+            (low, high, sum, true)
+        } else {
+            let left = low * 0.5;
+            let right = high * 0.5;
+            (left, right, left + right, false)
+        };
+        // TwoSum retains the part of the endpoint sum that rounding discarded.
+        let virtual_right = sum - left;
+        let residual = (left - (sum - virtual_right)) + (right - virtual_right);
+        let center = if half { sum * 0.5 } else { sum };
+        let twice_error = if half {
+            residual + (sum - (center + center))
+        } else {
+            residual + residual
+        };
+        (center, twice_error)
     }
 
     fn difference(value: f64, origin: f64, divisor: f64) -> f64 {
@@ -909,6 +938,21 @@ impl ObjPlacement {
             Self::Affine { center, scale } => {
                 std::array::from_fn(|axis| (vertex[axis] - center[axis]) * scale)
             }
+            Self::Centered {
+                center,
+                twice_error,
+                scale,
+            } => std::array::from_fn(|axis| {
+                let offset = vertex[axis] - center[axis];
+                let half_error = twice_error[axis] * 0.5;
+                if half_error + half_error == twice_error[axis] {
+                    (offset - half_error) * scale
+                } else {
+                    // Halving a subnormal residual may lose geometry that a
+                    // usable scale can recover. Scale before halving it here.
+                    offset * scale - (twice_error[axis] * scale) * 0.5
+                }
+            }),
             Self::Ratio {
                 min,
                 max,
@@ -1402,6 +1446,93 @@ f 2//2 4//4 3//3
                     .expect("reference field"),
                 "{field}"
             );
+        }
+    }
+
+    #[test]
+    fn model_normalization_centers_unrepresentable_midpoints() {
+        for (low, side) in [
+            ([1e16; 3], 2.0),
+            ([-1e16; 3], 2.0),
+            ([1e16, -1e16, 1e16], 2.0),
+            ([0.0; 3], f64::from_bits(1)),
+        ] {
+            let [x0, y0, z0] = low;
+            let [x1, y1, z1] = low.map(|value| value + side);
+            let source = format!(
+                "v {x0:e} {y0:e} {z0:e}\nv {x1:e} {y0:e} {z1:e}\nv {x0:e} {y1:e} {z0:e}\nf 1 2 3\n"
+            );
+            for height in [DEFAULT_MODEL_HEIGHT, 7.5, 1e-17] {
+                let build = |source: &[u8]| {
+                    let model = ThreeDModel::from_obj(source).expect("finite source geometry");
+                    Mobject::from(if height == DEFAULT_MODEL_HEIGHT {
+                        model
+                    } else {
+                        model.with_height(height)
+                    })
+                };
+                let model = build(source.as_bytes());
+                #[allow(clippy::cast_possible_truncation)]
+                let half = (height * 0.5) as f32;
+                assert_eq!(
+                    model.buffer.read_column("point").unwrap(),
+                    vec![-half, -half, -half, half, -half, half, -half, half, -half],
+                    "{low:?}, side {side:e}, height {height:e}"
+                );
+                let reference = build(b"v 0 0 0\nv 2 0 2\nv 0 2 0\nf 1 2 3\n");
+                assert_eq!(
+                    model.buffer.read_column("d_normal_point"),
+                    reference.buffer.read_column("d_normal_point"),
+                    "{low:?}, side {side:e}, height {height:e}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn model_placement_preserves_wide_axes_at_subnormal_heights() {
+        let tiny = f64::from_bits(1);
+        let vertices = [[1e16, 0.0, 0.0], [1e16 + 2.0, tiny, 0.0]];
+        let placement = ObjPlacement::new(&vertices, tiny);
+        for (vertex, expected_x) in vertices.into_iter().zip([-1.0, 1.0]) {
+            let point = placement.place(vertex);
+            assert!(point.into_iter().all(f64::is_finite));
+            assert_eq!(point[0], expected_x);
+        }
+        // The exact center is 5e15 + 0.5. Normalizing the whole X range
+        // before subtracting its midpoint would erase this interior offset.
+        let interior = [[1.0, 0.0, 0.0], [1e16, tiny, 0.0], [5e15, 0.0, 0.0]];
+        let placement = ObjPlacement::new(&interior, tiny);
+        assert_eq!(placement.place(interior[2])[0], -0.5);
+        let zero = ObjPlacement::new(&vertices, 0.0);
+        for vertex in vertices {
+            assert_eq!(zero.place(vertex), [0.0; 3]);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn model_placement_corrects_midpoints_without_overflowing_source_arithmetic() {
+        let high = 2.0_f64.powi(970);
+        let vertices = [[-f64::MAX, 0.0, 0.0], [high, 1e-20, 0.0]];
+        assert!((high - vertices[0][0]).is_infinite());
+        let placement = ObjPlacement::new(&vertices, 1e-300);
+        let half_width = (f64::MAX * 0.5 + high * 0.5) * (1e-300 / 1e-20);
+        for (vertex, sign) in vertices.into_iter().zip([-1.0, 1.0]) {
+            let point = placement.place(vertex);
+            assert!(point.into_iter().all(f64::is_finite));
+            assert_eq!(point[0] as f32, (sign * half_width) as f32);
+        }
+        // Their sum overflows and their exact midpoint lies halfway between
+        // adjacent finite floats, so the sum-of-halves residual matters too.
+        let low = f64::from_bits(f64::MAX.to_bits() - 1);
+        let vertices = [[low, 0.0, 0.0], [f64::MAX, 1e300, 0.0]];
+        let placement = ObjPlacement::new(&vertices, 3.0);
+        let half_width = (f64::MAX - low) * 0.5 * (3.0 / 1e300);
+        for (vertex, sign) in vertices.into_iter().zip([-1.0, 1.0]) {
+            let point = placement.place(vertex);
+            assert!(point.into_iter().all(f64::is_finite));
+            assert_eq!(point[0] as f32, (sign * half_width) as f32);
         }
     }
 
