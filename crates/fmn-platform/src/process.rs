@@ -2338,10 +2338,45 @@ pub struct StdProcessRunner;
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 fn kill_process_tree(child: &mut asupersync::process::ExactImageChild) -> std::io::Result<()> {
-    match child.kill_process_tree() {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error),
+    kill_tree_retrying_exit_race(
+        cfg!(target_os = "macos"),
+        || child.kill_process_tree(),
+        std::thread::sleep,
+    )
+}
+
+/// Darwin's `killpg` answers `EPERM` when no member of the group can be
+/// signalled, which is also what a group whose leader is exiting looks like.
+/// The exact-image primitive confirms that case by reaping the leader with
+/// `WNOHANG`, but there is a window in which the leader can no longer be
+/// signalled and cannot yet be reaped, so one confirmation races and a
+/// finished child is reported as a plumbing failure (about one spawn in 40
+/// under load). On macOS only, retry that typed outcome: seven backoffs
+/// (1..64 ms, 127 ms total), after which a leader that is still not reapable
+/// keeps `EPERM` a real error. Linux signals zombies, so it never retries.
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+fn kill_tree_retrying_exit_race(
+    retry_permission_denied: bool,
+    mut kill: impl FnMut() -> std::io::Result<()>,
+    mut sleep: impl FnMut(Duration),
+) -> std::io::Result<()> {
+    const MAX_RETRIES: u32 = 7;
+
+    let mut retries = 0;
+    loop {
+        match kill() {
+            Ok(()) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error)
+                if retry_permission_denied
+                    && retries < MAX_RETRIES
+                    && error.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                sleep(Duration::from_millis(1 << retries));
+                retries += 1;
+            }
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -2843,6 +2878,102 @@ impl RunningProcess for ScriptedProcess {
 impl Drop for ScriptedProcess {
     fn drop(&mut self) {
         self.record();
+    }
+}
+
+// The policy is platform-independent control flow, so it is exercised on
+// every host with a fake kill that replays Darwin's observable sequence.
+#[cfg(all(test, not(target_arch = "wasm32"), feature = "exact-process"))]
+mod kill_tree_retry_tests {
+    use super::*;
+
+    fn permission_denied() -> io::Error {
+        io::Error::from(io::ErrorKind::PermissionDenied)
+    }
+
+    fn group_gone() -> io::Error {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "exact-image process group no longer exists",
+        )
+    }
+
+    #[test]
+    fn darwin_exit_race_is_retried_until_the_leader_is_reapable() {
+        // Darwin: the exiting leader refuses the signal twice before
+        // WNOHANG can reap it; the primitive then reports the group gone.
+        let mut replies = vec![
+            Err(group_gone()),
+            Err(permission_denied()),
+            Err(permission_denied()),
+        ];
+        let mut sleeps = Vec::new();
+        kill_tree_retrying_exit_race(
+            true,
+            || replies.pop().expect("no more kill attempts were expected"),
+            |pause| sleeps.push(pause),
+        )
+        .expect("a child that finished during the kill is not a plumbing failure");
+        assert!(
+            replies.is_empty(),
+            "the kill must be retried until the group is gone"
+        );
+        assert_eq!(sleeps, [Duration::from_millis(1), Duration::from_millis(2)]);
+    }
+
+    #[test]
+    fn darwin_exit_race_retry_is_bounded_and_keeps_the_os_error() {
+        let mut attempts = 0;
+        let mut slept = Duration::ZERO;
+        let error = kill_tree_retrying_exit_race(
+            true,
+            || {
+                attempts += 1;
+                Err(permission_denied())
+            },
+            |pause| slept += pause,
+        )
+        .expect_err("a leader that never becomes reapable keeps EPERM an error");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts, 8, "persistent EPERM must not be retried forever");
+        assert_eq!(slept, Duration::from_millis(127));
+    }
+
+    #[test]
+    fn permission_denied_is_never_retried_off_darwin() {
+        let mut attempts = 0;
+        let error = kill_tree_retrying_exit_race(
+            false,
+            || {
+                attempts += 1;
+                Err(permission_denied())
+            },
+            |_| panic!("no backoff off Darwin"),
+        )
+        .expect_err("EPERM stays an immediate error where zombies are signalable");
+        assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn other_kill_errors_are_never_retried_and_a_vanished_group_is_success() {
+        let mut attempts = 0;
+        let error = kill_tree_retrying_exit_race(
+            true,
+            || {
+                attempts += 1;
+                Err(io::Error::from(io::ErrorKind::InvalidInput))
+            },
+            |_| panic!("only EPERM is retried"),
+        )
+        .expect_err("an unrelated kill error is reported as is");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(attempts, 1);
+
+        kill_tree_retrying_exit_race(true, || Err(group_gone()), |_| panic!("no retry"))
+            .expect("a group that is already gone needs no kill");
+        kill_tree_retrying_exit_race(true, || Ok(()), |_| panic!("no retry"))
+            .expect("a delivered signal is success");
     }
 }
 
