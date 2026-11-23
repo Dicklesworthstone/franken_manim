@@ -22,6 +22,12 @@ _SOURCE = Path(__file__).with_name("_embedded_bootstrap.py")
 _MAX_SOURCE_BYTES = 4 * 1024 * 1024
 _MAX_BYTECODE_BYTES = 32 * 1024 * 1024
 _FILENAME = "<string>"
+_CODE_FIELDS = (
+    "co_argcount", "co_posonlyargcount", "co_kwonlyargcount", "co_nlocals",
+    "co_stacksize", "co_flags", "co_code", "co_consts", "co_names",
+    "co_varnames", "co_filename", "co_name", "co_qualname", "co_firstlineno",
+    "co_linetable", "co_exceptiontable", "co_freevars", "co_cellvars",
+)
 
 
 def _read_bounded(path, limit):
@@ -85,6 +91,44 @@ def _canonical_filename(code):
     )
 
 
+def _code_identity_value(value):
+    """Encode executable structure without marshal's object-reference state.
+
+    A raw code object cannot always use marshal v2: CPython 3.14 adds slice
+    constants, which require v5. Newer marshal formats also encode interning
+    and reference sharing, so merely selecting the host's latest format would
+    make fresh compilation and a cache load hash differently. Normalize every
+    supported constant into tagged v2-compatible values instead. Tags retain
+    type distinctions, and sorting frozensets removes hash-seed dependence.
+    """
+    kind = type(value)
+    if kind is CodeType:
+        return ("code", tuple(_code_identity_value(getattr(value, field))
+                              for field in _CODE_FIELDS))
+    if kind is tuple:
+        return ("tuple", tuple(_code_identity_value(item) for item in value))
+    if kind is frozenset:
+        return ("frozenset", tuple(sorted(marshal.dumps(_code_identity_value(item), 2)
+                                         for item in value)))
+    if kind is slice:
+        return ("slice", _code_identity_value(value.start),
+                _code_identity_value(value.stop), _code_identity_value(value.step))
+    if value is None:
+        return ("none",)
+    if value is Ellipsis:
+        return ("ellipsis",)
+    if kind in (bool, int, float, complex, str, bytes):
+        # Marshal v2 preserves the exact floating-point bits, including signed
+        # zero, without the reference/interning flags of newer formats.
+        return (kind.__name__, value)
+    raise TypeError("unsupported bootstrap code constant type: " + kind.__name__)
+
+
+def _code_digest(code):
+    payload = marshal.dumps(_code_identity_value(code), 2)
+    return hashlib.sha256(b"fmn-bootstrap-code-v1\x00" + payload).hexdigest()
+
+
 def load_bootstrap(source):
     """Return the exact embedded skin's code and its executed-runtime identity.
 
@@ -117,11 +161,9 @@ def load_bootstrap(source):
     code = _canonical_filename(code)
     identity = {
         "source_sha256": hashlib.sha256(source).hexdigest(),
-        # Marshal v2 deliberately avoids reference/interning flags which can
-        # differ between fresh compilation and a cache load of the same code.
-        # This digest binds actual executable code, not the cache filename or
-        # cache warmness, into the certified runtime's ABI inventory.
-        "code_sha256": hashlib.sha256(marshal.dumps(code, 2)).hexdigest(),
+        # Bind actual executable code, not the cache filename or cache
+        # warmness, into the certified runtime's ABI inventory.
+        "code_sha256": _code_digest(code),
         "cache_tag": sys.implementation.cache_tag,
         "magic": importlib.util.MAGIC_NUMBER.hex(),
         "optimization": sys.flags.optimize,

@@ -27,6 +27,8 @@ ROOT = _FMN_MODULE
 class Example:
     def value(self, x: MissingType = 3):
         return (x + 4, ROOT, __name__)
+    def selection(self, x):
+        return x[1:5:2]
 MEMBERS = frozenset({"alpha", "beta", "gamma"})
 '''
 
@@ -60,7 +62,40 @@ class BootstrapLoaderTests(unittest.TestCase):
             exec(code, vars(native), vars(native))  # ubs:ignore[py.security.eval-exec-usage,py.eval-exec] -- fixed trusted source fixture, exercising native-global execution.
             self.assertEqual(native.Example().value()[::2], (7, "manimlib"))
             self.assertIs(native.Example().value()[1], native)
+            self.assertEqual(native.Example().selection(range(8)), range(1, 5, 2))
             self.assertEqual(native.Example.value.__code__.co_filename, "<string>")
+
+    def test_slice_constants_do_not_require_a_new_marshal_format(self):
+        # CPython 3.14 folds constant slices into co_consts; older hosts can
+        # exercise that exact code-object shape without pretending to run 3.14.
+        child = compile("answer = 1", "<string>", "exec")
+        child = child.replace(co_consts=child.co_consts + (slice(1, 5, 2),))
+        code = compile("pass", "<string>", "exec")
+        code = code.replace(co_consts=(None, child, (slice(None, 3),)))
+        with self.assertRaisesRegex(ValueError, "unmarshallable"):
+            marshal.dumps(code, 2)
+        with patch.object(loader, "_SOURCE", self.root / "missing.py"), \
+                patch.object(loader, "compile", return_value=code, create=True):
+            loaded, identity = self.load()
+        self.assertEqual(loaded, code)
+        self.assertEqual(identity["code_sha256"], loader._code_digest(code))
+
+    def test_code_identity_preserves_constant_types_and_float_bits(self):
+        code = compile("pass", "<string>", "exec")
+        constants = (None, Ellipsis, False, 0, 0.0, -0.0, 0j, b"x", "x",
+                     (1, 2), frozenset((1, 2)), slice(1, 2), slice(1, 2, 1))
+        identities = {loader._code_digest(code.replace(co_consts=(constant,)))
+                      for constant in constants}
+        self.assertEqual(len(identities), len(constants))
+        self.assertEqual(
+            loader._code_digest(code.replace(co_consts=(frozenset(("a", "b", "c")),))),
+            loader._code_digest(code.replace(co_consts=(frozenset(("c", "b", "a")),))),
+        )
+
+    def test_code_identity_rejects_unknown_constant_types(self):
+        code = compile("pass", "<string>", "exec").replace(co_consts=({},))
+        with self.assertRaisesRegex(TypeError, "unsupported bootstrap code constant type: dict"):
+            loader._code_digest(code)
 
     def test_full_production_bootstrap_matches_embedded_compilation(self):
         source = _PATH.parent.parent.joinpath("manimlib_bootstrap.py").read_bytes()
@@ -167,6 +202,8 @@ loader = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(loader)
 loader._SOURCE = pathlib.Path(sys.argv[2])
 source = loader._SOURCE.read_bytes()
+if sys.argv[3] == "embedded":
+    loader._SOURCE = loader._SOURCE.with_name("missing_bootstrap.py")
 if sys.argv[3] == "warm":
     def fail(*args, **kwargs):
         raise AssertionError("fresh process recompiled a warm bootstrap")
@@ -176,7 +213,7 @@ identity.pop("source_path")
 print(json.dumps(identity, sort_keys=True))
 '''
         observed = []
-        for mode, seed in (("cold", "1"), ("warm", "2")):
+        for mode, seed in (("cold", "1"), ("warm", "2"), ("embedded", "3")):
             env = dict(os.environ, PYTHONHASHSEED=seed)
             env.pop("PYTHONDONTWRITEBYTECODE", None)
             result = subprocess.run(
@@ -185,6 +222,7 @@ print(json.dumps(identity, sort_keys=True))
             )
             observed.append(json.loads(result.stdout))
         self.assertEqual(observed[0], observed[1])
+        self.assertEqual(observed[0], observed[2])
         other = self.root / "another_install.py"
         other.write_bytes(source)
         with patch.object(loader, "_SOURCE", other):
