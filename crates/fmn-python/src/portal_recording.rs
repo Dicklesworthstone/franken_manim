@@ -9,6 +9,10 @@ use super::*;
 pub(crate) fn install(module: &Bound<'_, PyModule>) -> PyResult<()> {
     portal_studio::bundle::install(module)?;
     portal_video::install_concatenation(module)?;
+    module.setattr(
+        "_portal_presenter_hold",
+        wrap_pyfunction!(portal_playback::_portal_presenter_hold, module)?,
+    )?;
     // This runs after the schema bootstrap. Do not recreate PyO3's __all__:
     // these are private host boundaries, not a new wildcard import surface.
     module.setattr(

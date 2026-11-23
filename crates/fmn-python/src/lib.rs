@@ -44,6 +44,8 @@ pub use portal_ode::run_portal_gauntlet_ode_solution;
 #[cfg(feature = "gauntlet")]
 pub use portal_rates::run_portal_gauntlet_exact_rates;
 mod portal_playback;
+#[cfg(feature = "gauntlet")]
+pub use portal_playback::run_portal_gauntlet_presenter;
 mod portal_readback;
 mod portal_recording;
 mod portal_streamlines;
@@ -10545,6 +10547,11 @@ impl PyScene {
         ignore_presenter_mode: bool,
         duration_frames: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<()> {
+        if portal_playback::presenter_active(slf)? {
+            return Err(PyRuntimeError::new_err(
+                "cannot start a wait during this Scene's presenter hold",
+            ));
+        }
         let duration_frames = duration_frames.map(frame_count_from_py).transpose()?;
         if duration.is_some() && duration_frames.is_some() {
             return Err(PyValueError::new_err(
@@ -10553,6 +10560,21 @@ impl PyScene {
         }
         let engine = Rc::clone(&slf.borrow().engine);
         portal_playback::synchronize(slf)?;
+        let skipping = engine.borrow().is_skipping();
+        if duration_frames.is_none() && !ignore_presenter_mode && !skipping {
+            let presenter_mode = match slf.getattr("presenter_mode") {
+                Ok(value) => value.is_truthy()?,
+                Err(error)
+                    if error.is_instance_of::<pyo3::exceptions::PyAttributeError>(slf.py()) =>
+                {
+                    false
+                }
+                Err(error) => return Err(error),
+            };
+            if presenter_mode {
+                return portal_playback::_portal_presenter_hold(slf, true);
+            }
+        }
         let needs_host_updates =
             portal_playback::requires_public_scene_update(slf)? || has_python_updaters(slf, &[])?;
         let readback_needs_release = prepare_portal_readback(slf)?;

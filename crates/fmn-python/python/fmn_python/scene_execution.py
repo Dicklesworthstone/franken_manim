@@ -247,7 +247,8 @@ def install_scene_execution(native: Any) -> None:
         # Acquire a clip before entering the execution boundary, and finish it
         # only after all animation locks have been released. The same native
         # recording generation handles frames; this is not another scheduler.
-        if vars(scene).get(_OWNER_KEY) is not None:
+        if (vars(scene).get(_OWNER_KEY) is not None
+                or vars(scene).get("_fmn_presenter_hold_active")):
             raise RuntimeError("cannot start another play/wait while this Scene is executing one")
         subdivision = vars(scene).get("_fmn_subdivision_session")
         capture = (nullcontext(None) if subdivision is None else
@@ -257,7 +258,29 @@ def install_scene_execution(native: Any) -> None:
             try:
                 args, kwargs, hooks = prepare(scene, args, kwargs)
                 if hooks:
-                    scene.pre_play()
+                    # Exact-frame and explicitly finite waits bypass the
+                    # initial presenter pause as well as the wait itself.
+                    # Keep the public pre_play hook and its original receiver.
+                    bypass = (operation is original_wait_frames
+                              or (operation is original_wait
+                                  and kwargs.get("ignore_presenter_mode", False)))
+                    previous = vars(scene).get("_fmn_bypass_initial_hold", _MISSING)
+                    previous_initial = vars(scene).get("_fmn_presenter_initial_allowed", _MISSING)
+                    try:
+                        vars(scene)["_fmn_presenter_initial_allowed"] = True
+                        if bypass:
+                            vars(scene)["_fmn_bypass_initial_hold"] = True
+                        scene.pre_play()
+                    finally:
+                        if previous_initial is _MISSING:
+                            vars(scene).pop("_fmn_presenter_initial_allowed", None)
+                        else:
+                            vars(scene)["_fmn_presenter_initial_allowed"] = previous_initial
+                        if bypass:
+                            if previous is _MISSING:
+                                vars(scene).pop("_fmn_bypass_initial_hold", None)
+                            else:
+                                vars(scene)["_fmn_bypass_initial_hold"] = previous
                 if segment is not None:
                     # Range selection belongs to pre_play. In particular, do
                     # not publish an endpoint still for skipped preroll or an

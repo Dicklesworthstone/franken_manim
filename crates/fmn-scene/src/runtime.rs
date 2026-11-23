@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 mod idle;
 mod parallel;
 pub use fmn_anim::OpenWaitCheckpoint;
-pub use idle::IdleFrame;
+pub use idle::{IdleFrame, SteppedHold};
 
 use fmn_anim::pure_frame::{PureSegment, PureWaitAdvance};
 use fmn_anim::{

@@ -349,9 +349,231 @@ pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     Ok(())
 }
 
+
+const PRESENTER_ACTIVE: &str = "_fmn_presenter_hold_active";
+
+pub(super) fn presenter_active(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
+    Ok(scene
+        .getattr("__dict__")?
+        .cast::<PyDict>()?
+        .get_item(PRESENTER_ACTIVE)?
+        .is_some())
+}
+
+fn presenter_decision(scene: &Bound<'_, PyScene>) -> PyResult<fmn_scene::HoldDecision> {
+    scene.py().check_signals()?;
+    if scene.call_method0("is_window_closing")?.is_truthy()? {
+        return Ok(fmn_scene::HoldDecision::EndScene);
+    }
+    Ok(if requested_skip(scene)? || !scene.getattr("hold_on_wait")?.is_truthy()? {
+        fmn_scene::HoldDecision::Release
+    } else {
+        fmn_scene::HoldDecision::Continue
+    })
+}
+
+/// Drive the existing presenter/idle capture seam with host callbacks released
+/// from every native borrow. The host owns event pumping and optional pacing;
+/// Proscenium alone owns frame sampling, updaters, capture and play counts.
+#[pyfunction]
+#[pyo3(signature = (scene, wait = false))]
+pub(crate) fn _portal_presenter_hold(scene: &Bound<'_, PyScene>, wait: bool) -> PyResult<()> {
+    if presenter_active(scene)? {
+        return Err(PyRuntimeError::new_err(
+            "cannot reenter this Scene's presenter hold",
+        ));
+    }
+    let namespace = scene.getattr("__dict__")?;
+    let namespace = namespace.cast::<PyDict>()?;
+    let inside_frame = scene.borrow().frame_step_context.is_some();
+    let executing = namespace
+        .get_item("_fmn_scene_execution")?
+        .is_some_and(|owner| !owner.is_none());
+    let initial_allowed = namespace
+        .get_item("_fmn_presenter_initial_allowed")?
+        .map(|value| value.extract::<bool>())
+        .transpose()?
+        .unwrap_or(false);
+    if inside_frame || (!wait && executing && !initial_allowed) {
+        return Err(PyRuntimeError::new_err(
+            "cannot start a presenter hold during an active play/wait",
+        ));
+    }
+    // Hold identity as well as references: an authored poll must not redirect
+    // a released frame into a replacement scene/output generation.
+    let engine = Rc::clone(&scene.borrow().engine);
+    let generation = Arc::clone(&scene.borrow().render_generation);
+    let check_owner = || -> PyResult<()> {
+        if !Rc::ptr_eq(&engine, &scene.borrow().engine)
+            || !Arc::ptr_eq(&generation, &scene.borrow().render_generation)
+        {
+            return Err(PyRuntimeError::new_err(
+                "presenter scene/output ownership changed during a host callback",
+            ));
+        }
+        Ok(())
+    };
+    namespace.set_item(PRESENTER_ACTIVE, true)?;
+    let result = (|| {
+        synchronize(scene)?;
+        check_owner()?;
+        if !wait && engine.borrow().is_skipping() {
+            return Ok(());
+        }
+        let declaration = namespace.get_item("_fmn_presenter_controller")?.ok_or_else(|| {
+            CapabilityError::new_err(
+                "presenter holds require Scene.set_presenter_controller(poll, max_frames=...); \
+                 use ignore_presenter_mode=True or wait_frames for a finite headless wait",
+            )
+        })?;
+        let (controller, max_frames): (Py<PyAny>, u64) = declaration.extract()?;
+        if !controller.bind(scene.py()).is_callable() || !(1..=1_048_576).contains(&max_frames) {
+            return Err(PyValueError::new_err(
+                "presenter controller must be callable with a frame budget in 1..=1048576",
+            ));
+        }
+        if let Some(owner) = namespace.get_item("_fmn_owned_render_session")?
+            && owner.getattr("reproducible")?.is_truthy()?
+        {
+            return Err(CapabilityError::new_err(
+                "host-controlled presenter input is not a certified render closure; \
+                 use a standard live session or finite authored waits",
+            ));
+        }
+        prepare_portal_readback(scene)?;
+        let initial_completed = if wait {
+            run_scene_update_phase(scene, 0.0)?.1
+        } else {
+            false
+        };
+        check_owner()?;
+        let mut sink = PortalSceneSink {
+            render: Arc::clone(&scene.borrow().render),
+            readback: Rc::clone(&scene.borrow().readback),
+            readback_every_frame: true,
+            ..PortalSceneSink::default()
+        };
+        let kind = if wait {
+            fmn_scene::HoldKind::Wait
+        } else {
+            fmn_scene::HoldKind::Initial
+        };
+        let mut hold = engine
+            .borrow_mut()
+            .begin_stepped_hold(kind, max_frames, initial_completed, &mut sink)
+            .map_err(scene_error)?;
+        let driven: PyResult<()> = (|| {
+            loop {
+                engine
+                    .borrow_mut()
+                    .prepare_stepped_hold_poll(&hold)
+                    .map_err(scene_error)?;
+                let mut decision = presenter_decision(scene)?;
+                check_owner()?;
+                if decision == fmn_scene::HoldDecision::Continue {
+                    crossing::record(CrossingClass::Other);
+                    let response = controller
+                        .bind(scene.py())
+                        .call1((scene, if wait { "wait" } else { "initial" }))?;
+                    if !response.is_none()
+                        && !response.is_instance_of::<pyo3::types::PyBool>()
+                    {
+                        return Err(PyTypeError::new_err(
+                            "presenter poll must return True, False, or None",
+                        ));
+                    }
+                    decision = presenter_decision(scene)?;
+                    check_owner()?;
+                    if decision == fmn_scene::HoldDecision::Continue
+                        && !response.is_none()
+                        && !response.is_truthy()?
+                    {
+                        decision = fmn_scene::HoldDecision::Release;
+                    }
+                }
+                match decision {
+                    fmn_scene::HoldDecision::Release => break,
+                    fmn_scene::HoldDecision::EndScene => {
+                        return Err(EndScene::new_err("presenter window closing"));
+                    }
+                    fmn_scene::HoldDecision::Continue => {}
+                }
+                let mut frame = engine
+                    .borrow_mut()
+                    .prepare_stepped_hold_frame(&mut hold, &mut sink)
+                    .map_err(scene_error)?;
+                let (python_ns, native_updater_ns, completed) =
+                    run_scene_capture_frame_update_phase(scene, frame.dt(), frame.time().fps())?;
+                check_owner()?;
+                if completed {
+                    frame.mark_scene_updaters_complete();
+                }
+                synchronize_portal_camera(scene)?;
+                check_owner()?;
+                let started = Instant::now();
+                engine
+                    .borrow_mut()
+                    .complete_stepped_hold_frame(&mut hold, frame, &mut sink)
+                    .map_err(scene_error)?;
+                crossing::record_phase(
+                    python_ns,
+                    portal_elapsed_ns(started).saturating_add(native_updater_ns),
+                );
+            }
+            synchronize(scene)?;
+            check_owner()?;
+            Ok(())
+        })();
+        if let Err(error) = driven {
+            engine.borrow_mut().abort_stepped_hold(hold, &mut sink);
+            return Err(error);
+        }
+        engine
+            .borrow_mut()
+            .finish_stepped_hold(hold, &mut sink)
+            .map_err(scene_error)
+    })();
+    // Cleanup cannot replace an authored exception or its traceback. Work
+    // already performed is not rolled back or repeated after a failed poll.
+    let released = namespace.del_item(PRESENTER_ACTIVE);
+    match result {
+        Ok(()) => {
+            released?;
+            scene.setattr("hold_on_wait", true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Host presenter waits share the ordinary native frame, readback and writer
+/// paths. Arbitrary host input is outside the certified render closure.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_presenter() -> Result<u64, String> {
+    crate::with_python_test_module("host presenter holds", |py, _module, globals| {
+        let code = CString::new(include_str!("../tests/native_presenter.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(code.as_c_str(), Some(globals), Some(globals))
+            .inspect_err(|error| error.print(py))
+            .map_err(|error| error.to_string())?;
+        globals
+            .get_item("run_native_presenter")
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "presenter acceptance entry point is absent".to_owned())?
+            .call0()
+            .inspect_err(|error| error.print(py))
+            .and_then(|value| value.extract::<u64>())
+            .map_err(|error| error.to_string())
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn host_presenter_holds_use_native_frames() {
+        assert_eq!(run_portal_gauntlet_presenter().unwrap(), 8);
+    }
 
     #[test]
     fn absolute_audio_positions_keep_pre_origin_overlap_and_exact_skipped_endpoints() {

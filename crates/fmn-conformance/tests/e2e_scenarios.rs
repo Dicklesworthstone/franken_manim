@@ -17744,6 +17744,24 @@ fn python_parallel_batch_checkpoint_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
     Ok(RunOutcome::ok().with_counter("parallel_batch_checks", total))
 }
 
+/// Host presenter input runs outside native borrows while every held frame
+/// uses the existing rational clock, updater traversal and capture pipeline.
+fn python_presenter_hold_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    ctx.record_asset(
+        "python/native-presenter.py",
+        include_bytes!("../../fmn-python/tests/native_presenter.py"),
+    );
+    let checks = manimlib::run_portal_gauntlet_presenter()
+        .map_err(|error| fail(format!("Python presenter hold: {error}")))?;
+    if checks != 8 {
+        return Err(fail(format!(
+            "presenter acceptance ran {checks} cases; expected 8"
+        )));
+    }
+    ctx.event(LogEvent::new("e2e.python.presenter_hold").field("checks", checks));
+    Ok(RunOutcome::ok().with_counter("presenter_hold_checks", checks))
+}
+
 /// fm-restore-green-ci-tqsr.23: actual process transport, no fake clip recovery.
 fn python_worker_receipt_shutdown_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     ctx.record_asset(
@@ -21260,6 +21278,20 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.python_presenter_hold.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::PythonInProcess,
+        Invocation::new(python_presenter_hold_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("presenter_hold_checks", 8),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.presenter_hold",
+            vec![FieldPred::u64_eq("checks", 8)],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_native_offload.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -23737,6 +23769,16 @@ fn cli_window_flag_scenario_passes() {
 }
 
 /// Portal admission must produce real native jobs and preserve serial output.
+#[test]
+fn python_presenter_hold_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.python_presenter_hold.v1")
+        .expect("Python presenter hold lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
 #[test]
 fn python_native_offload_scenario_passes() {
     let scenario = catalog()

@@ -14471,15 +14471,45 @@ class Scene(_SceneCore):
         if end is not None and self.num_plays >= end:
             raise _EndScene("end_at_animation_number reached")
 
+    def set_presenter_controller(self, poll, *, max_frames=108_000):
+        """Install an explicit host event pump for presenter pauses.
+
+        ``poll(scene, kind)`` runs before each frame, with ``kind`` equal to
+        ``"initial"`` or ``"wait"``. Return False to release, True or None to
+        continue. The usual space/right key handlers release ``hold_on_wait``;
+        window close and Ctrl-Q end the scene. A host may pump events and pace
+        frames here; it must return promptly and must not start another play
+        or wait. Geometry/camera edits and scene inspection remain available.
+
+        The native rational clock, updater order and output sink own every
+        frame. ``max_frames`` is a positive per-hold budget (at most 1048576),
+        so a controller which never releases fails instead of spinning forever.
+        Pass None to detach. Headless callers use wait_frames or
+        wait(ignore_presenter_mode=True); no input thread/window is created.
+        Host-controlled holds are standard-mode interactions, not certified
+        recordings of arbitrary host input.
+        """
+        if self.__dict__.get("_fmn_presenter_hold_active"):
+            raise RuntimeError("cannot replace a presenter controller during its hold")
+        if poll is None:
+            self.__dict__.pop("_fmn_presenter_controller", None)
+            return self
+        if not callable(poll):
+            raise TypeError("presenter controller must be callable or None")
+        count = _fmn_validate_frame_count(max_frames)
+        if not 1 <= count <= 1_048_576:
+            raise ValueError("presenter max_frames must be in 1..=1048576")
+        self.__dict__["_fmn_presenter_controller"] = (poll, count)
+        return self
+
     def hold_loop(self):
-        # Presenter hold waits on a host key (space/right). Without a window
-        # the loop cannot be released, so refuse instead of spinning.
-        if self.hold_on_wait:
-            raise _CapabilityError(
-                "Scene.hold_loop presenter wait requires a host window; "
-                "FrankenManim Studio owns interactive windows"
-            )
-        self.hold_on_wait = True
+        # Finite authored waits and skipped preroll must never require an
+        # interactive event source. Rearm the next actual presenter pause.
+        if (not self.hold_on_wait or self.skip_animations
+                or self.__dict__.get("_fmn_bypass_initial_hold", False)):
+            self.hold_on_wait = True
+            return
+        return _FMN_MODULE._portal_presenter_hold(self)
 
     def increment_time(self, dt):
         super().increment_time(float(dt))
