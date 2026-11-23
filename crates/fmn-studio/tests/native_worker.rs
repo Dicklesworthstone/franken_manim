@@ -1907,6 +1907,7 @@ enum TerminalPlayKind {
     Rotation,
     FadeOut,
     Replacement,
+    Method,
     VectorFade,
     PassingFlash,
     BorderFill,
@@ -2018,6 +2019,7 @@ fn terminal_play_program(
         kind,
         TerminalPlayKind::Write
             | TerminalPlayKind::ReverseWrite
+            | TerminalPlayKind::Method
             | TerminalPlayKind::IncreasingSubsets
             | TerminalPlayKind::OneByOne
             | TerminalPlayKind::Wiggle
@@ -2054,6 +2056,28 @@ fn terminal_play_program(
             Box::new(
                 fmn_anim::replacement_transform(root, target).with_path_arc(0.75, [0.0, 0.0, 1.0]),
             )
+        }
+        TerminalPlayKind::Method => {
+            // The target is built before the prefix rotates the source; begin
+            // must preserve that distinct target and capture the later start.
+            let builder = root
+                .animate()
+                .set_anim_args(fmn_mobject::AnimateArgs {
+                    path_arc: Some(0.75),
+                    lag_ratio: Some(0.2),
+                    ..fmn_mobject::AnimateArgs::default()
+                })
+                .unwrap()
+                .shift([1.5, 0.5, 0.0])
+                .unwrap()
+                .scale(0.6)
+                .unwrap()
+                .set_opacity(0.4)
+                .unwrap();
+            let mut animation = fmn_anim::prepare_animation(builder, scene.stage_mut()).unwrap();
+            assert!((animation.as_ref() as &dyn std::any::Any).is::<fmn_anim::MethodAnimation>());
+            animation.state_mut().config.final_alpha_value = 0.35;
+            animation
         }
         TerminalPlayKind::VectorFade => Box::new(fmn_anim::v_fade_out(root)),
         TerminalPlayKind::PassingFlash => Box::new(fmn_anim::show_passing_flash(root, 0.3)),
@@ -2163,6 +2187,7 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
         TerminalPlayKind::Rotation,
         TerminalPlayKind::FadeOut,
         TerminalPlayKind::Replacement,
+        TerminalPlayKind::Method,
         TerminalPlayKind::VectorFade,
         TerminalPlayKind::PassingFlash,
         TerminalPlayKind::BorderFill,
@@ -2191,6 +2216,7 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
                 let rendered = seek(&mut original, frame);
                 expected.push((frame, rendered, checkpoint_observation(&original)));
             }
+            let expected_final = commit(&mut original, 21);
             for threads in [1, 4] {
                 // Only newly emitted suffix frames fit this budget: replaying
                 // the six-frame prefix or saved play would fail.
@@ -2245,6 +2271,7 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
                         assert!(!stage.is_updating_suspended(root));
                         match kind {
                             TerminalPlayKind::Rotation
+                            | TerminalPlayKind::Method
                             | TerminalPlayKind::BorderFill
                             | TerminalPlayKind::Write
                             | TerminalPlayKind::ReverseWrite
@@ -2266,6 +2293,11 @@ fn terminal_native_play_checkpoints_preserve_every_frame_and_pending_epilogue() 
                         assert_eq!(scene.play_count(), 4);
                     }
                 }
+                // Canonical checkpoints also bind the scene RNG and cursor,
+                // beyond the visible pixels and full arena observations.
+                let actual_final = commit(&mut restored, 21);
+                assert_eq!(actual_final.state_hash, expected_final.state_hash);
+                assert_eq!(actual_final.checkpoint, expected_final.checkpoint);
             }
         }
     }
@@ -2472,11 +2504,25 @@ fn restored_active_play_can_be_checkpointed_again_without_changing_canonical_sta
 
 #[test]
 fn opaque_rates_and_delegating_lifecycle_wrappers_stay_cold() {
-    for (policy, frame) in [
-        (TerminalPlayPolicy::OpaqueRate, 10),
-        (TerminalPlayPolicy::DelegatingWrapper, 10),
+    for (kind, policy, frame) in [
+        (
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::OpaqueRate,
+            10,
+        ),
+        (
+            TerminalPlayKind::Rotation,
+            TerminalPlayPolicy::DelegatingWrapper,
+            10,
+        ),
+        (TerminalPlayKind::Method, TerminalPlayPolicy::OpaqueRate, 10),
+        (
+            TerminalPlayKind::Method,
+            TerminalPlayPolicy::DelegatingWrapper,
+            10,
+        ),
     ] {
-        let make = || terminal_play_worker(TerminalPlayKind::Rotation, policy, true, 1, 100);
+        let make = || terminal_play_worker(kind, policy, true, 1, 100);
         let mut original = make();
         let entry = commit(&mut original, frame);
         let expected = checkpoint_observation(&original);

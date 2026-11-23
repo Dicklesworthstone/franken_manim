@@ -21,9 +21,9 @@ use crate::creation::{IntRound, PartialGeometry};
 use crate::transform::TargetPrep;
 use crate::{
     AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FadeTransform,
-    FramePosition, MoveAlongPath, OpenSegment, PathFunc, RateFunc, RationalFrameClock,
-    RevealBounds, Rotating, ShowIncreasingSubsets, ShowPartial, Transform, VFade,
-    VShowPassingFlash, WiggleOutThenIn,
+    FramePosition, MethodAnimation, MoveAlongPath, OpenSegment, PathFunc, RateFunc,
+    RationalFrameClock, RevealBounds, Rotating, ShowIncreasingSubsets, ShowPartial, Transform,
+    VFade, VShowPassingFlash, WiggleOutThenIn,
 };
 
 // Minor 4 adds captured path motion and crossfade lifecycle carriers;
@@ -100,9 +100,20 @@ fn limits(max_bytes: usize) -> Limits {
     }
 }
 
+// MethodAnimation delegates its complete lifecycle to Transform, so it uses
+// the existing Transform wire carrier. This exact-type check deliberately does
+// not admit user wrappers through their interpolation or effect trait hooks.
+fn native_transform(animation: &dyn Animation) -> Option<&Transform> {
+    let any: &dyn Any = animation;
+    any.downcast_ref::<Transform>().or_else(|| {
+        any.downcast_ref::<MethodAnimation>()
+            .map(MethodAnimation::continuation_transform)
+    })
+}
+
 fn native_kind(animation: &dyn Animation) -> Option<u8> {
     let any: &dyn Any = animation;
-    if any.is::<Transform>() {
+    if native_transform(animation).is_some() {
         Some(1)
     } else if any.is::<Rotating>() {
         Some(2)
@@ -131,7 +142,7 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
 
 fn clone_native(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
     let any: &dyn Any = animation;
-    if let Some(value) = any.downcast_ref::<Transform>() {
+    if let Some(value) = native_transform(animation) {
         Some(Box::new(value.clone()))
     } else if let Some(value) = any.downcast_ref::<Rotating>() {
         Some(Box::new(value.clone()))
@@ -190,10 +201,7 @@ pub(crate) fn native_preparation_supported(animation: &dyn Animation) -> bool {
 
     fn supported(animation: &dyn Animation, depth: usize, remaining: &mut usize) -> bool {
         let any: &dyn Any = animation;
-        if depth > MAX_NATIVE_DEPTH
-            || *remaining == 0
-            || (native_kind(animation).is_none() && !any.is::<crate::MethodAnimation>())
-        {
+        if depth > MAX_NATIVE_DEPTH || *remaining == 0 || native_kind(animation).is_none() {
             return false;
         }
         *remaining -= 1;
@@ -357,7 +365,7 @@ fn emission_schema(schema: Schema, animations: &[Box<dyn Animation>]) -> Schema 
 
 fn native_parameters_valid(stage: &Stage, animation: &dyn Animation) -> bool {
     let any: &dyn Any = animation;
-    if let Some(value) = any.downcast_ref::<Transform>() {
+    if let Some(value) = native_transform(animation) {
         value.path.validate().is_ok()
     } else if let Some(value) = any.downcast_ref::<Rotating>() {
         value.angle.is_finite()
@@ -1209,7 +1217,7 @@ fn put_native_node(
         return Ok(());
     }
     put_state(writer, stage, animation.state(), prepared)?;
-    if let Some(value) = any.downcast_ref::<Transform>() {
+    if let Some(value) = native_transform(animation) {
         put_mob(writer, stage, value.target)?;
         put_path(writer, value.path);
         writer.put_bool(value.replace_in_scene);
@@ -1871,7 +1879,7 @@ fn declaration_is_fresh(animation: &dyn Animation) -> bool {
                 .animations()
                 .iter()
                 .all(|child| declaration_is_fresh(child.as_ref()))
-    } else if let Some(transform) = any.downcast_ref::<Transform>() {
+    } else if let Some(transform) = native_transform(animation) {
         transform.target_copy.is_none()
     } else if let Some(drawing) = any.downcast_ref::<DrawBorderThenFill>() {
         drawing.outline.is_none() && drawing.crossed.is_empty()
@@ -2057,6 +2065,22 @@ mod tests {
             stage.shift(path, [100.0, 100.0, 0.0]);
             stage.delete(path).unwrap();
             Box::new(MoveAlongPath::from_observation(root, captured))
+        } else if kind == 3 {
+            let builder = root
+                .animate()
+                .set_anim_args(fmn_mobject::AnimateArgs {
+                    path_arc: Some(0.75),
+                    lag_ratio: Some(0.2),
+                    ..fmn_mobject::AnimateArgs::default()
+                })
+                .unwrap()
+                .shift([2.75, -1.25, 0.0])
+                .unwrap()
+                .scale(0.6)
+                .unwrap()
+                .set_opacity(0.4)
+                .unwrap();
+            crate::prepare_animation(builder, &mut stage).unwrap()
         } else {
             let target = stage.copy_family(root).unwrap();
             stage.shift(target, [2.75, -1.25, 0.0]);
@@ -2083,10 +2107,9 @@ mod tests {
         (stage, vec![animation])
     }
 
-    #[test]
-    fn captured_motion_and_crossfades_resume_every_remaining_sample_and_cleanup() {
+    fn assert_motion_continuations(kinds: &[u8]) {
         let rng = RngRoot::from_seed(17);
-        for kind in 0..3 {
+        for &kind in kinds {
             for nested in [false, true] {
                 for remover in [false, true] {
                     for boundary in [0, 1, 6, 12, 13] {
@@ -2176,6 +2199,104 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn captured_motion_and_crossfades_resume_every_remaining_sample_and_cleanup() {
+        assert_motion_continuations(&[0, 1, 2]);
+    }
+
+    #[test]
+    fn method_continuations_resume_every_remaining_sample_and_cleanup() {
+        assert_motion_continuations(&[3]);
+    }
+
+    #[test]
+    fn method_declarations_use_the_existing_transform_carrier_without_mutating_the_stage() {
+        let (stage, animations) = motion_scene(3, false, false);
+        let animation = &animations[0];
+        let method = (animation.as_ref() as &dyn Any)
+            .downcast_ref::<MethodAnimation>()
+            .expect("the actual builder front door must produce MethodAnimation");
+        let transform: Vec<Box<dyn Animation>> = vec![Box::new(
+            Transform::new(method.state().mobject(), method.target())
+                .with_config(method.state().config.clone())
+                .with_path_arc(0.75, [0.0, 0.0, 1.0]),
+        )];
+        let before = stage.snapshot().to_bytes().unwrap();
+        let actual = fresh_declaration(
+            &stage,
+            &animations,
+            DeclarationOverrides::default(),
+            30,
+            MAX_BYTES,
+        )
+        .unwrap()
+        .expect("a future method play has a closed declaration");
+        let expected = fresh_declaration(
+            &stage,
+            &transform,
+            DeclarationOverrides::default(),
+            30,
+            MAX_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            actual, expected,
+            "the complete existing wire carrier is reused"
+        );
+        assert_eq!(actual.1, 13);
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        assert_eq!(
+            Reader::open(
+                &actual.0,
+                DECLARATION_SCHEMA,
+                limits(MAX_BYTES),
+                UnknownPolicy::Strict,
+            )
+            .unwrap()
+            .version(),
+            (1, 2),
+            "method plays need no new wire version"
+        );
+    }
+
+    #[test]
+    fn method_declarations_admit_fresh_nested_groups_but_reject_prepared_state() {
+        for nested in [false, true] {
+            let (mut stage, mut animations) = motion_scene(3, nested, false);
+            let before = stage.snapshot().to_bytes().unwrap();
+            assert!(
+                fresh_declaration(
+                    &stage,
+                    &animations,
+                    DeclarationOverrides::default(),
+                    30,
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .is_some()
+            );
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+            let clock = RationalFrameClock::new(30).unwrap();
+            let open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+            let prepared = stage.snapshot().to_bytes().unwrap();
+            assert!(
+                fresh_declaration(
+                    &stage,
+                    &animations,
+                    DeclarationOverrides::default(),
+                    30,
+                    MAX_BYTES,
+                )
+                .unwrap()
+                .is_none(),
+                "prepared method state cannot be mistaken for a future factory value"
+            );
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), prepared);
+            crate::finish_open_play(&mut stage, &mut animations, open).unwrap();
         }
     }
 
@@ -2840,7 +2961,7 @@ mod exact_rate_tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
 
         let failed = endpoint_rate(false);
-        failed.eval(0.5);
+        let _ = failed.eval(0.5);
         assert!(failed.error().is_some());
         assert!(!rate_supported(&failed, 0));
         let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));

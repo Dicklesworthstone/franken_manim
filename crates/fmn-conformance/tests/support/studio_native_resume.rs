@@ -614,6 +614,70 @@ pub(super) fn run_groups(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> 
     run_prepared_checkpoints(ctx, group_program, "group", &[4, 9, 16])
 }
 
+fn method_program(nested: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 83).map_err(service_error)?;
+    let root = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.2).build().into(),
+            fmn_library::Circle::new().radius(0.35).build().into(),
+        ]))
+        .map_err(service_error)?;
+    let children = scene.stage().get(root).unwrap().submobjects().to_vec();
+    scene.stage_mut().shift(children[0], [-0.8, -0.4, 0.0]);
+    scene.stage_mut().shift(children[1], [-0.8, 0.4, 0.0]);
+    scene.stage_mut().set_fill(
+        root,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    let builder = root
+        .animate()
+        .set_anim_args(fmn_mobject::AnimateArgs {
+            path_arc: Some(0.75),
+            lag_ratio: Some(0.2),
+            ..fmn_mobject::AnimateArgs::default()
+        })
+        .map_err(service_error)?
+        .shift([1.6, 0.2, 0.0])
+        .map_err(service_error)?
+        .scale(0.6)
+        .map_err(service_error)?
+        .set_opacity(0.4)
+        .map_err(service_error)?;
+    let mut animation =
+        fmn_anim::prepare_animation(builder, scene.stage_mut()).map_err(service_error)?;
+    // Finishing must apply this value once, after the final emitted sample.
+    animation.state_mut().config.final_alpha_value = 0.35;
+    if nested {
+        let inner = fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![animation])
+            .map_err(service_error)?;
+        animation = Box::new(
+            fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(inner)])
+                .map_err(service_error)?,
+        );
+    }
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![animation],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(16),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_methods(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, method_program, "method", &[4, 9, 16])
+}
+
 fn motion_program(pieces: bool) -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 79).map_err(service_error)?;
     let moving = scene

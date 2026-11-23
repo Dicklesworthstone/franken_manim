@@ -216,6 +216,13 @@ impl MethodAnimation {
     pub fn target(&self) -> Mob {
         self.target
     }
+
+    /// This concrete wrapper owns no lifecycle hooks beyond [`Transform`]'s. The
+    /// durable continuation may therefore carry that complete mechanism,
+    /// including its prepared starting/target families and pending cleanup.
+    pub(crate) fn continuation_transform(&self) -> &Transform {
+        &self.transform
+    }
 }
 
 impl Animation for MethodAnimation {
