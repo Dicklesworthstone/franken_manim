@@ -158,12 +158,25 @@ def load_bootstrap(source):
             # header-validation fallback. Retry through the same compiler and
             # publisher with bytecode reads disabled, without deleting files.
             code = _VerifiedSourceLoader(_SOURCE, source, ignore_bytecode=True).get_code(_MODULE)
-    code = _canonical_filename(code)
+    try:
+        code = _canonical_filename(code)
+        code_sha256 = _code_digest(code)
+    except (TypeError, ValueError, RecursionError):
+        if source_path is None:
+            raise
+        # A valid pyc header and marshal body can still contain constants
+        # that the compiler never emits, or an excessively nested code tree.
+        # The optional cache must not prevent importing verified source.
+        # Retry outside this handler so genuine compilation or identity
+        # failures propagate, and let importlib repair the checked cache.
+        code = _VerifiedSourceLoader(_SOURCE, source, ignore_bytecode=True).get_code(_MODULE)
+        code = _canonical_filename(code)
+        code_sha256 = _code_digest(code)
     identity = {
         "source_sha256": hashlib.sha256(source).hexdigest(),
         # Bind actual executable code, not the cache filename or cache
         # warmness, into the certified runtime's ABI inventory.
-        "code_sha256": _code_digest(code),
+        "code_sha256": code_sha256,
         "cache_tag": sys.implementation.cache_tag,
         "magic": importlib.util.MAGIC_NUMBER.hex(),
         "optimization": sys.flags.optimize,

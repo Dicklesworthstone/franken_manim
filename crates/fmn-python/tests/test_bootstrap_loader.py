@@ -97,6 +97,30 @@ class BootstrapLoaderTests(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "unsupported bootstrap code constant type: dict"):
             loader._code_digest(code)
 
+    def test_exception_handlers_participate_in_executed_identity(self):
+        source = b'''def guarded(value):
+    try:
+        return 10 // value
+    except ZeroDivisionError:
+        return 42
+'''
+        compiled = compile(source, "<string>", "exec")
+        code = next(value for value in compiled.co_consts if isinstance(value, types.CodeType))
+        unguarded = code.replace(co_exceptiontable=b"")
+        self.assertEqual(code.co_code, unguarded.co_code)
+        self.assertEqual(types.FunctionType(code, {})(0), 42)
+        with self.assertRaises(ZeroDivisionError):
+            types.FunctionType(unguarded, {})(0)
+        self.assertNotEqual(loader._code_digest(code), loader._code_digest(unguarded))
+
+    def test_optimization_changes_the_executed_identity(self):
+        source = "def example():\n    'retained docstring'\n    assert __debug__\n    return __debug__\n"
+        identities = {
+            loader._code_digest(compile(source, "<string>", "exec", optimize=level))
+            for level in (0, 1, 2)
+        }
+        self.assertEqual(len(identities), 3)
+
     def test_full_production_bootstrap_matches_embedded_compilation(self):
         source = _PATH.parent.parent.joinpath("manimlib_bootstrap.py").read_bytes()
         self.path.write_bytes(source)
@@ -140,6 +164,45 @@ class BootstrapLoaderTests(unittest.TestCase):
                 self.assertEqual(expected, actual)
                 self.assertEqual(code, compile(_SKIN, "<string>", "exec", dont_inherit=True))
                 self.assertEqual(self.cache.read_bytes()[:16], good[:16])
+
+    def test_unsupported_cached_constant_recompiles_and_repairs_cache(self):
+        original, expected = self.load()
+        header = self.cache.read_bytes()[:16]
+        # Marshal accepts mutable containers inside code constants, even
+        # though the compiler never puts them there. Header validation and
+        # get_code accept this damaged body; identity validation must reject
+        # it and retry from the source already verified above.
+        damaged = original.replace(co_consts=original.co_consts + ({},))
+        self.cache.write_bytes(header + marshal.dumps(damaged))
+        compilations = []
+        compile_source = loader._VerifiedSourceLoader.source_to_code
+
+        def verified_compile(instance, source, path, **kwargs):
+            compilations.append(source)
+            return compile_source(instance, source, path, **kwargs)
+
+        with patch.object(loader._VerifiedSourceLoader, "source_to_code", verified_compile):
+            repaired, observed = self.load()
+        self.assertEqual(compilations, [_SKIN])
+        self.assertEqual(repaired, original)
+        self.assertEqual(observed, expected)
+        self.assertEqual(self.cache.read_bytes()[:16], header)
+        with patch.object(loader._VerifiedSourceLoader, "source_to_code",
+                          side_effect=AssertionError("repaired bootstrap was recompiled")):
+            warm, cached_identity = self.load()
+        self.assertEqual(warm, original)
+        self.assertEqual(cached_identity, expected)
+
+    def test_cache_recovery_preserves_source_compilation_errors(self):
+        original, _ = self.load()
+        source = b"def broken(:\n"
+        self.path.write_bytes(source)
+        header = (importlib.util.MAGIC_NUMBER + b"\x03\x00\x00\x00"
+                  + importlib.util.source_hash(source))
+        damaged = original.replace(co_consts=original.co_consts + ({},))
+        self.cache.write_bytes(header + marshal.dumps(damaged))
+        with self.assertRaises(SyntaxError):
+            self.load(source)
 
     def test_content_hash_is_checked_even_if_host_disables_hash_pyc_checks(self):
         import _imp
@@ -213,11 +276,12 @@ identity.pop("source_path")
 print(json.dumps(identity, sort_keys=True))
 '''
         observed = []
+        optimization = ["-" + "O" * sys.flags.optimize] if sys.flags.optimize else []
         for mode, seed in (("cold", "1"), ("warm", "2"), ("embedded", "3")):
             env = dict(os.environ, PYTHONHASHSEED=seed)
             env.pop("PYTHONDONTWRITEBYTECODE", None)
             result = subprocess.run(
-                [sys.executable, "-c", probe, str(_PATH), str(self.path), mode],
+                [sys.executable, *optimization, "-c", probe, str(_PATH), str(self.path), mode],
                 env=env, capture_output=True, text=True, timeout=20, check=True,
             )
             observed.append(json.loads(result.stdout))
