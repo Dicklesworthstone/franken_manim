@@ -21,15 +21,16 @@ use crate::creation::{IntRound, PartialGeometry};
 use crate::transform::TargetPrep;
 use crate::{
     AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FadeTransform,
-    FramePosition, MoveAlongPath, OpenSegment, PathFunc, RateFunc, RationalFrameClock, RevealBounds,
-    Rotating, ShowIncreasingSubsets, ShowPartial, Transform, VFade, VShowPassingFlash, WiggleOutThenIn,
+    FramePosition, MoveAlongPath, OpenSegment, PathFunc, RateFunc, RationalFrameClock,
+    RevealBounds, Rotating, ShowIncreasingSubsets, ShowPartial, Transform, VFade,
+    VShowPassingFlash, WiggleOutThenIn,
 };
 
-// Minor 4 adds captured path motion and cross-fade lifecycle carriers.
-// Existing native kind payloads retain their layout and remain readable. Writers
-// retain minor 2/3 for older trees so their declaration digests stay stable.
-const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 4);
-const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 4);
+// Minor 4 adds captured path motion and crossfade lifecycle carriers;
+// minor 5 adds exact prepared rate tables. Existing payload layouts and emitted
+// minor versions stay unchanged for older carrier/rate trees.
+const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 5);
+const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 5);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
 const MAX_RATE_DEPTH: usize = 32;
@@ -178,7 +179,8 @@ fn rate_supported(rate: &RateFunc, depth: usize) -> bool {
         RateFunc::Scaled { inner, proportion } => {
             proportion.is_finite() && rate_supported(inner, depth + 1)
         }
-        RateFunc::Preparing(_) | RateFunc::Exact(_) => false,
+        RateFunc::Exact(values) => values.len() <= MAX_ITEMS && values.error().is_none(),
+        RateFunc::Preparing(_) => false,
     }
 }
 
@@ -233,9 +235,19 @@ fn native_play_supported(animations: &[Box<dyn Animation>]) -> bool {
         .all(|animation| native_tree_supported(animation.as_ref(), 0, &mut remaining))
 }
 
+// Call only after rate_supported has bounded every nested combinator.
+fn rate_minor(rate: &RateFunc) -> u16 {
+    match rate {
+        RateFunc::Exact(_) => 5,
+        RateFunc::Squish { inner, .. } | RateFunc::Scaled { inner, .. } => rate_minor(inner),
+        _ => 2,
+    }
+}
+
 // Call only after native_play_supported has bounded the concrete carrier tree.
 fn carrier_minor(animation: &dyn Animation) -> u16 {
-    if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
+    let own_rate = rate_minor(&animation.state().config.rate_func);
+    let carrier = if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
         group
             .animations()
             .iter()
@@ -248,7 +260,8 @@ fn carrier_minor(animation: &dyn Animation) -> u16 {
             Some(7..=9) => 3,
             _ => 2,
         }
-    }
+    };
+    own_rate.max(carrier)
 }
 
 fn emission_schema(schema: Schema, animations: &[Box<dyn Animation>]) -> Schema {
@@ -352,7 +365,11 @@ fn native_parameters_valid(stage: &Stage, animation: &dyn Animation) -> bool {
 fn captured_path_valid(path: &PathObservation) -> bool {
     path.point_count() > 0
         && path.point_count() <= MAX_ITEMS
-        && path.world_points().iter().flatten().all(|value| value.is_finite())
+        && path
+            .world_points()
+            .iter()
+            .flatten()
+            .all(|value| value.is_finite())
         && path.total_length().is_finite()
         && path.total_length() >= 0.0
 }
@@ -657,6 +674,12 @@ fn charge_rate(budget: &mut Budget, rate: &RateFunc) -> Result<(), Error> {
             budget.charge::<f64>(values.len())?;
             budget.charge::<f64>(values.len())?;
         }
+        RateFunc::Exact(values) => {
+            budget.charge::<crate::rate_table::ExactRateTable>(1)?;
+            budget.charge::<usize>(2)?; // Arc strong/weak counters.
+            budget.charge::<(u64, f64)>(values.len())?;
+            budget.charge::<(u64, f64)>(values.len())?;
+        }
         RateFunc::Squish { inner, .. } | RateFunc::Scaled { inner, .. } => {
             charge_rate(budget, inner)?;
         }
@@ -713,9 +736,9 @@ fn capture_native_budget(
             budget.charge::<f32>(profile.len())?;
         }
     } else if let Some(value) = any.downcast_ref::<MoveAlongPath>() {
-        let path = value
-            .captured_path()
-            .ok_or(Error::Invalid("live path motion has no closed continuation"))?;
+        let path = value.captured_path().ok_or(Error::Invalid(
+            "live path motion has no closed continuation",
+        ))?;
         budget.charge::<[f64; 3]>(path.point_count())?;
         charge_path_table(budget, path.point_count())?;
     } else if let Some(group) = any.downcast_ref::<AnimationGroup>() {
@@ -784,7 +807,18 @@ fn put_rate(writer: &mut Writer, rate: &RateFunc) -> Result<(), Error> {
             put_float(writer, *proportion);
             put_rate(writer, inner)?;
         }
-        RateFunc::Preparing(_) | RateFunc::Exact(_) => {
+        RateFunc::Exact(values) => {
+            if values.error().is_some() {
+                return Err(Error::Invalid("failed exact rate has no durable carrier"));
+            }
+            writer.put_u8(4);
+            put_count(writer, values.len())?;
+            for &(key, value) in values.samples() {
+                writer.put_u64(key);
+                put_float(writer, value);
+            }
+        }
+        RateFunc::Preparing(_) => {
             return Err(Error::Invalid("rate has no supported durable carrier"));
         }
     }
@@ -824,6 +858,22 @@ fn get_rate(reader: &mut Reader<'_>, budget: &mut Budget, depth: usize) -> Resul
                 inner: Box::new(get_rate(reader, budget, depth + 1)?),
                 proportion,
             }
+        }
+        4 => {
+            if reader.version().1 < 5 {
+                return Err(Error::Invalid("exact rates require FMPC minor 5"));
+            }
+            let count = get_count(reader, 16)?;
+            budget.charge::<crate::rate_table::ExactRateTable>(1)?;
+            budget.charge::<usize>(2)?;
+            budget.charge::<(u64, f64)>(count)?; // Vec-to-Box storage may briefly coexist.
+            let mut samples = budget.vector::<(u64, f64)>(count)?;
+            for _ in 0..count {
+                samples.push((reader.get_u64()?, get_float(reader)?));
+            }
+            RateFunc::Exact(Arc::new(crate::rate_table::ExactRateTable::from_samples(
+                samples.into_boxed_slice(),
+            )?))
         }
         _ => return Err(Error::Invalid("unknown native rate kind")),
     })
@@ -1209,7 +1259,9 @@ fn put_native_node(
             put_mob(
                 writer,
                 stage,
-                value.ending.ok_or(Error::Invalid("missing cross-fade ending"))?,
+                value
+                    .ending
+                    .ok_or(Error::Invalid("missing cross-fade ending"))?,
             )?;
             let saved = fade_source(stage, value)
                 .and_then(|source| stage.saved_state(source))
@@ -1478,7 +1530,9 @@ fn get_native_node(
                 pieces,
                 interpolation_scratch: Default::default(),
             };
-            if fade_source(stage, &value).and_then(|source| stage.saved_state(source)) != Some(saved) {
+            if fade_source(stage, &value).and_then(|source| stage.saved_state(source))
+                != Some(saved)
+            {
                 return Err(Error::Invalid("cross-fade saved source differs"));
             }
             Box::new(value)
@@ -1673,16 +1727,25 @@ pub fn declaration_bytes(
 ) -> Result<Option<Vec<u8>>, Error> {
     if animations.is_empty()
         || (overrides.run_time.is_some() && overrides.run_time_frames.is_some())
+        || overrides
+            .rate_func
+            .is_some_and(|rate| !rate_supported(rate, 0))
         || !native_play_supported(animations)
         || capture_budget(animations).is_err()
     {
         return Ok(None);
     }
-    let mut writer = Writer::with_limits(
-        emission_schema(DECLARATION_SCHEMA, animations),
-        limits(max_bytes),
-    );
-    put_count(&mut writer, animations.len())?;
+    // Overrides can introduce a new rate carrier or repeat a shared table
+    // across several roots. Admit the effective tree before selecting its
+    // version or writing bytes, with the same repeated charges as decode.
+    let mut declared = Vec::new();
+    declared
+        .try_reserve_exact(animations.len())
+        .map_err(|_| SerialError::AllocationFailed {
+            needed: animations
+                .len()
+                .saturating_mul(std::mem::size_of::<Box<dyn Animation>>()),
+        })?;
     for animation in animations {
         let Some(mut owned) = clone_native(animation.as_ref()) else {
             return Ok(None);
@@ -1695,10 +1758,18 @@ pub fn declaration_bytes(
         if let Some(frames) = overrides.run_time_frames {
             owned.state_mut().config.run_time_frames = Some(frames);
         }
-        if !config_supported(&owned.state().config) {
-            return Ok(None);
-        }
-        put_native(&mut writer, stage, owned.as_ref(), false)?;
+        declared.push(owned);
+    }
+    if !native_play_supported(&declared) || capture_budget(&declared).is_err() {
+        return Ok(None);
+    }
+    let mut writer = Writer::with_limits(
+        emission_schema(DECLARATION_SCHEMA, &declared),
+        limits(max_bytes),
+    );
+    put_count(&mut writer, declared.len())?;
+    for animation in &declared {
+        put_native(&mut writer, stage, animation.as_ref(), false)?;
     }
     Ok(Some(writer.finish()?))
 }
@@ -1943,7 +2014,8 @@ mod tests {
                         let mut clock = RationalFrameClock::new(30).unwrap();
                         clock.advance_frames(5).unwrap();
                         stage.set_time_from_clock(clock.now().to_f64());
-                        let mut open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+                        let mut open =
+                            crate::open_play(&mut stage, &clock, &mut animations).unwrap();
                         crate::advance_play(
                             &mut stage,
                             &mut clock,
@@ -1990,10 +2062,8 @@ mod tests {
                             &mut open,
                             13,
                             &mut |packet| {
-                                serial_frames.push((
-                                    packet.metadata(),
-                                    packet.state().to_bytes().unwrap(),
-                                ));
+                                serial_frames
+                                    .push((packet.metadata(), packet.state().to_bytes().unwrap()));
                             },
                         )
                         .unwrap();
@@ -2005,10 +2075,8 @@ mod tests {
                             &mut resumed_open,
                             13,
                             &mut |packet| {
-                                resumed_frames.push((
-                                    packet.metadata(),
-                                    packet.state().to_bytes().unwrap(),
-                                ));
+                                resumed_frames
+                                    .push((packet.metadata(), packet.state().to_bytes().unwrap()));
                             },
                         )
                         .unwrap();
@@ -2036,10 +2104,10 @@ mod tests {
         let (mut stage, root) = indication_family();
         let target = stage.copy_family(root).unwrap();
         stage.shift(target, [2.0, -1.0, 0.0]);
-        let first = PathObservation::from_world_points(vec![[1.000_000_000_001, -0.0, 0.0]])
-            .unwrap();
-        let changed = PathObservation::from_world_points(vec![[1.000_000_000_002, -0.0, 0.0]])
-            .unwrap();
+        let first =
+            PathObservation::from_world_points(vec![[1.000_000_000_001, -0.0, 0.0]]).unwrap();
+        let changed =
+            PathObservation::from_world_points(vec![[1.000_000_000_002, -0.0, 0.0]]).unwrap();
         let fade = crate::fade_transform(&mut stage, root, target).unwrap();
         let variants: Vec<Box<dyn Animation>> = vec![
             Box::new(MoveAlongPath::from_observation(root, first)),
@@ -2571,6 +2639,275 @@ mod tests {
                 &stage,
                 &[Box::new(group)],
                 DeclarationOverrides::default(),
+                MAX_BYTES,
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+}
+
+#[cfg(test)]
+mod exact_rate_tests {
+    use super::*;
+    use crate::rate_table::{ExactRateTable, RateSampler};
+    use fmn_mobject::Mobject;
+
+    fn rate_document(rate: &RateFunc, minor: u16) -> Vec<u8> {
+        let mut writer = Writer::with_limits(Schema { minor, ..SCHEMA }, limits(MAX_BYTES));
+        put_rate(&mut writer, rate).unwrap();
+        writer.finish().unwrap()
+    }
+
+    fn decode_rate(bytes: &[u8], allowance: usize) -> Result<RateFunc, Error> {
+        let mut reader = Reader::open(bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict)?;
+        let mut budget = Budget {
+            remaining: allowance,
+            native_items: 0,
+        };
+        let rate = get_rate(&mut reader, &mut budget, 0)?;
+        reader.finish()?;
+        Ok(rate)
+    }
+
+    fn raw_table(pairs: &[(u64, u64)], minor: u16) -> Vec<u8> {
+        let mut writer = Writer::with_limits(Schema { minor, ..SCHEMA }, limits(MAX_BYTES));
+        writer.put_u8(4);
+        put_count(&mut writer, pairs.len()).unwrap();
+        for &(key, value) in pairs {
+            writer.put_u64(key).put_u64(value);
+        }
+        writer.finish().unwrap()
+    }
+
+    fn endpoint_rate(negative_zero: bool) -> RateFunc {
+        let collector = RateSampler::new(2, move |alpha| {
+            Ok(if negative_zero && alpha == 0.0 {
+                -0.0
+            } else {
+                alpha
+            })
+        });
+        collector.eval(0.0);
+        collector.eval(1.0);
+        collector.finish().unwrap()
+    }
+
+    #[test]
+    fn exact_wire_preserves_binary64_pairs_and_nested_combinators() {
+        let collector = RateSampler::new(8, |alpha| {
+            Ok(if alpha == 0.0 { -alpha } else { alpha * 1.5 })
+        });
+        let inputs = [0.0, -0.0, f64::from_bits(1), -0.125, 0.5, 1.0];
+        for alpha in inputs {
+            collector.eval(alpha);
+        }
+        let original = collector.finish().unwrap();
+        let bytes = rate_document(&original, 5);
+        let restored = decode_rate(&bytes, MAX_BYTES).unwrap();
+        for alpha in inputs {
+            assert_eq!(
+                restored.eval(alpha).to_bits(),
+                original.eval(alpha).to_bits()
+            );
+        }
+        assert!(!restored.is_linear());
+        assert_eq!(rate_document(&restored, 5), bytes);
+        let nested = RateFunc::Scaled {
+            inner: Box::new(RateFunc::Squish {
+                inner: Box::new(original),
+                a: 0.25,
+                b: 0.75,
+            }),
+            proportion: -2.0,
+        };
+        let bytes = rate_document(&nested, 5);
+        let restored = decode_rate(&bytes, MAX_BYTES).unwrap();
+        assert_eq!(rate_document(&restored, 5), bytes);
+        assert_eq!(rate_minor(&restored), 5);
+
+        let empty = RateSampler::new(0, |_| unreachable!("empty rates do not execute callbacks"))
+            .finish()
+            .unwrap();
+        let restored = decode_rate(&rate_document(&empty, 5), MAX_BYTES).unwrap();
+        assert!(matches!(restored, RateFunc::Exact(values) if values.is_empty()));
+    }
+
+    #[test]
+    fn exact_wire_rejects_ambiguous_keys_nonfinite_data_old_versions_and_budgets() {
+        let zero = 0.0_f64.to_bits();
+        let one = 1.0_f64.to_bits();
+        for pairs in [
+            vec![(zero, zero), (zero, one)],
+            vec![(one, one), (zero, zero)],
+            vec![(f64::NAN.to_bits(), zero)],
+            vec![(f64::INFINITY.to_bits(), zero)],
+            vec![(zero, f64::NAN.to_bits())],
+            vec![(zero, f64::NEG_INFINITY.to_bits())],
+        ] {
+            assert!(decode_rate(&raw_table(&pairs, 5), MAX_BYTES).is_err());
+        }
+        let valid = [(zero, (-0.0_f64).to_bits()), (one, one)];
+        assert!(decode_rate(&raw_table(&valid, 4), MAX_BYTES).is_err());
+        assert!(decode_rate(&raw_table(&valid, 5), std::mem::size_of::<RateFunc>()).is_err());
+        let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+        writer.put_u8(4).put_u32(u32::MAX);
+        assert!(decode_rate(&writer.finish().unwrap(), MAX_BYTES).is_err());
+    }
+
+    #[test]
+    fn exact_wire_does_not_clear_failures_or_capture_preparing_callbacks() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let failed = endpoint_rate(false);
+        failed.eval(0.5);
+        assert!(failed.error().is_some());
+        assert!(!rate_supported(&failed, 0));
+        let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+        assert!(put_rate(&mut writer, &failed).is_err());
+        assert!(!rate_supported(&failed.squish(0.5, 0.5), 0));
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let collector = RateSampler::new(8, move |alpha| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            Ok(alpha)
+        });
+        let preparing = RateFunc::Preparing(collector).squish(0.5, 0.5);
+        assert!(!rate_supported(&preparing, 0));
+        let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+        assert!(put_rate(&mut writer, &preparing).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn declarations_admit_effective_overrides_and_each_groups_own_rate() {
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::from_points(&[[1.0, 0.0, 0.0]]));
+        let ordinary: Vec<Box<dyn Animation>> = vec![Box::new(Rotating::new(root))];
+        let legacy = declaration_bytes(
+            &stage,
+            &ordinary,
+            DeclarationOverrides::default(),
+            MAX_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+        let rate = endpoint_rate(true);
+        let changed = endpoint_rate(false);
+        let mut declarations = Vec::new();
+        for exact in [&rate, &changed] {
+            let bytes = declaration_bytes(
+                &stage,
+                &ordinary,
+                DeclarationOverrides {
+                    rate_func: Some(exact),
+                    ..DeclarationOverrides::default()
+                },
+                MAX_BYTES,
+            )
+            .unwrap()
+            .unwrap();
+            let reader = Reader::open(
+                &bytes,
+                DECLARATION_SCHEMA,
+                limits(MAX_BYTES),
+                UnknownPolicy::Strict,
+            )
+            .unwrap();
+            assert_eq!(reader.version(), (1, 5));
+            declarations.push(bytes);
+        }
+        assert_ne!(
+            declarations[0], declarations[1],
+            "output signed zero binds identity"
+        );
+        assert_eq!(
+            declaration_bytes(
+                &stage,
+                &ordinary,
+                DeclarationOverrides::default(),
+                MAX_BYTES
+            )
+            .unwrap()
+            .unwrap(),
+            legacy
+        );
+        let reader = Reader::open(
+            &legacy,
+            DECLARATION_SCHEMA,
+            limits(MAX_BYTES),
+            UnknownPolicy::Strict,
+        )
+        .unwrap();
+        assert_eq!(reader.version(), (1, 2));
+
+        let group = AnimationGroup::new(&mut stage, ordinary)
+            .unwrap()
+            .with_rate_func(rate);
+        let before = stage.snapshot().to_bytes().unwrap();
+        let (bytes, _) = fresh_declaration(
+            &stage,
+            &[Box::new(group)],
+            DeclarationOverrides::default(),
+            30,
+            MAX_BYTES,
+        )
+        .unwrap()
+        .unwrap();
+        let reader = Reader::open(
+            &bytes,
+            DECLARATION_SCHEMA,
+            limits(MAX_BYTES),
+            UnknownPolicy::Strict,
+        )
+        .unwrap();
+        assert_eq!(reader.version(), (1, 5));
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    }
+
+    #[test]
+    fn effective_override_admission_charges_repeated_tables_and_bounds_depth() {
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::from_points(&[[1.0, 0.0, 0.0]]));
+        let animations: Vec<Box<dyn Animation>> = (0..32)
+            .map(|_| Box::new(Rotating::new(root)) as Box<dyn Animation>)
+            .collect();
+        // One MiB of shared samples needs more than 64 MiB when repeated
+        // across the 32 independent wire occurrences and decode temporaries.
+        let count = MAX_BYTES / (32 * 2 * std::mem::size_of::<(u64, f64)>());
+        let samples: Vec<_> = (0..count)
+            .map(|index| ((index as f64).to_bits(), index as f64))
+            .collect();
+        let rate = RateFunc::Exact(Arc::new(
+            ExactRateTable::from_samples(samples.into_boxed_slice()).unwrap(),
+        ));
+        assert!(capture_budget(&animations).is_ok());
+        assert!(
+            declaration_bytes(
+                &stage,
+                &animations,
+                DeclarationOverrides {
+                    rate_func: Some(&rate),
+                    ..DeclarationOverrides::default()
+                },
+                MAX_BYTES,
+            )
+            .unwrap()
+            .is_none()
+        );
+        let mut deep = RateFunc::linear();
+        for _ in 0..=MAX_RATE_DEPTH {
+            deep = deep.squish(0.1, 0.9);
+        }
+        assert!(
+            declaration_bytes(
+                &stage,
+                &animations,
+                DeclarationOverrides {
+                    rate_func: Some(&deep),
+                    ..DeclarationOverrides::default()
+                },
                 MAX_BYTES,
             )
             .unwrap()

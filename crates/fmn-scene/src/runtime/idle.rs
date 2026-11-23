@@ -291,7 +291,6 @@ impl Scene {
             }
         }
     }
-
 }
 
 #[cfg(test)]
@@ -436,7 +435,6 @@ mod tests {
         assert_eq!(sink.frames.len(), 1);
     }
 
-
     #[test]
     fn stepped_holds_bound_frames_and_consume_only_wait_play_indices() {
         let mut scene = Scene::new(
@@ -448,21 +446,37 @@ mod tests {
         )
         .unwrap();
         let mut sink = Sink::default();
-        assert!(scene.begin_stepped_hold(HoldKind::Initial, 0, false, &mut sink).is_err());
+        assert!(
+            scene
+                .begin_stepped_hold(HoldKind::Initial, 0, false, &mut sink)
+                .is_err()
+        );
         let mut initial = scene
             .begin_stepped_hold(HoldKind::Initial, 2, false, &mut sink)
             .unwrap();
         assert_eq!(initial.kind(), HoldKind::Initial);
         for _ in 0..2 {
             scene.prepare_stepped_hold_poll(&initial).unwrap();
-            let frame = scene.prepare_stepped_hold_frame(&mut initial, &mut sink).unwrap();
+            let frame = scene
+                .prepare_stepped_hold_frame(&mut initial, &mut sink)
+                .unwrap();
             assert!(scene.prepare_stepped_hold_poll(&initial).is_err());
-            assert!(scene.prepare_stepped_hold_frame(&mut initial, &mut sink).is_err());
-            scene.complete_stepped_hold_frame(&mut initial, frame, &mut sink).unwrap();
+            assert!(
+                scene
+                    .prepare_stepped_hold_frame(&mut initial, &mut sink)
+                    .is_err()
+            );
+            scene
+                .complete_stepped_hold_frame(&mut initial, frame, &mut sink)
+                .unwrap();
         }
         assert_eq!(initial.frames(), 2);
         scene.prepare_stepped_hold_poll(&initial).unwrap();
-        assert!(scene.prepare_stepped_hold_frame(&mut initial, &mut sink).is_err());
+        assert!(
+            scene
+                .prepare_stepped_hold_frame(&mut initial, &mut sink)
+                .is_err()
+        );
         assert_eq!(scene.time().frames(), 2);
         scene.finish_stepped_hold(initial, &mut sink).unwrap();
         assert_eq!(scene.play_count(), 0);
@@ -470,8 +484,12 @@ mod tests {
         let mut wait = scene
             .begin_stepped_hold(HoldKind::Wait, 1, false, &mut sink)
             .unwrap();
-        let frame = scene.prepare_stepped_hold_frame(&mut wait, &mut sink).unwrap();
-        scene.complete_stepped_hold_frame(&mut wait, frame, &mut sink).unwrap();
+        let frame = scene
+            .prepare_stepped_hold_frame(&mut wait, &mut sink)
+            .unwrap();
+        scene
+            .complete_stepped_hold_frame(&mut wait, frame, &mut sink)
+            .unwrap();
         scene.finish_stepped_hold(wait, &mut sink).unwrap();
         assert_eq!(scene.time().frames(), 3);
         assert_eq!(scene.play_count(), 1);
@@ -484,24 +502,33 @@ mod tests {
         let mob = scene.add_mobject(Mobject::new()).unwrap();
         let calls = Rc::new(RefCell::new(0));
         let observed = Rc::clone(&calls);
-        scene.stage_mut().add_updater(
-            mob,
-            move |_, _| *observed.borrow_mut() += 1,
-            false,
-        ).unwrap();
+        scene
+            .stage_mut()
+            .add_updater(mob, move |_, _| *observed.borrow_mut() += 1, false)
+            .unwrap();
         let mut sink = Sink::default();
         let mut hold = scene
             .begin_stepped_hold(HoldKind::Initial, 2, false, &mut sink)
             .unwrap();
-        let mut frame = scene.prepare_stepped_hold_frame(&mut hold, &mut sink).unwrap();
-        scene.stage_mut().update_at_time(frame.dt(), frame.time().to_f64());
+        let mut frame = scene
+            .prepare_stepped_hold_frame(&mut hold, &mut sink)
+            .unwrap();
+        scene
+            .stage_mut()
+            .update_at_time(frame.dt(), frame.time().to_f64());
         frame.mark_scene_updaters_complete();
-        scene.complete_stepped_hold_frame(&mut hold, frame, &mut sink).unwrap();
+        scene
+            .complete_stepped_hold_frame(&mut hold, frame, &mut sink)
+            .unwrap();
         assert_eq!(*calls.borrow(), 1);
         assert_eq!(sink.frames.len(), 1);
         // An unmarked next frame retains the ordinary native updater pass.
-        let frame = scene.prepare_stepped_hold_frame(&mut hold, &mut sink).unwrap();
-        scene.complete_stepped_hold_frame(&mut hold, frame, &mut sink).unwrap();
+        let frame = scene
+            .prepare_stepped_hold_frame(&mut hold, &mut sink)
+            .unwrap();
+        scene
+            .complete_stepped_hold_frame(&mut hold, frame, &mut sink)
+            .unwrap();
         scene.finish_stepped_hold(hold, &mut sink).unwrap();
         assert_eq!(*calls.borrow(), 2);
         assert_eq!(sink.frames.len(), 2);
@@ -515,12 +542,15 @@ mod tests {
         let mut hold = scene
             .begin_stepped_hold(HoldKind::Wait, 2, false, &mut sink)
             .unwrap();
-        let mut frame = scene.prepare_stepped_hold_frame(&mut hold, &mut sink).unwrap();
-        assert!(scene.stage_mut().add_try_updater(
-            mob,
-            |_, _| Err(updater_refusal()),
-            true,
-        ).is_err());
+        let mut frame = scene
+            .prepare_stepped_hold_frame(&mut hold, &mut sink)
+            .unwrap();
+        assert!(
+            scene
+                .stage_mut()
+                .add_try_updater(mob, |_, _| Err(updater_refusal()), true,)
+                .is_err()
+        );
         frame.mark_scene_updaters_complete();
         assert!(matches!(
             scene.complete_stepped_hold_frame(&mut hold, frame, &mut sink),
@@ -589,7 +619,9 @@ mod tests {
         let mut hold = scene
             .begin_stepped_hold(HoldKind::Initial, 1, false, &mut sink)
             .unwrap();
-        let pending = scene.prepare_stepped_hold_frame(&mut hold, &mut sink).unwrap();
+        let pending = scene
+            .prepare_stepped_hold_frame(&mut hold, &mut sink)
+            .unwrap();
         scene.abort_stepped_hold(hold, &mut sink);
         assert!(scene.complete_idle_frame(pending, &mut sink).is_err());
         assert!(sink.frames.is_empty());

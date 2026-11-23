@@ -349,7 +349,6 @@ pub(super) fn synchronize(scene: &Bound<'_, PyScene>) -> PyResult<()> {
     Ok(())
 }
 
-
 const PRESENTER_ACTIVE: &str = "_fmn_presenter_hold_active";
 
 pub(super) fn presenter_active(scene: &Bound<'_, PyScene>) -> PyResult<bool> {
@@ -365,11 +364,13 @@ fn presenter_decision(scene: &Bound<'_, PyScene>) -> PyResult<fmn_scene::HoldDec
     if scene.call_method0("is_window_closing")?.is_truthy()? {
         return Ok(fmn_scene::HoldDecision::EndScene);
     }
-    Ok(if requested_skip(scene)? || !scene.getattr("hold_on_wait")?.is_truthy()? {
-        fmn_scene::HoldDecision::Release
-    } else {
-        fmn_scene::HoldDecision::Continue
-    })
+    Ok(
+        if requested_skip(scene)? || !scene.getattr("hold_on_wait")?.is_truthy()? {
+            fmn_scene::HoldDecision::Release
+        } else {
+            fmn_scene::HoldDecision::Continue
+        },
+    )
 }
 
 /// Drive the existing presenter/idle capture seam with host callbacks released
@@ -420,12 +421,14 @@ pub(crate) fn _portal_presenter_hold(scene: &Bound<'_, PyScene>, wait: bool) -> 
         if !wait && engine.borrow().is_skipping() {
             return Ok(());
         }
-        let declaration = namespace.get_item("_fmn_presenter_controller")?.ok_or_else(|| {
-            CapabilityError::new_err(
-                "presenter holds require Scene.set_presenter_controller(poll, max_frames=...); \
+        let declaration = namespace
+            .get_item("_fmn_presenter_controller")?
+            .ok_or_else(|| {
+                CapabilityError::new_err(
+                    "presenter holds require Scene.set_presenter_controller(poll, max_frames=...); \
                  use ignore_presenter_mode=True or wait_frames for a finite headless wait",
-            )
-        })?;
+                )
+            })?;
         let (controller, max_frames): (Py<PyAny>, u64) = declaration.extract()?;
         if !controller.bind(scene.py()).is_callable() || !(1..=1_048_576).contains(&max_frames) {
             return Err(PyValueError::new_err(
@@ -475,9 +478,7 @@ pub(crate) fn _portal_presenter_hold(scene: &Bound<'_, PyScene>, wait: bool) -> 
                     let response = controller
                         .bind(scene.py())
                         .call1((scene, if wait { "wait" } else { "initial" }))?;
-                    if !response.is_none()
-                        && !response.is_instance_of::<pyo3::types::PyBool>()
-                    {
+                    if !response.is_none() && !response.is_instance_of::<pyo3::types::PyBool>() {
                         return Err(PyTypeError::new_err(
                             "presenter poll must return True, False, or None",
                         ));

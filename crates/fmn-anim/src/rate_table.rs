@@ -148,6 +148,35 @@ impl ExactRateTable {
         self.samples.is_empty()
     }
 
+    /// The complete immutable binary64 lookup data, in unsigned bit-key order.
+    /// Durable playback stores these pairs rather than an interpolated grid or
+    /// the callback that originally produced them.
+    pub(crate) fn samples(&self) -> &[(u64, f64)] {
+        &self.samples
+    }
+
+    /// Restore a previously prepared table after its owner has admitted the
+    /// serialized allocation budget. Neither keys nor values are normalized:
+    /// signed zero is part of the exact sampling contract on both sides.
+    pub(crate) fn from_samples(samples: Box<[(u64, f64)]>) -> Result<Self, AnimError> {
+        let mut previous = None;
+        for &(bits, value) in &samples {
+            if !f64::from_bits(bits).is_finite() || !value.is_finite() {
+                return Err(failure("durable rate samples must be finite"));
+            }
+            if previous.is_some_and(|key| key >= bits) {
+                return Err(failure(
+                    "durable rate sample keys must be unique and in bit order",
+                ));
+            }
+            previous = Some(bits);
+        }
+        Ok(Self {
+            samples,
+            error: OnceLock::new(),
+        })
+    }
+
     pub(crate) fn eval(&self, alpha: f64) -> f64 {
         match self
             .samples
@@ -205,6 +234,50 @@ mod tests {
                 .to_string()
                 .contains("unprepared rate input")
         );
+    }
+
+    #[test]
+    fn durable_samples_preserve_every_input_and_output_bit() {
+        let collector = RateSampler::new(8, |alpha| {
+            Ok(if alpha == 0.0 { -alpha } else { alpha * alpha })
+        });
+        let inputs = [0.0, -0.0, 0.375, -0.375, 1.0];
+        for alpha in inputs {
+            collector.eval(alpha);
+        }
+        let RateFunc::Exact(original) = collector.finish().unwrap() else {
+            panic!("preparation must produce an exact table");
+        };
+        let restored = ExactRateTable::from_samples(original.samples().into()).unwrap();
+        assert_eq!(restored.len(), original.len());
+        for alpha in inputs {
+            assert_eq!(
+                restored.eval(alpha).to_bits(),
+                original.eval(alpha).to_bits()
+            );
+        }
+        restored.eval(0.5);
+        assert!(restored.error().is_some());
+        assert!(original.error().is_none());
+        assert!(
+            ExactRateTable::from_samples(Box::new([]))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn durable_samples_reject_ambiguous_or_nonfinite_lookup_data() {
+        for invalid in [
+            vec![(0.0_f64.to_bits(), 0.0), (0.0_f64.to_bits(), 1.0)],
+            vec![(1.0_f64.to_bits(), 1.0), (0.0_f64.to_bits(), 0.0)],
+            vec![(f64::NAN.to_bits(), 0.0)],
+            vec![(f64::INFINITY.to_bits(), 0.0)],
+            vec![(0.0_f64.to_bits(), f64::NAN)],
+            vec![(0.0_f64.to_bits(), f64::NEG_INFINITY)],
+        ] {
+            assert!(ExactRateTable::from_samples(invalid.into_boxed_slice()).is_err());
+        }
     }
 
     #[test]

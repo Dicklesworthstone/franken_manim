@@ -634,13 +634,12 @@ fn motion_program(pieces: bool) -> Result<NativeSceneProgram, ServiceError> {
         [1.345_678_901_234_5, -0.4, 0.0],
     ])
     .map_err(service_error)?;
-    let motion = fmn_anim::MoveAlongPath::from_observation(moving, path).with_config(
-        fmn_anim::AnimConfig {
+    let motion =
+        fmn_anim::MoveAlongPath::from_observation(moving, path).with_config(fmn_anim::AnimConfig {
             run_time_frames: Some(12),
             rate_func: fmn_anim::RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack),
             ..fmn_anim::AnimConfig::default()
-        },
-    );
+        });
 
     let source = scene
         .add_mobject(fmn_mobject::Mobject::group(vec![
@@ -711,6 +710,108 @@ fn motion_program(pieces: bool) -> Result<NativeSceneProgram, ServiceError> {
 
 pub(super) fn run_motion(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     run_prepared_checkpoints(ctx, motion_program, "motion", &[4, 9, 16])
+}
+
+fn exact_rate_setup(
+    nested: bool,
+    rate: fmn_anim::RateFunc,
+) -> Result<(Scene, Vec<Box<dyn Animation>>), ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 101).map_err(service_error)?;
+    let root = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.15).build().into(),
+            fmn_library::Circle::new().radius(0.25).build().into(),
+            fmn_library::Circle::new().radius(0.35).build().into(),
+        ]))
+        .map_err(service_error)?;
+    let children = scene.stage().get(root).unwrap().submobjects().to_vec();
+    for (index, child) in children.into_iter().enumerate() {
+        scene
+            .stage_mut()
+            .shift(child, [index as f64 - 1.0, 0.2 * index as f64, 0.0]);
+    }
+    scene.stage_mut().set_fill(
+        root,
+        Some(fmn_core::constants::BLUE_C),
+        Some(0.8),
+        None,
+        true,
+    );
+    let rotation = fmn_anim::Rotating::new(root)
+        .with_angle(2.4)
+        .with_about_point([0.0, 0.0, 0.0])
+        .with_config(fmn_anim::AnimConfig {
+            run_time_frames: Some(16),
+            rate_func: rate.clone(),
+            lag_ratio: 0.18,
+            final_alpha_value: 0.375,
+            ..fmn_anim::AnimConfig::default()
+        });
+    let animation: Box<dyn Animation> = if nested {
+        let inner = fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(rotation)])
+            .map_err(service_error)?
+            .with_run_time_frames(16)
+            .with_rate_func(rate.clone().squish(0.1, 0.9));
+        Box::new(
+            fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(inner)])
+                .map_err(service_error)?
+                .with_run_time_frames(16)
+                .with_rate_func(rate),
+        )
+    } else {
+        Box::new(rotation)
+    };
+    Ok((scene, vec![animation]))
+}
+
+fn exact_rate_program(nested: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let collector = fmn_anim::rate_table::RateSampler::new(4096, |alpha| {
+        Ok(if alpha < 0.375 {
+            alpha * alpha
+        } else if alpha < 0.625 {
+            0.8
+        } else {
+            alpha
+        })
+    });
+    // Rehearse the actual driver, including nested timing, begin and finish.
+    // A uniform grid cannot describe every argument used by this lifecycle.
+    let (mut rehearsal, mut animations) =
+        exact_rate_setup(nested, fmn_anim::RateFunc::Preparing(collector.clone()))?;
+    let mut clock = fmn_anim::RationalFrameClock::new(30).map_err(service_error)?;
+    let rng = fmn_core::rng::RngRoot::from_seed(101);
+    let mut open = fmn_anim::open_play(rehearsal.stage_mut(), &clock, &mut animations)
+        .map_err(service_error)?;
+    let frames = open.report().n_frames;
+    fmn_anim::advance_play(
+        rehearsal.stage_mut(),
+        &mut clock,
+        &rng,
+        &mut animations,
+        &mut open,
+        frames,
+        &mut |_| {},
+    )
+    .map_err(service_error)?;
+    fmn_anim::finish_open_play(rehearsal.stage_mut(), &mut animations, open)
+        .map_err(service_error)?;
+    let rate = collector.finish().map_err(service_error)?;
+    let (scene, animations) = exact_rate_setup(nested, rate)?;
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations,
+                overrides: fmn_scene::PlayOverrides::default(),
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_exact_rates(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, exact_rate_program, "exact_rate", &[4, 9, 16])
 }
 
 fn indication_program(one_by_one: bool) -> Result<NativeSceneProgram, ServiceError> {
