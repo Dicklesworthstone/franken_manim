@@ -361,6 +361,8 @@ fn custom_budgets_bite() {
         max_output_points: 64,
         max_use_expansions: 2,
         max_elements: 16,
+        max_css_rules: 16,
+        max_css_match_work: 1 << 12,
     };
     assert!(matches!(
         SvgDocument::parse_with_limits(b"<svg><g><g><g><g><g/></g></g></g></g></svg>", &limits),
@@ -755,4 +757,355 @@ fn explicit_singular_svg_affines_keep_their_exact_collapsed_geometry() {
         document.shapes[0].path.points(),
         &[[0., 0., 0.], [0., 1., 0.], [0., 0., 0.]]
     );
+}
+
+fn css_document(source: &str) -> SvgDocument {
+    SvgDocument::parse(source.as_bytes()).expect("supported embedded stylesheet")
+}
+
+fn css_fill(document: &SvgDocument, index: usize) -> String {
+    match document.shapes[index].style.fill {
+        Some(Paint::Color(color)) => color.to_hex(),
+        None => "none".into(),
+    }
+}
+
+#[test]
+fn css_specificity_lists_compounds_and_document_order_resolve_before_geometry() {
+    let document = css_document(
+        r##"<svg fill="black">
+      <rect id="selected" class="accent hot" width="1" height="1" fill="yellow"/>
+      <rect class="accent" width="1" height="1"/>
+      <circle class="accented" r="1" fill="yellow"/>
+      <rect width="1" height="1" fill="yellow"/>
+      <defs><style>
+        * { fill: blue }
+        rect, circle { stroke: black; stroke-width: 3 }
+        .accent { fill: red }
+        rect.accent.hot { fill: orange }
+        #selected { fill: purple }
+        .hot.hot.hot.hot { fill: lime }
+      </style></defs>
+      <style>.accent { fill: teal } circle { fill: pink }</style>
+    </svg>"##,
+    );
+    assert_eq!(document.shapes.len(), 4);
+    assert_eq!(
+        css_fill(&document, 0),
+        "#800080",
+        "one ID outranks any number of classes"
+    );
+    assert_eq!(
+        css_fill(&document, 1),
+        "#008080",
+        "later equal specificity wins across sheets"
+    );
+    assert_eq!(
+        css_fill(&document, 2),
+        "#FFC0CB",
+        "class matching uses complete words"
+    );
+    assert_eq!(
+        css_fill(&document, 3),
+        "#0000FF",
+        "even universal rules outrank presentation attributes"
+    );
+    assert!(
+        document
+            .shapes
+            .iter()
+            .all(|shape| shape.style.stroke_width == 3.0)
+    );
+
+    let listed = css_document(
+        r##"<svg><style>
+      #selected, .accent { fill: red }
+      rect.accent { fill: blue }
+    </style><rect class="accent" width="1" height="1"/></svg>"##,
+    );
+    assert_eq!(
+        css_fill(&listed, 0),
+        "#0000FF",
+        "unmatched list arms do not lend their specificity"
+    );
+}
+
+#[test]
+fn css_importance_inline_priority_and_repeated_properties_select_one_value() {
+    let document = css_document(
+        r##"<svg><style>
+      #ordinary { fill: red }
+      .important { fill: red !important; opacity: .3 !important }
+      .visible { display: inline; opacity: .5 }
+    </style>
+      <rect id="ordinary" width="1" height="1" fill="yellow" style="fill:blue"/>
+      <rect class="important" width="1" height="1" style="fill:blue;opacity:.9"/>
+      <rect class="important" width="1" height="1" style="fill:green ! IMPORTANT; fill:blue; opacity:.8 ! important; opacity:.9"/>
+      <rect class="visible" width="1" height="1" display="none" opacity=".2" style="opacity:.7;opacity:.8"/>
+    </svg>"##,
+    );
+    assert_eq!(
+        document.shapes.len(),
+        4,
+        "the winning display value restores this element"
+    );
+    assert_eq!(css_fill(&document, 0), "#0000FF");
+    assert_eq!(css_fill(&document, 1), "#FF0000");
+    assert_eq!(css_fill(&document, 2), "#008000");
+    assert_eq!(document.shapes[1].style.opacity, 0.3);
+    assert_eq!(document.shapes[2].style.opacity, 0.8);
+    assert_eq!(
+        document.shapes[3].style.opacity, 0.8,
+        "overridden opacities must not multiply"
+    );
+}
+
+#[test]
+fn css_inheritance_resets_alpha_and_visibility_are_independent_properties() {
+    let document = css_document(
+        r##"<svg><style>
+      .parent { fill: rgba(255,0,0,.5); fill-opacity:.5; opacity:.8;
+        color:rgba(0,0,255,.25); stroke:red; stroke-width:3; visibility:hidden }
+      .visible { visibility:VISIBLE }
+      .inherited { fill:inherit; fill-opacity:inherit; opacity:inherit; stroke-width:inherit }
+      .reset { fill:initial; fill-opacity:unset; stroke:initial; opacity:unset; stroke-width:initial }
+      .current { fill:currentColor; opacity:.5 }
+      .none { fill:NONE; fill-rule:EVENODD; stroke-linecap:ROUND; stroke-linejoin:BEVEL }
+    </style><g class="parent">
+      <rect class="visible inherited" width="1" height="1"/>
+      <rect class="visible reset" width="1" height="1"/>
+      <rect class="visible current" width="1" height="1"/>
+      <rect class="visible none" width="1" height="1"/>
+      <rect width="1" height="1"/>
+    </g><g display="none"><rect class="visible" style="display:inline" width="1" height="1"/></g></svg>"##,
+    );
+    assert_eq!(document.shapes.len(), 4);
+    let inherited = &document.shapes[0].style;
+    assert_eq!(
+        inherited.fill_opacity, 0.25,
+        "paint alpha multiplies channel opacity"
+    );
+    assert_eq!(
+        inherited.opacity,
+        0.8 * 0.8,
+        "explicit opacity inheritance uses the parent local value"
+    );
+    assert_eq!(inherited.stroke_width, 3.0);
+    let reset = &document.shapes[1].style;
+    assert_eq!(css_fill(&document, 1), "#000000");
+    assert_eq!(reset.fill_opacity, 0.5);
+    assert_eq!(reset.stroke, None);
+    assert_eq!(reset.stroke_width, 1.0);
+    assert_eq!(
+        reset.opacity, 0.8,
+        "opacity unset uses its non-inherited initial value"
+    );
+    let current = &document.shapes[2].style;
+    assert_eq!(css_fill(&document, 2), "#0000FF");
+    assert_eq!(current.fill_opacity, 0.125);
+    assert_eq!(current.opacity, 0.4);
+    assert_eq!(document.shapes[3].style.fill, None);
+    assert_eq!(
+        document.shapes[3].style.fill_rule,
+        fmn_geom::FillRule::EvenOdd
+    );
+    assert_eq!(document.shapes[3].style.line_cap, fmn_geom::LineCap::Round);
+    assert_eq!(
+        document.shapes[3].style.line_join,
+        fmn_geom::LineJoin::Bevel
+    );
+}
+
+#[test]
+fn css_text_cdata_comments_entities_and_use_instances_keep_token_boundaries() {
+    let document = css_document(
+        r##"<svg>
+      <defs><g id="symbol"><rect class="accent" width="2" height="3"/></g></defs>
+      <use href="#symbol" class="red" x="1"/>
+      <use href="#symbol" class="blue" x="5"/>
+      <style type="text/css" media="all"><![CDATA[
+        /* braces {, commas, and café text in comments are not CSS syntax */
+        rect/**/.accent/* tail */ { fill:currentColor; stroke-dasharray:2/**/ 1 }
+        .red { color:red }
+      ]]></style>
+      <style> .blue { color:rgb(0,0,&#50;55) } </style>
+    </svg>"##,
+    );
+    assert_eq!(document.shapes.len(), 2);
+    assert_eq!(css_fill(&document, 0), "#FF0000");
+    assert_eq!(css_fill(&document, 1), "#0000FF");
+    for (shape, x) in document.shapes.iter().zip([1.0, 5.0]) {
+        let bounds = [0, 1].map(|axis| {
+            (
+                shape
+                    .path
+                    .points()
+                    .iter()
+                    .map(|point| point[axis])
+                    .fold(f64::INFINITY, f64::min),
+                shape
+                    .path
+                    .points()
+                    .iter()
+                    .map(|point| point[axis])
+                    .fold(f64::NEG_INFINITY, f64::max),
+            )
+        });
+        assert_eq!(bounds, [(x, x + 2.0), (0.0, 3.0)]);
+    }
+    for (first, second) in document.shapes[0]
+        .path
+        .points()
+        .iter()
+        .zip(document.shapes[1].path.points())
+    {
+        assert_eq!(*second, [first[0] + 4.0, first[1], first[2]]);
+    }
+    assert_eq!(document.shapes[0].style.stroke_dasharray, [2.0, 1.0]);
+    assert!(matches!(
+        SvgDocument::parse(b"<svg><style>re/**/ct { fill:red }</style><rect width='1' height='1'/></svg>"),
+        Err(SvgError::UnsupportedFeature { feature, .. }) if feature == "CSS selector"
+    ));
+    assert!(matches!(
+        SvgDocument::parse(b"<svg><style>.a { fill:&unknown; }</style></svg>"),
+        Err(SvgError::UnknownEntity { .. })
+    ));
+}
+
+#[test]
+fn css_unsupported_constructs_refuse_by_name_instead_of_mispainting() {
+    for (body, feature) in [
+        ("<style>g .x { fill:red }</style>", "CSS selector"),
+        ("<style>g > rect { fill:red }</style>", "CSS selector"),
+        ("<style>rect:hover { fill:red }</style>", "CSS selector"),
+        ("<style>rect[x] { fill:red }</style>", "CSS selector"),
+        ("<style>\u{00a0}rect { fill:red }</style>", "CSS selector"),
+        ("<style>rect { fill:\u{00a0}red }</style>", "CSS value"),
+        ("<style>.\\61 { fill:red }</style>", "CSS escapes"),
+        (
+            "<style>@import url(https://example.invalid/x.css);</style>",
+            "CSS at-rule",
+        ),
+        (
+            "<style>@media screen { rect { fill:red } }</style>",
+            "CSS at-rule",
+        ),
+        (
+            "<style media='screen'>rect { fill:red }</style>",
+            "CSS media query",
+        ),
+        (
+            "<style>rect { transform:translate(2px) }</style>",
+            "CSS property `transform`",
+        ),
+        ("<style>rect { clip-path:url(#clip) }</style>", "clip-path"),
+        (
+            "<rect width='1' height='1' style='mask:url(#mask)'/>",
+            "mask",
+        ),
+        ("<style>rect { filter:url(#filter) }</style>", "filter"),
+        ("<style>rect { marker-end:url(#marker) }</style>", "marker"),
+        (
+            "<style title='alternate'>rect { fill:red }</style>",
+            "alternate stylesheet",
+        ),
+    ] {
+        let source = format!("<svg>{body}<rect width='1' height='1'/></svg>");
+        assert!(
+            matches!(SvgDocument::parse(source.as_bytes()),
+            Err(SvgError::UnsupportedFeature { feature: actual, .. }) if actual == feature),
+            "{body}"
+        );
+    }
+    assert!(
+        matches!(SvgDocument::parse(b"<?xml-stylesheet href='remote.css'?><svg/>"),
+        Err(SvgError::UnsupportedFeature { feature, .. }) if feature == "external stylesheet")
+    );
+    for value in ["url(https://example.invalid/paint)", "URL('file:///paint')"] {
+        let source = format!(
+            "<svg><style>rect {{ fill:{value} }}</style><rect width='1' height='1'/></svg>"
+        );
+        assert!(matches!(
+            SvgDocument::parse(source.as_bytes()),
+            Err(SvgError::ExternalRef { .. })
+        ));
+    }
+    assert!(
+        matches!(SvgDocument::parse(br##"<svg><defs><linearGradient id="paint"/></defs><style>rect {fill:URL('#paint')}</style><rect width="1" height="1"/></svg>"##),
+        Err(SvgError::UnsupportedFeature { feature, .. }) if feature == "gradient")
+    );
+}
+
+#[test]
+fn css_selector_and_work_limits_include_lists_long_classes_and_use_expansions() {
+    let rules = b"<svg><style>rect,circle {fill:red}</style><rect width='1' height='1'/></svg>";
+    let limits = SvgLimits {
+        max_css_rules: 1,
+        ..Default::default()
+    };
+    assert_eq!(
+        SvgDocument::parse_with_limits(rules, &limits),
+        Err(SvgError::TooManyCssRules { limit: 1 })
+    );
+    let limits = SvgLimits {
+        max_css_rules: 2,
+        ..Default::default()
+    };
+    assert!(SvgDocument::parse_with_limits(rules, &limits).is_ok());
+
+    let limits = SvgLimits {
+        max_css_match_work: 128,
+        ..Default::default()
+    };
+    let long_class = format!(
+        "<svg><style>.x.x.x {{fill:red}}</style><rect class='{}' width='1' height='1'/></svg>",
+        "x ".repeat(64)
+    );
+    assert_eq!(
+        SvgDocument::parse_with_limits(long_class.as_bytes(), &limits),
+        Err(SvgError::TooMuchCssWork { limit: 128 })
+    );
+    let mut uses = String::from(
+        "<svg><style>rect {fill:red}</style><defs><rect id='r' width='1' height='1'/></defs>",
+    );
+    for _ in 0..16 {
+        uses.push_str("<use href='#r'/>");
+    }
+    uses.push_str("</svg>");
+    assert_eq!(
+        SvgDocument::parse_with_limits(uses.as_bytes(), &limits),
+        Err(SvgError::TooMuchCssWork { limit: 128 })
+    );
+    assert_eq!(css_document(&uses).shapes.len(), 16);
+}
+
+#[test]
+fn css_hidden_shapes_skip_refinement_but_visit_visible_children() {
+    let limits = SvgLimits {
+        max_output_points: 9,
+        max_path_commands: 4,
+        ..Default::default()
+    };
+    let source = br##"<svg><style>.hidden{visibility:hidden}.visible{visibility:visible}</style>
+      <defs><path id="hidden" class="hidden" d="M0 0C0 100 100 0 100 100"/></defs>
+      <use href="#hidden"/><use href="#hidden"/>
+      <path class="hidden" d="invalid path data that must never be refined">
+        <rect class="visible" width="1" height="1"/>
+      </path>
+    </svg>"##;
+    let document = SvgDocument::parse_with_limits(source, &limits).unwrap();
+    assert_eq!(document.shapes.len(), 1);
+    assert_eq!(document.shapes[0].path.num_points(), 9);
+}
+
+#[test]
+fn css_resolved_styles_survive_export_and_reimport_without_stylesheets() {
+    let source = br##"<svg width="10" height="10"><style>
+      .a { fill:rgba(255,0,0,.5); fill-opacity:.5; stroke:blue;
+        stroke-width:2; stroke-dasharray:3 1; fill-rule:evenodd }
+    </style><g opacity=".8"><path class="a" d="M0 0H10V10H0Z M2 2H8V8H2Z"/></g></svg>"##;
+    let original = SvgDocument::parse(source).unwrap();
+    let emitted = fmn_geom::emit_svg_document(&original);
+    let reparsed = SvgDocument::parse(emitted.as_bytes()).unwrap();
+    assert_eq!(original, reparsed);
 }

@@ -29,10 +29,11 @@
 //! | Units `px pt pc mm cm in %` (+ unitless)           | accepted (`em`/`ex` are outside the subset → [`SvgError::Malformed`]) |
 //! | `transform`: matrix/translate/scale/rotate/skewX/skewY | accepted, composed in document order |
 //! | Presentation attributes + the `style` attribute    | accepted for the cascaded subset below |
+//! | Embedded `style` sheets; type, `*`, `.class`, `#id`, compound selectors and comma lists | accepted, with specificity, source order and `!important` |
 //! | `fill`, `stroke`: `none`, hex, `rgb[a()]`, named colors, `currentColor`, `transparent` (→ alpha 0) | accepted |
 //! | `fill-opacity`, `stroke-opacity`, `opacity` (multiplied down groups — a documented flattening of group-opacity compositing) | accepted |
 //! | `fill-rule` (nonzero/evenodd), stroke cap/join/miterlimit, dasharray/dashoffset | accepted |
-//! | `display:none`, `visibility`                       | accepted (subtree elision) |
+//! | `display:none`, `visibility`                       | accepted; hidden descendants can restore `visibility:visible` |
 //! | `color`                                            | accepted (feeds `currentColor`) |
 //! | `clip-path` attributes and `clipPath` elements     | **rejected** — [`SvgError::UnsupportedFeature`] `"clip-path"` |
 //! | `mask` attributes and elements                     | **rejected** — `"mask"` |
@@ -40,18 +41,21 @@
 //! | `pattern`/`hatch`, and `url(#…)` resolving to one  | **rejected** — `"pattern"` |
 //! | `filter` attributes and filter primitives          | **rejected** — `"filter"` |
 //! | `marker*` attributes and `marker` elements         | **rejected** — `"marker"` |
-//! | `text`/`tspan`/`textPath`, `image`, `foreignObject`, `script`, `style` (CSS), `animate*`/`set`/`mpath`, `switch`, `view`, fonts, audio/video, and any other element | **rejected** — [`SvgError::UnsupportedFeature`] naming the element |
+//! | CSS combinators, attribute/pseudo selectors, escapes, at-rules, conditional media, external stylesheets | **rejected** — [`SvgError::UnsupportedFeature`] naming the CSS feature |
+//! | `text`/`tspan`/`textPath`, `image`, `foreignObject`, `script`, `animate*`/`set`/`mpath`, `switch`, `view`, fonts, audio/video, and any other element | **rejected** — [`SvgError::UnsupportedFeature`] naming the element |
 //! | `title`, `desc`, `metadata`                        | ignored (non-rendering metadata) |
-//! | comments, CDATA, processing instructions, `class`/`id`/`xmlns*` attributes | ignored |
+//! | XML comments, non-stylesheet processing instructions, `xmlns*` attributes | ignored; style text accepts CDATA and predefined/numeric entities |
 //! | DOCTYPE (any, case-insensitive)                    | **rejected** — [`SvgError::DoctypeRefused`]; entity bombs are refused by construction |
 //! | entities: `amp lt gt quot apos` + numeric `&#N;`/`&#xN;` | accepted; any other name → [`SvgError::UnknownEntity`] |
 //! | any non-fragment `href` (http/https/file/data/…)   | **rejected** — [`SvgError::ExternalRef`]; there are no remote references of any kind |
 //!
-//! Out of the subset by design (documented, not bugs): CSS stylesheets and
-//! selectors (`class` attributes are inert), unknown *properties* inside the
-//! `style` attribute (they configure features outside this matrix), text
-//! layout, raster images, scripting, animation, and all paint servers.
-//! Text content between elements is ignored. The cubic→quadratic tolerance
+//! CSS identifiers use unescaped ASCII names. Sheets are collected in document
+//! order before rendering, including sheets in `defs` or after a shape. Unknown
+//! sheet properties are refused; unrelated unknown inline properties retain
+//! their documented ignored behavior, but inline clipping/filter/marker/mask
+//! properties are refused just like their presentation attributes. Text outside
+//! `style` is ignored. Text layout, raster images, scripting, animation, and paint
+//! servers remain outside the subset. The cubic→quadratic tolerance
 //! is measured in the resulting viewport: every element divides it by a
 //! conservative bound on its full affine cascade's maximum stretch before
 //! calling the shared converter. Magnification, skew and `use` expansion
@@ -160,6 +164,16 @@ pub enum SvgError {
         /// The configured budget.
         limit: usize,
     },
+    /// Embedded CSS selector lists exceeded their declared entry budget.
+    TooManyCssRules {
+        /// The configured budget, counting every selector in a comma list.
+        limit: usize,
+    },
+    /// CSS matching or declaration processing exceeded its work budget.
+    TooMuchCssWork {
+        /// The configured byte-comparison/declaration work budget.
+        limit: usize,
+    },
     /// A coordinate or scalar parsed to a non-finite value (`nan`, `inf`,
     /// overflowing exponent) or a transform produced one.
     NonFinite {
@@ -251,6 +265,15 @@ impl std::fmt::Display for SvgError {
             Self::TooManyUseExpansions { limit } => {
                 write!(f, "use-expansion budget of {limit} exceeded")
             }
+            Self::TooManyCssRules { limit } => {
+                write!(f, "CSS selector budget of {limit} exceeded")
+            }
+            Self::TooMuchCssWork { limit } => {
+                write!(
+                    f,
+                    "CSS matching/declaration work budget of {limit} exceeded"
+                )
+            }
             Self::NonFinite { line, context } => {
                 write!(f, "line {line}: {context} is not a finite number")
             }
@@ -297,6 +320,12 @@ pub struct SvgLimits {
     pub max_use_expansions: usize,
     /// Maximum element count. Default `1 << 16`.
     pub max_elements: usize,
+    /// Maximum selectors across all embedded CSS rule lists. Default 4096.
+    pub max_css_rules: usize,
+    /// Maximum CSS matching/declaration work, charged conservatively for
+    /// compared bytes and visited declarations, including `use` expansions.
+    /// Default `1 << 24`.
+    pub max_css_match_work: usize,
 }
 
 impl Default for SvgLimits {
@@ -308,6 +337,8 @@ impl Default for SvgLimits {
             max_output_points: 1 << 20,
             max_use_expansions: 1024,
             max_elements: 1 << 16,
+            max_css_rules: 4096,
+            max_css_match_work: 1 << 24,
         }
     }
 }
@@ -366,7 +397,7 @@ impl std::fmt::Display for LineJoin {
 }
 
 /// A fully resolved style record for one shape, after the
-/// presentation-attribute + `style`-attribute cascade and group-opacity
+/// presentation-attribute + embedded/inline CSS cascade and group-opacity
 /// folding. Opacities are clamped to [0, 1] per the SVG spec.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SvgStyle {
@@ -685,10 +716,10 @@ fn local_name(name: &str) -> &str {
     }
 }
 
-/// A markup token. Text between elements is skipped by the tokenizer
-/// (documented: it renders nothing in the accepted subset).
+/// A markup token. Character data is borrowed until the tree builder decides
+/// whether it belongs to an embedded stylesheet; other text needs no allocation.
 #[derive(Debug)]
-enum Lexeme {
+enum Lexeme<'a> {
     Start {
         name: String,
         attrs: Vec<(String, String)>,
@@ -697,6 +728,11 @@ enum Lexeme {
     },
     End {
         name: String,
+        line: usize,
+    },
+    Text {
+        raw: &'a str,
+        decode_entities: bool,
         line: usize,
     },
 }
@@ -786,16 +822,24 @@ impl<'a> Lexer<'a> {
         Ok(out)
     }
 
-    fn next_lexeme(&mut self) -> Result<Option<Lexeme>, SvgError> {
+    fn next_lexeme(&mut self) -> Result<Option<Lexeme<'a>>, SvgError> {
         loop {
-            let lt = match self.text[self.pos..].find('<') {
-                Some(off) => self.pos + off,
-                None => {
-                    self.advance(self.text.len());
-                    return Ok(None);
-                }
-            };
-            self.advance(lt);
+            if self.pos == self.text.len() {
+                return Ok(None);
+            }
+            let lt = self.text[self.pos..]
+                .find('<')
+                .map_or(self.text.len(), |off| self.pos + off);
+            if lt > self.pos {
+                let raw = &self.text[self.pos..lt];
+                let line = self.line;
+                self.advance(lt);
+                return Ok(Some(Lexeme::Text {
+                    raw,
+                    decode_entities: true,
+                    line,
+                }));
+            }
             let start_line = self.line;
             let rest = &self.text[self.pos..];
             let rbytes = rest.as_bytes();
@@ -811,8 +855,13 @@ impl<'a> Lexer<'a> {
             if rest.starts_with("<![CDATA[") {
                 return match rest.find("]]>") {
                     Some(end) => {
+                        let raw = &rest[9..end];
                         self.advance(self.pos + end + 3);
-                        continue;
+                        Ok(Some(Lexeme::Text {
+                            raw,
+                            decode_entities: false,
+                            line: start_line,
+                        }))
                     }
                     None => Err(malformed(start_line, "unterminated CDATA section")),
                 };
@@ -828,6 +877,13 @@ impl<'a> Lexer<'a> {
                 ));
             }
             if rest.starts_with("<?") {
+                let target = rest[2..]
+                    .split(|ch: char| ch.is_ascii_whitespace() || ch == '?')
+                    .next()
+                    .unwrap_or("");
+                if target.eq_ignore_ascii_case("xml-stylesheet") {
+                    return Err(unsupported(start_line, "external stylesheet"));
+                }
                 return match rest.find("?>") {
                     Some(end) => {
                         self.advance(self.pos + end + 2);
@@ -973,6 +1029,8 @@ struct Element {
     name: String,
     attrs: Vec<(String, String)>,
     children: Vec<Element>,
+    /// Only `<style>` keeps character data; allocation stays input-bounded.
+    style_text: String,
     line: usize,
 }
 
@@ -1008,6 +1066,7 @@ fn build_tree(text: &str, limits: &SvgLimits) -> Result<Element, SvgError> {
                     name,
                     attrs,
                     children: Vec::new(),
+                    style_text: String::new(),
                     line,
                 };
                 if self_closing {
@@ -1046,6 +1105,23 @@ fn build_tree(text: &str, limits: &SvgLimits) -> Result<Element, SvgError> {
                         if root.replace(el).is_some() {
                             return Err(malformed(line, "multiple root elements"));
                         }
+                    }
+                }
+            }
+            Lexeme::Text {
+                raw,
+                decode_entities,
+                line,
+            } => {
+                if let Some(parent) = stack.last_mut()
+                    && local_name(&parent.name) == "style"
+                {
+                    if decode_entities {
+                        parent
+                            .style_text
+                            .push_str(&Lexer::decode_entities(raw, line)?);
+                    } else {
+                        parent.style_text.push_str(raw);
                     }
                 }
             }
@@ -1460,8 +1536,11 @@ struct Style {
     miter_limit: f64,
     dash: Vec<f64>,
     dash_offset: f64,
+    /// This element's opacity, before the documented group-opacity fold.
+    local_opacity: f64,
     opacity: f64,
     color: Srgb,
+    color_alpha: f64,
     display_none: bool,
     visibility_hidden: bool,
 }
@@ -1487,8 +1566,10 @@ impl Default for Style {
             miter_limit: 4.0,
             dash: Vec::new(),
             dash_offset: 0.0,
+            local_opacity: 1.0,
             opacity: 1.0,
             color: BLACK,
+            color_alpha: 1.0,
             display_none: false,
             visibility_hidden: false,
         }
@@ -1514,37 +1595,561 @@ const PRESENTATION_PROPERTIES: &[&str] = &[
     "visibility",
 ];
 
-impl Style {
-    /// Apply this element's presentation attributes, then its `style`
-    /// attribute (which wins, per the CSS cascade).
-    fn cascade(&mut self, el: &Element, vp: Viewport) -> Result<(), SvgError> {
-        for (raw_name, value) in &el.attrs {
-            let name = local_name(raw_name);
-            if PRESENTATION_PROPERTIES.contains(&name) {
-                self.apply(name, value, vp, el.line)?;
+// ------------------------------------------------------------- embedded CSS
+
+/// CSS is resolved here, before geometry or native record allocation. The
+/// accepted selectors have no ancestor dependence, so a `use` instance matches
+/// its original element's type/id/classes and inherits from its instance host.
+#[derive(Debug, Default)]
+struct StyleSheet {
+    rules: Vec<CssRule>,
+    selector_count: usize,
+}
+
+#[derive(Debug)]
+struct CssRule {
+    selectors: Vec<CssSelector>,
+    declarations: Vec<CssDeclaration>,
+}
+
+#[derive(Debug)]
+struct CssSelector {
+    tag: Option<String>,
+    ids: Vec<String>,
+    classes: Vec<String>,
+    specificity: [usize; 4],
+    bytes: usize,
+}
+
+#[derive(Debug)]
+struct CssDeclaration {
+    property: usize,
+    value: String,
+    important: bool,
+    line: usize,
+}
+
+/// Importance precedes specificity. Inline declarations have the leading
+/// specificity component; a universal rule ties a presentation attribute and
+/// wins because rules are visited later. Equal priorities always keep the last
+/// declaration, including repeats within one declaration block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct CssPriority {
+    important: bool,
+    specificity: [usize; 4],
+}
+
+#[derive(Clone, Copy)]
+struct CssWinner<'a> {
+    value: &'a str,
+    line: usize,
+    priority: CssPriority,
+}
+
+fn offer_css<'a>(winners: &mut [Option<CssWinner<'a>>], property: usize, candidate: CssWinner<'a>) {
+    if winners[property].is_none_or(|current| candidate.priority >= current.priority) {
+        winners[property] = Some(candidate);
+    }
+}
+
+struct CssWork {
+    remaining: usize,
+    limit: usize,
+}
+
+impl CssWork {
+    fn new(limit: usize) -> Self {
+        Self {
+            remaining: limit,
+            limit,
+        }
+    }
+
+    fn charge(&mut self, amount: usize) -> Result<(), SvgError> {
+        self.remaining = self
+            .remaining
+            .checked_sub(amount)
+            .ok_or(SvgError::TooMuchCssWork { limit: self.limit })?;
+        Ok(())
+    }
+}
+
+/// Mask comments without concatenating distinct CSS tokens. Byte offsets stay
+/// unchanged so selectors can read the original token boundaries: `rect/**/.a`
+/// is a compound, but `re/**/ct` must not turn into the type selector `rect`.
+fn css_without_comments(text: &str, line: usize) -> Result<String, SvgError> {
+    let bytes = text.as_bytes();
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0;
+    let mut i = 0;
+    let mut quote = None;
+    while i < bytes.len() {
+        match (quote, bytes[i]) {
+            (_, b'\\') => return Err(unsupported(line, "CSS escapes")),
+            (Some(open), close) if open == close => quote = None,
+            (None, b'\'' | b'"') => quote = Some(bytes[i]),
+            (None, b'/') if bytes.get(i + 1) == Some(&b'*') => {
+                out.push_str(&text[copied..i]);
+                let end = text[i + 2..]
+                    .find("*/")
+                    .ok_or_else(|| malformed(line, "unterminated CSS comment"))?;
+                let consumed = end + 4;
+                out.extend(std::iter::repeat_n(' ', consumed));
+                i += consumed;
+                copied = i;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.push_str(&text[copied..]);
+    Ok(out)
+}
+
+/// Find a separator outside quoted strings and function arguments. Returned
+/// offsets always name ASCII bytes and therefore UTF-8 character boundaries.
+fn css_separator(text: &str, separators: &[u8], line: usize) -> Result<Option<usize>, SvgError> {
+    let mut quote = None;
+    let mut depth = 0usize;
+    for (i, byte) in text.bytes().enumerate() {
+        match (quote, byte) {
+            (_, b'\\') => return Err(unsupported(line, "CSS escapes")),
+            (Some(open), close) if open == close => quote = None,
+            (Some(_), _) => {}
+            (None, b'\'' | b'"') => quote = Some(byte),
+            (None, b'(') => depth += 1,
+            (None, b')') => {
+                depth = depth
+                    .checked_sub(1)
+                    .ok_or_else(|| malformed(line, "unmatched CSS `)`"))?;
+            }
+            (None, _) if depth == 0 && separators.contains(&byte) => return Ok(Some(i)),
+            _ => {}
+        }
+    }
+    if quote.is_some() || depth != 0 {
+        return Err(malformed(line, "unterminated CSS string or function"));
+    }
+    Ok(None)
+}
+
+fn css_identifier_end(text: &str, line: usize) -> Result<usize, SvgError> {
+    let bytes = text.as_bytes();
+    let start = |byte: u8| byte.is_ascii_alphabetic() || byte == b'_';
+    let admitted = bytes.first().is_some_and(|&byte| start(byte))
+        || (bytes.first() == Some(&b'-')
+            && bytes
+                .get(1)
+                .is_some_and(|&byte| start(byte) || byte == b'-'));
+    if !admitted {
+        return Err(unsupported(line, "CSS selector"));
+    }
+    Ok(bytes
+        .iter()
+        .take_while(|&&byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        .count())
+}
+
+fn css_whitespace(ch: char) -> bool {
+    matches!(ch, ' ' | '\t' | '\n' | '\r' | '\u{000c}')
+}
+
+fn css_trim(text: &str) -> &str {
+    text.trim_matches(css_whitespace)
+}
+
+fn css_trim_start(text: &str) -> &str {
+    text.trim_start_matches(css_whitespace)
+}
+
+fn css_skip_comments(mut text: &str, line: usize) -> Result<&str, SvgError> {
+    while let Some(tail) = text.strip_prefix("/*") {
+        let end = tail
+            .find("*/")
+            .ok_or_else(|| malformed(line, "unterminated CSS comment"))?;
+        text = &tail[end + 2..];
+    }
+    Ok(text)
+}
+
+fn css_skip_trivia(mut text: &str, line: usize) -> Result<&str, SvgError> {
+    loop {
+        let tail = css_skip_comments(css_trim_start(text), line)?;
+        if tail.len() == text.len() {
+            return Ok(tail);
+        }
+        text = tail;
+    }
+}
+
+impl CssSelector {
+    fn parse(text: &str, line: usize) -> Result<Self, SvgError> {
+        let mut rest = css_skip_trivia(css_trim(text), line)?;
+        if rest.is_empty() {
+            return Err(malformed(line, "empty CSS selector"));
+        }
+        let mut selector = Self {
+            tag: None,
+            ids: Vec::new(),
+            classes: Vec::new(),
+            specificity: [0; 4],
+            bytes: rest.len(),
+        };
+        if let Some(tail) = rest.strip_prefix('*') {
+            rest = tail;
+        } else if !rest.starts_with(['.', '#']) {
+            let end = css_identifier_end(rest, line)?;
+            selector.tag = Some(rest[..end].to_owned());
+            selector.specificity[3] = 1;
+            rest = &rest[end..];
+        }
+        while !rest.is_empty() {
+            rest = css_skip_comments(rest, line)?;
+            // Whitespace is admitted only after the complete selector. A real
+            // descendant combinator remains outside this selector grammar.
+            if css_skip_trivia(rest, line)?.is_empty() {
+                break;
+            }
+            let (is_id, tail) = match rest.as_bytes()[0] {
+                b'#' => (true, &rest[1..]),
+                b'.' => (false, &rest[1..]),
+                _ => return Err(unsupported(line, "CSS selector")),
+            };
+            let tail = css_skip_comments(tail, line)?;
+            let end = css_identifier_end(tail, line)?;
+            if is_id {
+                selector.ids.push(tail[..end].to_owned());
+                selector.specificity[1] += 1;
+            } else {
+                selector.classes.push(tail[..end].to_owned());
+                selector.specificity[2] += 1;
+            }
+            rest = &tail[end..];
+        }
+        Ok(selector)
+    }
+
+    fn matches(
+        &self,
+        tag: &str,
+        id: Option<&str>,
+        classes: &str,
+        work: &mut CssWork,
+    ) -> Result<bool, SvgError> {
+        // Each term may inspect the complete class/id string. Charge that
+        // conservative bound before matching, not after attacker-sized scans.
+        let text_bytes = tag
+            .len()
+            .saturating_add(id.map_or(0, str::len))
+            .saturating_add(classes.len())
+            .saturating_add(1);
+        let terms = self
+            .ids
+            .len()
+            .saturating_add(self.classes.len())
+            .saturating_add(1);
+        work.charge(text_bytes.saturating_mul(terms).saturating_add(self.bytes))?;
+        Ok(self.tag.as_deref().is_none_or(|expected| expected == tag)
+            && self
+                .ids
+                .iter()
+                .all(|expected| id == Some(expected.as_str()))
+            && self.classes.iter().all(|expected| {
+                classes
+                    .split_ascii_whitespace()
+                    .any(|class| class == expected)
+            }))
+    }
+}
+
+fn css_declarations(
+    text: &str,
+    line: usize,
+    strict: bool,
+) -> Result<Vec<CssDeclaration>, SvgError> {
+    let mut declarations = Vec::new();
+    let mut rest = text;
+    while !css_trim(rest).is_empty() {
+        let end = css_separator(rest, b";{}", line)?.unwrap_or(rest.len());
+        if rest.as_bytes().get(end).is_some_and(|byte| *byte != b';') {
+            return Err(unsupported(line, "CSS nesting"));
+        }
+        let declaration = css_trim(&rest[..end]);
+        rest = rest.get(end + 1..).unwrap_or("");
+        if declaration.is_empty() {
+            continue;
+        }
+        let (name, value) = declaration
+            .split_once(':')
+            .ok_or_else(|| malformed(line, "CSS declaration has no `:`"))?;
+        let name = css_trim(name).to_ascii_lowercase();
+        let mut value = css_trim(value);
+        let important = if let Some(bang) = css_separator(value, b"!", line)? {
+            if !css_trim(&value[bang + 1..]).eq_ignore_ascii_case("important") {
+                return Err(malformed(line, "invalid CSS priority"));
+            }
+            value = css_trim(&value[..bang]);
+            true
+        } else {
+            false
+        };
+        if value.is_empty() {
+            return Err(malformed(line, "CSS declaration has an empty value"));
+        }
+        let Some(property) = PRESENTATION_PROPERTIES
+            .iter()
+            .position(|&known| known == name)
+        else {
+            let refused = match name.as_str() {
+                "clip-path" | "mask" | "filter" => Some(name.as_str()),
+                "marker" | "marker-start" | "marker-mid" | "marker-end" => Some("marker"),
+                _ => None,
+            };
+            if let Some(feature) = refused {
+                if !value.eq_ignore_ascii_case("none") {
+                    return Err(unsupported(line, feature));
+                }
+            } else if strict {
+                return Err(unsupported(line, &format!("CSS property `{name}`")));
+            }
+            continue;
+        };
+        // All admitted paint/number/keyword values use ASCII. Do not let the
+        // older SVG value parsers' Unicode trim turn a CSS identifier containing
+        // a nonbreaking space into a different, accepted color or keyword.
+        if !value.is_ascii() {
+            return Err(unsupported(line, "CSS value"));
+        }
+        declarations.push(CssDeclaration {
+            property,
+            value: value.to_owned(),
+            important,
+            line,
+        });
+    }
+    Ok(declarations)
+}
+
+impl StyleSheet {
+    fn collect(&mut self, el: &Element, limits: &SvgLimits) -> Result<(), SvgError> {
+        if local_name(&el.name) == "style" {
+            if !el.children.is_empty() {
+                return Err(malformed(
+                    el.line,
+                    "style elements contain only CSS character data",
+                ));
+            }
+            if attr(el, "href").is_some() {
+                return Err(unsupported(el.line, "external stylesheet"));
+            }
+            if attr(el, "type").is_some_and(|value| {
+                !css_trim(value).is_empty() && !css_trim(value).eq_ignore_ascii_case("text/css")
+            }) {
+                return Err(unsupported(el.line, "stylesheet type"));
+            }
+            if attr(el, "media").is_some_and(|value| {
+                !css_trim(value).is_empty() && !css_trim(value).eq_ignore_ascii_case("all")
+            }) {
+                return Err(unsupported(el.line, "CSS media query"));
+            }
+            if attr(el, "title").is_some_and(|value| !value.is_empty()) {
+                return Err(unsupported(el.line, "alternate stylesheet"));
+            }
+            if attr(el, "scoped").is_some() {
+                return Err(unsupported(el.line, "scoped stylesheet"));
+            }
+            let source = css_without_comments(&el.style_text, el.line)?;
+            let mut rest = css_trim_start(&source);
+            while !rest.is_empty() {
+                if rest.starts_with('@') {
+                    return Err(unsupported(el.line, "CSS at-rule"));
+                }
+                let open = css_separator(rest, b"{}", el.line)?
+                    .ok_or_else(|| malformed(el.line, "CSS rule has no declaration block"))?;
+                if rest.as_bytes()[open] != b'{' {
+                    return Err(malformed(el.line, "unexpected CSS `}`"));
+                }
+                let mut selectors = Vec::new();
+                let mut selector_offset = source.len() - rest.len();
+                for text in rest[..open].split(',') {
+                    if self.selector_count >= limits.max_css_rules {
+                        return Err(SvgError::TooManyCssRules {
+                            limit: limits.max_css_rules,
+                        });
+                    }
+                    self.selector_count += 1;
+                    selectors.push(CssSelector::parse(
+                        &el.style_text[selector_offset..selector_offset + text.len()],
+                        el.line,
+                    )?);
+                    selector_offset += text.len() + 1;
+                }
+                let body = &rest[open + 1..];
+                let close = css_separator(body, b"{}", el.line)?
+                    .ok_or_else(|| malformed(el.line, "unterminated CSS declaration block"))?;
+                if body.as_bytes()[close] != b'}' {
+                    return Err(unsupported(el.line, "CSS nesting"));
+                }
+                let declarations = css_declarations(&body[..close], el.line, true)?;
+                self.rules.push(CssRule {
+                    selectors,
+                    declarations,
+                });
+                rest = css_trim_start(&body[close + 1..]);
             }
         }
-        if let Some(style_attr) = attr(el, "style") {
-            for declaration in style_attr.split(';') {
-                let declaration = declaration.trim();
-                if declaration.is_empty() {
-                    continue;
-                }
-                let (name, value) = declaration.split_once(':').ok_or_else(|| {
-                    malformed(
-                        el.line,
-                        format!("style declaration {declaration:?} has no `:`"),
-                    )
-                })?;
-                let name = name.trim();
-                // Unknown properties configure features outside the accept
-                // matrix (fonts, text layout, …) and are ignored by design.
-                if PRESENTATION_PROPERTIES.contains(&name) {
-                    self.apply(name, value, vp, el.line)?;
-                }
-            }
+        for child in &el.children {
+            self.collect(child, limits)?;
         }
         Ok(())
+    }
+}
+
+impl Style {
+    /// Resolve each property once, then apply its winning value to the inherited
+    /// computed style. Applying every candidate in sequence would incorrectly
+    /// multiply overridden opacities and make `display:none` irreversible.
+    fn cascade(
+        &mut self,
+        el: &Element,
+        vp: Viewport,
+        sheet: &StyleSheet,
+        work: &mut CssWork,
+    ) -> Result<(), SvgError> {
+        let inline = if let Some(text) = attr(el, "style") {
+            work.charge(text.len().saturating_add(1))?;
+            css_declarations(&css_without_comments(text, el.line)?, el.line, false)?
+        } else {
+            Vec::new()
+        };
+        let mut winners = [None; PRESENTATION_PROPERTIES.len()];
+        for (raw_name, value) in &el.attrs {
+            let name = local_name(raw_name);
+            if let Some(property) = PRESENTATION_PROPERTIES
+                .iter()
+                .position(|&known| known == name)
+            {
+                offer_css(
+                    &mut winners,
+                    property,
+                    CssWinner {
+                        value,
+                        line: el.line,
+                        priority: CssPriority {
+                            important: false,
+                            specificity: [0; 4],
+                        },
+                    },
+                );
+            }
+        }
+        if !sheet.rules.is_empty() {
+            let lookup_cost = el.attrs.iter().fold(0usize, |cost, (name, _)| {
+                cost.saturating_add(name.len()).saturating_add(1)
+            });
+            work.charge(lookup_cost.saturating_mul(2))?;
+            let tag = local_name(&el.name);
+            let id = attr(el, "id");
+            let classes = attr(el, "class").unwrap_or("");
+            for rule in &sheet.rules {
+                let mut specificity = None;
+                for selector in &rule.selectors {
+                    if selector.matches(tag, id, classes, work)? {
+                        specificity = specificity.max(Some(selector.specificity));
+                    }
+                }
+                if let Some(specificity) = specificity {
+                    for declaration in &rule.declarations {
+                        work.charge(declaration.value.len().saturating_add(1))?;
+                        offer_css(
+                            &mut winners,
+                            declaration.property,
+                            CssWinner {
+                                value: &declaration.value,
+                                line: declaration.line,
+                                priority: CssPriority {
+                                    important: declaration.important,
+                                    specificity,
+                                },
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        for declaration in &inline {
+            offer_css(
+                &mut winners,
+                declaration.property,
+                CssWinner {
+                    value: &declaration.value,
+                    line: declaration.line,
+                    priority: CssPriority {
+                        important: declaration.important,
+                        specificity: [1, 0, 0, 0],
+                    },
+                },
+            );
+        }
+        let parent_opacity = self.opacity;
+        let parent_local_opacity = self.local_opacity;
+        let parent_display_none = self.display_none;
+        // Opacity and display do not inherit. Ancestor display:none is handled
+        // by subtree elision; ancestor opacity is folded after local resolution.
+        self.local_opacity = 1.0;
+        self.display_none = false;
+        for (name, winner) in PRESENTATION_PROPERTIES.iter().zip(winners) {
+            let Some(winner) = winner else { continue };
+            let value = winner.value.trim();
+            let inherited = !matches!(*name, "opacity" | "display");
+            if value.eq_ignore_ascii_case("inherit") {
+                if *name == "opacity" {
+                    self.local_opacity = parent_local_opacity;
+                } else if *name == "display" {
+                    self.display_none = parent_display_none;
+                }
+            } else if value.eq_ignore_ascii_case("initial")
+                || (value.eq_ignore_ascii_case("unset") && !inherited)
+            {
+                self.initial_property(name);
+            } else if value.eq_ignore_ascii_case("unset") {
+                // Every inherited property still has its parent's computed value.
+            } else if value.eq_ignore_ascii_case("revert")
+                || value.eq_ignore_ascii_case("revert-layer")
+            {
+                return Err(unsupported(winner.line, "CSS revert"));
+            } else {
+                self.apply(name, value, vp, winner.line)?;
+            }
+        }
+        self.opacity = parent_opacity * self.local_opacity;
+        Ok(())
+    }
+
+    fn initial_property(&mut self, name: &str) {
+        let initial = Self::default();
+        match name {
+            "fill" => self.fill = initial.fill,
+            "fill-opacity" => self.fill_opacity = initial.fill_opacity,
+            "fill-rule" => self.fill_rule = initial.fill_rule,
+            "stroke" => self.stroke = initial.stroke,
+            "stroke-width" => self.stroke_width = initial.stroke_width,
+            "stroke-opacity" => self.stroke_opacity = initial.stroke_opacity,
+            "stroke-linecap" => self.line_cap = initial.line_cap,
+            "stroke-linejoin" => self.line_join = initial.line_join,
+            "stroke-miterlimit" => self.miter_limit = initial.miter_limit,
+            "stroke-dasharray" => self.dash.clear(),
+            "stroke-dashoffset" => self.dash_offset = initial.dash_offset,
+            "opacity" => self.local_opacity = initial.local_opacity,
+            "color" => {
+                self.color = initial.color;
+                self.color_alpha = initial.color_alpha;
+            }
+            "display" => self.display_none = initial.display_none,
+            "visibility" => self.visibility_hidden = initial.visibility_hidden,
+            _ => {}
+        }
     }
 
     /// Apply one property/value pair.
@@ -1555,35 +2160,25 @@ impl Style {
         vp: Viewport,
         line: usize,
     ) -> Result<(), SvgError> {
-        // `!important` is inert here (this is the only cascade origin).
-        let value = value
-            .trim()
-            .strip_suffix("!important")
-            .map_or(value.trim(), str::trim_end);
+        let keyword = value.trim().to_ascii_lowercase();
         match name {
             "fill" => {
-                if let Some((paint, alpha)) = parse_paint(value, line)? {
+                if let Some((paint, _)) = parse_paint(value, line)? {
                     self.fill = paint;
-                    if alpha < 1.0 {
-                        self.fill_opacity = alpha;
-                    }
                 }
             }
             "stroke" => {
-                if let Some((paint, alpha)) = parse_paint(value, line)? {
+                if let Some((paint, _)) = parse_paint(value, line)? {
                     self.stroke = paint;
-                    if alpha < 1.0 {
-                        self.stroke_opacity = alpha;
-                    }
                 }
             }
             "fill-opacity" => self.fill_opacity = parse_opacity(value, line, "fill-opacity")?,
             "stroke-opacity" => {
                 self.stroke_opacity = parse_opacity(value, line, "stroke-opacity")?;
             }
-            "opacity" => self.opacity *= parse_opacity(value, line, "opacity")?,
+            "opacity" => self.local_opacity = parse_opacity(value, line, "opacity")?,
             "fill-rule" => {
-                self.fill_rule = match value.trim() {
+                self.fill_rule = match keyword.as_str() {
                     "nonzero" => FillRule::NonZero,
                     "evenodd" => FillRule::EvenOdd,
                     "inherit" => self.fill_rule,
@@ -1600,7 +2195,7 @@ impl Style {
                 self.stroke_width = w;
             }
             "stroke-linecap" => {
-                self.line_cap = match value.trim() {
+                self.line_cap = match keyword.as_str() {
                     "butt" => LineCap::Butt,
                     "round" => LineCap::Round,
                     "square" => LineCap::Square,
@@ -1611,7 +2206,7 @@ impl Style {
                 };
             }
             "stroke-linejoin" => {
-                self.line_join = match value.trim() {
+                self.line_join = match keyword.as_str() {
                     "miter" | "miter-clip" => LineJoin::Miter,
                     "round" => LineJoin::Round,
                     "bevel" => LineJoin::Bevel,
@@ -1632,7 +2227,7 @@ impl Style {
                 self.miter_limit = m;
             }
             "stroke-dasharray" => {
-                let v = value.trim();
+                let v = keyword.as_str();
                 if v == "none" || v == "inherit" {
                     if v == "none" {
                         self.dash.clear();
@@ -1664,18 +2259,20 @@ impl Style {
                 self.dash_offset = vp.other(parse_length(value, line, "stroke-dashoffset")?);
             }
             "color" => {
-                if let Some((color, _)) = parse_color(value, line)? {
+                if value.eq_ignore_ascii_case("currentcolor") {
+                    // `color:currentColor` computes to the inherited color.
+                } else if value.eq_ignore_ascii_case("transparent") {
+                    self.color = BLACK;
+                    self.color_alpha = 0.0;
+                } else if let Some((color, alpha)) = parse_color(value, line)? {
                     self.color = color;
+                    self.color_alpha = alpha;
                 }
             }
             "display" => {
-                // `display:none` elides the subtree; it is never un-set by
-                // a descendant (CSS: the subtree generates no boxes).
-                if value.trim() == "none" {
-                    self.display_none = true;
-                }
+                self.display_none = value.eq_ignore_ascii_case("none");
             }
-            "visibility" => match value.trim() {
+            "visibility" => match keyword.as_str() {
                 "hidden" | "collapse" => self.visibility_hidden = true,
                 "visible" => self.visibility_hidden = false,
                 _ => {}
@@ -1693,7 +2290,7 @@ fn parse_paint(text: &str, line: usize) -> Result<Option<(PaintInput, f64)>, Svg
     if t.eq_ignore_ascii_case("inherit") {
         return Ok(None);
     }
-    if t == "none" {
+    if t.eq_ignore_ascii_case("none") {
         return Ok(Some((PaintInput::None, 1.0)));
     }
     if t.eq_ignore_ascii_case("currentcolor") {
@@ -1702,7 +2299,10 @@ fn parse_paint(text: &str, line: usize) -> Result<Option<(PaintInput, f64)>, Svg
     if t.eq_ignore_ascii_case("transparent") {
         return Ok(Some((PaintInput::Color(BLACK, 0.0), 0.0)));
     }
-    if let Some(rest) = t.strip_prefix("url(") {
+    if t.get(..4)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("url("))
+    {
+        let rest = &t[4..];
         let inner = rest
             .strip_suffix(')')
             .ok_or_else(|| malformed(line, "malformed url() paint"))?;
@@ -2447,6 +3047,8 @@ struct Interpreter<'a, 'tree> {
     expansions: usize,
     use_stack: Vec<String>,
     shapes: Vec<SvgShape>,
+    stylesheet: StyleSheet,
+    css_work: CssWork,
 }
 
 impl<'a, 'tree> Interpreter<'a, 'tree> {
@@ -2462,6 +3064,8 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
             expansions: 0,
             use_stack: Vec::new(),
             shapes: Vec::new(),
+            stylesheet: StyleSheet::default(),
+            css_work: CssWork::new(limits.max_css_match_work),
         }
     }
 
@@ -2474,6 +3078,7 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
             ));
         }
         self.check_refusals(root)?;
+        self.stylesheet.collect(root, self.limits)?;
         let view_box = parse_viewbox(attr(root, "viewBox"), line)?;
         let width = root_dimension(root, "width", view_box.map(|vb| vb[2]), line)?;
         let height = root_dimension(root, "height", view_box.map(|vb| vb[3]), line)?;
@@ -2487,8 +3092,10 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
             None => viewbox,
         };
         let mut style = Style::default();
-        style.cascade(root, vp)?;
-        self.render_children(root, affine, &style, vp)?;
+        style.cascade(root, vp, &self.stylesheet, &mut self.css_work)?;
+        if !style.display_none {
+            self.render_children(root, affine, &style, vp)?;
+        }
         Ok(SvgDocument {
             width,
             height,
@@ -2571,9 +3178,13 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
         let line = el.line;
         let name = local_name(el.name.as_str());
         self.check_refusals(el)?;
+        if name == "style" {
+            // Collected before rendering. CSS can never make its text render.
+            return Ok(());
+        }
         let mut style = parent.clone();
-        style.cascade(el, vp)?;
-        if style.display_none || style.visibility_hidden {
+        style.cascade(el, vp, &self.stylesheet, &mut self.css_work)?;
+        if style.display_none {
             return Ok(());
         }
         // The element's own transform composes after its parent's.
@@ -2582,6 +3193,17 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
             None => Affine::IDENTITY,
         };
         let affine = affine.then(element_transform);
+        if style.visibility_hidden
+            && matches!(
+                name,
+                "path" | "rect" | "circle" | "ellipse" | "line" | "polyline" | "polygon"
+            )
+        {
+            // Hidden shapes have no geometry to allocate or refine. Their
+            // children still participate because visibility is inherited and
+            // may be overridden, unlike display:none's subtree suppression.
+            return self.render_children(el, affine, &style, vp);
+        }
         match name {
             "g" | "a" | "symbol" => {
                 self.render_children(el, affine, &style, vp)?;
@@ -2798,7 +3420,7 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
         style: &Style,
         line: usize,
     ) -> Result<(), SvgError> {
-        if !path.has_points() {
+        if !path.has_points() || style.visibility_hidden {
             return Ok(());
         }
         self.points = self
@@ -2862,11 +3484,13 @@ impl<'a, 'tree> Interpreter<'a, 'tree> {
         let fill = self.resolve_paint(&style.fill, style.color, line)?;
         let stroke = self.resolve_paint(&style.stroke, style.color, line)?;
         let fill_opacity = match style.fill {
-            PaintInput::Color(_, alpha) => style.fill_opacity.min(alpha),
+            PaintInput::Color(_, alpha) => style.fill_opacity * alpha,
+            PaintInput::CurrentColor => style.fill_opacity * style.color_alpha,
             _ => style.fill_opacity,
         };
         let stroke_opacity = match style.stroke {
-            PaintInput::Color(_, alpha) => style.stroke_opacity.min(alpha),
+            PaintInput::Color(_, alpha) => style.stroke_opacity * alpha,
+            PaintInput::CurrentColor => style.stroke_opacity * style.color_alpha,
             _ => style.stroke_opacity,
         };
         self.shapes.push(SvgShape {
@@ -3425,7 +4049,6 @@ mod tests {
         for (doc, feature) in [
             ("<svg><text>hi</text></svg>", "text"),
             ("<svg><image href=\"#x\"/></svg>", "image"),
-            ("<svg><style>.a{fill:red}</style></svg>", "style"),
             ("<svg><script>alert(1)</script></svg>", "script"),
             ("<svg><foreignObject/></svg>", "foreignObject"),
             ("<svg><animate attributeName=\"x\"/></svg>", "animate"),
@@ -3612,6 +4235,8 @@ mod tests {
             max_output_points: 1 << 16,
             max_use_expansions: 64,
             max_elements: 1 << 10,
+            max_css_rules: 128,
+            max_css_match_work: 1 << 16,
         };
         let mut rng = Rng(0x666d_366e_6d5f_6675);
         for case in 0..2000u64 {

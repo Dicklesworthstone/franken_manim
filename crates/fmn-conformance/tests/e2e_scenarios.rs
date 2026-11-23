@@ -86,6 +86,8 @@ mod studio_wait_tail;
 mod surface_normals;
 #[path = "../../fmn/tests/support/surround_audio.rs"]
 mod surround_audio;
+#[path = "../../fmn/tests/support/svg_stylesheets.rs"]
+mod svg_stylesheets;
 
 // fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
 // (crates/fmn/examples/hoeffding_d), compiled here from its own sources so
@@ -2592,6 +2594,21 @@ fn metadata_only_capture_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
         .with_counter("metadata_capture_packets", metadata_packets)
         .with_counter("metadata_capture_equivalent", u64::from(equivalent))
         .with_counter("metadata_facade_samples", 2))
+}
+
+/// CSS-styled imports stay editable and render like independently resolved paints.
+fn native_svg_stylesheets_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checked = svg_stylesheets::verify().map_err(fail)?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_svg_stylesheets")
+            .field("frames", checked.frames)
+            .field("thread_counts", 3_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("stylesheet-first.png", checked.first)
+        .with_artifact("stylesheet-last.png", checked.last)
+        .with_counter("svg_stylesheet_frames", checked.frames)
+        .with_counter("svg_stylesheet_thread_counts", 3))
 }
 
 /// The native still-image route executes every updater tick and captures
@@ -19190,6 +19207,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_svg_stylesheets.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_svg_stylesheets_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "stylesheet-first.png".to_owned(),
+                "stylesheet-last.png".to_owned(),
+            ]),
+            counter_eq("svg_stylesheet_frames", 12),
+            counter_eq("svg_stylesheet_thread_counts", 3),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_svg_stylesheets",
+            vec![
+                FieldPred::u64_eq("frames", 12),
+                FieldPred::u64_eq("thread_counts", 3),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_final_png.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -24124,6 +24163,16 @@ fn native_positional_lifecycle_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.native_positional_wag.v1")
         .expect("native positional lifecycle scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_svg_stylesheets_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_svg_stylesheets.v1")
+        .expect("native SVG stylesheet scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -23,6 +23,70 @@ figure = SVGMobject(svg_string=source, width=8, stroke_width=None)
 zero. A later `set_stroke(width=...)` reveals the already prepared dash geometry.
 The example in `demo/python/imported_svg_paints.py` needs no external assets.
 
+## Embedded stylesheets
+
+User SVGs can also keep their embedded CSS. The shared native document processor
+resolves `<style>` rules before building shapes, so the Python portal and native
+Rust importer produce the same editable paints:
+
+```python
+source = '''<svg width="12" height="8">
+  <path class="panel" d="M1 1H7V7H1Z M2 2H6V6H2Z"/>
+  <path id="accent" class="hot" style="fill:green;fill-opacity:.5"
+        d="M8 1H11V4H8Z"/>
+  <style>
+    .panel { fill:#4263eb; fill-rule:evenodd }
+    #accent.hot { fill:rgba(255,64,32,.5) !important }
+  </style>
+</svg>'''
+figure = SVGMobject(svg_string=source, width=8, stroke_width=None)
+```
+
+The panel retains its hole. The accent is orange with a quarter-opacity fill:
+its important rule overrides the ordinary inline green, and paint alpha and
+`fill-opacity` multiply independently.
+
+Supported selectors are element types (`path`), universal (`*`), classes
+(`.panel`), IDs (`#accent`), compounds (`path.panel.hot`, `#accent.hot`), and
+comma-separated lists. Identifiers use unescaped ASCII letters, digits,
+underscores and hyphens with CSS identifier starting rules. Class names match
+complete whitespace-separated words and remain case sensitive. CSS comments,
+CDATA sections and predefined/numeric XML character references are accepted.
+Comments between selector tokens preserve their token boundaries.
+
+Rules apply in document order, including sheets in `defs` and sheets placed
+after the geometry they style. Only matching arms of a selector list contribute
+specificity. Presentation attributes precede stylesheet declarations, including
+universal rules; inline declarations have greater specificity than ordinary
+rules. Importance is considered first, and equal priorities use the last
+declaration. The cascade follows the author-style ordering in
+[SVG styling](https://www.w3.org/TR/SVG2/styling.html) and the
+[CSS cascade](https://www.w3.org/TR/CSS2/cascade.html).
+
+The existing paint/stroke property subset also supports `inherit`, `initial`
+and `unset`. Inherited `currentColor` resolves against the child's computed
+color, including its alpha. A group with `visibility:hidden` can contain a
+child that restores `visibility:visible`; `display:none` suppresses its entire
+subtree. A winning opacity is applied once per element before the documented
+group-opacity fold. This remains a flattening of group compositing: overlapping
+children do not acquire a separate off-screen browser opacity group.
+
+Stylesheets need no retained CSS runtime or new native record fields. The
+resolved colors, opacities, widths, fill rules and dash patterns flow into the
+same native geometry and animation APIs as presentation attributes. `use`
+instances match their original element's type, ID and classes and inherit from
+their instance host.
+
+Conditional media, alternate/scoped sheets, external stylesheets and XML
+stylesheet processing instructions are refused. The supported media value is
+unconditional `all` (or an omitted/empty attribute); the supported type is
+`text/css`. At-rules, descendant/child/sibling combinators, attribute selectors,
+pseudo selectors, CSS escapes, variables and unsupported sheet properties have
+named errors. Clipping, masks, filters, markers and paint servers retain their
+named refusals when expressed through CSS as well. Unrelated unknown properties
+in legacy inline `style` attributes keep their earlier documented ignored
+behavior; embedded rules use the stricter property admission.
+
 ## Filled sets and strokes
 
 Before this integration, the document processor accepted `fill-rule="evenodd"`
@@ -75,7 +139,12 @@ publishes replacement geometry.
 
 The existing XML processor continues to enforce its byte, nesting, element,
 command and expansion limits and to reject DOCTYPE, scripts, external references
-and unsupported features by name. Paint preparation adds document-wide limits of
+and unsupported features by name. Embedded sheets additionally default to 4,096
+selector entries (every arm of a comma list counts) and 16,777,216 units of
+conservatively charged selector/declaration work. Comparisons account for class
+and ID byte lengths and repeated `use` instances; caller-supplied `SvgLimits`
+can lower either budget. Hidden shapes skip geometry refinement while still
+visiting children that may restore visibility. Paint preparation adds document-wide limits of
 1,048,576 native points, 4,096 dash pieces, 131,072 dash traversal steps and the
 existing boolean work budgets. Dash extraction reserves its touched-curve output
 before allocation, rather than copying a whole densely sampled path per dash.

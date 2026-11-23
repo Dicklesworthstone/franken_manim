@@ -1083,6 +1083,8 @@ const SVG_LIMITS: fmn_geom::SvgLimits = fmn_geom::SvgLimits {
     max_output_points: 1 << 16,
     max_use_expansions: 128,
     max_elements: 1 << 12,
+    max_css_rules: 128,
+    max_css_match_work: 1 << 18,
 };
 
 impl SvgDocumentProcessor {
@@ -1159,6 +1161,10 @@ impl SvgDocumentProcessor {
         "mask=\"url(#m)\"",
         "<text>x</text>",
         "<style>.a{fill:red}</style>",
+        "<style><![CDATA[rect.a{fill:blue!important}#b{stroke:red}]]></style>",
+        "class=\"a b\"",
+        "<style>@import url(https://example.invalid/style.css);</style>",
+        "<style>g > rect{fill:red}</style>",
         "<!-- comment -->",
         "<![CDATA[x]]>",
         "<?xml version=\"1.0\"?>",
@@ -1212,6 +1218,13 @@ impl Target for SvgDocumentProcessor {
               <g fill-opacity=\"0.5\" opacity=\"0.8\" fill-rule=\"evenodd\">\
               <ellipse cx=\"50\" cy=\"50\" rx=\"40\" ry=\"20\"/>\
               <polygon points=\"10,10 90,10 50,90\"/></g></svg>"
+                .to_vec(),
+            // Styles after geometry still apply, including referenced defs.
+            b"<svg><defs><rect id=\"badge\" class=\"accent\" width=\"10\" height=\"10\"/></defs>\
+              <use href=\"#badge\"/><circle class=\"accent\" cx=\"20\" cy=\"20\" r=\"5\" \
+              fill=\"green\" style=\"fill:blue\"/>\
+              <style><![CDATA[*{stroke:black;stroke-width:1} \
+              .accent{fill:red!important}rect.accent{opacity:0.5}]]></style></svg>"
                 .to_vec(),
         ]
     }
