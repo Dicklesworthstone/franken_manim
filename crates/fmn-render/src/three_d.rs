@@ -120,13 +120,24 @@ fn length(value: Vec3) -> f64 {
     dot(value, value).sqrt()
 }
 
-fn normalize(value: Vec3) -> Option<Vec3> {
-    let length = length(value);
-    if length == 0.0 || !length.is_finite() {
-        None
-    } else {
-        Some(mul(value, 1.0 / length))
+pub(crate) fn normalize(value: Vec3) -> Option<Vec3> {
+    let magnitude = length(value);
+    if magnitude != 0.0 && magnitude.is_finite() {
+        // Keep the ordinary certified arithmetic, including its rounding.
+        return Some(mul(value, 1.0 / magnitude));
     }
+    if !finite3(value) {
+        return None;
+    }
+    let scale = value.into_iter().map(f64::abs).fold(0.0_f64, f64::max);
+    if scale == 0.0 {
+        return None;
+    }
+    // A finite direction can have an overflowing or underflowing squared
+    // length. Bound its components before squaring; the new length is in
+    // [1, sqrt(3)], even when the original components are subnormal.
+    let bounded = value.map(|component| component / scale);
+    Some(mul(bounded, 1.0 / length(bounded)))
 }
 
 fn finite3(value: Vec3) -> bool {
@@ -10604,6 +10615,31 @@ mod tests {
         assert_ne!(sha256(first.as_bytes()), sha256(moved_one.as_bytes()));
         assert_eq!(moved_one.as_bytes(), moved_four.as_bytes());
         assert_eq!(moved_one.as_bytes(), moved_sixteen.as_bytes());
+    }
+
+    #[test]
+    fn distant_finite_light_preserves_directional_surface_lighting() {
+        let mut camera = camera();
+        let paint = color("#666666", 1.0);
+        let mesh = full_triangle(0.0, paint);
+        let mut draw = SurfaceDraw::new(&mesh);
+        draw.shading = [0.5, 0.0, 0.0];
+        let draws = [ThreeDDraw::Surface(draw)];
+
+        // At both distances, the rounded light direction's z component is
+        // exactly one at every vertex. Only the latter squared length
+        // overflows; the finite authored light must still illuminate +z.
+        camera.set_light_source_position([0.0, 0.0, 1e100]).unwrap();
+        let expected = ThreeDJob::new(&camera, &draws, Tiling::default())
+            .unwrap()
+            .render(1)
+            .unwrap();
+        assert!(pixel(&expected, 16, 12)[0] > paint.r);
+        camera.set_light_source_position([0.0, 0.0, 1e200]).unwrap();
+        let job = ThreeDJob::new(&camera, &draws, Tiling::default()).unwrap();
+        for threads in [1, 4, 16] {
+            assert_eq!(job.render(threads).unwrap().as_bytes(), expected.as_bytes());
+        }
     }
 
     #[test]

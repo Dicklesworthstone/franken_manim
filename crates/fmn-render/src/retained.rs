@@ -1482,7 +1482,7 @@ fn normalized_or_zero(value: Vec3) -> Vec3 {
     if length > 0.0 && length.is_finite() {
         [value[0] / length, value[1] / length, value[2] / length]
     } else {
-        [0.0; 3]
+        crate::three_d::normalize(value).unwrap_or([0.0; 3])
     }
 }
 
@@ -2003,6 +2003,87 @@ mod tests {
         let entry = stage.get_mut(mob).unwrap();
         entry.buffer = fmn_mobject::stage::with_surface_validity(&entry.buffer, &[1.0; 4]).unwrap();
         assert_eq!(fresh_camera_bits(&stage, &camera), expected);
+    }
+
+    #[test]
+    fn extreme_finite_similarities_preserve_surface_lighting() {
+        let mut object = surface((2, 2));
+        object.uniforms.shading = [0.5, 0.2, 0.3];
+        let shading = object.uniforms.shading;
+        let mut stage = Stage::new();
+        let mob = stage.add(object);
+        stage.add_to_scene(mob).unwrap();
+        let base_camera = camera();
+
+        // The authored plane faces +z. Supply that direction explicitly to
+        // the oracle, independently of retained d_normal_point conversion.
+        let oracle = SurfaceMesh::from_uv_grid(
+            (0..4)
+                .map(|record| {
+                    SurfaceVertex::colored(
+                        record_vec3(&stage, mob, record, "point").unwrap(),
+                        [0.0, 0.0, 1.0],
+                        record_rgba(&stage, mob, record).unwrap(),
+                    )
+                })
+                .collect(),
+            (2, 2),
+        )
+        .unwrap();
+        let mut oracle_draw = crate::SurfaceDraw::new(&oracle);
+        oracle_draw.shading = shading;
+        let draws = [ThreeDDraw::Surface(oracle_draw)];
+        let expected = crate::ThreeDJob::new(&base_camera, &draws, config(1).tiling)
+            .unwrap()
+            .render(1)
+            .unwrap();
+        assert_ne!(
+            expected.as_bytes(),
+            fresh_camera_bits(&Stage::new(), &base_camera)
+        );
+
+        // Power-of-two similarities preserve all projected point bits. Both
+        // placements and camera states remain finite and publicly admissible,
+        // but squaring their normal and lighting vectors over/underflows.
+        for threads in [1, 4, 16] {
+            let mut renderer = RetainedFrameRenderer::new(config(threads)).unwrap();
+            for scale in [
+                1.0,
+                f64::from_bits(423_u64 << 52),
+                f64::from_bits(1623_u64 << 52),
+            ] {
+                stage
+                    .set_placement(
+                        mob,
+                        Placement::new(
+                            [[scale, 0.0, 0.0], [0.0, scale, 0.0], [0.0, 0.0, scale]],
+                            [0.0; 3],
+                        ),
+                    )
+                    .unwrap();
+                let mut camera = base_camera.clone();
+                camera
+                    .frame_mut()
+                    .set_shape(base_camera.frame().shape().map(|value| value * scale))
+                    .unwrap();
+                camera
+                    .set_light_source_position(
+                        base_camera
+                            .light_source_position()
+                            .map(|value| value * scale),
+                    )
+                    .unwrap();
+                renderer.render_with_camera(&stage, &camera).unwrap();
+                assert_eq!(
+                    renderer.frame().as_bytes(),
+                    expected.as_bytes(),
+                    "scale {scale:e}, threads {threads}"
+                );
+                renderer.render_with_camera(&stage, &camera).unwrap();
+                assert!(renderer.last_camera_frame_reused());
+                assert_eq!(renderer.frame().as_bytes(), expected.as_bytes());
+            }
+        }
     }
 
     #[test]
