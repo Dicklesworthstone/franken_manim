@@ -4027,6 +4027,121 @@ fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("prelude_thread_counts", checked))
 }
 
+/// Per-record scatter geometry reaches final SVG publication alongside vectors.
+fn native_dotcloud_svg_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::{SvgRenderError, SvgRenderOptions, render_svg_with_fs};
+    use fmn_config::config::ThreadPolicy;
+    use fmn_geom::{Paint, SvgDocument};
+    use fmn_platform::fs::VirtualFs;
+
+    struct Scatter {
+        glow: bool,
+    }
+    impl fmn::SceneConstruct for Scatter {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let dots = stage.add(
+                fmn_library::DotCloud::new([
+                    [-1.0, 0.0, 0.0],
+                    [0.0, 0.0, 0.0],
+                    [1.0, 0.0, 0.0],
+                    [2.0, 0.0, 0.0],
+                ])
+                .with_radii([0.2, 0.0, 0.4, 0.5])
+                .colored(Srgb::from_rgb8(255, 0, 0), 0.5)
+                .with_glow_factor(if self.glow { 2.0 } else { 0.0 }),
+            )?;
+            let buffer = &mut stage.arena_mut().get_mut(dots).unwrap().buffer;
+            assert!(buffer.write(2, "rgba", &[0.0, 0.0, 1.0, 0.75]));
+            assert!(buffer.write(3, "rgba", &[0.0, 1.0, 0.0, 0.0]));
+            let square = stage.add(fmn_library::Square::new().side_length(0.5))?;
+            stage.set_fill(square, Some(WHITE), Some(1.0), None, false);
+            stage.set_stroke(square, None, Some(0.0), None, None, false);
+            stage.shift(square, [0.0, 2.0, 0.0]);
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+    let options = |path: &str, threads| -> Result<SvgRenderOptions, ScenarioError> {
+        let mut options = SvgRenderOptions::new(path).map_err(|e| fail(e.to_string()))?;
+        options.config.camera.resolution = (160, 90);
+        options.config.camera.fps = 8;
+        options.config.camera.background_opacity = 0.0;
+        options.config.sizes.frame_height = 8.0;
+        options.config.render.threads = ThreadPolicy::Fixed(threads);
+        options.typeset_cache = false;
+        Ok(options)
+    };
+    let fs = Arc::new(VirtualFs::new());
+    let mut baseline = None;
+    let mut renders = 0;
+    for threads in [1, 4, 16] {
+        let path = format!("/scatter-{threads}.svg");
+        let report = render_svg_with_fs(
+            &mut Scatter { glow: false },
+            options(&path, threads)?,
+            fs.clone(),
+        )
+        .map_err(|e| fail(e.to_string()))?;
+        let bytes = fs
+            .read(std::path::Path::new(&path))
+            .map_err(|e| fail(e.to_string()))?;
+        let document = SvgDocument::parse(&bytes).map_err(|e| fail(e.to_string()))?;
+        if report.scene.time.frames() != 2
+            || report.artifact.bytes != bytes.len() as u64
+            || document.shapes.len() != 3
+        {
+            return Err(fail(
+                "scatter SVG omitted visible geometry or retained invisible dots",
+            ));
+        }
+        for (shape, (color, opacity)) in document.shapes.iter().zip([
+            (Srgb::from_rgb8(255, 0, 0), 0.5),
+            (Srgb::from_rgb8(0, 0, 255), 0.75),
+            (WHITE, 1.0),
+        ]) {
+            if shape.style.fill != Some(Paint::Color(color))
+                || shape.style.fill_opacity != opacity
+                || shape.style.stroke.is_some()
+            {
+                return Err(fail(
+                    "scatter SVG changed per-record paint or mixed painter order",
+                ));
+            }
+        }
+        if baseline.as_ref().is_some_and(|previous| previous != &bytes) {
+            return Err(fail("scatter SVG bytes depend on worker count"));
+        }
+        baseline = Some(bytes);
+        renders += 1;
+    }
+    let mut refusals = 0;
+    for (path, glow, max_shapes) in [
+        ("/scatter-limit.svg", false, 2),
+        ("/scatter-glow.svg", true, 32_768),
+    ] {
+        let mut request = options(path, 1)?;
+        request.geometry.max_shapes = max_shapes;
+        let result = render_svg_with_fs(&mut Scatter { glow }, request, fs.clone());
+        if !matches!(result, Err(SvgRenderError::Projection(_)))
+            || fs.exists(std::path::Path::new(path))
+        {
+            return Err(fail("unsupported scatter SVG published an output"));
+        }
+        refusals += 1;
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_dotcloud_svg")
+            .field("renders", renders)
+            .field("visible_dots", 2_u64)
+            .field("refusals", refusals),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("scatter.svg", baseline.unwrap())
+        .with_counter("scatter_svg_renders", renders)
+        .with_counter("scatter_svg_visible_dots", 2)
+        .with_counter("scatter_svg_refusals", refusals))
+}
+
 /// Explicit surround layouts cross both authored source forms, the native
 /// audio export path, and the portable recording path against independent PCM.
 fn native_surround_soundtrack_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -19520,6 +19635,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_dotcloud_svg.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_dotcloud_svg_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("scatter_svg_renders", 3),
+            counter_eq("scatter_svg_visible_dots", 2),
+            counter_eq("scatter_svg_refusals", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_dotcloud_svg",
+            vec![
+                FieldPred::u64_eq("renders", 3),
+                FieldPred::u64_eq("visible_dots", 2),
+                FieldPred::u64_eq("refusals", 2),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_surround_soundtrack.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -21501,13 +21636,13 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             Assertion::ExitCode(0),
             Assertion::FileInventory(vec!["diagram.svg".to_owned()]),
             counter_eq("svg_thread_counts", 3),
-            counter_eq("svg_failure_paths", 3),
+            counter_eq("svg_failure_paths", 4),
         ],
         vec![LogExpect::span_present(
             "e2e.python.svg",
             vec![
                 FieldPred::u64_eq("thread_counts", 3),
-                FieldPred::u64_eq("failure_paths", 3),
+                FieldPred::u64_eq("failure_paths", 4),
             ],
         )],
     ));
@@ -24070,6 +24205,16 @@ fn cli_wav_encoding_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.cli_wav_encoding.v1")
         .expect("CLI WAV encoding scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_dotcloud_svg_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_dotcloud_svg.v1")
+        .expect("native dot-cloud SVG scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

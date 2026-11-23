@@ -11,6 +11,8 @@ use fmn_mobject::{Mob, RenderPrimitive, Stage, StageError};
 
 use crate::Camera;
 
+mod dots;
+
 /// Geometry admitted to a vector document, counting repeated placements.
 #[derive(Clone, Copy, Debug)]
 pub struct SvgLimits {
@@ -79,6 +81,34 @@ fn unsupported(detail: &'static str) -> SvgProjectionError {
     SvgProjectionError::Unsupported(detail)
 }
 
+struct ProjectedFamily {
+    roots: Vec<Mob>,
+    points: usize,
+}
+
+struct GeometryBudget {
+    limits: SvgLimits,
+    points: usize,
+    shapes: usize,
+}
+
+impl GeometryBudget {
+    fn charge(&mut self, points: usize, shapes: usize) -> Result<(), SvgProjectionError> {
+        let points = self.points.checked_add(points);
+        let shapes = self.shapes.checked_add(shapes);
+        match (points, shapes) {
+            (Some(points), Some(shapes))
+                if points <= self.limits.max_points && shapes <= self.limits.max_shapes =>
+            {
+                self.points = points;
+                self.shapes = shapes;
+                Ok(())
+            }
+            _ => Err(SvgProjectionError::GeometryLimit),
+        }
+    }
+}
+
 /// Prepare pixel-centered, y-up vector records for Chisel's SVG serializer.
 ///
 /// The returned Stage is a detached publication view. Its flat root sequence
@@ -94,11 +124,19 @@ fn unsupported(detail: &'static str) -> SvgProjectionError {
 /// in pixels, including the native zoom/fixed-frame mix.
 ///
 /// # Errors
-/// Refuses non-vector draws, varying paint/width, depth, lighting, clip planes,
-/// and perspective-varying or depth-clipped quadratics. Constant homogeneous
-/// weight is required: projecting the controls of a rational curve as an SVG
-/// quadratic would change its shape. Validation and budgets precede geometry
-/// copies; every failure leaves the input Stage unchanged.
+/// Hard `DotCloud`/`TrueDot` discs become separate flat-filled ellipse paths, with
+/// each record's radius and RGBA. Their camera-facing projective silhouette is
+/// retained, including off-center perspective; the quadratic approximation
+/// and native-record rounding together stay within 0.1 output pixel. SVG
+/// viewers own silhouette antialiasing, as they do for ordinary vector paths.
+/// The geometry limits count the expanded paths, including repeated placements.
+///
+/// Refuses other non-vector draws, varying vector paint/width, dot glow, depth,
+/// lighting, clip planes, and perspective-varying or depth-clipped quadratics.
+/// Constant homogeneous weight is required for existing vector controls:
+/// projecting rational controls directly would change their shape. Dots whose
+/// discs cross a depth/horizon plane also refuse. Validation and budgets precede
+/// geometry copies; every failure leaves the input Stage unchanged.
 pub fn project_svg_stage(
     stage: &Stage,
     camera: &Camera,
@@ -106,16 +144,43 @@ pub fn project_svg_stage(
 ) -> Result<Stage, SvgProjectionError> {
     let sequence = admitted_sequence(stage, limits)?;
     let mut projected = Stage::new();
-    let mut mapped = HashMap::<Mob, Mob>::new();
+    let mut mapped = HashMap::<Mob, ProjectedFamily>::new();
     mapped.try_reserve(sequence.len())?;
     let mut roots = Vec::new();
     roots.try_reserve_exact(sequence.len())?;
+    let mut budget = GeometryBudget {
+        limits,
+        points: 0,
+        shapes: 0,
+    };
     let (width, height) = camera.pixel_shape();
     for source in sequence {
-        if let Some(&target) = mapped.get(&source) {
-            roots.push(target);
+        if let Some(family) = mapped.get(&source) {
+            budget.charge(family.points, family.roots.len())?;
+            roots.try_reserve(family.roots.len())?;
+            roots.extend_from_slice(&family.roots);
             continue;
         }
+        if stage
+            .get(source)
+            .ok_or(StageError::StaleHandle)?
+            .render_primitive()
+            == RenderPrimitive::DotCloud
+        {
+            let family = dots::project(stage, source, camera, &mut budget, &mut projected)?;
+            roots.try_reserve(family.roots.len())?;
+            roots.extend_from_slice(&family.roots);
+            mapped.insert(source, family);
+            continue;
+        }
+        budget.charge(
+            stage
+                .get(source)
+                .ok_or(StageError::StaleHandle)?
+                .buffer
+                .len(),
+            1,
+        )?;
         let points = stage
             .get_points(source)
             .ok_or_else(|| unsupported("stale point records"))?;
@@ -178,7 +243,13 @@ pub fn project_svg_stage(
                 return Err(unsupported("invalid vector style records"));
             }
         }
-        mapped.insert(source, target);
+        mapped.insert(
+            source,
+            ProjectedFamily {
+                roots: vec![target],
+                points: pixels.len(),
+            },
+        );
         roots.push(target);
     }
     projected.add_many_to_scene(&roots)?;
@@ -197,11 +268,16 @@ fn admitted_sequence(stage: &Stage, limits: SvgLimits) -> Result<Vec<Mob>, SvgPr
             points = points
                 .checked_add(entry.buffer.len())
                 .ok_or(SvgProjectionError::GeometryLimit)?;
-            if sequence.len() >= limits.max_shapes || points > limits.max_points {
+            if points > limits.max_points {
                 return Err(SvgProjectionError::GeometryLimit);
             }
-            if entry.render_primitive() != RenderPrimitive::Vector {
-                return Err(unsupported("only quadratic vector families are supported"));
+            if !matches!(
+                entry.render_primitive(),
+                RenderPrimitive::Vector | RenderPrimitive::DotCloud
+            ) {
+                return Err(unsupported(
+                    "only quadratic vector families and hard dots are supported",
+                ));
             }
             let uniforms = entry.uniforms();
             if uniforms.depth_test
@@ -212,21 +288,25 @@ fn admitted_sequence(stage: &Stage, limits: SvgLimits) -> Result<Vec<Mob>, SvgPr
                     "depth, lighting and user clip planes require Lumen",
                 ));
             }
-            for (name, width) in [("fill_rgba", 4), ("stroke_rgba", 4), ("stroke_width", 1)] {
-                let values = entry
-                    .buffer
-                    .read_column(name)
-                    .ok_or_else(|| unsupported("non-vector record schema"))?;
-                if values.len() != entry.buffer.len() * width
-                    || !values.iter().all(|v| v.is_finite())
-                {
-                    return Err(unsupported("invalid vector style records"));
-                }
-                if values
-                    .chunks_exact(width)
-                    .any(|row| row != &values[..width])
-                {
-                    return Err(unsupported("per-vertex paint and stroke-width variation"));
+            if entry.render_primitive() == RenderPrimitive::DotCloud {
+                dots::validate(entry)?;
+            } else {
+                for (name, width) in [("fill_rgba", 4), ("stroke_rgba", 4), ("stroke_width", 1)] {
+                    let values = entry
+                        .buffer
+                        .read_column(name)
+                        .ok_or_else(|| unsupported("non-vector record schema"))?;
+                    if values.len() != entry.buffer.len() * width
+                        || !values.iter().all(|v| v.is_finite())
+                    {
+                        return Err(unsupported("invalid vector style records"));
+                    }
+                    if values
+                        .chunks_exact(width)
+                        .any(|row| row != &values[..width])
+                    {
+                        return Err(unsupported("per-vertex paint and stroke-width variation"));
+                    }
                 }
             }
             sequence.try_reserve(1)?;

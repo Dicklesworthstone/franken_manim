@@ -38,13 +38,29 @@ native painter order and shared-object placements. `stroke_behind` emits two
 adjacent vector paint passes in the appropriate order. Camera backgrounds are
 ordinary vector rectangles; fully transparent backgrounds add no geometry.
 
-Flat fill/stroke colors and native text/TeX outlines are supported. The current
-route refuses image/texture/surface/point-cloud primitives, lighting, depth tests,
-user clip planes, per-vertex paint or variable-width strokes, and paths whose
-perspective projection has varying homogeneous weight. Those are explicit
-capability errors, not silently flattened approximations; PNG remains available
-for Lumen raster output. A nonzero camera tilt may therefore refuse world-space
-curves while a fixed-frame overlay remains representable.
+Flat fill/stroke colors, native text/TeX outlines, and hard `DotCloud`/`TrueDot`
+discs are supported. Each visible dot becomes its own filled quadratic path,
+preserving its individual radius, color, opacity and place in painter order.
+Zero-radius and fully transparent dots add no geometry. Point transforms move
+dot centers; radius follows the native radius data, so a nonuniform stretch does
+not invent a wider disc. The same support is available through the native Rust
+`render_svg_with_fs` and `render_svg_camera_with_fs` entry points.
+
+The dot silhouette uses the native camera-facing billboard and its full
+projective ellipse, including ordinary off-center perspective, camera pan/zoom,
+and fractional fixed-frame attachment. It starts with BN-09's 16 quadratic
+components per full ellipse, doubling when necessary to keep curve error within
+0.05 output pixel. Rounding into native point records is checked against another
+0.05 pixel bound. This conversion preserves the silhouette within 0.1 pixel; the
+SVG viewer supplies edge antialiasing. It does not embed raster pixels.
+
+The route refuses image/texture/surface primitives, radial dot glow (including
+`GlowDot`/`GlowDots`), lighting, depth tests, user clip planes, per-vertex vector
+paint or variable-width strokes, and vector paths whose perspective projection
+has varying homogeneous weight. A dot disc that crosses a camera depth or
+horizon plane also refuses. PNG remains available for those Lumen raster
+effects. A nonzero camera tilt may therefore refuse world-space vector curves
+while an unlit dot cloud or fixed-frame overlay remains representable.
 
 Stroke widths follow the existing native SVG export convention (SVG pixel
 widths). The SVG viewer owns its rasterization and compositing. This is not a
@@ -62,9 +78,12 @@ An exception, unsupported scene, invalid geometry or exceeded budget publishes
 nothing. The source scene's geometry is never replaced by projected coordinates:
 projection is applied to a private native copy-on-write snapshot.
 
-The vector route admits at most 32,768 drawn point-carrying entries, 262,144
-point records, and 64 MiB of encoded SVG, with dimensions 1–16,384 and thread
-budgets 1–96. Thread count does not select an alternative SVG serializer.
+The vector route admits at most 32,768 projected shapes, 262,144 source records
+and 262,144 expanded vector point records, and 64 MiB of encoded SVG, with
+dimensions 1–16,384 and thread budgets 1–96. Dot expansion and repeated shared
+placements count toward those limits: an ordinary visible dot uses one shape
+and 33 point records before any screen-error refinement. Thread count does not
+select an alternative SVG serializer.
 Video encoder, pixel-format and ffmpeg options do not apply to SVG. The existing
 `-s` switch specifically requests a final PNG; use `--format svg` on its own for
 a vector still.

@@ -133,6 +133,22 @@ fn finite3(value: Vec3) -> bool {
     value.iter().all(|component| component.is_finite())
 }
 
+/// The native disc's normal and radius-scaled billboard axes. SVG publication
+/// shares this construction: point placement moves the center, not the radius.
+pub(crate) fn dot_billboard_axes(location: Vec3, center: Vec3, radius: f64) -> [Vec3; 3] {
+    let to_camera = normalize(sub(location, center)).unwrap_or([0.0, 0.0, 1.0]);
+    let mut right = normalize(cross([0.0, 1.0, 1.0], to_camera));
+    if right.is_none() {
+        right = normalize(cross([1.0, 0.0, 0.0], to_camera));
+    }
+    let right = mul(right.unwrap_or([1.0, 0.0, 0.0]), radius);
+    let up = mul(
+        normalize(cross(to_camera, right)).unwrap_or([0.0, 1.0, 0.0]),
+        radius,
+    );
+    [to_camera, right, up]
+}
+
 fn rgba_array(color: LinearRgba) -> [f64; 4] {
     [color.r, color.g, color.b, color.a]
 }
@@ -4114,16 +4130,7 @@ fn compile_dot_into<'a>(
     if draw.anti_alias_width < 0.0 {
         return Err(ThreeDError::InvalidAntiAliasWidth);
     }
-    let to_camera = normalize(sub(location, draw.center)).unwrap_or([0.0, 0.0, 1.0]);
-    let mut right = normalize(cross([0.0, 1.0, 1.0], to_camera));
-    if right.is_none() {
-        right = normalize(cross([1.0, 0.0, 0.0], to_camera));
-    }
-    let right = mul(right.unwrap_or([1.0, 0.0, 0.0]), draw.radius);
-    let up = mul(
-        normalize(cross(to_camera, right)).unwrap_or([0.0, 1.0, 0.0]),
-        draw.radius,
-    );
+    let [to_camera, right, up] = dot_billboard_axes(location, draw.center, draw.radius);
     let corner = |i: f64, j: f64| WorldVertex {
         attributes: Attributes {
             world: add(draw.center, add(mul(right, i), mul(up, j))),

@@ -66,6 +66,52 @@ with tempfile.TemporaryDirectory(prefix='fmn-native-svg-') as directory:
     assert elements[0].attrib['fill'] == 'none'
     assert elements[1].attrib['stroke'] == 'none'
 
+    class Scatter(m.Scene):
+        def construct(self):
+            self.camera.background_rgba[3] = 0
+            self.dots = m.DotCloud([[-1, 0, 0], [1, 0, 0], [3, 0, 0], [4, 0, 0]])
+            self.dots.set_radii([0.125, 0.25, 0, 0.5])
+            self.dots.data['rgba'][:] = [[1, 0, 0, 0.25], [0, 0, 1, 0.75],
+                                        [1, 1, 1, 1], [1, 1, 1, 0]]
+            self.dots.stretch(2, 0, about_point=m.ORIGIN)
+            self.add(self.dots, m.TrueDot([0, -1.5, 0], radius=0.15,
+                                         color=m.GREEN, opacity=0.6), m.Square(side_length=0.25))
+            self.wait(0.125)
+            self.dots.shift(0.25 * m.RIGHT)
+
+    scatter_bytes = None
+    for threads in (1, 4, 16):
+        scatter = root / f'scatter-{threads}.svg'
+        scene = Scatter()
+        receipt = scene.render(scatter, resolution=(160, 90), fps=8, threads=threads)
+        assert receipt.engine == 'native-svg'
+        _, elements = paths(scatter)
+        assert len(elements) == 4, 'two painted records, TrueDot, then the vector overlay'
+        assert elements[0].attrib['fill'].lower() == '#ff0000'
+        assert elements[1].attrib['fill'].lower() == '#0000ff'
+        assert float(elements[0].attrib['fill-opacity']) == 0.25
+        assert float(elements[1].attrib['fill-opacity']) == 0.75
+        assert elements[0].attrib['stroke'] == elements[1].attrib['stroke'] == 'none'
+        assert abs(float(elements[2].attrib['fill-opacity']) - 0.6) < 1e-6
+        assert elements[3].attrib['stroke'] != 'none'
+        assert abs(scene.dots.get_points()[0, 0] + 1.75) < 1e-5
+        if scatter_bytes is None:
+            scatter_bytes = scatter.read_bytes()
+        else:
+            assert scatter.read_bytes() == scatter_bytes, 'scatter vector bytes depend on threads'
+
+    class Glow(m.Scene):
+        def construct(self):
+            self.add(m.GlowDot())
+    glow = root / 'glow.svg'
+    try:
+        Glow().render(glow, resolution=(160, 90), fps=8)
+    except Exception as error:
+        assert 'SVG export' in str(error) and 'dot glow' in str(error)
+    else:
+        raise AssertionError('SVG discarded the native radial glow profile')
+    assert not glow.exists()
+
     class Failed(m.Scene):
         def construct(self):
             self.add(m.Circle())
@@ -108,6 +154,6 @@ with tempfile.TemporaryDirectory(prefix='fmn-native-svg-') as directory:
     assert (root / 'batch' / 'second.svg').exists()
     _svg_document = first.read_bytes()
     _svg_thread_counts = 3
-    _svg_failure_paths = 3
+    _svg_failure_paths = 4
 
 print('native SVG output acceptance passed')

@@ -284,7 +284,7 @@ mod tests {
     fn portal_svg_acceptance() {
         let report = run_portal_gauntlet_svg().unwrap();
         assert_eq!(report.thread_counts, 3);
-        assert_eq!(report.failure_paths, 3);
+        assert_eq!(report.failure_paths, 4);
         assert!(!report.document.is_empty());
     }
 }

@@ -176,6 +176,134 @@ fn native_svg_camera_samples_final_rig_and_keeps_fixed_overlay() {
     }
 }
 
+struct Scatter;
+
+impl SceneConstruct for Scatter {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let dots = stage.add(
+            DotCloud::new([
+                [-1.0, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [3.0, 0.0, 0.0],
+                [4.0, 0.0, 0.0],
+            ])
+            .with_radii([0.125, 0.25, 0.0, 0.5]),
+        )?;
+        for (row, rgba) in [
+            [1.0, 0.0, 0.0, 0.25],
+            [0.0, 0.0, 1.0, 0.75],
+            [1.0; 4],
+            [1.0, 1.0, 1.0, 0.0],
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(
+                stage
+                    .arena_mut()
+                    .get_mut(dots)
+                    .unwrap()
+                    .buffer
+                    .write(row, "rgba", rgba)
+            );
+        }
+        // A point transform moves centers without scaling their radius data.
+        stage
+            .arena_mut()
+            .stretch_about(dots, 2.0, 0, Some([0.0; 3]), None);
+        stage.add(
+            true_dot([0.0, -1.5, 0.0])
+                .with_radius(0.15)
+                .colored(GREEN, 0.6),
+        )?;
+        stage.add(Square::new().side_length(0.25))?;
+        stage.wait(0.125)?;
+        // The authored final state, after the last capture, is the SVG input.
+        stage.shift(dots, [0.25, 0.0, 0.0]);
+        Ok(())
+    }
+}
+
+#[test]
+fn native_svg_exports_scatter_paint_and_projective_radii_in_final_painter_order() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut baseline = None;
+    for threads in [1, 4, 16] {
+        let path = format!("/scatter-{threads}.svg");
+        let mut request = options(&path);
+        request.config.render.threads = ThreadPolicy::Fixed(threads);
+        let camera = Camera::new(request.camera_config().unwrap()).unwrap();
+        let report = render_svg_with_fs(&mut Scatter, request, fs.clone()).unwrap();
+        assert_eq!(report.scene.time.frames(), 1);
+        let bytes = fs.read(Path::new(&path)).unwrap();
+        let document = SvgDocument::parse(&bytes).unwrap();
+        assert_eq!(
+            document.shapes.len(),
+            5,
+            "background, two colored dots, TrueDot, vector overlay"
+        );
+        for (index, (x, radius, color, alpha)) in [
+            (-1.75_f64, 0.125_f64, Srgb::from_rgb8(255, 0, 0), 0.25),
+            (2.25, 0.25, Srgb::from_rgb8(0, 0, 255), 0.75),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let shape = &document.shapes[index + 1];
+            assert_eq!(shape.style.fill, Some(Paint::Color(color)));
+            assert_eq!(shape.style.fill_opacity, alpha);
+            assert!(shape.style.stroke.is_none());
+            // Independent perspective-disc principal-axis formulas; these
+            // detect accidental radius scaling and center-only projection.
+            let d = camera.location()[2];
+            let scale = 1.0 / camera.pixel_size();
+            let length = (x * x + d * d).sqrt();
+            let h = 1.0 - radius * radius * x * x / (length * length * d * d);
+            let expected_center = 80.0 + scale * x * (1.0 + radius * radius / (d * d * h));
+            let actual = center(&document, index + 1);
+            assert!((actual[0] - expected_center).abs() < 1e-4);
+            assert!((actual[1] - 45.0).abs() < 1e-4);
+            let rx = scale * radius * length / (d * h);
+            let points = shape.path.points();
+            let min = points.iter().map(|p| p[0]).fold(f64::INFINITY, f64::min);
+            let max = points
+                .iter()
+                .map(|p| p[0])
+                .fold(f64::NEG_INFINITY, f64::max);
+            assert!(((max - min) / 2.0 - rx).abs() < 0.1);
+        }
+        assert!((document.shapes[3].style.fill_opacity - 0.6).abs() < 1e-6);
+        assert!(document.shapes[4].style.stroke.is_some());
+        if let Some(baseline) = &baseline {
+            assert_eq!(&bytes, baseline);
+        } else {
+            baseline = Some(bytes);
+        }
+    }
+}
+
+#[test]
+fn native_svg_scatter_refuses_expanded_geometry_and_glow_without_publication() {
+    let fs = Arc::new(VirtualFs::new());
+    let mut request = options("/scatter-limit.svg");
+    request.geometry.max_shapes = 3;
+    assert!(matches!(
+        render_svg_with_fs(&mut Scatter, request, fs.clone()),
+        Err(SvgRenderError::Projection(_))
+    ));
+    assert!(!fs.exists(Path::new("/scatter-limit.svg")));
+    struct Glow;
+    impl SceneConstruct for Glow {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.add(glow_dot([0.0; 3]))?;
+            Ok(())
+        }
+    }
+    let error = render_svg_with_fs(&mut Glow, options("/glow.svg"), fs.clone()).unwrap_err();
+    assert!(error.to_string().contains("dot glow"));
+    assert!(!fs.exists(Path::new("/glow.svg")));
+}
+
 struct Refused(u8);
 
 impl SceneConstruct for Refused {
