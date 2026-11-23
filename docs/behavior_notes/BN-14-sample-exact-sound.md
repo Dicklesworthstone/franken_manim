@@ -210,6 +210,15 @@ timeline before the relative offset is applied. `add_sound` calls made while
 skipping remain an early no-op, so their paths are not read. The mix spans at
 least the emitted picture and retains a longer cue tail.
 
+Native Rust MP4/MOV renders and scene-bundle exports refuse scenes that combine
+sound cues with explicit `show()` captures. Each `show()` inserts a picture frame
+without advancing the source clock; cue timestamps alone cannot distinguish a
+cue authored before that capture from one authored after it. Padding the audio
+at the end would leave later cues misaligned. The refusal precedes sound-asset
+reads and publication. Use `wait` for a timed hold, or let a static scene receive
+its automatic terminal still. Soundless `show()` captures and automatic terminal
+stills with audio remain supported, including camera scenes and compact bundles.
+
 The CLI's `--subdivide` already performs a deterministic counting pass for
 its compiled-in native programs. It also collects that pass's complete cue
 list and decodes it once before starting the clips. Each clip receives the

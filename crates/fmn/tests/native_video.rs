@@ -276,6 +276,393 @@ fn scratch(name: &str) -> PathBuf {
     root.canonicalize().unwrap()
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShowPosition {
+    BeforeCue,
+    AfterCue,
+    AfterWait,
+}
+
+struct ShownChime {
+    sound: Option<PathBuf>,
+    show: ShowPosition,
+}
+
+impl SceneConstruct for ShownChime {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        stage.add(Circle::new().radius(0.5).color(BLUE))?;
+        if self.show == ShowPosition::BeforeCue {
+            stage.show()?;
+        }
+        stage.wait_frames(2)?;
+        if let Some(sound) = &self.sound {
+            stage
+                .scene_mut()
+                .add_sound(sound.clone(), 0.0, None, None)?;
+        }
+        if self.show == ShowPosition::AfterCue {
+            stage.show()?;
+        }
+        stage.wait_frames(2)?;
+        if self.show == ShowPosition::AfterWait {
+            stage.show()?;
+        }
+        Ok(())
+    }
+}
+
+fn render_video_program<P: SceneConstruct>(
+    mut program: P,
+    camera: bool,
+    options: RenderOptions,
+    fs: Arc<dyn FileSystem>,
+) -> Result<fmn::rendering::RenderReport, RenderError> {
+    if camera {
+        fmn::rendering::render_camera_with_fs(
+            |scene, config| Ok((program, fmn_scene::CameraRig::new(scene, config)?)),
+            options,
+            fs,
+        )
+    } else {
+        render_with_fs(&mut program, options, fs)
+    }
+}
+
+// Use the platform's bounded scripted process for the refusal itself. No
+// installed ffmpeg or encoded artifact is needed: the scene must fail before
+// the video stream can prepare its output or decode/mux any sound.
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod show_audio_capability {
+    use super::*;
+    use fmn_platform::fs::{FsError, FsNodeKind};
+    use fmn_platform::process::{
+        ProcessCancellation, ProcessError, ProcessMechanism, ProcessOutcome, ProcessRunner,
+        ProcessSpec, ProcessStdinLimits, ProcessTermination, RunningProcess, ScriptedRunner,
+    };
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    const MISSING_CUE: &str = "/missing-cue.wav";
+
+    struct CueFs {
+        files: VirtualFs,
+        cue_accesses: AtomicUsize,
+    }
+
+    impl CueFs {
+        fn observed(&self, path: &Path) -> &VirtualFs {
+            if path == Path::new(MISSING_CUE) {
+                self.cue_accesses.fetch_add(1, Ordering::SeqCst);
+            }
+            &self.files
+        }
+    }
+
+    impl FileSystem for CueFs {
+        fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+            self.observed(path).node_kind_no_follow(path)
+        }
+        fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+            self.observed(path).create_dir(path)
+        }
+        fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+            self.observed(path).read(path)
+        }
+        fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+            self.observed(path).read_bounded(path, max_bytes)
+        }
+        fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+            self.observed(path).write_atomic(path, bytes)
+        }
+        fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+            self.observed(path).create_new(path, bytes)
+        }
+        fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+            self.observed(path).remove_file(path)
+        }
+        fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+            self.observed(path).remove_dir_all(path)
+        }
+        fn exists(&self, path: &Path) -> bool {
+            self.observed(path).exists(path)
+        }
+        fn list_dir(&self, path: &Path) -> Result<Vec<PathBuf>, FsError> {
+            self.observed(path).list_dir(path)
+        }
+        fn count_dir_entries_bounded(
+            &self,
+            path: &Path,
+            max_entries: usize,
+        ) -> Result<usize, FsError> {
+            self.observed(path)
+                .count_dir_entries_bounded(path, max_entries)
+        }
+    }
+
+    struct VideoRunner;
+
+    impl ProcessRunner for VideoRunner {
+        fn mechanism(&self) -> ProcessMechanism {
+            ProcessMechanism::Scripted
+        }
+
+        fn start(
+            &self,
+            spec: &ProcessSpec,
+            cancellation: ProcessCancellation,
+            stdin_limits: ProcessStdinLimits,
+        ) -> Result<Box<dyn RunningProcess>, ProcessError> {
+            let stdout = if spec.argv == ["-version"] {
+                b"ffmpeg version show-audio-fixture\n".to_vec()
+            } else if spec.argv.iter().any(|arg| arg == "-encoders") {
+                b"Encoders:\n ------\n V..... libx264 fixture H.264 encoder\n".to_vec()
+            } else if spec.argv.iter().any(|arg| arg == "encoder=libx264") {
+                b"Encoder libx264 [Fixture encoder]:\n    Supported pixel formats: yuv420p nv12\n"
+                    .to_vec()
+            } else {
+                assert!(spec.argv.windows(2).any(|pair| pair == ["-f", "rawvideo"]));
+                assert!(spec.argv.windows(2).any(|pair| pair == ["-i", "pipe:0"]));
+                assert!(spec.argv.windows(2).any(|pair| pair == ["-c:v", "libx264"]));
+                Vec::new()
+            };
+            let mut runner = ScriptedRunner::new();
+            runner.script(
+                &spec.program,
+                ProcessOutcome {
+                    termination: ProcessTermination::Exited(Some(0)),
+                    stdout,
+                    stderr: Vec::new(),
+                },
+            );
+            runner.start(spec, cancellation, stdin_limits)
+        }
+    }
+
+    // The same minimal native containers used by the output boundary tests.
+    // They are structurally admitted but never executed by ScriptedRunner.
+    fn native_image() -> Vec<u8> {
+        #[cfg(target_os = "linux")]
+        {
+            let mut bytes = vec![0_u8; 120];
+            bytes[..4].copy_from_slice(b"\x7fELF");
+            bytes[4..7].copy_from_slice(&[2, 1, 1]);
+            bytes[16..18].copy_from_slice(&3_u16.to_le_bytes());
+            let machine = if cfg!(target_arch = "x86_64") {
+                62_u16
+            } else {
+                183_u16
+            };
+            bytes[18..20].copy_from_slice(&machine.to_le_bytes());
+            bytes[20..24].copy_from_slice(&1_u32.to_le_bytes());
+            bytes[24..32].copy_from_slice(&0x1000_u64.to_le_bytes());
+            bytes[32..40].copy_from_slice(&64_u64.to_le_bytes());
+            bytes[52..54].copy_from_slice(&64_u16.to_le_bytes());
+            bytes[54..56].copy_from_slice(&56_u16.to_le_bytes());
+            bytes[56..58].copy_from_slice(&1_u16.to_le_bytes());
+            let segment = &mut bytes[64..];
+            segment[..4].copy_from_slice(&1_u32.to_le_bytes());
+            segment[4..8].copy_from_slice(&5_u32.to_le_bytes());
+            segment[16..24].copy_from_slice(&0x1000_u64.to_le_bytes());
+            segment[32..40].copy_from_slice(&120_u64.to_le_bytes());
+            segment[40..48].copy_from_slice(&120_u64.to_le_bytes());
+            segment[48..56].copy_from_slice(&0x1000_u64.to_le_bytes());
+            bytes
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let mut bytes = vec![0_u8; 201];
+            bytes[..4].copy_from_slice(&[0xcf, 0xfa, 0xed, 0xfe]);
+            let cpu = if cfg!(target_arch = "x86_64") {
+                0x0100_0007_u32
+            } else {
+                0x0100_000c_u32
+            };
+            let subtype = if cfg!(target_arch = "x86_64") {
+                3_u32
+            } else {
+                0_u32
+            };
+            bytes[4..8].copy_from_slice(&cpu.to_le_bytes());
+            bytes[8..12].copy_from_slice(&subtype.to_le_bytes());
+            bytes[12..16].copy_from_slice(&2_u32.to_le_bytes());
+            bytes[16..20].copy_from_slice(&3_u32.to_le_bytes());
+            bytes[20..24].copy_from_slice(&168_u32.to_le_bytes());
+            let pagezero = &mut bytes[32..104];
+            pagezero[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+            pagezero[4..8].copy_from_slice(&72_u32.to_le_bytes());
+            pagezero[8..18].copy_from_slice(b"__PAGEZERO");
+            pagezero[32..40].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+            let text = &mut bytes[104..176];
+            text[..4].copy_from_slice(&0x19_u32.to_le_bytes());
+            text[4..8].copy_from_slice(&72_u32.to_le_bytes());
+            text[8..14].copy_from_slice(b"__TEXT");
+            text[24..32].copy_from_slice(&0x1_0000_0000_u64.to_le_bytes());
+            text[32..40].copy_from_slice(&201_u64.to_le_bytes());
+            text[48..56].copy_from_slice(&201_u64.to_le_bytes());
+            text[56..60].copy_from_slice(&7_u32.to_le_bytes());
+            text[60..64].copy_from_slice(&5_u32.to_le_bytes());
+            let entry = &mut bytes[176..200];
+            entry[..4].copy_from_slice(&0x8000_0028_u32.to_le_bytes());
+            entry[4..8].copy_from_slice(&24_u32.to_le_bytes());
+            entry[8..16].copy_from_slice(&200_u64.to_le_bytes());
+            bytes[200] = 0xc3;
+            bytes
+        }
+    }
+
+    #[test]
+    fn explicit_show_with_audio_refuses_before_missing_source_or_publication() {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = PathBuf::from("/tmp").canonicalize().unwrap().join(format!(
+            "fmn-native-show-audio-{}-{stamp}",
+            std::process::id(),
+        ));
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let tool = root.join("ffmpeg");
+        std::fs::write(&tool, native_image()).unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let capability = FfmpegCapability {
+            runner: Arc::new(VideoRunner),
+            locator: Arc::new(StdFfmpegLocator::default()),
+            workdir_root: root.clone(),
+        };
+        let fs = Arc::new(CueFs {
+            files: VirtualFs::new(),
+            cue_accesses: AtomicUsize::new(0),
+        });
+        for camera in [false, true] {
+            for (format, extension) in [(RenderFormat::Mp4, "mp4"), (RenderFormat::Mov, "mov")] {
+                for show in [
+                    ShowPosition::BeforeCue,
+                    ShowPosition::AfterCue,
+                    ShowPosition::AfterWait,
+                ] {
+                    for existing in [false, true] {
+                        let destination =
+                            root.join(format!("{camera}-{show:?}-{existing}.{extension}"));
+                        if existing {
+                            std::fs::write(&destination, b"keep existing artifact").unwrap();
+                        }
+                        let mut request = options(&destination, format);
+                        request.config.camera.fps = 8;
+                        request.config.camera.resolution = (32, 24);
+                        request.config.determinism.mode =
+                            fmn_config::config::DeterminismMode::Standard;
+                        request.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(1);
+                        request.config.file_writer.ffmpeg_bin = tool.to_str().unwrap().to_owned();
+                        request.ffmpeg = Some(capability.clone());
+                        request.typeset_cache = false;
+                        let error = render_video_program(
+                            ShownChime {
+                                sound: Some(MISSING_CUE.into()),
+                                show,
+                            },
+                            camera,
+                            request,
+                            fs.clone(),
+                        )
+                        .unwrap_err();
+                        assert!(
+                            matches!(error, RenderError::Capability(message)
+                                if message.contains("explicit show") && message.contains("play/wait")),
+                            "camera={camera}, format={format:?}, show={show:?}: {error}",
+                        );
+                        assert_eq!(fs.cue_accesses.load(Ordering::SeqCst), 0);
+                        if existing {
+                            assert_eq!(
+                                std::fs::read(&destination).unwrap(),
+                                b"keep existing artifact",
+                            );
+                        } else {
+                            assert!(!destination.exists());
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn soundless_show_and_audible_terminal_stills_keep_native_video_semantics() {
+    const TEST: &str = "soundless_show_and_audible_terminal_stills_keep_native_video_semantics";
+    let Some(capability) = host_capability() else {
+        fmn_core::test_inputs::skip_or_fail(TEST, "an ffmpeg executable on PATH");
+        return;
+    };
+    struct TerminalChime(PathBuf);
+    impl SceneConstruct for TerminalChime {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.add(Circle::new().radius(0.5).color(BLUE))?;
+            stage
+                .scene_mut()
+                .add_sound(self.0.clone(), 0.0, None, None)?;
+            Ok(())
+        }
+    }
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let root = scratch(&format!("show-controls-{stamp}"));
+    let tone = root.join("short.wav");
+    std::fs::write(
+        &tone,
+        fmn_codec::encode_wav(1, 48_000, fmn_codec::SampleFormat::F32, &[0.25]),
+    )
+    .unwrap();
+    for camera in [false, true] {
+        for (format, extension) in [(RenderFormat::Mp4, "mp4"), (RenderFormat::Mov, "mov")] {
+            for terminal in [false, true] {
+                let destination = root.join(format!("{camera}-{terminal}.{extension}"));
+                let mut request = options(&destination, format);
+                request.config.camera.fps = 8;
+                request.ffmpeg = Some(capability.clone());
+                request.typeset_cache = false;
+                let report = if terminal {
+                    render_video_program(
+                        TerminalChime(tone.clone()),
+                        camera,
+                        request,
+                        Arc::new(StdFs),
+                    )
+                } else {
+                    render_video_program(
+                        ShownChime {
+                            sound: None,
+                            show: ShowPosition::BeforeCue,
+                        },
+                        camera,
+                        request,
+                        Arc::new(StdFs),
+                    )
+                }
+                .unwrap();
+                let handlers = handler_types(&std::fs::read(&destination).unwrap());
+                assert!(handlers.contains(b"vide"));
+                assert_eq!(handlers.contains(b"soun"), terminal);
+                assert_eq!(report.artifact.frame_count, if terminal { 1 } else { 5 });
+                assert_eq!(report.scene.time.frames(), if terminal { 0 } else { 4 });
+                assert_eq!(report.artifact.ffmpeg.len(), if terminal { 2 } else { 1 });
+                if terminal {
+                    let audio = report.artifact.soundtrack.unwrap();
+                    assert_eq!(audio.cues_mixed, 1);
+                    assert_eq!(audio.sample_frames * 8, u64::from(audio.sample_rate));
+                } else {
+                    assert!(report.artifact.soundtrack.is_none());
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn hdr_pq_native_movie_preserves_color_signalling_through_soundtrack_mux() {
     const TEST: &str = "hdr_pq_native_movie_preserves_color_signalling_through_soundtrack_mux";

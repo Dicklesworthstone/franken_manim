@@ -736,7 +736,9 @@ impl std::error::Error for RenderError {
 /// the completed scene once, after animation cleanup and scene teardown, while
 /// preserving normal playback and updater execution. Sound cues (`Scene::add_sound`) are
 /// mixed natively and muxed into MP4/MOV video; image and Y4M outputs carry no
-/// audio.
+/// audio. Explicit `show()` captures combined with sound cues are refused:
+/// those extra picture frames do not advance authored cue times. Use play/wait
+/// or an automatic terminal still for video with a soundtrack.
 ///
 /// Video formats use [`RenderOptions::ffmpeg`] or, when it is unset and the
 /// `ffmpeg` feature is enabled, the host's ffmpeg capability.
@@ -898,6 +900,7 @@ struct RenderSink {
     plan: ExecutionPlan,
     next_sequence: u64,
     deferred_captures: u64,
+    saw_show: bool,
     max_frames: u64,
     failure: Option<RenderError>,
 }
@@ -1355,6 +1358,7 @@ impl RenderSink {
             plan,
             next_sequence: 0,
             deferred_captures: 0,
+            saw_show: false,
             max_frames: options.max_frames,
             failure: None,
         })
@@ -1434,6 +1438,7 @@ impl RenderSink {
                     Some(scene) => video.mix(
                         scene,
                         self.next_sequence,
+                        self.saw_show,
                         self.plan.output_team.threads().max(1),
                     )?,
                     None => recorded_mix,
@@ -1504,11 +1509,20 @@ impl VideoSession {
         &mut self,
         scene: &fmn_scene::Scene,
         frames_published: u64,
+        saw_show: bool,
         threads: usize,
     ) -> Result<Option<MixReport>, RenderError> {
         let requests = scene.sound_requests();
         if requests.is_empty() {
             return Ok(None);
+        }
+        // Explicit show captures add picture frames without advancing the
+        // source clock. Sound cues do not retain their ordering relative to
+        // those captures, so padding the mix cannot recover their placement.
+        if saw_show {
+            return Err(RenderError::Capability(
+                "soundtrack rendering cannot retime explicit show captures; use play/wait or a terminal still",
+            ));
         }
         let config = MixerConfig::default();
         let time = scene.time();
@@ -1699,7 +1713,7 @@ impl SceneSink for RenderSink {
 
     fn capture(
         &mut self,
-        _reason: CaptureReason,
+        reason: CaptureReason,
         packet: FramePacket,
     ) -> Result<(), IntegrationError> {
         if let Some(error) = &self.failure {
@@ -1718,6 +1732,7 @@ impl SceneSink for RenderSink {
         };
         if result.is_ok() && !deferred {
             self.next_sequence += 1;
+            self.saw_show |= reason == CaptureReason::Show;
         }
         result.map_err(|error| {
             let message = error.to_string();

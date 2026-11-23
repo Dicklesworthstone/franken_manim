@@ -35,6 +35,8 @@ use crate::{ProgramAdapter, SceneConstruct};
 /// values or foreign handles fail without publishing a partial artifact.
 /// Factory/scene errors retain their typed sources; unwinding cancels and
 /// joins all native workers before control returns to the caller.
+/// Video with sound cues and explicit `show` captures is refused because
+/// those extra picture frames have no unambiguous soundtrack timing.
 pub fn render_camera<F, P>(factory: F, options: RenderOptions) -> Result<RenderReport, RenderError>
 where
     F: FnOnce(&mut Scene, &CameraConfig) -> crate::Result<(P, CameraRig)>,
@@ -208,7 +210,11 @@ impl fmn_scene::SceneSink for RigSink {
         })
     }
 
-    fn capture(&mut self, _: CaptureReason, packet: FramePacket) -> Result<(), IntegrationError> {
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
         if let Some(error) = &self.inner.failure {
             return Err(IntegrationError::new("native-camera", error.to_string()));
         }
@@ -219,6 +225,9 @@ impl fmn_scene::SceneSink for RigSink {
         } else {
             self.render_stage(&packet.materialize_stage())
         };
+        if result.is_ok() {
+            self.inner.saw_show |= reason == CaptureReason::Show;
+        }
         result.map_err(|error| {
             let message = error.to_string();
             self.inner.failure = Some(error);
