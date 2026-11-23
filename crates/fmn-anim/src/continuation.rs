@@ -19,6 +19,7 @@ use fmn_mobject::{Mob, Stage};
 use crate::composition::GroupContinuationControls;
 use crate::creation::{IntRound, PartialGeometry};
 use crate::transform::TargetPrep;
+use crate::transform_matching::MatchingFamilyRow;
 use crate::{
     AnimConfig, AnimError, AnimState, Animation, AnimationGroup, DrawBorderThenFill, FadeTransform,
     FramePosition, MethodAnimation, MoveAlongPath, OpenSegment, PathFunc, RateFunc,
@@ -28,10 +29,11 @@ use crate::{
 
 // Minor 4 adds captured path motion and crossfade lifecycle carriers;
 // minor 5 adds exact prepared rate tables. Existing payload layouts and emitted
-// minor versions stay unchanged for older carrier/rate trees.
-const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 5);
+// minor versions stay unchanged for older carrier/rate trees. Minor 6 adds
+// shape matching's eager group plus its original-target replacement lifecycle.
+const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 6);
 // Declaration minor 6 binds untouched future successions and shape matching.
-// Their active lifecycles still have no durable carrier; FMPC/1 is unchanged.
+// Succession still has no prepared carrier: its children begin just in time.
 const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 6);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
@@ -137,24 +139,32 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
         Some(10)
     } else if any.is::<FadeTransform>() {
         Some(11)
+    } else if any.is::<TransformMatchingParts>() {
+        Some(13)
     } else {
         None
     }
 }
 
 // Declaration identity is a separate capability from resuming a prepared
-// lifecycle or running private native-frame preparation. These two extra
-// types remain executable only as untouched values from the fresh factory.
+// lifecycle or running private native-frame preparation. Succession remains
+// executable only as an untouched value from the fresh factory.
 fn declaration_kind(animation: &dyn Animation) -> Option<u8> {
     native_kind(animation).or_else(|| {
         let any = animation as &dyn Any;
         if any.is::<Succession>() {
             Some(12)
-        } else if any.is::<TransformMatchingParts>() {
-            Some(13)
         } else {
             None
         }
+    })
+}
+
+fn native_group(animation: &dyn Animation) -> Option<&AnimationGroup> {
+    let any = animation as &dyn Any;
+    any.downcast_ref::<AnimationGroup>().or_else(|| {
+        any.downcast_ref::<TransformMatchingParts>()
+            .map(TransformMatchingParts::declaration_group)
     })
 }
 
@@ -224,6 +234,13 @@ fn clone_native(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
             .map(|child| clone_native(child.as_ref()))
             .collect::<Option<Vec<_>>>()?;
         Some(Box::new(value.clone_for_continuation(children)))
+    } else if let Some(value) = any.downcast_ref::<TransformMatchingParts>() {
+        let children = value
+            .animations()
+            .iter()
+            .map(|child| clone_native(child.as_ref()))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Box::new(value.clone_for_continuation(children)))
     } else {
         None
     }
@@ -256,7 +273,13 @@ pub(crate) fn native_preparation_supported(animation: &dyn Animation) -> bool {
 
     fn supported(animation: &dyn Animation, depth: usize, remaining: &mut usize) -> bool {
         let any: &dyn Any = animation;
-        if depth > MAX_NATIVE_DEPTH || *remaining == 0 || native_kind(animation).is_none() {
+        if depth > MAX_NATIVE_DEPTH
+            || *remaining == 0
+            || native_kind(animation).is_none()
+            // Durable resume never replays matching's setup/cleanup. It does
+            // not authorize executing those hooks during private preparation.
+            || any.is::<TransformMatchingParts>()
+        {
             return false;
         }
         *remaining -= 1;
@@ -360,7 +383,7 @@ fn native_tree_supported(animation: &dyn Animation, depth: usize, remaining: &mu
     {
         return false;
     }
-    if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
+    if let Some(group) = native_group(animation) {
         group_controls_supported(group.continuation_controls())
             && group
                 .animations()
@@ -451,10 +474,10 @@ fn rate_minor(rate: &RateFunc) -> u16 {
 fn carrier_minor(animation: &dyn Animation) -> u16 {
     let own_rate = rate_minor(&animation.state().config.rate_func);
     let carrier = if let Some((_, children)) = declaration_composition(animation) {
-        let minimum = if native_kind(animation).is_some() {
-            2
-        } else {
+        let minimum = if matches!(declaration_kind(animation), Some(12 | 13)) {
             6
+        } else {
+            2
         };
         children
             .iter()
@@ -877,6 +900,13 @@ fn charge_group_timing(budget: &mut Budget, children: usize) -> Result<(), Error
     budget.charge::<u8>(words)
 }
 
+fn charge_matching_validation(budget: &mut Budget, members: usize) -> Result<(), Error> {
+    // Sorted durable-handle index, DFS state, and bounded iterative stack.
+    budget.charge::<(u32, u32, usize)>(members)?;
+    budget.charge::<u8>(members)?;
+    budget.charge::<(usize, usize)>(members)
+}
+
 fn charge_rate(budget: &mut Budget, rate: &RateFunc) -> Result<(), Error> {
     budget.charge::<RateFunc>(1)?;
     match rate {
@@ -975,17 +1005,16 @@ fn document_native_budget(
                 if layout.len() > MAX_ITEMS {
                     return Err(Error::Invalid("matching family exceeds its bound"));
                 }
-                budget.charge::<(Mob, Vec<Mob>, bool)>(layout.len())?;
+                budget.charge::<MatchingFamilyRow>(layout.len())?;
                 // Clone the original manifest and validate its graph with a
                 // sorted durable-handle index and bounded iterative DFS.
-                budget.charge::<(u32, u32, usize)>(layout.len())?;
-                budget.charge::<u8>(layout.len())?;
-                budget.charge::<(usize, usize)>(layout.len())?;
+                charge_matching_validation(budget, layout.len())?;
                 for (_, descendants, _) in layout {
                     if descendants.len() > MAX_ITEMS {
                         return Err(Error::Invalid("matching child list exceeds its bound"));
                     }
                     budget.charge::<Mob>(descendants.len())?;
+                    budget.charge::<(u32, u32)>(descendants.len())?;
                 }
             }
         }
@@ -1020,6 +1049,53 @@ fn get_mob(reader: &mut Reader<'_>, stage: &Stage) -> Result<Mob, Error> {
         .ok_or(Error::Invalid(
             "prepared handle is absent from the restored snapshot",
         ))
+}
+
+fn put_matching_family(
+    writer: &mut Writer,
+    stage: &Stage,
+    root: Mob,
+    layout: &[MatchingFamilyRow],
+) -> Result<(), Error> {
+    put_mob(writer, stage, root)?;
+    put_count(writer, layout.len())?;
+    for &(member, ref descendants, empty) in layout {
+        put_mob(writer, stage, member)?;
+        writer.put_bool(empty);
+        put_count(writer, descendants.len())?;
+        for &child in descendants {
+            put_mob(writer, stage, child)?;
+        }
+    }
+    Ok(())
+}
+
+fn get_matching_family(
+    reader: &mut Reader<'_>,
+    stage: &Stage,
+    budget: &mut Budget,
+) -> Result<(Mob, Vec<MatchingFamilyRow>), Error> {
+    let root = get_mob(reader, stage)?;
+    let count = get_count(reader, 13)?;
+    if count == 0 {
+        return Err(Error::Invalid("empty matching family manifest"));
+    }
+    charge_matching_validation(budget, count)?;
+    let mut layout = budget.vector::<MatchingFamilyRow>(count)?;
+    for _ in 0..count {
+        let member = get_mob(reader, stage)?;
+        let empty = reader.get_bool()?;
+        let count = get_count(reader, 8)?;
+        // The graph validator sorts each original child list to reject
+        // duplicate edges before the canonical depth-first walk.
+        budget.charge::<(u32, u32)>(count)?;
+        let mut children = budget.vector::<Mob>(count)?;
+        for _ in 0..count {
+            children.push(get_mob(reader, stage)?);
+        }
+        layout.push((member, children, empty));
+    }
+    Ok((root, layout))
 }
 
 fn put_rate(writer: &mut Writer, rate: &RateFunc) -> Result<(), Error> {
@@ -1352,9 +1428,9 @@ fn put_native_node(
     writer.put_u8(kind);
     let any: &dyn Any = animation;
     if let Some((controls, children)) = declaration_composition(animation) {
-        // Eager groups own no starting copy or zipped family table. Each
-        // child's independently prepared state carries those handles. The
-        // two declaration-only compositions reach here only while untouched.
+        // Eager groups and matching wrappers own no starting copy or zipped
+        // family table. Their prepared children carry those handles. A
+        // succession can reach here only as an untouched declaration.
         put_state(writer, stage, animation.state(), false)?;
         if !group_controls_supported(controls) {
             return Err(Error::Invalid("invalid native group controls"));
@@ -1365,16 +1441,7 @@ fn put_native_node(
         writer.put_bool(controls.run_time_override);
         if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
             for (root, layout) in matching.declaration_families() {
-                put_mob(writer, stage, root)?;
-                put_count(writer, layout.len())?;
-                for &(member, ref descendants, empty) in layout {
-                    put_mob(writer, stage, member)?;
-                    writer.put_bool(empty);
-                    put_count(writer, descendants.len())?;
-                    for &child in descendants {
-                        put_mob(writer, stage, child)?;
-                    }
-                }
+                put_matching_family(writer, stage, root, layout)?;
             }
         }
         put_count(writer, children.len())?;
@@ -1552,7 +1619,7 @@ fn get_native_node(
 ) -> Result<Box<dyn Animation>, Error> {
     budget.native_node(depth)?;
     let kind = reader.get_u8()?;
-    if !(1..=11).contains(&kind) {
+    if !(1..=11).contains(&kind) && kind != 13 {
         return Err(Error::Invalid("unknown native animation kind"));
     }
     if kind >= 7 && reader.version().1 < 3 {
@@ -1565,8 +1632,11 @@ fn get_native_node(
             "native animation kind requires FMPC minor 4",
         ));
     }
+    if kind == 13 && reader.version().1 < 6 {
+        return Err(Error::Invalid("shape matching requires FMPC minor 6"));
+    }
     charge_carrier(budget, kind)?;
-    if kind == 6 {
+    if matches!(kind, 6 | 13) {
         let mob = get_mob(reader, stage)?;
         let config = get_config(reader, budget)?;
         let controls = GroupContinuationControls {
@@ -1578,6 +1648,14 @@ fn get_native_node(
         if !group_controls_supported(controls) {
             return Err(Error::Invalid("invalid native group controls"));
         }
+        let matching_families = if kind == 13 {
+            Some((
+                get_matching_family(reader, stage, budget)?,
+                get_matching_family(reader, stage, budget)?,
+            ))
+        } else {
+            None
+        };
         let count = get_count(reader, 1)?;
         if count > MAX_ITEMS - budget.native_items {
             return Err(Error::Invalid("native node count exceeds its bound"));
@@ -1589,12 +1667,19 @@ fn get_native_node(
         for _ in 0..count {
             children.push(get_native_node(reader, stage, budget, fps, depth + 1)?);
         }
-        return Ok(Box::new(AnimationGroup::from_continuation(
+        let group = AnimationGroup::from_continuation(
             AnimState::new(mob, config),
             children,
             controls,
             fps,
-        )?));
+        )?;
+        return Ok(if let Some((source, target)) = matching_families {
+            Box::new(TransformMatchingParts::from_continuation(
+                group, source, target,
+            )) as Box<dyn Animation>
+        } else {
+            Box::new(group) as Box<dyn Animation>
+        });
     }
     let width = if matches!(kind, 1 | 5 | 11) { 3 } else { 2 };
     let state = get_state(reader, stage, budget, fps, width)?;
@@ -1803,24 +1888,40 @@ fn get_native_node(
     })
 }
 
+fn prepared_group_valid(stage: &Stage, group: &AnimationGroup, fps: u32) -> Result<bool, Error> {
+    if !group.continuation_lifecycle_valid(stage) {
+        return Ok(false);
+    }
+    for child in group.animations() {
+        if !prepared_valid(stage, child.as_ref(), fps)? {
+            return Ok(false);
+        }
+    }
+    if !group.continuation_timing_valid(fps) {
+        return Ok(false);
+    }
+    // Children have each passed their prepared-state validation above.
+    // Repeating the group's recursive pre-begin validation would wrongly
+    // require a matching child's original family shape after alignment.
+    crate::animation::validate_begin_state(group.state(), stage, [group.state().mobject()])?;
+    Ok(true)
+}
+
 fn prepared_valid(stage: &Stage, animation: &dyn Animation, fps: u32) -> Result<bool, Error> {
     if native_kind(animation).is_none() || !config_supported(&animation.state().config) {
         return Ok(false);
     }
-    if let Some(group) = (animation as &dyn Any).downcast_ref::<AnimationGroup>() {
-        if !group.continuation_lifecycle_valid(stage) {
+    let any = animation as &dyn Any;
+    if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
+        if !matching.continuation_lifecycle_valid(stage)
+            || !matching.declaration_families_valid(stage)
+        {
             return Ok(false);
         }
-        for child in group.animations() {
-            if !prepared_valid(stage, child.as_ref(), fps)? {
-                return Ok(false);
-            }
-        }
-        if !group.continuation_timing_valid(fps) {
-            return Ok(false);
-        }
-        animation.validate_begin(stage)?;
-        return Ok(true);
+        return prepared_group_valid(stage, matching.declaration_group(), fps);
+    }
+    if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+        return prepared_group_valid(stage, group, fps);
     }
     if !native_parameters_valid(stage, animation) {
         return Ok(false);
@@ -2489,6 +2590,321 @@ mod tests {
             );
             assert_eq!(stage.snapshot().to_bytes().unwrap(), prepared);
             crate::finish_open_play(&mut stage, &mut animations, open).unwrap();
+        }
+    }
+
+    fn matching_scene(
+        align_root: bool,
+        nested: bool,
+    ) -> (Stage, Vec<Box<dyn Animation>>, Mob, Mob) {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::vector_from_points(&[]));
+        let target = stage.add(Mobject::vector_from_points(if align_root {
+            &[[0.0, 0.0, 0.0], [0.5, 1.0, 0.0], [1.0, 0.0, 0.0]]
+        } else {
+            &[]
+        }));
+        let first = stage.add(Mobject::vector_from_points(&[
+            [-1.0, 0.0, 0.0],
+            [-0.5, 1.0, 0.0],
+            [0.0, 0.0, 0.0],
+        ]));
+        let matched = stage.copy_family(first).unwrap();
+        stage.shift(matched, [2.0, 0.5, 0.0]);
+        stage.attach(source, first).unwrap();
+        stage.attach(target, matched).unwrap();
+        if !align_root {
+            let disappearing = stage.add(Mobject::vector_from_points(&[
+                [1.0, 0.0, 0.0],
+                [1.5, 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+            ]));
+            let appearing = stage.add(Mobject::vector_from_points(&[
+                [1.0, -1.0, 0.0],
+                [1.5, 1.0, 0.0],
+                [2.0, -1.0, 0.0],
+                [2.5, -2.0, 0.0],
+                [3.0, -1.0, 0.0],
+            ]));
+            stage.attach(source, disappearing).unwrap();
+            stage.attach(target, appearing).unwrap();
+        }
+        stage.add_to_scene(source).unwrap();
+        let pair = if align_root {
+            (source, target)
+        } else {
+            (first, matched)
+        };
+        let mut animation: Box<dyn Animation> = Box::new(
+            TransformMatchingParts::with_config(
+                &mut stage,
+                source,
+                target,
+                &[pair],
+                crate::MatchingPartsConfig {
+                    lag_ratio: 0.2,
+                    rate_func: RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack),
+                    ..crate::MatchingPartsConfig::default()
+                },
+            )
+            .unwrap(),
+        );
+        animation.state_mut().config.run_time_frames = Some(13);
+        animation.state_mut().config.final_alpha_value = 0.35;
+        if nested {
+            animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+            animation = Box::new(AnimationGroup::new(&mut stage, vec![animation]).unwrap());
+        }
+        (stage, vec![animation], source, target)
+    }
+
+    fn matching_leaf(animation: &dyn Animation) -> &TransformMatchingParts {
+        let any = animation as &dyn Any;
+        if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
+            matching
+        } else {
+            matching_leaf(any.downcast_ref::<AnimationGroup>().unwrap().animations()[0].as_ref())
+        }
+    }
+
+    #[test]
+    fn matching_continuations_preserve_every_sample_and_pending_target_publication() {
+        let rng = RngRoot::from_seed(27);
+        for align_root in [false, true] {
+            for nested in [false, true] {
+                for boundary in [0, 1, 6, 12, 13] {
+                    let (mut stage, mut animations, source, target) =
+                        matching_scene(align_root, nested);
+                    let source_id = stage.snapshot_handle(source).unwrap();
+                    let target_id = stage.snapshot_handle(target).unwrap();
+                    assert!(!native_preparation_supported(animations[0].as_ref()));
+                    let mut clock = RationalFrameClock::new(30).unwrap();
+                    clock.advance_frames(5).unwrap();
+                    stage.set_time_from_clock(clock.now().to_f64());
+                    let mut open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+                    assert!(!stage.has_padding_sources());
+                    if align_root {
+                        assert!(
+                            matching_leaf(animations[0].as_ref())
+                                .validate_begin(&stage)
+                                .is_err()
+                        );
+                    }
+                    crate::advance_play(
+                        &mut stage,
+                        &mut clock,
+                        &rng,
+                        &mut animations,
+                        &mut open,
+                        boundary,
+                        &mut |_| {},
+                    )
+                    .unwrap();
+                    let checkpoint = capture(&stage, &clock, &animations, &open, MAX_BYTES)
+                        .unwrap()
+                        .expect("prepared shape matching has a complete native carrier");
+                    assert_eq!(
+                        Reader::open(
+                            &checkpoint,
+                            SCHEMA,
+                            limits(MAX_BYTES),
+                            UnknownPolicy::Strict
+                        )
+                        .unwrap()
+                        .version(),
+                        (1, 6)
+                    );
+                    let snapshot = stage.snapshot().to_bytes().unwrap();
+                    let mut resumed_stage = Stage::new();
+                    let decoded = Snapshot::from_bytes(&snapshot, &resumed_stage).unwrap();
+                    resumed_stage.restore(&decoded.snapshot);
+                    resumed_stage.set_time_from_clock(clock.now().to_f64());
+                    let mut resumed_clock = clock;
+                    let (mut resumed, mut resumed_open) =
+                        restore(&resumed_stage, &resumed_clock, &checkpoint).unwrap();
+                    assert_eq!(resumed_stage.snapshot().to_bytes().unwrap(), snapshot);
+                    assert_eq!(
+                        capture(
+                            &resumed_stage,
+                            &resumed_clock,
+                            &resumed,
+                            &resumed_open,
+                            MAX_BYTES
+                        )
+                        .unwrap()
+                        .unwrap(),
+                        checkpoint,
+                    );
+                    let mut expected_frames = Vec::new();
+                    let mut actual_frames = Vec::new();
+                    crate::advance_play(
+                        &mut stage,
+                        &mut clock,
+                        &rng,
+                        &mut animations,
+                        &mut open,
+                        13,
+                        &mut |packet| {
+                            expected_frames
+                                .push((packet.metadata(), packet.state().to_bytes().unwrap()))
+                        },
+                    )
+                    .unwrap();
+                    crate::advance_play(
+                        &mut resumed_stage,
+                        &mut resumed_clock,
+                        &rng,
+                        &mut resumed,
+                        &mut resumed_open,
+                        13,
+                        &mut |packet| {
+                            actual_frames
+                                .push((packet.metadata(), packet.state().to_bytes().unwrap()))
+                        },
+                    )
+                    .unwrap();
+                    assert_eq!(
+                        actual_frames, expected_frames,
+                        "aligned={align_root}, nested={nested}, boundary={boundary}"
+                    );
+                    crate::finish_open_play(&mut stage, &mut animations, open).unwrap();
+                    crate::finish_open_play(&mut resumed_stage, &mut resumed, resumed_open)
+                        .unwrap();
+                    assert_eq!(
+                        stage.snapshot().to_bytes().unwrap(),
+                        resumed_stage.snapshot().to_bytes().unwrap()
+                    );
+                    assert_eq!(clock.now(), resumed_clock.now());
+                    assert!(stage.roots().contains(&target));
+                    assert!(!stage.roots().contains(&source));
+                    let restored_target = resumed_stage
+                        .resolve_snapshot_handle(target_id.0, target_id.1)
+                        .unwrap();
+                    let restored_source = resumed_stage
+                        .resolve_snapshot_handle(source_id.0, source_id.1)
+                        .unwrap();
+                    assert!(resumed_stage.roots().contains(&restored_target));
+                    assert!(!resumed_stage.roots().contains(&restored_source));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn matching_continuations_reject_forged_original_family_manifests() {
+        let (mut stage, mut animations, _, _) = matching_scene(false, false);
+        let unrelated = stage.add(Mobject::new());
+        let clock = RationalFrameClock::new(30).unwrap();
+        let _open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+        let matching = matching_leaf(animations[0].as_ref());
+        let before = stage.snapshot().to_bytes().unwrap();
+        for case in 0..9 {
+            let [(source_root, source_rows), (target_root, target_rows)] =
+                matching.declaration_families();
+            let mut source = (source_root, source_rows.to_vec());
+            let mut target = (target_root, target_rows.to_vec());
+            match case {
+                0 => source.1.clear(),
+                1 => source.1[0].0 = target.0,
+                2 => source.1.push(source.1[0].clone()),
+                3 => source.1[0].1.push(unrelated),
+                4 => source.1.last_mut().unwrap().1.push(source.0),
+                5 => {
+                    let child = source.1[0].1[0];
+                    source.1[0].1.push(child);
+                }
+                6 => target = source.clone(),
+                7 => {
+                    source.0 = matching.state().mobject();
+                    source.1[0].0 = source.0;
+                }
+                8 => source.1.push((unrelated, Vec::new(), true)),
+                _ => unreachable!(),
+            }
+            let group = matching.declaration_group();
+            let children = group
+                .animations()
+                .iter()
+                .map(|child| clone_native(child.as_ref()).unwrap())
+                .collect();
+            let bad = TransformMatchingParts::from_continuation(
+                group.clone_for_continuation(children),
+                source,
+                target,
+            );
+            assert!(
+                !matches!(decode_prepared(&stage, &bad), Ok(true)),
+                "forged matching manifest case={case}"
+            );
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+        }
+    }
+
+    #[test]
+    fn matching_continuation_wire_requires_its_version_and_bounded_live_inventory() {
+        let (mut stage, mut animations, _, _) = matching_scene(false, false);
+        let clock = RationalFrameClock::new(30).unwrap();
+        let _open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+        let matching = matching_leaf(animations[0].as_ref());
+        let before = stage.snapshot().to_bytes().unwrap();
+        for (minor, allowance) in [(5, MAX_BYTES), (6, 16)] {
+            let mut writer = Writer::with_limits(Schema { minor, ..SCHEMA }, limits(MAX_BYTES));
+            put_native(&mut writer, &stage, matching, true).unwrap();
+            let bytes = writer.finish().unwrap();
+            let mut reader =
+                Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+            let mut budget = Budget {
+                remaining: allowance,
+                native_items: 0,
+            };
+            assert!(get_native(&mut reader, &stage, &mut budget, 30).is_err());
+        }
+        // A future succession declaration is still not a prepared carrier,
+        // even when enclosed in the new active document version.
+        let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+        writer.put_u8(12);
+        let bytes = writer.finish().unwrap();
+        let mut reader =
+            Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+        let mut budget = Budget {
+            remaining: MAX_BYTES,
+            native_items: 0,
+        };
+        assert!(get_native(&mut reader, &stage, &mut budget, 30).is_err());
+
+        let (root, rows) = matching.declaration_families()[0];
+        let (slot, generation) = stage.snapshot_handle(root).unwrap();
+        for case in 0..4 {
+            let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+            match case {
+                0 => {
+                    writer.put_u32(slot).put_u32(generation.wrapping_add(1));
+                }
+                1 => {
+                    put_mob(&mut writer, &stage, root).unwrap();
+                    writer.put_u32(MAX_ITEMS as u32 + 1);
+                }
+                2 => {
+                    put_mob(&mut writer, &stage, root).unwrap();
+                    writer.put_u32(1);
+                    put_mob(&mut writer, &stage, root).unwrap();
+                    writer.put_bool(true).put_u32(MAX_ITEMS as u32 + 1);
+                }
+                3 => put_matching_family(&mut writer, &stage, root, rows).unwrap(),
+                _ => unreachable!(),
+            }
+            let bytes = writer.finish().unwrap();
+            let mut reader =
+                Reader::open(&bytes, SCHEMA, limits(MAX_BYTES), UnknownPolicy::Strict).unwrap();
+            let mut budget = Budget {
+                remaining: if case == 3 { 16 } else { MAX_BYTES },
+                native_items: 0,
+            };
+            assert!(
+                get_matching_family(&mut reader, &stage, &mut budget).is_err(),
+                "case={case}"
+            );
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
         }
     }
 

@@ -20996,6 +20996,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_matching_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run_matching),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_matching_checkpoint.bin".into(),
+                "native_matching_continued.png".into(),
+            ]),
+            counter_eq("studio_matching_checkpoint_restores", 6),
+            counter_eq("studio_matching_checkpoint_frames", 50),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.matching_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 6),
+                FieldPred::u64_eq("matching_frames", 50),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_motion_checkpoint.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioInProcess,
@@ -25464,6 +25488,16 @@ fn studio_method_checkpoint_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_method_checkpoint.v1")
         .expect("method animation checkpoint lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_matching_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_matching_checkpoint.v1")
+        .expect("active native matching checkpoint lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -678,6 +678,66 @@ pub(super) fn run_methods(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
     run_prepared_checkpoints(ctx, method_program, "method", &[4, 9, 16])
 }
 
+fn matching_program(nested: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 97).map_err(service_error)?;
+    let source = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.25).build().into(),
+            fmn_library::Rectangle::new()
+                .width(0.6)
+                .height(0.4)
+                .build()
+                .map_err(service_error)?
+                .into(),
+        ]))
+        .map_err(service_error)?;
+    let target = scene.stage_mut().add(fmn_mobject::Mobject::group(vec![
+        fmn_library::Circle::new().radius(0.35).build().into(),
+        fmn_library::Circle::new().radius(0.15).build().into(),
+    ]));
+    for (root, x, color) in [
+        (source, -0.7, fmn_core::constants::BLUE_C),
+        (target, 0.7, fmn_core::constants::RED_C),
+    ] {
+        let children = scene.stage().get(root).unwrap().submobjects().to_vec();
+        scene.stage_mut().shift(children[0], [x, 0.4, 0.0]);
+        scene.stage_mut().shift(children[1], [x, -0.4, 0.0]);
+        scene
+            .stage_mut()
+            .set_fill(root, Some(color), Some(0.8), None, true);
+    }
+    // One matched circle, one disappearing rectangle and one appearing
+    // circle retain the original target's publication for the cleanup step.
+    let matching = fmn_anim::TransformMatchingParts::new(scene.stage_mut(), source, target)
+        .map_err(service_error)?;
+    let animation: Box<dyn Animation> = if nested {
+        Box::new(
+            fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(matching)])
+                .map_err(service_error)?,
+        )
+    } else {
+        Box::new(matching)
+    };
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![animation],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(16),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_matching(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, matching_program, "matching", &[4, 9, 16])
+}
+
 fn motion_program(pieces: bool) -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 79).map_err(service_error)?;
     let moving = scene

@@ -95,17 +95,29 @@ impl MatchingFamily {
     /// Validate the original manifest without reading today's topology or
     /// point counts. Earlier segments may temporarily reveal or regroup its
     /// members; the ordinary begin hook validates the eventual live family.
-    /// The caller charges one index, byte and two-usize stack entry per row
-    /// before this bounded, nonrecursive walk.
+    /// The caller charges one index, byte and two-usize stack entry per row,
+    /// plus one durable handle key per edge, before this bounded walk.
     fn declaration_index(&self, stage: &Stage) -> Option<Vec<(u32, u32, usize)>> {
         if self.layout.first().map(|row| row.0) != Some(self.root) {
             return None;
         }
         let mut index = Vec::new();
         index.try_reserve_exact(self.layout.len()).ok()?;
-        for (ordinal, (mob, _, _)) in self.layout.iter().enumerate() {
+        for (ordinal, (mob, children, _)) in self.layout.iter().enumerate() {
             let (slot, generation) = stage.snapshot_handle(*mob)?;
             index.push((slot, generation, ordinal));
+            // Canonical Stage families cannot repeat a child in one row.
+            // Decoded manifests must retain that invariant independently of
+            // any legitimate alignment changes in the current live family.
+            let mut child_keys = Vec::new();
+            child_keys.try_reserve_exact(children.len()).ok()?;
+            for &child in children {
+                child_keys.push(stage.snapshot_handle(child)?);
+            }
+            child_keys.sort_unstable();
+            if child_keys.windows(2).any(|keys| keys[0] == keys[1]) {
+                return None;
+            }
         }
         index.sort_unstable_by_key(|&(slot, generation, _)| (slot, generation));
         if index
@@ -310,6 +322,23 @@ impl TransformMatchingParts {
     /// Clone only after the declaration owner has verified each child's
     /// concrete native type. No matching search, hooks or arena edits run.
     pub(crate) fn clone_for_declaration(&self, children: Vec<Box<dyn Animation>>) -> Self {
+        self.clone_for_continuation(children)
+    }
+
+    /// Only a successfully begun, unfinished lifetime has an active carrier.
+    /// Its original manifests and each prepared child are validated separately
+    /// by the continuation owner after their allocation budgets are charged.
+    pub(crate) fn continuation_lifecycle_valid(&self, stage: &Stage) -> bool {
+        self.begun
+            && !self.finished
+            && !self.cleaned
+            && self.error.is_none()
+            && self.group.continuation_lifecycle_valid(stage)
+    }
+
+    /// Copy a dynamically verified native child tree without invoking hooks.
+    /// This does not authorize isolated preparation of a matching animation.
+    pub(crate) fn clone_for_continuation(&self, children: Vec<Box<dyn Animation>>) -> Self {
         Self {
             group: self.group.clone_for_continuation(children),
             source: self.source.clone(),
@@ -318,6 +347,31 @@ impl TransformMatchingParts {
             finished: self.finished,
             cleaned: self.cleaned,
             error: self.error.clone(),
+        }
+    }
+
+    /// Rebind a decoded eager group and its original operand manifests. All
+    /// children already own their prepared starting/target data; rerunning
+    /// begin or the matching search would discard the saved lifetime.
+    pub(crate) fn from_continuation(
+        group: AnimationGroup,
+        source: (Mob, Vec<MatchingFamilyRow>),
+        target: (Mob, Vec<MatchingFamilyRow>),
+    ) -> Self {
+        Self {
+            group,
+            source: MatchingFamily {
+                root: source.0,
+                layout: source.1,
+            },
+            target: MatchingFamily {
+                root: target.0,
+                layout: target.1,
+            },
+            begun: true,
+            finished: false,
+            cleaned: false,
+            error: None,
         }
     }
 
@@ -794,7 +848,7 @@ mod declaration_tests {
         let manifest = MatchingFamily::read(&stage, root).unwrap();
         assert!(manifest.declaration_index(&stage).is_some());
 
-        for invalid in 0..6 {
+        for invalid in 0..7 {
             let (stage, mut matching) = fixture();
             let before = stage.snapshot_bytes().unwrap();
             match invalid {
@@ -809,7 +863,11 @@ mod declaration_tests {
                     .layout
                     .push((matching.target.root, Vec::new(), true)),
                 4 => matching.source.layout.swap(1, 2),
-                _ => matching.target = matching.source.clone(),
+                5 => matching.target = matching.source.clone(),
+                _ => {
+                    let child = matching.source.layout[0].1[0];
+                    matching.source.layout[0].1.push(child);
+                }
             }
             assert!(
                 !matching.declaration_families_valid(&stage),
@@ -820,5 +878,181 @@ mod declaration_tests {
         let (mut stage, matching) = fixture();
         stage.delete(matching.source.layout[1].0).unwrap();
         assert!(!matching.declaration_families_valid(&stage));
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    use super::*;
+    use fmn_mobject::Mobject;
+
+    fn explicit_family_fixture(padded: bool) -> (Stage, TransformMatchingParts) {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::vector_from_points(&[]));
+        let source_child = stage.add(Mobject::vector_from_points(&[
+            [-1.0, -0.4, 0.0],
+            [-0.6, 0.5, 0.0],
+            [-0.2, -0.4, 0.0],
+        ]));
+        stage.attach(source, source_child).unwrap();
+        let target = stage.add(Mobject::vector_from_points(&[
+            [0.2, -0.2, 0.0],
+            [0.6, 0.8, 0.0],
+            [1.0, -0.2, 0.0],
+        ]));
+        let target_child = stage.copy_family(source_child).unwrap();
+        stage.shift(target_child, [0.4, 0.6, 0.0]);
+        stage.attach(target, target_child).unwrap();
+        if padded {
+            let extra = stage.copy_family(target_child).unwrap();
+            stage.shift(extra, [0.0, -0.7, 0.0]);
+            stage.attach(target, extra).unwrap();
+        }
+        stage.add_to_scene(source).unwrap();
+        let mut matching = TransformMatchingParts::with_matched_pairs(
+            &mut stage,
+            source,
+            target,
+            &[(source, target)],
+        )
+        .unwrap();
+        // Explicit pairs claim all point-bearing descendants of a root,
+        // even when that root itself starts with an empty vector buffer.
+        assert_eq!(matching.animations().len(), 1);
+        let child = (matching.animations()[0].as_ref() as &dyn std::any::Any)
+            .downcast_ref::<Transform>()
+            .unwrap();
+        assert_eq!(child.state.mobject(), source);
+        assert_eq!(child.target, target);
+        matching.state_mut().config.run_time_frames = Some(7);
+        matching.state_mut().config.final_alpha_value = 0.35;
+        (stage, matching)
+    }
+
+    fn cloned_children(matching: &TransformMatchingParts) -> Vec<Box<dyn Animation>> {
+        matching
+            .animations()
+            .iter()
+            .map(|child| {
+                let any = child.as_ref() as &dyn std::any::Any;
+                Box::new(any.downcast_ref::<Transform>().unwrap().clone()) as Box<dyn Animation>
+            })
+            .collect()
+    }
+
+    #[test]
+    fn active_matching_reconstruction_preserves_aligned_state_and_original_target_cleanup() {
+        let (mut stage, mut original) = explicit_family_fixture(false);
+        let original_target_points = stage.get_points(original.target()).unwrap();
+        original.prepare_timing(30).unwrap();
+        original.begin(&mut stage).unwrap();
+        original.interpolate(&mut stage, 0.3);
+        assert!(!stage.has_padding_sources());
+        assert!(!stage.get(original.source.root).unwrap().buffer.is_empty());
+        assert_eq!(
+            original.source.validate(&stage),
+            Err(AnimError::Stage(StageError::FamilyShapeMismatch))
+        );
+        assert!(original.declaration_families_valid(&stage));
+        assert!(original.continuation_lifecycle_valid(&stage));
+
+        let before = stage.snapshot_bytes().unwrap();
+        let group = AnimationGroup::from_continuation(
+            original.state().clone(),
+            cloned_children(&original),
+            original.group.continuation_controls(),
+            30,
+        )
+        .unwrap();
+        let mut continued = TransformMatchingParts::from_continuation(
+            group,
+            (original.source.root, original.source.layout.clone()),
+            (original.target.root, original.target.layout.clone()),
+        );
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert!(continued.continuation_lifecycle_valid(&stage));
+        assert!(continued.group.continuation_timing_valid(30));
+        assert!(continued.declaration_families_valid(&stage));
+        assert!(!continued.declaration_is_fresh());
+        assert!(continued.freeze_interpolation().is_some());
+
+        let mut restored = stage.snapshot().materialize();
+        for alpha in [0.4, 0.75, 1.0] {
+            original.interpolate(&mut stage, alpha);
+            continued.interpolate(&mut restored, alpha);
+            assert_eq!(
+                stage.snapshot_bytes().unwrap(),
+                restored.snapshot_bytes().unwrap()
+            );
+        }
+        original.finish(&mut stage);
+        continued.finish(&mut restored);
+        assert!(!continued.continuation_lifecycle_valid(&restored));
+        original.clean_up_from_scene(&mut stage);
+        continued.clean_up_from_scene(&mut restored);
+        assert_eq!(restored.roots(), &[original.target()]);
+        assert_eq!(
+            restored.get_points(original.target()).unwrap(),
+            original_target_points
+        );
+        assert_eq!(
+            stage.snapshot_bytes().unwrap(),
+            restored.snapshot_bytes().unwrap()
+        );
+        for member in restored.family(continued.state().mobject()) {
+            assert!(!restored.is_animating(member));
+            assert!(!restored.is_updating_suspended(member));
+        }
+        let completed = restored.snapshot_bytes().unwrap();
+        continued.finish(&mut restored);
+        continued.clean_up_from_scene(&mut restored);
+        assert_eq!(restored.snapshot_bytes().unwrap(), completed);
+    }
+
+    #[test]
+    fn active_matching_requires_pristine_unfinished_lifecycle_flags() {
+        let (mut stage, mut matching) = explicit_family_fixture(false);
+        assert!(!matching.continuation_lifecycle_valid(&stage));
+        matching.prepare_timing(30).unwrap();
+        assert!(!matching.continuation_lifecycle_valid(&stage));
+        matching.begin(&mut stage).unwrap();
+        assert!(matching.continuation_lifecycle_valid(&stage));
+        let before = stage.snapshot_bytes().unwrap();
+        for invalid in 0..4 {
+            let mut bad = matching.clone_for_continuation(cloned_children(&matching));
+            match invalid {
+                0 => bad.begun = false,
+                1 => bad.finished = true,
+                2 => bad.cleaned = true,
+                _ => bad.error = Some(AnimError::InvalidFramePhase("latched failure")),
+            }
+            assert!(!bad.continuation_lifecycle_valid(&stage), "case {invalid}");
+            assert!(bad.freeze_interpolation().is_none(), "case {invalid}");
+            assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        }
+        matching.abort(&mut stage);
+        assert!(!matching.continuation_lifecycle_valid(&stage));
+        assert!(!stage.roots().contains(&matching.target()));
+    }
+
+    #[test]
+    fn active_matching_manifest_survives_unequal_family_alignment_without_hiding_padding() {
+        let (mut stage, mut matching) = explicit_family_fixture(true);
+        let original_members = matching.source.layout.len();
+        matching.prepare_timing(30).unwrap();
+        matching.begin(&mut stage).unwrap();
+        assert!(stage.family(matching.source.root).len() > original_members);
+        assert!(stage.has_padding_sources());
+        assert!(matching.source.validate(&stage).is_err());
+        assert!(matching.declaration_families_valid(&stage));
+        assert!(matching.continuation_lifecycle_valid(&stage));
+        // These links are deliberately outside the durable SceneState
+        // document. Studio must continue to choose verified cold recovery.
+        assert!(
+            stage
+                .family(matching.source.root)
+                .iter()
+                .any(|&member| { stage.padding_source(member).is_some() })
+        );
     }
 }

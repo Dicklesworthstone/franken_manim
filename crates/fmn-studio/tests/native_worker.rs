@@ -3079,39 +3079,306 @@ fn future_native_declaration_changes_refuse_restore_without_mutating_current_sta
 }
 
 #[test]
-fn active_succession_and_matching_keep_verified_cold_recovery() {
-    for kind in [
-        FutureDeclarationKind::Succession,
-        FutureDeclarationKind::MatchingParts,
-    ] {
-        for frame in [10, 15] {
-            let mut original = future_declaration_worker(kind, 7, false, 1, 100);
-            let entry = commit(&mut original, frame);
-            let expected = checkpoint_observation(&original);
-            let expected_png = seek(&mut original, frame);
-            let mut resumed = future_declaration_worker(kind, 7, false, 4, 100);
-            resumed
-                .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
-                .unwrap();
-            let report = resumed.last_restore().unwrap();
+fn active_succession_keeps_verified_cold_recovery() {
+    let kind = FutureDeclarationKind::Succession;
+    for frame in [10, 15] {
+        let mut original = future_declaration_worker(kind, 7, false, 1, 100);
+        let entry = commit(&mut original, frame);
+        let expected = checkpoint_observation(&original);
+        let expected_png = seek(&mut original, frame);
+        let mut resumed = future_declaration_worker(kind, 7, false, 4, 100);
+        resumed
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        let report = resumed.last_restore().unwrap();
+        assert_eq!(
+            report.mode,
+            NativeRestoreMode::ColdVerified,
+            "frame {frame}"
+        );
+        assert!(report.fallback.is_some());
+        assert_eq!(checkpoint_observation(&resumed), expected);
+        assert_eq!(png(&seek(&mut resumed, frame)), png(&expected_png));
+        for next in frame + 1..=18 {
             assert_eq!(
-                report.mode,
-                NativeRestoreMode::ColdVerified,
-                "{kind:?}, frame {frame}"
+                png(&seek(&mut resumed, next)),
+                png(&seek(&mut original, next))
             );
-            assert!(report.fallback.is_some());
-            assert_eq!(checkpoint_observation(&resumed), expected);
-            assert_eq!(png(&seek(&mut resumed, frame)), png(&expected_png));
-            for next in frame + 1..=18 {
-                assert_eq!(
-                    png(&seek(&mut resumed, next)),
-                    png(&seek(&mut original, next))
-                );
-                assert_eq!(
-                    checkpoint_observation(&resumed),
-                    checkpoint_observation(&original)
-                );
+            assert_eq!(
+                checkpoint_observation(&resumed),
+                checkpoint_observation(&original)
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+enum ActiveMatchingKind {
+    Pieces,
+    ExplicitFamily,
+    NestedExplicitFamily,
+    PaddedFamily,
+}
+
+fn active_matching_program(
+    kind: ActiveMatchingKind,
+    policy: TerminalPlayPolicy,
+) -> Result<FutureDeclarationFixture, ServiceError> {
+    if matches!(kind, ActiveMatchingKind::Pieces) {
+        assert!(matches!(policy, TerminalPlayPolicy::Native));
+        return future_declaration_program(FutureDeclarationKind::MatchingParts, 7, false);
+    }
+    let mut scene = Scene::new(RuntimeConfig::default(), 77).unwrap();
+    let _ = scene.rng_mut().next_u64();
+    let _ = scene.rng_mut().next_u64();
+    let source = scene.stage_mut().add(Mobject::vector_from_points(&[]));
+    let piece = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [-1.0, -0.4, 0.0],
+        [-0.6, 0.5, 0.0],
+        [-0.2, -0.4, 0.0],
+    ]));
+    scene.stage_mut().attach(source, piece).unwrap();
+    let target = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [0.2, -0.2, 0.0],
+        [0.6, 0.8, 0.0],
+        [1.0, -0.2, 0.0],
+    ]));
+    let target_piece = scene.stage_mut().copy_family(piece).unwrap();
+    scene.stage_mut().shift(target_piece, [0.4, 0.6, 0.0]);
+    scene.stage_mut().attach(target, target_piece).unwrap();
+    if matches!(kind, ActiveMatchingKind::PaddedFamily) {
+        let extra = scene.stage_mut().copy_family(target_piece).unwrap();
+        scene.stage_mut().shift(extra, [0.0, -0.7, 0.0]);
+        scene.stage_mut().attach(target, extra).unwrap();
+    }
+    scene.add(&[source]).unwrap();
+    let first = fmn_anim::write(scene.stage(), source);
+    let mut matching = fmn_anim::TransformMatchingShapes::with_matched_pairs(
+        scene.stage_mut(),
+        source,
+        target,
+        &[(source, target)],
+    )
+    .unwrap();
+    assert_eq!(matching.animations().len(), 1);
+    assert_eq!(matching.animations()[0].state().mobject(), source);
+    assert!(
+        matching.animations()[0]
+            .preflight_mobjects()
+            .contains(&target)
+    );
+    matching.state_mut().config.final_alpha_value = 0.35;
+    matching.state_mut().config.rate_func = if matches!(policy, TerminalPlayPolicy::OpaqueRate) {
+        fmn_anim::RateFunc::Base(opaque_play_rate)
+    } else {
+        fmn_anim::RateFunc::Sampled(std::sync::Arc::from([0.0, 0.9, 0.1, 1.0]))
+    };
+    let matching: Box<dyn Animation> = if matches!(policy, TerminalPlayPolicy::DelegatingWrapper) {
+        Box::new(DelegatingPlayAnimation(Box::new(matching)))
+    } else if matches!(kind, ActiveMatchingKind::NestedExplicitFamily) {
+        Box::new(
+            fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(matching)])
+                .unwrap()
+                .with_rate_func(fmn_anim::RateFunc::Catalog(
+                    fmn_core::rate::CatalogRate::ThereAndBack,
+                )),
+        )
+    } else {
+        Box::new(matching)
+    };
+    let source_id = scene.stage().snapshot_handle(source).unwrap();
+    let piece_id = scene.stage().snapshot_handle(piece).unwrap();
+    let target_id = scene.stage().snapshot_handle(target).unwrap();
+    let program = NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![Box::new(first)],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(6),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+            NativeSegment::Play {
+                animations: vec![matching],
+                overrides: fmn_scene::PlayOverrides {
+                    run_time_frames: Some(7),
+                    ..fmn_scene::PlayOverrides::default()
+                },
+            },
+            NativeSegment::WaitFrames { frames: 3 },
+        ],
+        18,
+    )?;
+    Ok(FutureDeclarationFixture {
+        program,
+        source: source_id,
+        first_piece: piece_id,
+        target: target_id,
+    })
+}
+
+fn active_matching_worker(
+    kind: ActiveMatchingKind,
+    policy: TerminalPlayPolicy,
+    threads: usize,
+    replay_budget: u64,
+) -> NativeSceneWorker {
+    let mut config = terminal_play_config(false);
+    config.frame_count = 19;
+    config.source_digest = protocol_digest(b"active-native-matching-v1");
+    config.renderer.threads = threads;
+    config.max_replay_frames = replay_budget;
+    NativeSceneWorker::new(config, move || {
+        active_matching_program(kind, policy).map(|fixture| fixture.program)
+    })
+    .unwrap()
+}
+
+#[test]
+fn active_matching_checkpoints_preserve_every_frame_and_original_target_publication() {
+    for kind in [
+        ActiveMatchingKind::Pieces,
+        ActiveMatchingKind::ExplicitFamily,
+        ActiveMatchingKind::NestedExplicitFamily,
+    ] {
+        let fixture = active_matching_program(kind, TerminalPlayPolicy::Native).unwrap();
+        for saved_frame in [9, 11, 15] {
+            let mut original = active_matching_worker(kind, TerminalPlayPolicy::Native, 1, 100);
+            let entry = commit(&mut original, saved_frame);
+            let saved = checkpoint(&entry, 0);
+            assert_eq!(&saved.state[..8], b"FMNR\x03\0\0\0", "{kind:?}");
+            let stage = original.program().unwrap().preview().stage();
+            assert!(!stage.has_padding_sources());
+            if !matches!(kind, ActiveMatchingKind::Pieces) {
+                let source = stage
+                    .resolve_snapshot_handle(fixture.source.0, fixture.source.1)
+                    .unwrap();
+                // Begin legitimately changes this construction-time empty
+                // flag. An active restore must not run validate_begin again.
+                assert!(!stage.get(source).unwrap().buffer.is_empty());
             }
+            let at_checkpoint = checkpoint_observation(&original);
+            let checkpoint_png = seek(&mut original, saved_frame);
+            let mut expected = Vec::new();
+            for frame in saved_frame + 1..=18 {
+                expected.push((
+                    frame,
+                    seek(&mut original, frame),
+                    checkpoint_observation(&original),
+                ));
+            }
+            let expected_final = commit(&mut original, 18);
+            for threads in [1, 4] {
+                let mut resumed =
+                    active_matching_worker(kind, TerminalPlayPolicy::Native, threads, 1);
+                resumed
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                    .unwrap();
+                let report = resumed.last_restore().unwrap();
+                assert_eq!(report.mode, NativeRestoreMode::Checkpoint, "{kind:?}");
+                assert_eq!(report.fallback, None);
+                assert_eq!(resumed.last_state_hash(), Some(entry.state_hash));
+                assert_eq!(checkpoint_observation(&resumed), at_checkpoint);
+                assert_eq!(png(&seek(&mut resumed, saved_frame)), png(&checkpoint_png));
+                for (frame, rendered, observation) in &expected {
+                    assert_eq!(
+                        png(&seek(&mut resumed, *frame)),
+                        png(rendered),
+                        "{kind:?}, saved {saved_frame}, next {frame}, threads {threads}"
+                    );
+                    assert_eq!(
+                        &checkpoint_observation(&resumed),
+                        observation,
+                        "{kind:?}, saved {saved_frame}, next {frame}, threads {threads}"
+                    );
+                }
+                let stage = resumed.program().unwrap().preview().stage();
+                let source = stage
+                    .resolve_snapshot_handle(fixture.source.0, fixture.source.1)
+                    .unwrap();
+                let target = stage
+                    .resolve_snapshot_handle(fixture.target.0, fixture.target.1)
+                    .unwrap();
+                assert_eq!(stage.roots(), &[target]);
+                assert!(!stage.roots().contains(&source));
+                for member in stage.family(source).into_iter().chain(stage.family(target)) {
+                    assert!(!stage.is_animating(member));
+                    assert!(!stage.is_updating_suspended(member));
+                }
+                let actual_final = commit(&mut resumed, 18);
+                assert_eq!(actual_final.state_hash, expected_final.state_hash);
+                assert_eq!(actual_final.checkpoint, expected_final.checkpoint);
+            }
+        }
+    }
+}
+
+#[test]
+fn active_matching_padding_and_unknown_hooks_keep_verified_cold_recovery() {
+    for (kind, policy) in [
+        (ActiveMatchingKind::PaddedFamily, TerminalPlayPolicy::Native),
+        (
+            ActiveMatchingKind::ExplicitFamily,
+            TerminalPlayPolicy::OpaqueRate,
+        ),
+        (
+            ActiveMatchingKind::ExplicitFamily,
+            TerminalPlayPolicy::DelegatingWrapper,
+        ),
+    ] {
+        let mut original = active_matching_worker(kind, policy, 1, 100);
+        let entry = commit(&mut original, 11);
+        let expected = checkpoint_observation(&original);
+        let expected_png = seek(&mut original, 11);
+        let padded = matches!(kind, ActiveMatchingKind::PaddedFamily);
+        assert_eq!(
+            original
+                .program()
+                .unwrap()
+                .preview()
+                .stage()
+                .has_padding_sources(),
+            padded
+        );
+        let mut resumed = active_matching_worker(kind, policy, 4, 100);
+        resumed
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
+            .unwrap();
+        let report = resumed.last_restore().unwrap();
+        assert_eq!(
+            report.mode,
+            NativeRestoreMode::ColdVerified,
+            "{kind:?}, {policy:?}"
+        );
+        assert!(report.fallback.is_some());
+        if padded {
+            assert_eq!(
+                report.fallback,
+                Some(fmn_studio::native::NativeCheckpointFallback::TransientSceneState)
+            );
+        }
+        assert_eq!(
+            resumed
+                .program()
+                .unwrap()
+                .preview()
+                .stage()
+                .has_padding_sources(),
+            padded
+        );
+        assert_eq!(checkpoint_observation(&resumed), expected);
+        assert_eq!(png(&seek(&mut resumed, 11)), png(&expected_png));
+        for next in 12..=18 {
+            assert_eq!(
+                png(&seek(&mut resumed, next)),
+                png(&seek(&mut original, next))
+            );
+            assert_eq!(
+                checkpoint_observation(&resumed),
+                checkpoint_observation(&original)
+            );
         }
     }
 }
