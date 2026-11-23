@@ -867,7 +867,10 @@ impl<'a> Lexer<'a> {
                 };
             }
             if rbytes.get(1) == Some(&b'!') {
-                if rest.len() >= 9 && rest[..9].eq_ignore_ascii_case("<!doctype") {
+                if rbytes
+                    .get(..9)
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"<!doctype"))
+                {
                     return Err(SvgError::DoctypeRefused { line: start_line });
                 }
                 return Err(malformed(
@@ -3993,6 +3996,28 @@ mod tests {
     }
 
     #[test]
+    fn unicode_markup_declarations_are_refused_without_slicing_codepoints() {
+        // Exercise the raw parser as well as the public admission facade:
+        // byte nine falls inside a multi-byte character in each declaration.
+        for declaration in ["<!éééé>", "<!😀😀>", "<!abc界界>"] {
+            for (source, expected_line) in [
+                (format!("{declaration}<svg/>"), 1),
+                (format!("<svg>\n{declaration}</svg>"), 2),
+            ] {
+                for result in [
+                    parse(&source).map(|_| ()),
+                    crate::SvgDocument::parse(source.as_bytes()).map(|_| ()),
+                ] {
+                    assert!(
+                        matches!(result, Err(SvgError::Malformed { line, .. }) if line == expected_line),
+                        "unsupported declaration must return a named error: {source:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn external_refs_are_refused_wherever_they_appear() {
         for doc in [
             "<svg><use href=\"http://evil.example/x.svg#y\"/></svg>",
@@ -4199,6 +4224,8 @@ mod tests {
             "fill=\"red\"",
             "style=\"fill:blue;opacity:0.5\"",
             "<!DOCTYPE svg>",
+            "<!éééé>",
+            "<!😀😀>",
             "&amp;",
             "&bomb;",
             "xlink:href",
