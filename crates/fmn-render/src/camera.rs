@@ -25,7 +25,7 @@ use fmn_core::constants::{
 use fmn_core::types::Vec3;
 use fmn_geom::rotation::{
     EulerSeq, IDENTITY_QUAT, Quat, compose_quat, euler_from_quat, matrix_from_unit_quat,
-    normalized, quat_from_euler, quat_from_rotvec,
+    normalized, quat_from_axis_angle, quat_from_euler,
 };
 
 /// The Reference's vertical field of view, 45 degrees.
@@ -111,10 +111,6 @@ fn finite3(value: Vec3) -> bool {
 
 fn finite4(value: [f64; 4]) -> bool {
     value.iter().all(|component| component.is_finite())
-}
-
-fn dot(a: Vec3, b: Vec3) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
 }
 
 /// The mutable semantic camera frame.
@@ -401,15 +397,7 @@ impl CameraFrame {
         if !angle.is_finite() || !finite3(axis) {
             return Err(CameraError::NonFinite);
         }
-        let length = dot(axis, axis).sqrt();
-        if length == 0.0 {
-            return Err(CameraError::InvalidOrientation);
-        }
-        let rot = quat_from_rotvec([
-            angle * axis[0] / length,
-            angle * axis[1] / length,
-            angle * axis[2] / length,
-        ]);
+        let rot = quat_from_axis_angle(angle, axis).ok_or(CameraError::InvalidOrientation)?;
         self.set_orientation(compose_quat(rot, self.orientation))
     }
 
@@ -1979,6 +1967,146 @@ mod tests {
             let q = frame.orientation();
             let norm = q.iter().map(|v| v * v).sum::<f64>();
             assert!(close(norm, 1.0));
+        }
+    }
+
+    #[test]
+    fn camera_rotation_ignores_finite_axis_magnitude() {
+        for direction in [[0.0, 0.0, 1.0], [1.0, -1.0, 1.0]] {
+            let mut expected = CameraFrame::default();
+            expected.rotate(0.7, direction).unwrap();
+            for scale in [f64::from_bits(1), 1e-200, 1e-161, 1e200, f64::MAX] {
+                let mut actual = CameraFrame::default();
+                actual
+                    .rotate(0.7, direction.map(|value| value * scale))
+                    .expect("a finite nonzero rotation axis has no privileged magnitude");
+                for (got, want) in actual.orientation().into_iter().zip(expected.orientation()) {
+                    assert!(
+                        close(got, want),
+                        "scale={scale:e}: {:?}",
+                        actual.orientation()
+                    );
+                }
+                for relative in [false, true] {
+                    let point = [2.0, -0.5, 7.0];
+                    let got = actual.to_fixed_frame_point(point, relative);
+                    let want = expected.to_fixed_frame_point(point, relative);
+                    assert!(got.into_iter().zip(want).all(|(a, b)| close(a, b)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn invalid_rotations_leave_the_camera_and_its_revision_unchanged() {
+        let mut frame = CameraFrame::default();
+        frame.rotate(0.7, [1.0, -2.0, 3.0]).unwrap();
+        let before = frame.clone();
+        assert_eq!(
+            frame.rotate(1.0, [0.0; 3]),
+            Err(CameraError::InvalidOrientation)
+        );
+        assert_eq!(frame, before);
+        assert_eq!(
+            frame.set_orientation([0.0; 4]),
+            Err(CameraError::InvalidOrientation)
+        );
+        assert_eq!(frame, before);
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                frame.rotate(value, [0.0, 0.0, 1.0]),
+                Err(CameraError::NonFinite)
+            );
+            assert_eq!(
+                frame.rotate(1.0, [value, 0.0, 1.0]),
+                Err(CameraError::NonFinite)
+            );
+            assert_eq!(
+                frame.set_orientation([value, 0.0, 0.0, 1.0]),
+                Err(CameraError::NonFinite)
+            );
+            assert_eq!(frame, before);
+        }
+    }
+
+    #[test]
+    fn scaled_camera_axes_render_identical_certified_frames_at_every_thread_count() {
+        use crate::{
+            EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig,
+            ScreenMap, Tiling, Viewport,
+        };
+        use fmn_mobject::{Mobject, RecordBuffer, RecordSchema, Stage};
+
+        let points = [
+            [-1.25, -0.75, 0.0],
+            [0.25, -0.75, 0.0],
+            [1.75, -0.75, 0.0],
+            [0.875, 0.625, 0.0],
+            [0.0, 2.0, 0.0],
+            [-0.625, 0.625, 0.0],
+            [-1.25, -0.75, 0.0],
+        ];
+        let mut buffer = RecordBuffer::new(RecordSchema::vmobject(), points.len()).unwrap();
+        buffer.write_range(
+            "point",
+            0,
+            &points.into_iter().flatten().collect::<Vec<f32>>(),
+        );
+        buffer.write_range("fill_rgba", 0, &[0.1, 0.6, 0.9, 1.0].repeat(points.len()));
+        let mut stage = Stage::new();
+        let mob = stage.add(Mobject::from_buffer(buffer));
+        stage.add_to_scene(mob).unwrap();
+        let resolution = (64, 48);
+        let mut camera = Camera::new(CameraConfig {
+            resolution,
+            ..CameraConfig::default()
+        })
+        .unwrap();
+        let config = RetainedFrameRendererConfig {
+            frame: FrameConfig::new(
+                Viewport {
+                    width: resolution.0,
+                    height: resolution.1,
+                },
+                ScreenMap {
+                    scale: f64::from(resolution.1) / FRAME_HEIGHT,
+                    origin: [32.0, 24.0],
+                    y_up: true,
+                },
+                camera.background(),
+            ),
+            tiling: Tiling::default(),
+            engine: EngineIdentity::certified(),
+            threads: 1,
+        };
+        let mut baseline = RetainedFrameRenderer::new(config).unwrap();
+        baseline.render_with_camera(&stage, &camera).unwrap();
+        let unrotated = baseline.frame().as_bytes().to_vec();
+        camera.frame_mut().rotate(0.7, [0.0, 0.0, 1.0]).unwrap();
+        baseline.render_with_camera(&stage, &camera).unwrap();
+        let expected = baseline.frame().as_bytes().to_vec();
+        assert_ne!(
+            expected, unrotated,
+            "the fixture must expose the previously lost rotation"
+        );
+        for threads in [1, 4, 16] {
+            let mut renderer =
+                RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..config })
+                    .unwrap();
+            for scale in [f64::from_bits(1), 1e-200, 1e-161, 1e200, f64::MAX] {
+                let mut camera = Camera::new(CameraConfig {
+                    resolution,
+                    ..CameraConfig::default()
+                })
+                .unwrap();
+                camera.frame_mut().rotate(0.7, [0.0, 0.0, scale]).unwrap();
+                renderer.render_with_camera(&stage, &camera).unwrap();
+                assert_eq!(
+                    renderer.frame().as_bytes(),
+                    expected,
+                    "threads={threads}, scale={scale:e}"
+                );
+            }
         }
     }
 

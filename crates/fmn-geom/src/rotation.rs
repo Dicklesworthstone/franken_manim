@@ -48,15 +48,78 @@ const SMALL_ANGLE: f64 = 1e-3;
 /// scipy's gimbal-lock window on the second Euler angle (`1e-7` rad).
 const GIMBAL_EPS: f64 = 1e-7;
 
-/// `Rotation.from_quat`'s normalization, with scipy's zero-norm rejection
-/// returned as `None` instead of raised.
+/// `Rotation.from_quat`'s normalization, with zero/non-finite input rejected
+/// as `None` instead of raised. Finite nonzero magnitudes do not affect the
+/// rotation, including when squaring their components overflows or underflows.
 #[must_use]
 pub fn normalized(quat: Quat) -> Option<Quat> {
-    let n = (quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3]).sqrt();
-    if n == 0.0 || !n.is_finite() {
+    let squared = quat[0] * quat[0] + quat[1] * quat[1] + quat[2] * quat[2] + quat[3] * quat[3];
+    if squared.is_normal() {
+        // Keep the established arithmetic, and therefore certified bits, for
+        // the ordinary range. A subnormal sum is not sufficient evidence of
+        // a usable norm: its lost significand bits can visibly change a turn.
+        let n = squared.sqrt();
+        return Some([quat[0] / n, quat[1] / n, quat[2] / n, quat[3] / n]);
+    }
+    scaled_unit(quat)
+}
+
+/// Normalize through the largest component without forming the original norm.
+/// The scaled squared norm is in [1, N], even for a subnormal component or a
+/// direction whose mathematical length exceeds f64::MAX.
+fn scaled_unit<const N: usize>(values: [f64; N]) -> Option<[f64; N]> {
+    if values.iter().any(|value| !value.is_finite()) {
         return None;
     }
-    Some([quat[0] / n, quat[1] / n, quat[2] / n, quat[3] / n])
+    let largest = values
+        .iter()
+        .fold(0.0f64, |maximum, value| maximum.max(value.abs()));
+    if largest == 0.0 {
+        return None;
+    }
+    let scaled = values.map(|value| value / largest);
+    let norm = scaled.iter().map(|value| value * value).sum::<f64>().sqrt();
+    Some(scaled.map(|value| value / norm))
+}
+
+/// Rotation by `angle` about the direction of `axis`, in scipy quaternion order.
+///
+/// The axis magnitude is irrelevant. Normal-range inputs retain the original
+/// multiply-then-divide arithmetic; scaling handles a norm or intermediate
+/// product that would lose precision to overflow/underflow.
+/// Returns `None` for a zero axis or any non-finite input.
+#[must_use]
+pub fn quat_from_axis_angle(angle: f64, axis: Vec3) -> Option<Quat> {
+    if !angle.is_finite() || axis.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    if !(angle * angle).is_finite() {
+        // Reconstructing a huge angle from a rotation vector can shift it by
+        // an ulp and change its trigonometric phase completely. Use the
+        // caller's angle directly. This range previously produced NaNs, so
+        // ordinary successful arithmetic remains unchanged.
+        let unit = scaled_unit(axis)?;
+        let half_angle = 0.5 * angle;
+        let sine = scalar::sin(half_angle);
+        return Some([
+            unit[0] * sine,
+            unit[1] * sine,
+            unit[2] * sine,
+            scalar::cos(half_angle),
+        ]);
+    }
+    let squared = axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2];
+    let products = axis.map(|value| angle * value);
+    let products_representable = products.iter().zip(axis).all(|(product, value)| {
+        product.is_normal() || (*product == 0.0 && (angle == 0.0 || value == 0.0))
+    });
+    let rotvec = if squared.is_normal() && products_representable {
+        let norm = squared.sqrt();
+        products.map(|value| value / norm)
+    } else {
+        scaled_unit(axis)?.map(|value| angle * value)
+    };
+    Some(quat_from_rotvec(rotvec))
 }
 
 /// `Rotation.from_rotvec(rotvec).as_quat()`.
@@ -65,7 +128,25 @@ pub fn normalized(quat: Quat) -> Option<Quat> {
 /// rotations lose no precision to `sin(θ/2)/θ`'s cancellation.
 #[must_use]
 pub fn quat_from_rotvec(rotvec: Vec3) -> Quat {
-    let angle = (rotvec[0] * rotvec[0] + rotvec[1] * rotvec[1] + rotvec[2] * rotvec[2]).sqrt();
+    let squared = rotvec[0] * rotvec[0] + rotvec[1] * rotvec[1] + rotvec[2] * rotvec[2];
+    if squared.is_infinite() && rotvec.iter().all(|value| value.is_finite()) {
+        let largest = rotvec
+            .iter()
+            .fold(0.0f64, |maximum, value| maximum.max(value.abs()));
+        let scaled = rotvec.map(|value| value / largest);
+        let norm = (scaled[0] * scaled[0] + scaled[1] * scaled[1] + scaled[2] * scaled[2]).sqrt();
+        // Only the half angle enters sin/cos. Halve before rescaling so even
+        // [MAX, MAX, MAX] has a representable argument (sqrt(3)/2 * MAX).
+        let half_angle = (0.5 * largest) * norm;
+        let sine = scalar::sin(half_angle);
+        return [
+            (scaled[0] / norm) * sine,
+            (scaled[1] / norm) * sine,
+            (scaled[2] / norm) * sine,
+            scalar::cos(half_angle),
+        ];
+    }
+    let angle = squared.sqrt();
     let scale = if angle <= SMALL_ANGLE {
         let a2 = angle * angle;
         0.5 - a2 / 48.0 + a2 * a2 / 3840.0
@@ -403,6 +484,133 @@ mod tests {
         assert!(rotvec_from_quat([0.0; 4]).is_none());
         assert!(matrix_from_quat([0.0; 4]).is_none());
         assert!(euler_from_quat([0.0; 4], EulerSeq::parse("zxz").unwrap()).is_none());
+    }
+
+    #[test]
+    fn finite_quaternion_magnitude_cannot_change_its_rotation() {
+        let expected = [0.5, -0.5, 0.5, -0.5];
+        let expected_matrix = matrix_from_unit_quat(expected);
+        for scale in [
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            1e-200,
+            1e-161,
+            1.0,
+            1e200,
+            f64::MAX,
+        ] {
+            let quat = [scale, -scale, scale, -scale];
+            let actual = normalized(quat).expect("every finite nonzero quaternion has a direction");
+            assert!(
+                quat_close(actual, expected, 2e-15),
+                "scale={scale:e}: {actual:?}"
+            );
+            let matrix = matrix_from_quat(quat).unwrap();
+            for row in 0..3 {
+                for column in 0..3 {
+                    assert!((matrix[row][column] - expected_matrix[row][column]).abs() < 4e-15);
+                }
+            }
+        }
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(normalized([value, 0.0, 0.0, 1.0]).is_none());
+        }
+    }
+
+    #[test]
+    fn finite_large_rotation_vectors_keep_their_axis_and_unit_norm() {
+        for angle in [1e200, f64::MAX] {
+            let expected = [0.0, 0.0, scalar::sin(0.5 * angle), scalar::cos(0.5 * angle)];
+            let actual = quat_from_rotvec([0.0, 0.0, angle]);
+            assert!(
+                quat_close(actual, expected, 2e-15),
+                "angle={angle:e}: {actual:?}"
+            );
+            let negative = quat_from_rotvec([0.0, 0.0, -angle]);
+            assert!(quat_close(
+                negative,
+                [0.0, 0.0, -expected[2], expected[3]],
+                2e-15
+            ));
+        }
+        let actual = quat_from_rotvec([f64::MAX, -f64::MAX, f64::MAX]);
+        assert!(actual.into_iter().all(f64::is_finite), "{actual:?}");
+        let norm_squared = actual.into_iter().map(|value| value * value).sum::<f64>();
+        assert!((norm_squared - 1.0).abs() < 2e-15, "{actual:?}");
+    }
+
+    #[test]
+    fn ordinary_quaternion_normalization_keeps_its_established_bits() {
+        for (input, bits) in [
+            (
+                [0.3, -0.4, 0.5, 1.0],
+                [
+                    0x3fcf5a7cecdb684b,
+                    0xbfd4e6fdf33cf032,
+                    0x3fda20bd700c2c3f,
+                    0x3fea20bd700c2c3f,
+                ],
+            ),
+            (
+                [-0.0, 1.0, 0.0, 1.0],
+                [
+                    0x8000000000000000,
+                    0x3fe6a09e667f3bcc,
+                    0,
+                    0x3fe6a09e667f3bcc,
+                ],
+            ),
+            (
+                [1e70, -2e70, 3e70, -4e70],
+                [
+                    0x3fc75e9746a0b099,
+                    0xbfd75e9746a0b099,
+                    0x3fe186f174f88472,
+                    0xbfe75e9746a0b099,
+                ],
+            ),
+        ] {
+            assert_eq!(normalized(input).unwrap().map(f64::to_bits), bits);
+        }
+    }
+
+    #[test]
+    fn axis_angle_does_not_lose_the_angle_to_an_intermediate_product() {
+        for (angle, axis_scale) in [
+            (0.7, f64::MAX),
+            (1e200, 1e100),
+            (1e-200, 1e-100),
+            (f64::MAX, 0.3),
+            (-f64::MAX, 0.3),
+        ] {
+            let expected = quat_from_rotvec([0.0 * angle, 0.0 * angle, angle]);
+            let actual = quat_from_axis_angle(angle, [0.0, 0.0, axis_scale]).unwrap();
+            assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+        }
+        assert!(quat_from_axis_angle(1.0, [0.0; 3]).is_none());
+        for value in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(quat_from_axis_angle(value, [0.0, 0.0, 1.0]).is_none());
+            assert!(quat_from_axis_angle(1.0, [value, 0.0, 1.0]).is_none());
+        }
+    }
+
+    #[test]
+    fn huge_axis_angles_use_the_supplied_angle_without_reconstructing_it() {
+        for angle in [1e200, f64::MAX, -f64::MAX] {
+            let sine = scalar::sin(0.5 * angle);
+            let cosine = scalar::cos(0.5 * angle);
+            for axis in [[1.0, -1.0, 1.0], [0.3, -0.3, 0.3], [f64::MAX; 3]] {
+                let component = 1.0 / 3.0f64.sqrt();
+                let expected = [
+                    component * sine,
+                    component.copysign(axis[1]) * sine,
+                    component * sine,
+                    cosine,
+                ];
+                let actual = quat_from_axis_angle(angle, axis).unwrap();
+                assert_eq!(actual.map(f64::to_bits), expected.map(f64::to_bits));
+            }
+        }
     }
 
     #[test]
