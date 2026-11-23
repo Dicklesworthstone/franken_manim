@@ -267,6 +267,7 @@ fn export_bundle_bytes_inner<P: SceneConstruct + ?Sized>(
         // The typed failure is retained by the recorder and returned by finish.
         let _ = recorder.capture_terminal_still(completed.scene().stage());
     }
+    let has_explicit_show_captures = recorder.has_explicit_show_captures();
     let bundle = recorder
         .finish_with_max_bytes(options.max_output_bytes)
         .map_err(|error| match error {
@@ -275,6 +276,7 @@ fn export_bundle_bytes_inner<P: SceneConstruct + ?Sized>(
             }
             error => BundleExportError::Recording(error),
         })?;
+    soundtrack::validate_recording_timing(has_explicit_show_captures, completed.scene())?;
     let (bundle, soundtrack) =
         soundtrack::finish_recording(bundle, completed.scene(), &options, audio)?;
     Ok(SceneBundleExport {

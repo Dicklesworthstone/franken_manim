@@ -111,7 +111,9 @@ fn sound(error: RenderError) -> BundleExportError {
 /// No cue means byte-identical legacy output and no asset reads. Cues retain
 /// rational call sites, negative offsets, gains, background ducking, channel
 /// mapping and resampling through PreparedSceneSoundtrack. Missing/unsupported
-/// sources or exhausted budgets produce no partial artifact.
+/// sources or exhausted budgets produce no partial artifact. Explicit `show()`
+/// captures with sound are refused before asset preparation: their extra output
+/// frames do not advance authored cue times. Use play/wait or a terminal still.
 ///
 /// # Errors
 /// Native scene/capture errors plus typed audio, allocation and output refusals.
@@ -192,6 +194,18 @@ fn validate_output(output: &Path) -> Result<(), BundleExportError> {
     } else {
         Ok(())
     }
+}
+
+pub(super) fn validate_recording_timing(
+    has_explicit_show_captures: bool,
+    scene: &Scene,
+) -> Result<(), BundleExportError> {
+    if has_explicit_show_captures && !scene.sound_requests().is_empty() {
+        return Err(BundleExportError::Capability(
+            "soundtrack export cannot retime explicit show captures; use play/wait or a terminal still",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) fn finish_recording(

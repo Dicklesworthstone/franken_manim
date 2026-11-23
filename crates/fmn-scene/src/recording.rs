@@ -218,6 +218,7 @@ pub struct SceneBundleRecorder {
     segments: Vec<RecordedSegment>,
     active: Option<ActiveSegment>,
     failure: Option<RecordingError>,
+    saw_show: bool,
     render_only: bool,
     cameras: Option<Vec<CameraSample>>,
     compact: Option<CompactBudget>,
@@ -244,6 +245,7 @@ impl SceneBundleRecorder {
             segments: Vec::new(),
             active: None,
             failure: None,
+            saw_show: false,
             render_only: false,
             cameras: None,
             compact: None,
@@ -433,6 +435,16 @@ impl SceneBundleRecorder {
     #[must_use]
     pub fn frame_count(&self) -> u64 {
         self.frames
+    }
+
+    /// Whether an explicit `Scene::show` added a hold to the output grid.
+    ///
+    /// These captures do not advance the source clock. A composition root
+    /// attaching sound at authored scene times must either remap those times
+    /// or refuse the combination. An automatic terminal still is not a show.
+    #[must_use]
+    pub fn has_explicit_show_captures(&self) -> bool {
+        self.saw_show
     }
 
     /// Consume a failed recorder to recover the original typed sink failure.
@@ -911,7 +923,11 @@ impl SceneBundleRecorder {
             }
             let sample = self.camera_sample(camera)?;
             let bytes = self.encode_snapshot(packet.state());
-            self.capture_snapshot(bytes, sample)
+            self.capture_snapshot(bytes, sample)?;
+            if reason == CaptureReason::Show {
+                self.saw_show = true;
+            }
+            Ok(())
         })();
         self.retain_failure(result)
     }

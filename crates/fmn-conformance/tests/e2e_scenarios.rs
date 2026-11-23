@@ -8662,7 +8662,7 @@ fn cli_builtin_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError>
 fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use fmn::exporting::soundtrack::{
         BundleSoundtrackOptions, export_bundle_with_soundtrack_bytes,
-        export_bundle_with_soundtrack_with_fs,
+        export_bundle_with_soundtrack_with_fs, export_camera_bundle_with_soundtrack_with_fs,
     };
     use fmn::exporting::{BundleExportError, BundleExportOptions, export_bundle_bytes};
     use fmn::rendering::RenderError;
@@ -8683,6 +8683,13 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
             }
             stage.wait(0.25)?;
             Ok(())
+        }
+    }
+    struct ShownScore;
+    impl fmn::SceneConstruct for ShownScore {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            stage.show()?;
+            fmn::SceneConstruct::construct(&mut Score(Some("/missing-cue.wav")), stage)
         }
     }
     let mut options = BundleExportOptions::new().map_err(|e| fail(e.to_string()))?;
@@ -8777,6 +8784,47 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
             "compressed capability refusal was untyped or published output",
         ));
     }
+    let mut show_refusals = 0;
+    for compact in [false, true] {
+        for camera in [false, true] {
+            let mut show_options = options.clone();
+            if compact {
+                show_options.storage = fmn::exporting::BundleStorage::Compact(Default::default());
+            }
+            let refused = if camera {
+                export_camera_bundle_with_soundtrack_with_fs(
+                    |scene, config| Ok((ShownScore, fmn_scene::CameraRig::new(scene, config)?)),
+                    "/show.fmtl",
+                    fmn_render::CameraConfig {
+                        fps: 8,
+                        resolution: (64, 36),
+                        ..Default::default()
+                    },
+                    show_options,
+                    &audio,
+                    fs.clone(),
+                )
+            } else {
+                export_bundle_with_soundtrack_with_fs(
+                    &mut ShownScore,
+                    "/show.fmtl",
+                    show_options,
+                    &audio,
+                    fs.clone(),
+                )
+            }
+            .expect_err("explicit show captures cannot shift recorded audio silently");
+            if !matches!(refused, BundleExportError::Capability(message)
+                if message.contains("explicit show") && message.contains("play/wait"))
+                || fs.exists(Path::new("/show.fmtl"))
+            {
+                return Err(fail(
+                    "show/audio refusal must precede missing-source reads and publication",
+                ));
+            }
+            show_refusals += 1;
+        }
+    }
     options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
     let refused = export_bundle_with_soundtrack_with_fs(
         &mut Score(Some("/compressed.asset")),
@@ -8802,7 +8850,8 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
         LogEvent::new("e2e.bundle.soundtrack_capabilities")
             .field("thread_counts", checked)
             .field("source_receipts", 2_u64)
-            .field("prepublication_refusals", 2_u64),
+            .field("prepublication_refusals", 2_u64)
+            .field("show_audio_refusals", show_refusals),
     );
     Ok(RunOutcome::ok()
         .with_artifact(
@@ -8812,6 +8861,7 @@ fn bundle_soundtrack_capabilities_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sc
         .with_counter("bundle_audio_thread_counts", checked)
         .with_counter("bundle_audio_source_receipts", 2)
         .with_counter("bundle_audio_refusals", 2)
+        .with_counter("bundle_audio_show_refusals", show_refusals)
         .with_counter("bundle_audio_no_cue_unchanged", 1))
 }
 
@@ -22444,6 +22494,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             counter_eq("bundle_audio_thread_counts", 3),
             counter_eq("bundle_audio_source_receipts", 2),
             counter_eq("bundle_audio_refusals", 2),
+            counter_eq("bundle_audio_show_refusals", 4),
             counter_eq("bundle_audio_no_cue_unchanged", 1),
         ],
         vec![LogExpect::span_present(

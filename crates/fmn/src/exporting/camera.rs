@@ -133,10 +133,12 @@ where
             .recorder
             .capture_terminal_still_with_camera(scene.stage(), &camera);
     }
+    let has_explicit_show_captures = sink.recorder.has_explicit_show_captures();
     let bundle = sink
         .recorder
         .finish_with_max_bytes(options.max_output_bytes)
         .map_err(recording_error)?;
+    super::soundtrack::validate_recording_timing(has_explicit_show_captures, &scene)?;
     let (bundle, soundtrack) =
         super::soundtrack::finish_recording(bundle, &scene, &options, audio)?;
     Ok(SceneBundleExport {

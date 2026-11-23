@@ -11,7 +11,9 @@ mod compressed_audio;
 mod surround_audio;
 
 use fmn::exporting::soundtrack::*;
-use fmn::exporting::{BundleExportOptions, export_bundle_bytes, export_camera_bundle_bytes};
+use fmn::exporting::{
+    BundleExportError, BundleExportOptions, export_bundle_bytes, export_camera_bundle_bytes,
+};
 use fmn::prelude::*;
 use fmn::rendering::{SoundtrackPreparationLimits, render_bundle_with_fs};
 use fmn_codec::{SampleFormat, WavAudio, encode_wav};
@@ -19,7 +21,7 @@ use fmn_output::{
     AudioDecodeError, AudioDecodeLimits, AudioDecoder, AudioInputFormat, MixerConfig, SoundCue,
     SoundMixer,
 };
-use fmn_platform::fs::{FileSystem, StdFs, VirtualFs};
+use fmn_platform::fs::{FileSystem, FsError, FsNodeKind, StdFs, VirtualFs};
 use fmn_platform::process::{FfmpegLocator, StdFfmpegLocator, StdProcessRunner};
 use fmn_scene::{CameraRig, TimelineBundle};
 use std::{cell::Cell, path::Path, rc::Rc, sync::Arc};
@@ -275,6 +277,303 @@ fn no_cues_preserve_legacy_bytes_and_bad_configuration_precedes_scene_execution(
     }
     assert!(export_bundle_bytes(&mut Explanation::new(true), options()).is_err());
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShowAt {
+    BeforeCue,
+    AfterCue,
+    AfterWait,
+}
+
+struct ShownExplanation {
+    sound: bool,
+    at: ShowAt,
+}
+
+impl SceneConstruct for ShownExplanation {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        stage.add(Circle::new().radius(0.5))?;
+        if self.at == ShowAt::BeforeCue {
+            stage.show()?;
+        }
+        if self.sound {
+            stage.scene_mut().add_sound("/tone.wav", 0.0, None, None)?;
+        }
+        if self.at == ShowAt::AfterCue {
+            stage.show()?;
+        }
+        stage.wait(0.25)?;
+        if self.at == ShowAt::AfterWait {
+            stage.show()?;
+        }
+        stage.wait(0.25)?;
+        Ok(())
+    }
+}
+
+/// Observe the actual export capability boundary, independently of its result.
+/// Even probing an asset or creating a private publication file is too early.
+struct ObservedExportFs {
+    inner: Arc<VirtualFs>,
+    accesses: std::sync::atomic::AtomicUsize,
+}
+
+impl ObservedExportFs {
+    fn observed(&self) -> &VirtualFs {
+        self.accesses
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.as_ref()
+    }
+}
+
+impl FileSystem for ObservedExportFs {
+    fn node_kind_no_follow(&self, path: &Path) -> Result<Option<FsNodeKind>, FsError> {
+        self.observed().node_kind_no_follow(path)
+    }
+    fn create_dir(&self, path: &Path) -> Result<bool, FsError> {
+        self.observed().create_dir(path)
+    }
+    fn read(&self, path: &Path) -> Result<Vec<u8>, FsError> {
+        self.observed().read(path)
+    }
+    fn read_bounded(&self, path: &Path, max_bytes: usize) -> Result<Vec<u8>, FsError> {
+        self.observed().read_bounded(path, max_bytes)
+    }
+    fn write_atomic(&self, path: &Path, bytes: &[u8]) -> Result<(), FsError> {
+        self.observed().write_atomic(path, bytes)
+    }
+    fn begin_atomic_file(
+        self: Arc<Self>,
+        path: &Path,
+    ) -> Result<Box<dyn fmn_platform::fs::AtomicFileWriter>, FsError> {
+        self.observed();
+        Arc::clone(&self.inner).begin_atomic_file(path)
+    }
+    fn create_new(&self, path: &Path, bytes: &[u8]) -> Result<bool, FsError> {
+        self.observed().create_new(path, bytes)
+    }
+    fn remove_file(&self, path: &Path) -> Result<(), FsError> {
+        self.observed().remove_file(path)
+    }
+    fn remove_dir_all(&self, path: &Path) -> Result<(), FsError> {
+        self.observed().remove_dir_all(path)
+    }
+    fn exists(&self, path: &Path) -> bool {
+        self.observed().exists(path)
+    }
+    fn list_dir(&self, path: &Path) -> Result<Vec<std::path::PathBuf>, FsError> {
+        self.observed().list_dir(path)
+    }
+    fn count_dir_entries_bounded(&self, path: &Path, max_entries: usize) -> Result<usize, FsError> {
+        self.observed().count_dir_entries_bounded(path, max_entries)
+    }
+}
+
+#[test]
+fn explicit_show_with_sound_refuses_before_assets_audio_budgets_or_publication() {
+    for compact in [false, true] {
+        for camera in [false, true] {
+            for at in [ShowAt::BeforeCue, ShowAt::AfterCue, ShowAt::AfterWait] {
+                for constrained in [false, true] {
+                    let inner = Arc::new(VirtualFs::new());
+                    inner.insert("/existing.fmtl", b"keep existing artifact".to_vec());
+                    if !constrained {
+                        inner.insert("/tone.wav", encode_wav(1, 8, SampleFormat::F32, &[0.25]));
+                    }
+                    let fs = Arc::new(ObservedExportFs {
+                        inner: Arc::clone(&inner),
+                        accesses: std::sync::atomic::AtomicUsize::new(0),
+                    });
+                    let mut opts = options();
+                    if compact {
+                        opts.storage = fmn::exporting::BundleStorage::Compact(Default::default());
+                    }
+                    let (mut settings, decoder_calls) = unavailable_decoder();
+                    if constrained {
+                        // A missing source and exhausted audio budgets must
+                        // not replace the earlier semantic refusal.
+                        settings.preparation.max_source_bytes = 1;
+                        settings.preparation.max_prepared_samples = 1;
+                    }
+                    let destination = if constrained {
+                        "/existing.fmtl"
+                    } else {
+                        "/new.fmtl"
+                    };
+                    let mut program = ShownExplanation { sound: true, at };
+                    let error = if camera {
+                        export_camera_bundle_with_soundtrack_with_fs(
+                            move |scene, config| Ok((program, CameraRig::new(scene, config)?)),
+                            destination,
+                            fmn_render::CameraConfig {
+                                fps: 8,
+                                resolution: (64, 36),
+                                ..Default::default()
+                            },
+                            opts,
+                            &settings,
+                            fs.clone(),
+                        )
+                    } else {
+                        export_bundle_with_soundtrack_with_fs(
+                            &mut program,
+                            destination,
+                            opts,
+                            &settings,
+                            fs.clone(),
+                        )
+                    }
+                    .unwrap_err();
+                    assert!(
+                        matches!(error, BundleExportError::Capability(message)
+                            if message.contains("explicit show") && message.contains("play/wait")),
+                        "compact={compact}, camera={camera}, at={at:?}: {error}"
+                    );
+                    assert_eq!(fs.accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
+                    assert_eq!(decoder_calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+                    assert!(!inner.exists(Path::new("/new.fmtl")));
+                    assert_eq!(
+                        inner.read(Path::new("/existing.fmtl")).unwrap(),
+                        b"keep existing artifact"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn show_audio_refusal_preserves_recording_and_output_failures() {
+    struct CaughtCaptureFailure;
+    impl SceneConstruct for CaughtCaptureFailure {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.show()?;
+            stage
+                .scene_mut()
+                .add_sound("/missing.wav", 0.0, None, None)?;
+            let _ = stage.wait(0.25);
+            Ok(())
+        }
+    }
+
+    for compact in [false, true] {
+        for camera in [false, true] {
+            for capture_failure in [false, true] {
+                let mut opts = options();
+                if compact {
+                    let mut limits = fmn::exporting::CompactRecordingLimits::default();
+                    if capture_failure {
+                        limits.max_frames = 1;
+                    }
+                    opts.storage = fmn::exporting::BundleStorage::Compact(limits);
+                } else if capture_failure {
+                    opts.limits.max_frames = 1;
+                }
+                if !capture_failure {
+                    opts.max_output_bytes = 1;
+                }
+                let fs = ObservedExportFs {
+                    inner: Arc::new(VirtualFs::new()),
+                    accesses: std::sync::atomic::AtomicUsize::new(0),
+                };
+                let error = if camera {
+                    export_camera_bundle_with_soundtrack_bytes(
+                        |scene, config| Ok((CaughtCaptureFailure, CameraRig::new(scene, config)?)),
+                        fmn_render::CameraConfig {
+                            fps: 8,
+                            resolution: (64, 36),
+                            ..Default::default()
+                        },
+                        opts,
+                        &audio(1, 8),
+                        &fs,
+                    )
+                } else {
+                    export_bundle_with_soundtrack_bytes(
+                        &mut CaughtCaptureFailure,
+                        opts,
+                        &audio(1, 8),
+                        &fs,
+                    )
+                }
+                .unwrap_err();
+                if capture_failure {
+                    assert!(
+                        matches!(
+                            error,
+                            BundleExportError::Recording(
+                                fmn_scene::recording::RecordingError::Bundle(
+                                    fmn_scene::timeline_bundle::BundleError::FrameLimitExceeded {
+                                        frames: 2,
+                                        max_frames: 1,
+                                    }
+                                )
+                            )
+                        ),
+                        "{error}"
+                    );
+                } else {
+                    assert!(
+                        matches!(error, BundleExportError::OutputLimit { limit: 1, .. }),
+                        "{error}"
+                    );
+                }
+                assert_eq!(fs.accesses.load(std::sync::atomic::Ordering::SeqCst), 0);
+            }
+        }
+    }
+}
+
+#[test]
+fn explicit_show_without_sound_preserves_the_recorded_grid_with_audio_enabled() {
+    for compact in [false, true] {
+        for camera in [false, true] {
+            let mut opts = options();
+            if compact {
+                opts.storage = fmn::exporting::BundleStorage::Compact(Default::default());
+            }
+            let program = || ShownExplanation {
+                sound: false,
+                at: ShowAt::BeforeCue,
+            };
+            let fs = VirtualFs::new();
+            let settings = audio(1, 8);
+            let (legacy, enabled) = if camera {
+                let config = fmn_render::CameraConfig {
+                    fps: 8,
+                    resolution: (64, 36),
+                    ..Default::default()
+                };
+                (
+                    export_camera_bundle_bytes(
+                        |scene, config| Ok((program(), CameraRig::new(scene, config)?)),
+                        config.clone(),
+                        opts.clone(),
+                    ),
+                    export_camera_bundle_with_soundtrack_bytes(
+                        |scene, config| Ok((program(), CameraRig::new(scene, config)?)),
+                        config,
+                        opts,
+                        &settings,
+                        &fs,
+                    ),
+                )
+            } else {
+                (
+                    export_bundle_bytes(&mut program(), opts.clone()),
+                    export_bundle_with_soundtrack_bytes(&mut program(), opts, &settings, &fs),
+                )
+            };
+            let (legacy, enabled) = (legacy.unwrap(), enabled.unwrap());
+            assert_eq!(enabled.bundle.bytes, legacy.bundle.bytes);
+            assert!(enabled.soundtrack.is_none());
+            assert_eq!(enabled.bundle.frame_count, 5);
+            assert_eq!(enabled.bundle.segment_count, 3);
+            assert_eq!(enabled.scene.time.frames(), 4);
+        }
+    }
+}
+
 #[test]
 fn cumulative_audio_limits_and_missing_assets_never_publish_partial_or_overwrite() {
     for field in 0..5 {
@@ -509,17 +808,44 @@ fn short_cues_pad_to_picture_and_terminal_stills_without_advancing_authored_time
     }
     let fs = VirtualFs::new();
     fs.insert("/short.wav", encode_wav(1, 8, SampleFormat::F32, &[0.25]));
-    for (hold, pictures, expected) in [
-        (true, 4, vec![0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
-        (false, 1, vec![0.25, 0.25]),
-    ] {
-        let export =
-            export_bundle_with_soundtrack_bytes(&mut Short { hold }, options(), &audio(1, 8), &fs)
+    for compact in [false, true] {
+        for camera in [false, true] {
+            for (hold, pictures, expected) in [
+                (true, 4, vec![0.25, 0.25, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                (false, 1, vec![0.25, 0.25]),
+            ] {
+                let mut opts = options();
+                if compact {
+                    opts.storage = fmn::exporting::BundleStorage::Compact(Default::default());
+                }
+                let export = if camera {
+                    export_camera_bundle_with_soundtrack_bytes(
+                        |scene, config| Ok((Short { hold }, CameraRig::new(scene, config)?)),
+                        fmn_render::CameraConfig {
+                            fps: 8,
+                            resolution: (64, 36),
+                            ..Default::default()
+                        },
+                        opts,
+                        &audio(1, 8),
+                        &fs,
+                    )
+                } else {
+                    export_bundle_with_soundtrack_bytes(
+                        &mut Short { hold },
+                        opts,
+                        &audio(1, 8),
+                        &fs,
+                    )
+                }
                 .unwrap();
-        assert_eq!(export.bundle.frame_count, pictures);
-        assert_eq!(export.scene.time.frames(), if hold { 4 } else { 0 });
-        let bundle = TimelineBundle::from_bytes(&export.bundle.bytes).unwrap();
-        assert_eq!(bundle.soundtrack().unwrap().samples(), expected);
+                assert_eq!(export.bundle.frame_count, pictures);
+                assert_eq!(export.scene.time.frames(), if hold { 4 } else { 0 });
+                let bundle = TimelineBundle::from_bytes(&export.bundle.bytes).unwrap();
+                assert_eq!(bundle.has_camera_track(), camera);
+                assert_eq!(bundle.soundtrack().unwrap().samples(), expected);
+            }
+        }
     }
 }
 
