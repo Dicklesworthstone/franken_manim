@@ -11,7 +11,10 @@
 //!
 //! Untrusted-input posture (§16.5): chunk sizes are bounds-checked,
 //! the sample budget is enforced before allocation, and unknown
-//! chunks are skipped, never trusted.
+//! chunks are skipped, never trusted. Chunks must fit inside the declared
+//! RIFF container, including their word padding. Extensible PCM/float headers
+//! are admitted only after their complete subformat GUID and sample layout
+//! have been validated; a matching 16-bit GUID prefix is not a format proof.
 
 /// Typed refusals of the WAV codec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,7 +23,9 @@ pub enum WavError {
     NotWav,
     /// The stream ended mid-chunk.
     Truncated,
-    /// No `fmt ` chunk before `data`.
+    /// The RIFF container is malformed or has ambiguous audio chunks.
+    BadRiff(&'static str),
+    /// No `fmt ` chunk.
     MissingFmt,
     /// No `data` chunk.
     MissingData,
@@ -42,6 +47,12 @@ pub enum WavError {
         /// The configured sample budget.
         max_samples: u64,
     },
+    /// The decoded sample buffer cannot fit the target's allocation bounds
+    /// or available address space, even though its declared budget admits it.
+    AllocationFailed {
+        /// Number of interleaved f32 samples requested.
+        samples: usize,
+    },
 }
 
 impl std::fmt::Display for WavError {
@@ -49,6 +60,7 @@ impl std::fmt::Display for WavError {
         match self {
             Self::NotWav => write!(f, "not a RIFF/WAVE stream"),
             Self::Truncated => write!(f, "wav stream truncated"),
+            Self::BadRiff(what) => write!(f, "malformed wav container: {what}"),
             Self::MissingFmt => write!(f, "wav has no fmt chunk"),
             Self::MissingData => write!(f, "wav has no data chunk"),
             Self::BadFmt(what) => write!(f, "malformed fmt chunk: {what}"),
@@ -61,6 +73,9 @@ impl std::fmt::Display for WavError {
             }
             Self::TooLarge { max_samples } => {
                 write!(f, "wav exceeds the {max_samples}-sample budget")
+            }
+            Self::AllocationFailed { samples } => {
+                write!(f, "cannot allocate {samples} decoded wav samples")
             }
         }
     }
@@ -127,55 +142,57 @@ fn read_u32(data: &[u8], at: usize) -> Result<u32, WavError> {
         .ok_or(WavError::Truncated)
 }
 
-/// Decode a WAV stream.
-///
-/// # Errors
-/// Every refusal in [`WavError`].
-pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError> {
-    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
-        return Err(WavError::NotWav);
-    }
-    let mut at = 12usize;
-    let mut fmt: Option<(u16, u16, u32, u16)> = None; // tag, channels, rate, bits
-    let mut payload: Option<&[u8]> = None;
-    while at + 8 <= data.len() {
-        let name = &data[at..at + 4];
-        let size = read_u32(data, at + 4)? as usize;
-        let body = data.get(at + 8..at + 8 + size).ok_or(WavError::Truncated)?;
-        match name {
-            b"fmt " => {
-                if size < 16 {
-                    return Err(WavError::BadFmt("length"));
-                }
-                let tag = read_u16(body, 0)?;
-                let channels = read_u16(body, 2)?;
-                let rate = read_u32(body, 4)?;
-                let bits = read_u16(body, 14)?;
-                if channels == 0 {
-                    return Err(WavError::BadFmt("zero channels"));
-                }
-                // WAVE_FORMAT_EXTENSIBLE carries the real tag in the
-                // extension's GUID head.
-                let tag = if tag == 0xfffe && size >= 26 {
-                    read_u16(body, 24)?
-                } else {
-                    tag
-                };
-                fmt = Some((tag, channels, rate, bits));
-            }
-            b"data" => {
-                payload = Some(body);
-                // Chunks after data (LIST, etc.) are legal; keep
-                // scanning only for fmt if it is somehow late.
-            }
-            _ => {}
-        }
-        // Chunks are word-aligned.
-        at += 8 + size + (size & 1);
-    }
-    let (tag, channels, sample_rate, bits) = fmt.ok_or(WavError::MissingFmt)?;
-    let payload = payload.ok_or(WavError::MissingData)?;
+struct WavSpec {
+    channels: u16,
+    sample_rate: u32,
+    format: SampleFormat,
+    bytes_per_sample: usize,
+    block_align: usize,
+}
 
+fn decode_fmt(body: &[u8]) -> Result<WavSpec, WavError> {
+    if body.len() < 16 {
+        return Err(WavError::BadFmt("length"));
+    }
+    let mut tag = read_u16(body, 0)?;
+    let channels = read_u16(body, 2)?;
+    let sample_rate = read_u32(body, 4)?;
+    let byte_rate = read_u32(body, 8)?;
+    let block_align = read_u16(body, 12)?;
+    let bits = read_u16(body, 14)?;
+    if channels == 0 {
+        return Err(WavError::BadFmt("zero channels"));
+    }
+    if sample_rate == 0 {
+        return Err(WavError::BadFmt("zero sample rate"));
+    }
+    if tag == 0xfffe {
+        // WAVEFORMATEXTENSIBLE is WAVEFORMATEX (18 bytes), valid bits,
+        // channel mask and a full GUID, not just the GUID's format-tag head.
+        // https://learn.microsoft.com/en-us/windows/win32/api/mmreg/ns-mmreg-waveformatextensible
+        if body.len() < 40 {
+            return Err(WavError::BadFmt("extensible length"));
+        }
+        let extension = usize::from(read_u16(body, 16)?);
+        if extension < 22 || extension > body.len() - 18 {
+            return Err(WavError::BadFmt("extensible extension size"));
+        }
+        // DEFINE_WAVEFORMATEX_GUID(tag): tag-0000-0010-8000-00aa00389b71.
+        const GUID_TAIL: [u8; 14] = [0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71];
+        if body[26..40] != GUID_TAIL {
+            return Err(WavError::UnsupportedFormat { format_tag: tag });
+        }
+        tag = read_u16(body, 24)?;
+        let valid_bits = read_u16(body, 18)?;
+        if matches!(tag, 1 | 3)
+            && (valid_bits == 0 || valid_bits > bits || (tag == 3 && valid_bits != bits))
+        {
+            return Err(WavError::BadFmt("extensible valid bits"));
+        }
+        // PCM's valid bits are left-aligned in the sample container. The
+        // ordinary signed-container divisors below therefore remain correct
+        // for e.g. 20-in-24 and 24-in-32 audio, without a lossy re-scaling.
+    }
     let (format, bytes_per_sample) = match (tag, bits) {
         (1, 8) => (SampleFormat::U8, 1),
         (1, 16) => (SampleFormat::S16, 2),
@@ -185,10 +202,86 @@ pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError>
         (1 | 3, other) => return Err(WavError::UnsupportedDepth { bits: other }),
         (other, _) => return Err(WavError::UnsupportedFormat { format_tag: other }),
     };
-    if !payload
-        .len()
-        .is_multiple_of(bytes_per_sample * usize::from(channels))
-    {
+    let frame_bytes = bytes_per_sample * usize::from(channels);
+    if usize::from(block_align) != frame_bytes {
+        return Err(WavError::BadFmt("block alignment"));
+    }
+    if sample_rate.checked_mul(u32::from(block_align)) != Some(byte_rate) {
+        return Err(WavError::BadFmt("byte rate"));
+    }
+    Ok(WavSpec {
+        channels,
+        sample_rate,
+        format,
+        bytes_per_sample,
+        block_align: frame_bytes,
+    })
+}
+
+/// Decode a WAV stream.
+///
+/// Unknown chunks and bytes following the declared RIFF container are ignored.
+/// Duplicate format/data chunks are refused rather than silently replacing
+/// earlier audio. The format chunk may follow the data chunk.
+///
+/// # Errors
+/// Every refusal in [`WavError`].
+pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError> {
+    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return Err(WavError::NotWav);
+    }
+    let size = usize::try_from(read_u32(data, 4)?).map_err(|_| WavError::Truncated)?;
+    if size < 4 {
+        return Err(WavError::BadRiff("size excludes the WAVE form type"));
+    }
+    let end = size.checked_add(8).ok_or(WavError::Truncated)?;
+    let data = data.get(..end).ok_or(WavError::Truncated)?;
+    let mut at = 12usize;
+    let mut fmt: Option<&[u8]> = None;
+    let mut payload: Option<&[u8]> = None;
+    while at < data.len() {
+        let body_start = at.checked_add(8).ok_or(WavError::Truncated)?;
+        let header = data.get(at..body_start).ok_or(WavError::Truncated)?;
+        let name = &header[..4];
+        let size = usize::try_from(read_u32(header, 4)?).map_err(|_| WavError::Truncated)?;
+        let body_end = body_start.checked_add(size).ok_or(WavError::Truncated)?;
+        let body = data.get(body_start..body_end).ok_or(WavError::Truncated)?;
+        let next = body_end.checked_add(size & 1).ok_or(WavError::Truncated)?;
+        if next > data.len() {
+            return Err(WavError::Truncated);
+        }
+        match name {
+            b"fmt " => {
+                if fmt.is_some() {
+                    return Err(WavError::BadRiff("duplicate fmt chunk"));
+                }
+                fmt = Some(body);
+            }
+            b"data" => {
+                if payload.is_some() {
+                    return Err(WavError::BadRiff("duplicate data chunk"));
+                }
+                payload = Some(body);
+            }
+            _ => {}
+        }
+        // Chunks are word-aligned.
+        at = next;
+    }
+    // Validate the complete container before classifying the codec. An
+    // unsupported format may use the explicit transcode capability, but a
+    // malformed RIFF file must not escape admission through that fallback.
+    let fmt = fmt.ok_or(WavError::MissingFmt)?;
+    let payload = payload.ok_or(WavError::MissingData)?;
+    let WavSpec {
+        channels,
+        sample_rate,
+        format,
+        bytes_per_sample,
+        block_align,
+    } = decode_fmt(fmt)?;
+
+    if !payload.len().is_multiple_of(block_align) {
         return Err(WavError::BadFmt("incomplete interleaved sample frame"));
     }
     let count = payload.len() / bytes_per_sample;
@@ -197,7 +290,13 @@ pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError>
             max_samples: limits.max_samples,
         });
     }
-    let mut samples = Vec::with_capacity(count);
+    // A caller may raise the sample budget above the target's Vec capacity
+    // ceiling (notably u8 sources decoded to f32 on wasm32). Refuse that input
+    // and allocation failures through the codec's error boundary, not a panic.
+    let mut samples = Vec::new();
+    samples
+        .try_reserve_exact(count)
+        .map_err(|_| WavError::AllocationFailed { samples: count })?;
     match format {
         SampleFormat::U8 => {
             for &b in payload {

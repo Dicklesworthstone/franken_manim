@@ -106,6 +106,10 @@ fn wav_decodes_the_cpython_fixture_matrix() {
 fn wav_refusals_are_typed() {
     assert_eq!(
         decode_wav(b"RIFFxxxxWAVE", &WavLimits::default()),
+        Err(WavError::Truncated)
+    );
+    assert_eq!(
+        decode_wav(b"RIFF\x04\x00\x00\x00WAVE", &WavLimits::default()),
         Err(WavError::MissingFmt)
     );
     assert_eq!(
@@ -134,11 +138,275 @@ fn wav_rejects_partial_samples_and_interleaved_frames_without_truncating() {
     {
         let mut bytes = encode_wav(channels, 8_000, format, &[0.25, -0.5]);
         bytes[40..44].copy_from_slice(&data_len.to_le_bytes());
+        bytes.truncate(44 + data_len as usize);
+        if data_len & 1 != 0 {
+            bytes.push(0);
+        }
+        set_riff_size(&mut bytes);
         assert_eq!(
             decode_wav(&bytes, &WavLimits::default()),
             Err(WavError::BadFmt("incomplete interleaved sample frame")),
         );
     }
+}
+
+fn set_riff_size(bytes: &mut [u8]) {
+    let size = u32::try_from(bytes.len() - 8).unwrap();
+    bytes[4..8].copy_from_slice(&size.to_le_bytes());
+}
+
+fn extensible_wav(bytes: &[u8], valid_bits: u16) -> Vec<u8> {
+    assert_eq!(&bytes[16..20], &16_u32.to_le_bytes());
+    let mut output = bytes[..36].to_vec();
+    output[16..20].copy_from_slice(&40_u32.to_le_bytes());
+    output[20..22].copy_from_slice(&0xfffe_u16.to_le_bytes());
+    output.extend_from_slice(&22_u16.to_le_bytes());
+    output.extend_from_slice(&valid_bits.to_le_bytes());
+    output.extend_from_slice(&0_u32.to_le_bytes()); // unspecified speaker mask
+    output.extend_from_slice(&bytes[20..22]);
+    output.extend_from_slice(&[0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71]);
+    output.extend_from_slice(&bytes[36..]);
+    set_riff_size(&mut output);
+    output
+}
+
+#[test]
+fn wav_chunks_cannot_escape_the_declared_riff_container() {
+    let valid = encode_wav(1, 8_000, SampleFormat::S16, &[0.25, -0.5]);
+    let mut outside = valid.clone();
+    outside[4..8].copy_from_slice(&4_u32.to_le_bytes());
+    assert_eq!(
+        decode_wav(&outside, &WavLimits::default()),
+        Err(WavError::MissingFmt),
+        "fmt and data after the RIFF boundary do not belong to this WAVE"
+    );
+    let mut trailer = valid.clone();
+    trailer.extend_from_slice(&valid[12..]);
+    assert_eq!(
+        decode_wav(&trailer, &WavLimits::default()),
+        decode_wav(&valid, &WavLimits::default()),
+        "trailing bytes cannot replace the admitted audio"
+    );
+    for size in [valid.len() as u32, u32::MAX] {
+        let mut truncated = valid.clone();
+        truncated[4..8].copy_from_slice(&size.to_le_bytes());
+        assert_eq!(
+            decode_wav(&truncated, &WavLimits::default()),
+            Err(WavError::Truncated)
+        );
+    }
+    let mut too_short = valid.clone();
+    too_short[4..8].copy_from_slice(&3_u32.to_le_bytes());
+    assert!(matches!(
+        decode_wav(&too_short, &WavLimits::default()),
+        Err(WavError::BadRiff(_))
+    ));
+    let mut oversized_chunk = valid;
+    oversized_chunk[40..44].copy_from_slice(&u32::MAX.to_le_bytes());
+    assert_eq!(
+        decode_wav(&oversized_chunk, &WavLimits::default()),
+        Err(WavError::Truncated)
+    );
+}
+
+#[test]
+fn wav_requires_complete_headers_and_word_padding_inside_riff() {
+    let valid = encode_wav(1, 8_000, SampleFormat::S16, &[0.25]);
+    for trailing in 1..8 {
+        let mut partial_header = valid.clone();
+        partial_header.extend(std::iter::repeat_n(0, trailing));
+        set_riff_size(&mut partial_header);
+        assert_eq!(
+            decode_wav(&partial_header, &WavLimits::default()),
+            Err(WavError::Truncated),
+            "{trailing}-byte partial header"
+        );
+    }
+    let mut odd = valid.clone();
+    odd.extend_from_slice(b"JUNK\x01\x00\x00\x00x");
+    set_riff_size(&mut odd);
+    assert_eq!(
+        decode_wav(&odd, &WavLimits::default()),
+        Err(WavError::Truncated),
+        "odd chunks need their padding inside the parent container"
+    );
+    odd.push(0);
+    set_riff_size(&mut odd);
+    assert_eq!(
+        decode_wav(&odd, &WavLimits::default()),
+        decode_wav(&valid, &WavLimits::default())
+    );
+}
+
+#[test]
+fn wav_refuses_ambiguous_chunks_but_accepts_late_format_and_metadata() {
+    let valid = encode_wav(1, 8_000, SampleFormat::S16, &[0.25, -0.5]);
+    for (chunk, error) in [
+        (&valid[12..36], WavError::BadRiff("duplicate fmt chunk")),
+        (&valid[36..], WavError::BadRiff("duplicate data chunk")),
+    ] {
+        let mut duplicate = valid.clone();
+        duplicate.extend_from_slice(chunk);
+        set_riff_size(&mut duplicate);
+        assert_eq!(decode_wav(&duplicate, &WavLimits::default()), Err(error));
+    }
+    let mut reordered = valid[..12].to_vec();
+    reordered.extend_from_slice(b"JUNK\x03\x00\x00\x00abc\x00");
+    reordered.extend_from_slice(&valid[36..]);
+    reordered.extend_from_slice(&valid[12..36]);
+    set_riff_size(&mut reordered);
+    assert_eq!(
+        decode_wav(&reordered, &WavLimits::default()),
+        decode_wav(&valid, &WavLimits::default())
+    );
+}
+
+#[test]
+fn wav_validates_sample_rate_alignment_and_byte_rate() {
+    let valid = encode_wav(2, 48_000, SampleFormat::S16, &[0.25, -0.5]);
+    for (offset, replacement, message) in [
+        (24, 0_u32.to_le_bytes().to_vec(), "zero sample rate"),
+        (32, 2_u16.to_le_bytes().to_vec(), "block alignment"),
+        (28, 96_000_u32.to_le_bytes().to_vec(), "byte rate"),
+    ] {
+        let mut malformed = valid.clone();
+        malformed[offset..offset + replacement.len()].copy_from_slice(&replacement);
+        assert_eq!(
+            decode_wav(&malformed, &WavLimits::default()),
+            Err(WavError::BadFmt(message))
+        );
+    }
+    let mut overflow = valid;
+    overflow[24..28].copy_from_slice(&u32::MAX.to_le_bytes());
+    overflow[28..32].copy_from_slice(&u32::MAX.wrapping_mul(4).to_le_bytes());
+    assert_eq!(
+        decode_wav(&overflow, &WavLimits::default()),
+        Err(WavError::BadFmt("byte rate")),
+        "byte-rate multiplication must not wrap on any target"
+    );
+}
+
+#[test]
+fn wav_extensible_headers_preserve_pcm_and_float_samples() {
+    for (bytes, bits) in [
+        (&include_bytes!("fixtures/wav/ramp_u8.wav")[..], 8),
+        (&include_bytes!("fixtures/wav/ramp_s16.wav")[..], 16),
+        (&include_bytes!("fixtures/wav/ramp_s24.wav")[..], 24),
+        (&include_bytes!("fixtures/wav/ramp_s32.wav")[..], 32),
+        (&include_bytes!("fixtures/wav/ramp_f32.wav")[..], 32),
+    ] {
+        let extended = extensible_wav(bytes, bits);
+        assert_eq!(
+            decode_wav(&extended, &WavLimits::default()),
+            decode_wav(bytes, &WavLimits::default())
+        );
+    }
+    // Twenty-four valid bits in a signed 32-bit container are left aligned.
+    let mut base = encode_wav(1, 48_000, SampleFormat::F32, &[0.0; 5]);
+    base[20..22].copy_from_slice(&1_u16.to_le_bytes());
+    for (chunk, sample) in base[44..].chunks_exact_mut(4).zip([
+        i32::MIN,
+        -1_073_741_824,
+        0,
+        1_073_741_824,
+        2_147_483_392,
+    ]) {
+        chunk.copy_from_slice(&sample.to_le_bytes());
+    }
+    let extended = extensible_wav(&base, 24);
+    let decoded = decode_wav(&extended, &WavLimits::default()).unwrap();
+    assert_eq!(decoded.format, SampleFormat::S32);
+    assert_eq!(
+        decoded.samples,
+        [-1.0, -0.5, 0.0, 0.5, 1.0 - 1.0 / 8_388_608.0]
+    );
+}
+
+#[test]
+fn wav_extensible_subformat_requires_the_entire_guid() {
+    let valid = extensible_wav(&encode_wav(1, 8_000, SampleFormat::S16, &[0.25, -0.5]), 16);
+    for offset in 46..60 {
+        let mut foreign = valid.clone();
+        foreign[offset] ^= 1;
+        assert_eq!(
+            decode_wav(&foreign, &WavLimits::default()),
+            Err(WavError::UnsupportedFormat { format_tag: 0xfffe }),
+            "foreign GUID byte {offset} must not masquerade as PCM"
+        );
+    }
+    for size in [26_u32, 38] {
+        let mut short = valid[..20 + size as usize].to_vec();
+        short.extend_from_slice(&valid[60..]);
+        short[16..20].copy_from_slice(&size.to_le_bytes());
+        set_riff_size(&mut short);
+        assert_eq!(
+            decode_wav(&short, &WavLimits::default()),
+            Err(WavError::BadFmt("extensible length"))
+        );
+    }
+    for extension in [0_u16, 21, 23, u16::MAX] {
+        let mut malformed = valid.clone();
+        malformed[36..38].copy_from_slice(&extension.to_le_bytes());
+        assert_eq!(
+            decode_wav(&malformed, &WavLimits::default()),
+            Err(WavError::BadFmt("extensible extension size"))
+        );
+    }
+    for precision in [0_u16, 17] {
+        let mut malformed = valid.clone();
+        malformed[38..40].copy_from_slice(&precision.to_le_bytes());
+        assert_eq!(
+            decode_wav(&malformed, &WavLimits::default()),
+            Err(WavError::BadFmt("extensible valid bits"))
+        );
+    }
+    let float = extensible_wav(&encode_wav(1, 8_000, SampleFormat::F32, &[0.25]), 24);
+    assert_eq!(
+        decode_wav(&float, &WavLimits::default()),
+        Err(WavError::BadFmt("extensible valid bits"))
+    );
+    assert_eq!(
+        decode_wav(&valid, &WavLimits { max_samples: 1 }),
+        Err(WavError::TooLarge { max_samples: 1 }),
+        "extensible admission retains the decode sample budget"
+    );
+}
+
+#[test]
+fn wav_container_refusals_precede_unsupported_codec_fallback() {
+    let mut source = encode_wav(1, 8_000, SampleFormat::S16, &[0.25]);
+    source[20..22].copy_from_slice(&7_u16.to_le_bytes());
+    assert_eq!(
+        decode_wav(&source, &WavLimits::default()),
+        Err(WavError::UnsupportedFormat { format_tag: 7 })
+    );
+    let mut missing_data = source[..36].to_vec();
+    set_riff_size(&mut missing_data);
+    assert_eq!(
+        decode_wav(&missing_data, &WavLimits::default()),
+        Err(WavError::MissingData)
+    );
+    missing_data[20..22].copy_from_slice(&1_u16.to_le_bytes());
+    missing_data[34..36].copy_from_slice(&64_u16.to_le_bytes());
+    assert_eq!(
+        decode_wav(&missing_data, &WavLimits::default()),
+        Err(WavError::MissingData),
+        "unsupported PCM depth cannot hide a missing required data chunk"
+    );
+    let mut truncated = source.clone();
+    truncated.extend_from_slice(b"JUNK\x02\x00\x00\x00x");
+    set_riff_size(&mut truncated);
+    assert_eq!(
+        decode_wav(&truncated, &WavLimits::default()),
+        Err(WavError::Truncated)
+    );
+    let mut duplicate = source.clone();
+    duplicate.extend_from_slice(&source[36..]);
+    set_riff_size(&mut duplicate);
+    assert_eq!(
+        decode_wav(&duplicate, &WavLimits::default()),
+        Err(WavError::BadRiff("duplicate data chunk"))
+    );
 }
 
 // ---- y4m ------------------------------------------------------------

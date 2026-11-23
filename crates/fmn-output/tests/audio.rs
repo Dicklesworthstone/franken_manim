@@ -234,6 +234,53 @@ fn audio_budgets_and_damaged_pcm_do_not_fall_through_to_ffmpeg() {
 }
 
 #[test]
+fn audio_container_and_layout_refusals_do_not_resolve_an_external_tool() {
+    let source = encode_wav(1, 48_000, SampleFormat::S16, &[0.25, -0.5]);
+    let mut decoder = AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
+        panic!("malformed native WAV must not resolve an external capability")
+    })
+    .unwrap();
+    let mut outside = source.clone();
+    outside[4..8].copy_from_slice(&4_u32.to_le_bytes());
+    let mut alignment = source.clone();
+    alignment[32..34].copy_from_slice(&4_u16.to_le_bytes());
+    let mut duplicate = source.clone();
+    duplicate.extend_from_slice(&source[36..]);
+    let size = u32::try_from(duplicate.len() - 8).unwrap();
+    duplicate[4..8].copy_from_slice(&size.to_le_bytes());
+    let mut truncated_foreign = source.clone();
+    truncated_foreign[20..22].copy_from_slice(&7_u16.to_le_bytes());
+    truncated_foreign.extend_from_slice(b"JUNK\x02\x00\x00\x00x");
+    let size = u32::try_from(truncated_foreign.len() - 8).unwrap();
+    truncated_foreign[4..8].copy_from_slice(&size.to_le_bytes());
+    let mut missing_foreign = source[..36].to_vec();
+    missing_foreign[20..22].copy_from_slice(&7_u16.to_le_bytes());
+    missing_foreign[4..8].copy_from_slice(&28_u32.to_le_bytes());
+    let mut missing_depth = missing_foreign.clone();
+    missing_depth[20..22].copy_from_slice(&1_u16.to_le_bytes());
+    missing_depth[34..36].copy_from_slice(&64_u16.to_le_bytes());
+    for (malformed, expected) in [
+        (outside, fmn_codec::WavError::MissingFmt),
+        (alignment, fmn_codec::WavError::BadFmt("block alignment")),
+        (
+            duplicate,
+            fmn_codec::WavError::BadRiff("duplicate data chunk"),
+        ),
+        (truncated_foreign, fmn_codec::WavError::Truncated),
+        (missing_foreign, fmn_codec::WavError::MissingData),
+        (missing_depth, fmn_codec::WavError::MissingData),
+    ] {
+        assert!(matches!(
+            decoder.decode(&malformed),
+            Err(AudioDecodeError::Native(error)) if error == expected
+        ));
+    }
+    // A refused source does not poison this retained decoder or force a
+    // subsequent valid native source through the external-tool boundary.
+    assert!(decoder.decode(&source).is_ok());
+}
+
+#[test]
 fn audio_per_source_budgets_tighten_without_replacing_decoder_policy() {
     use std::sync::{Arc, Mutex};
 
