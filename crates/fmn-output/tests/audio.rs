@@ -472,6 +472,95 @@ fn audio_missing_decoder_does_not_disable_native_wav() {
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 #[test]
+fn audio_real_decoder_preserves_explicit_layouts_without_guessing_surround() {
+    let path = match std::env::var_os("FMN_AUDIO_FFMPEG") {
+        Some(path) => path.into(),
+        None if std::env::var_os("FMN_REQUIRE_FFMPEG").is_some() => "ffmpeg".into(),
+        None => {
+            eprintln!("real layout decode: set FMN_AUDIO_FFMPEG to the governed decoder");
+            return;
+        }
+    };
+    // Float64 WAV deliberately takes the production external-decoder route.
+    // Hand-author the RIFF fields instead of using the native F32 encoder, so
+    // an omitted layout cannot acquire a mask during fixture construction.
+    let fixture = |channels: u16, mask: Option<u32>| {
+        let samples: Vec<f32> = (0..usize::from(channels) * 8)
+            .map(|index| (index % usize::from(channels) + 1) as f32 / 16.0)
+            .collect();
+        let payload: Vec<u8> = samples
+            .iter()
+            .flat_map(|&sample| f64::from(sample).to_le_bytes())
+            .collect();
+        let mut fmt = Vec::new();
+        fmt.extend_from_slice(&if mask.is_some() { 0xfffe_u16 } else { 3_u16 }.to_le_bytes());
+        fmt.extend_from_slice(&channels.to_le_bytes());
+        fmt.extend_from_slice(&8_000_u32.to_le_bytes());
+        fmt.extend_from_slice(&(8_000 * u32::from(channels) * 8).to_le_bytes());
+        fmt.extend_from_slice(&(channels * 8).to_le_bytes());
+        fmt.extend_from_slice(&64_u16.to_le_bytes());
+        if let Some(mask) = mask {
+            fmt.extend_from_slice(&22_u16.to_le_bytes());
+            fmt.extend_from_slice(&64_u16.to_le_bytes());
+            fmt.extend_from_slice(&mask.to_le_bytes());
+            fmt.extend_from_slice(&[
+                3, 0, 0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71,
+            ]);
+        }
+        let mut bytes = b"RIFF".to_vec();
+        bytes.extend_from_slice(&(20 + fmt.len() as u32 + payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&(fmt.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&fmt);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(&payload);
+        (bytes, samples)
+    };
+    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), Some(path)).unwrap();
+    for (channels, mask) in [(1, None), (2, None), (6, Some(0x3f)), (8, Some(0x63f))] {
+        let (bytes, samples) = fixture(channels, mask);
+        let result = decoder.decode(&bytes).unwrap();
+        assert_eq!(result.audio.channels, channels);
+        assert_eq!(result.audio.sample_rate, 8_000);
+        assert_eq!(result.audio.samples, samples);
+        assert_eq!(
+            result.audio.channel_layout().unwrap(),
+            ChannelLayout::from_mask(channels, mask).unwrap()
+        );
+        assert_eq!(result.report.source_digest, fmn_hash::sha256(&bytes));
+        let invocation = result
+            .report
+            .invocation
+            .expect("float64 WAV requires external decoding");
+        let argv = invocation.provenance.argv;
+        let guessing = argv
+            .windows(2)
+            .position(|args| args == ["-guess_layout_max", "0"])
+            .expect("governed decoder must retain explicit layout policy");
+        assert!(guessing < argv.iter().position(|arg| arg == "-i").unwrap());
+    }
+    for (channels, mask) in [
+        (6, None),
+        (8, None),
+        (6, Some(0)),
+        (6, Some(0x7)),
+        (6, Some(0x18f)),
+    ] {
+        let (bytes, _) = fixture(channels, mask);
+        assert!(
+            matches!(
+                decoder.decode(&bytes),
+                Err(AudioDecodeError::Native(WavError::UnsupportedChannelLayout { channels: observed, .. }))
+                    if observed == channels
+            ),
+            "invalid source layout was replaced: channels={channels}, mask={mask:?}"
+        );
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
+#[test]
 fn audio_real_file_cap_is_not_a_successfully_truncated_soundtrack() {
     let Some(root) = std::env::var_os("FMN_AUDIO_FIXTURE_DIR") else {
         assert!(

@@ -17,6 +17,8 @@ fn decode_argv(format: AudioInputFormat, input: &Path, output: &Path, cap: u64) 
         "-xerror",
         "-threads",
         "1",
+        "-guess_layout_max",
+        "0",
         "-protocol_whitelist",
         "file",
         "-f",
@@ -185,6 +187,12 @@ mod tests {
                     .any(|v| v == ["-protocol_whitelist", "file"])
             );
             assert!(argv.windows(2).any(|v| v == ["-f", format.demuxer()]));
+            let guessing = argv
+                .windows(2)
+                .position(|v| v == ["-guess_layout_max", "0"])
+                .expect("source speaker positions must not be guessed from channel count");
+            let input = argv.iter().position(|value| value == "-i").unwrap();
+            assert!(guessing < input, "layout policy must apply to the input");
             assert!(argv.windows(2).any(|v| v == ["-fs", "12345"]));
             assert!(argv.windows(2).any(|v| v == ["-map", "0:a:0"]));
             assert!(
