@@ -345,6 +345,39 @@ impl FfmpegLimitOptions {
     }
 }
 
+/// Native WAV representations supported by the shared PCM writer.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum WavSampleFormat {
+    /// Canonical signed 16-bit PCM, with optional deterministic TPDF dither.
+    #[default]
+    S16,
+    /// IEEE 32-bit PCM, preserving the mixed samples without quantization.
+    F32,
+}
+
+impl WavSampleFormat {
+    const fn name(self) -> &'static str {
+        match self {
+            Self::S16 => "s16",
+            Self::F32 => "f32",
+        }
+    }
+
+    const fn codec_format(self) -> SampleFormat {
+        match self {
+            Self::S16 => SampleFormat::S16,
+            Self::F32 => SampleFormat::F32,
+        }
+    }
+
+    const fn bytes_per_sample(self) -> u64 {
+        match self {
+            Self::S16 => 2,
+            Self::F32 => 4,
+        }
+    }
+}
+
 /// Semantic render request after parsing and interaction application.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RenderCommand {
@@ -396,6 +429,10 @@ pub struct RenderCommand {
     pub video_quality: VideoQuality,
     /// Optional AAC target, independent of the compressed-video rate mode.
     pub audio_bitrate: Option<u32>,
+    /// Native WAV sample format. Omission preserves the signed 16-bit default.
+    pub audio_sample_format: Option<WavSampleFormat>,
+    /// Native s16 WAV TPDF seed. Zero is a valid seed; omission disables dither.
+    pub audio_dither_seed: Option<u64>,
     /// Explicit ffmpeg wall-clock and byte budgets for video rendering.
     pub ffmpeg_limits: FfmpegLimitOptions,
     /// Output format.
@@ -787,6 +824,8 @@ fn typed_consumer_scope(binding: &str) -> Option<CommandScope> {
         | "tune"
         | "video_bitrate"
         | "audio_bitrate"
+        | "audio_sample_format"
+        | "audio_dither_seed"
         | "ffmpeg_timeout"
         | "ffmpeg_max_log_bytes"
         | "ffmpeg_max_artifact_bytes"
@@ -1218,6 +1257,11 @@ fn build_invocation(
         }
         CommandScope::Studio => {
             let render = build_render(values.clone(), common)?;
+            if render.audio_sample_format.is_some() || render.audio_dither_seed.is_some() {
+                return Err(usage(
+                    "native WAV encoding options apply to offline rendering, not Studio previews",
+                ));
+            }
             if render.hdr_pq {
                 return Err(usage(
                     "--hdr-pq applies to offline video rendering; Studio previews do not support PQ",
@@ -1283,7 +1327,7 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         return Err(usage("--crf must lie in 0..=51"));
     }
 
-    Ok(RenderCommand {
+    let command = RenderCommand {
         common,
         file: values.explicit_value("file").map(PathBuf::from),
         scene_names: values.many("scene_names"),
@@ -1324,6 +1368,15 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
             bitrate: parse_optional_positive(&values, "video_bitrate")?,
         },
         audio_bitrate: parse_optional_positive(&values, "audio_bitrate")?,
+        audio_sample_format: values
+            .explicit_value("audio_sample_format")
+            .map(|value| match value {
+                "s16" => Ok(WavSampleFormat::S16),
+                "f32" => Ok(WavSampleFormat::F32),
+                _ => Err(usage("--audio-sample-format must be `s16` or `f32`")),
+            })
+            .transpose()?,
+        audio_dither_seed: parse_optional(&values, "audio_dither_seed")?,
         ffmpeg_limits: FfmpegLimitOptions {
             timeout_seconds: parse_optional_positive(&values, "ffmpeg_timeout")?,
             max_log_bytes: parse_optional_positive(&values, "ffmpeg_max_log_bytes")?,
@@ -1343,7 +1396,9 @@ fn build_render(values: Collected, common: CommonOptions) -> Result<RenderComman
         finder: values.bool("finder"),
         show_animation_progress: values.bool("show_animation_progress"),
         leave_progress_bars: values.bool("leave_progress_bars"),
-    })
+    };
+    validate_wav_options(&command)?;
+    Ok(command)
 }
 
 fn parse_resolution_selection(values: &Collected) -> Result<Option<ResolutionChoice>, CliError> {
@@ -5550,9 +5605,79 @@ fn render_sink_limits(layout: &FrameLayout) -> Result<SinkLimits, CliError> {
 /// Named refusal when a scene renders no sound cues.
 const NO_SOUND_CUES_MESSAGE: &str = "scene_has_no_sound_cues: the scene recorded no add_sound requests, and --format wav publishes only the scene soundtrack";
 
-/// The certified soundtrack output grid (48 kHz stereo, `S16`, no dither).
+/// The certified soundtrack output grid (48 kHz stereo).
 const SOUNDTRACK_SAMPLE_RATE: u32 = 48_000;
 const SOUNDTRACK_CHANNELS: u16 = 2;
+
+/// Resolved native WAV encoding shared by scene rendering and compiled replay.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WavEncoding {
+    format: WavSampleFormat,
+    dither_seed: Option<u64>,
+}
+
+impl WavEncoding {
+    /// Resolve the command's WAV format and dither policy.
+    ///
+    /// # Errors
+    /// Explicit encoding options require WAV output; float output cannot dither.
+    pub fn for_command(command: &RenderCommand) -> Result<Self, CliError> {
+        validate_wav_options(command)?;
+        Ok(Self::from_command(command))
+    }
+
+    fn from_command(command: &RenderCommand) -> Self {
+        Self {
+            format: command.audio_sample_format.unwrap_or_default(),
+            dither_seed: command.audio_dither_seed,
+        }
+    }
+
+    /// The native writer's sample format.
+    #[must_use]
+    pub const fn format(self) -> SampleFormat {
+        self.format.codec_format()
+    }
+
+    /// The native writer's sample-indexed quantization noise policy.
+    #[must_use]
+    pub fn dither(self) -> DitherPolicy {
+        self.dither_seed
+            .map_or(DitherPolicy::None, |seed| DitherPolicy::Tpdf { seed })
+    }
+
+    /// Canonical robot and provenance record for the actual output sample grid.
+    #[must_use]
+    pub fn to_json(self, sample_rate: u32, channels: u16) -> String {
+        format!(
+            "{{\"sample_rate\":{sample_rate},\"channels\":{channels},\"sample_format\":\"{}\",\"dither\":\"{}\",\"dither_seed\":{}}}",
+            self.format.name(),
+            if self.dither_seed.is_some() {
+                "tpdf"
+            } else {
+                "none"
+            },
+            self.dither_seed
+                .map_or_else(|| "null".to_owned(), |seed| seed.to_string()),
+        )
+    }
+}
+
+fn validate_wav_options(command: &RenderCommand) -> Result<(), CliError> {
+    if (command.audio_sample_format.is_some() || command.audio_dither_seed.is_some())
+        && command.format != OutputFormat::Wav
+    {
+        return Err(usage(
+            "--audio-sample-format and --audio-dither-seed require --format wav",
+        ));
+    }
+    if command.audio_sample_format == Some(WavSampleFormat::F32)
+        && command.audio_dither_seed.is_some()
+    {
+        return Err(usage("--audio-dither-seed cannot dither f32 WAV output"));
+    }
+    Ok(())
+}
 
 /// The execution backend record for a composition-only target.
 ///
@@ -5584,7 +5709,8 @@ fn composition_backend(config: &fmn_config::Config) -> RenderBackendReport {
 /// seam: each [`fmn_scene::SoundRequest`] keeps its exact rational call-site
 /// time and Reference gain arguments, and the mixer owns every sample-grid
 /// conversion. The mix spans the whole scene timeline (digital silence past
-/// the last cue) and is encoded certified (`S16`, no dither).
+/// the last cue). The shared writer applies the declared s16/f32 representation
+/// and sample-indexed dither policy after mixing, independent of worker count.
 ///
 /// # Errors
 /// The named no-cue refusal, unreadable or undecodable cue assets, mixer
@@ -5595,6 +5721,7 @@ fn publish_scene_soundtrack(
     max_artifact_bytes: u64,
     scene: &fmn_scene::Scene,
     mix_threads: usize,
+    encoding: WavEncoding,
 ) -> Result<(RenderArtifactReport, Vec<SoundCueAssetInput>), CliError> {
     let requests = scene.sound_requests();
     if requests.is_empty() {
@@ -5610,9 +5737,13 @@ fn publish_scene_soundtrack(
     let config = fmn_output::MixerConfig {
         sample_rate: SOUNDTRACK_SAMPLE_RATE,
         channels: SOUNDTRACK_CHANNELS,
-        // S16 stereo is four bytes per mixed frame; the artifact budget is
-        // the same one the frame sinks publish under.
-        max_output_frames: (max_artifact_bytes / 4).max(1),
+        // Bound mixed storage using the actual representation and the RIFF
+        // envelope, before source preparation or timeline allocation.
+        max_output_frames: (max_artifact_bytes
+            .saturating_sub(44)
+            .min(u64::from(u32::MAX) - 36)
+            / (encoding.format.bytes_per_sample() * u64::from(SOUNDTRACK_CHANNELS)))
+        .max(1),
     };
     let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None)
         .map_err(|error| CliError::new("config", error.to_string()))?;
@@ -5647,8 +5778,8 @@ fn publish_scene_soundtrack(
         fs,
         &WavPublicationConfig {
             destination: destination.to_owned(),
-            format: SampleFormat::S16,
-            dither: DitherPolicy::None,
+            format: encoding.format.codec_format(),
+            dither: encoding.dither(),
             max_artifact_bytes,
             profile: None,
         },
@@ -5753,6 +5884,7 @@ enum RequestedRenderFormat {
 }
 
 fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFormat, CliError> {
+    validate_wav_options(command)?;
     if command.hdr_pq
         && (!matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
             || command.transparent
@@ -6265,6 +6397,24 @@ fn render_manifest(
             .map_err(|error| internal(error.to_string()))?,
         RenderArtifactReport::Native(_) => None,
     };
+    let wav_item = if matches!(
+        artifact,
+        RenderArtifactReport::Native(report) if report.kind == NativeArtifactKind::Wav
+    ) {
+        Some(
+            ClosureItem::byte_input(
+                4,
+                "native-wav-encoding.json",
+                WavEncoding::from_command(command)
+                    .to_json(SOUNDTRACK_SAMPLE_RATE, SOUNDTRACK_CHANNELS)
+                    .as_bytes(),
+                "native WAV sample format and sample-indexed PCM reduction policy",
+            )
+            .map_err(|error| internal(error.to_string()))?,
+        )
+    } else {
+        None
+    };
     ProvenanceManifest::new(
         mode,
         vec![
@@ -6283,6 +6433,7 @@ fn render_manifest(
         ]
         .into_iter()
         .chain(hdr_item)
+        .chain(wav_item)
         .chain(cue_items)
         .chain(font_items)
         .collect(),
@@ -7158,6 +7309,7 @@ fn execute_native_render_with_cancellation(
                             max_artifact_bytes,
                             &scene,
                             render_threads,
+                            WavEncoding::from_command(command),
                         )?,
                         _ => {
                             let svg_camera = camera_route::camera(&config)?;
@@ -7837,6 +7989,14 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                         render_threads,
                         json_string(&report.digest.to_hex()),
                     );
+                    if report.kind == NativeArtifactKind::Wav {
+                        let _ = write!(
+                            stdout,
+                            ",\"wav_encoding\":{}",
+                            WavEncoding::from_command(command)
+                                .to_json(SOUNDTRACK_SAMPLE_RATE, SOUNDTRACK_CHANNELS),
+                        );
+                    }
                     stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
                     stdout.push_str(&typesetting_json);
@@ -10104,6 +10264,8 @@ mod tests {
             "tune" => "animation",
             "video_bitrate" => "2000000",
             "audio_bitrate" => "192000",
+            "audio_sample_format" => "f32",
+            "audio_dither_seed" => "0",
             "ffmpeg_timeout" => "21600",
             "ffmpeg_max_log_bytes" => "1048576",
             "ffmpeg_max_artifact_bytes" | "ffmpeg_max_input_bytes" => "68719476736",
@@ -10157,7 +10319,92 @@ mod tests {
         if spec.action == FlagAction::Store {
             args.push(sample_value(spec).to_owned());
         }
+        if matches!(spec.binding, "audio_sample_format" | "audio_dither_seed") {
+            args.extend(["--format".to_owned(), "wav".to_owned()]);
+        }
         args
+    }
+
+    #[test]
+    fn native_wav_encoding_options_are_typed_and_keep_zero_seed() {
+        let defaults = render(parse_args(["--format", "wav"]).unwrap());
+        assert_eq!(defaults.audio_sample_format, None);
+        assert_eq!(defaults.audio_dither_seed, None);
+        assert_eq!(
+            WavEncoding::from_command(&defaults).format,
+            WavSampleFormat::S16
+        );
+        for seed in [0, 1, u64::MAX] {
+            let command = render(
+                parse_args([
+                    "--format",
+                    "wav",
+                    "--audio-sample-format",
+                    "s16",
+                    "--audio-dither-seed",
+                    &seed.to_string(),
+                ])
+                .unwrap(),
+            );
+            assert!(command.write_file);
+            assert_eq!(command.audio_sample_format, Some(WavSampleFormat::S16));
+            assert_eq!(command.audio_dither_seed, Some(seed));
+            assert_eq!(
+                WavEncoding::from_command(&command).dither(),
+                DitherPolicy::Tpdf { seed }
+            );
+        }
+        let Invocation::Batch(batch) =
+            parse_args(["batch", "--format", "wav", "--audio-sample-format", "f32"]).unwrap()
+        else {
+            panic!("batch keeps its render options");
+        };
+        assert_eq!(batch.render.audio_sample_format, Some(WavSampleFormat::F32));
+    }
+
+    #[test]
+    fn native_wav_encoding_refuses_incompatible_or_invalid_requests() {
+        for args in [
+            vec!["--audio-sample-format", "f32"],
+            vec!["--audio-dither-seed", "0"],
+            vec!["--format", "video", "--audio-dither-seed", "0"],
+            vec!["--format", "png", "--audio-sample-format", "s16"],
+            vec!["--format", "wav", "--audio-sample-format", "s24"],
+            vec!["--format", "wav", "--audio-dither-seed=-1"],
+            vec![
+                "--format",
+                "wav",
+                "--audio-dither-seed",
+                "18446744073709551616",
+            ],
+            vec!["--format", "wav", "--audio-dither-seed", "1.5"],
+            vec![
+                "--format",
+                "wav",
+                "--audio-dither-seed",
+                "0",
+                "--audio-sample-format",
+                "f32",
+            ],
+            vec!["studio", "--format", "wav", "--audio-sample-format", "f32"],
+        ] {
+            let error = parse_args(args.clone()).expect_err("invalid WAV options must refuse");
+            assert_eq!(error.exit_name(), "usage", "{args:?}: {error}");
+        }
+        // Public commands may also be assembled after parsing. The execution
+        // admission must retain the same check before any source/tool access.
+        let mut command = render(parse_args(["--format", "video"]).unwrap());
+        command.audio_dither_seed = Some(0);
+        assert_eq!(
+            requested_render_format(&command).unwrap_err().exit_name(),
+            "usage"
+        );
+        command.format = OutputFormat::Wav;
+        command.audio_sample_format = Some(WavSampleFormat::F32);
+        assert_eq!(
+            requested_render_format(&command).unwrap_err().exit_name(),
+            "usage"
+        );
     }
 
     #[test]

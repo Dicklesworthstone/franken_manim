@@ -330,6 +330,31 @@ unchanged. Tests in `fmn-output/tests/audio_quality.rs`, the native video tests,
 and the portal quality suites cover real process arguments, unchanged native
 PCM, actual AAC decode, and byte-identical H.264 streams across AAC targets.
 
+## Native WAV sample format and dither
+
+Standalone `fmn render` and `fmn batch` accept `--audio-sample-format s16|f32`
+with `--format wav`. Omission keeps the existing signed 16-bit PCM output.
+`f32` preserves floating-point samples without another quantization step.
+Scene renders use the existing 48 kHz stereo soundtrack grid. Sound-bearing
+FMTL replay retains the recording's sample rate and channels, selected segment
+boundaries, and existing full-output tail policy. Both paths use create-only
+artifact publication and the same native WAV writer.
+
+`--audio-dither-seed N` enables the shared writer's deterministic TPDF dither
+for signed 16-bit WAV. Zero is a valid seed; omission disables dither. Each
+noise sample is keyed by its interleaved output sample index starting at zero,
+so identical scene inputs and seed produce identical WAV bytes at any worker
+count. This matches the existing native Rust and Python dither policy.
+`f32` with dither, non-WAV outputs, and Studio previews refuse these options
+before scene execution. Native PCM never needs ffmpeg.
+
+WAV robot records expose `wav_encoding` with the sample rate, channel count,
+sample format, dither policy, and optional seed. The same record is hashed as
+`native-wav-encoding.json` in the C4 input closure. A changed seed or sample
+format changes the declared inputs even when a particular soundtrack happens
+to quantize to the same bytes. These choices remain available with
+`--reproducible`; they do not change scene timing or the fixed-order mix.
+
 ## Python portal batch, checkpoint, and inspection extensions
 
 Because `fmn-python` runs inside a host CPython interpreter rather than the

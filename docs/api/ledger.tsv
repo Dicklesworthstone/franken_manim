@@ -39,6 +39,8 @@ fmn.cli.global	-h,--help	help	cli_flag	0	action=store_true;nargs=-;type=-;defaul
 fmn.cli.global	-q,--quiet	quiet	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	suppress human decoration only
 fmn.cli.global	-v,--version	version	cli_flag	0	action=store_true;nargs=-;type=-;default=False	same	-	crates/fmn-cli/src/lib.rs#tests	stable version report
 fmn.cli.render	--audio-bitrate	audio_bitrate	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set soundtrack AAC bitrate in bits per second (video is stream-copied)
+fmn.cli.render	--audio-dither-seed	audio_dither_seed	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Enable deterministic sample-indexed TPDF dither for s16 WAV; zero is a valid seed
+fmn.cli.render	--audio-sample-format	audio_sample_format	cli_flag	0	action=store;nargs=-;type=-;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select s16 (default) or lossless mixed f32 samples for native WAV output
 fmn.cli.render	--autoreload	autoreload	cli_flag	0	action=store_true;nargs=-;type=-;default=False	tiered	OOT-CLI-AUTORELOAD	crates/fmn-cli/src/lib.rs#tests	re-specified as supervised Studio worker reload
 fmn.cli.render	--crf	crf	cli_flag	0	action=store;nargs=-;type=u64;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Set libx264/libx265 constant rate factor (0 through 51)
 fmn.cli.render	--engine	engine	cli_flag	0	action=store;nargs=-;type=engine;default=-	improved	BN-15	crates/fmn-cli/src/lib.rs#tests	Select the CPU engine or a standard-only accelerator annex

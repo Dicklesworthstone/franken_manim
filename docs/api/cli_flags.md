@@ -70,6 +70,8 @@ The Reference's `manimlib/config.py` declares 34 options. Every row has exactly 
 | `--tune` | render | `tune` | improved | BN-15 | store | — | Set one supported video encoder tune |
 | `--video-bitrate` | render | `video_bitrate` | improved | BN-15 | store | — | Set target video bitrate in bits per second (exclusive with CRF) |
 | `--audio-bitrate` | render | `audio_bitrate` | improved | BN-15 | store | — | Set soundtrack AAC bitrate in bits per second (video is stream-copied) |
+| `--audio-sample-format` | render | `audio_sample_format` | improved | BN-15 | store | — | Select s16 (default) or lossless mixed f32 samples for native WAV output |
+| `--audio-dither-seed` | render | `audio_dither_seed` | improved | BN-15 | store | — | Enable deterministic sample-indexed TPDF dither for s16 WAV; zero is a valid seed |
 | `--ffmpeg-timeout` | render | `ffmpeg_timeout` | improved | BN-15 | store | — | Set positive ffmpeg wall-clock seconds per video encode (default 86400) |
 | `--ffmpeg-max-log-bytes` | render | `ffmpeg_max_log_bytes` | improved | BN-15 | store | — | Bound captured bytes per ffmpeg stdout/stderr stream (default 1048576) |
 | `--ffmpeg-max-artifact-bytes` | render | `ffmpeg_max_artifact_bytes` | improved | BN-15 | store | — | Bound encoded video bytes, capped by the input allowance (default 8589934592) |
@@ -142,6 +144,9 @@ These rules are emitted into the parser artifact and executed after token collec
 | `tune-writes` | implies | `tune`, `write_file` | — | --tune implies video output |
 | `video-bitrate-writes` | implies | `video_bitrate`, `write_file` | — | --video-bitrate implies video output |
 | `audio-bitrate-writes` | implies | `audio_bitrate`, `write_file` | — | --audio-bitrate implies video output |
+| `audio-sample-format-requires-wav` | requires_any | `audio_sample_format`, `format=wav` | usage | --audio-sample-format requires --format wav |
+| `audio-dither-requires-wav` | requires_any | `audio_dither_seed`, `format=wav` | usage | --audio-dither-seed requires --format wav |
+| `audio-dither-vs-float` | conflicts | `audio_dither_seed`, `audio_sample_format=f32` | usage | --audio-dither-seed cannot dither f32 WAV output |
 | `ffmpeg-timeout-writes` | implies | `ffmpeg_timeout`, `write_file` | — | --ffmpeg-timeout implies video output |
 | `ffmpeg-log-limit-writes` | implies | `ffmpeg_max_log_bytes`, `write_file` | — | --ffmpeg-max-log-bytes implies video output |
 | `ffmpeg-artifact-limit-writes` | implies | `ffmpeg_max_artifact_bytes`, `write_file` | — | --ffmpeg-max-artifact-bytes implies video output |

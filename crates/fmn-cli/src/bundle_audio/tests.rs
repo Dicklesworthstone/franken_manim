@@ -64,6 +64,120 @@ fn full_wav_uses_embedded_pcm_and_preserves_tail_without_process_capability() {
 }
 
 #[test]
+fn wav_encoding_options_reach_compiled_replay_bytes_metadata_and_provenance() {
+    let bytes = recording();
+    let expected_samples = [0.25, -0.5].repeat(14);
+    let mut policy_results = Vec::new();
+    for (format, seed) in [
+        ("s16", None),
+        ("s16", Some("0")),
+        ("s16", Some("1")),
+        ("f32", None),
+    ] {
+        let mut first = None;
+        for threads in [1, 4, 16] {
+            let threads = threads.to_string();
+            let mut arguments = vec![
+                "--audio-sample-format",
+                format,
+                "--threads",
+                threads.as_str(),
+            ];
+            if let Some(seed) = seed {
+                arguments.extend(["--audio-dither-seed", seed]);
+            }
+            let command = command(&arguments);
+            let encoding = WavEncoding::for_command(&command).unwrap();
+            let fs = Arc::new(VirtualFs::new());
+            let output = run(
+                command,
+                &bytes,
+                TimelineBundle::from_bytes(&bytes).unwrap(),
+                fs.clone(),
+                &|| panic!("native FMTL WAV encoding acquired ffmpeg"),
+            );
+            assert_eq!(output.code, 0, "{}", output.stdout);
+            let wav = fs.read(Path::new("/out/scene.wav")).unwrap();
+            let decoded = fmn_codec::decode_wav(&wav, &fmn_codec::WavLimits::default()).unwrap();
+            assert_eq!(decoded.format, encoding.format());
+            assert_eq!((decoded.sample_rate, decoded.channels), (10, 2));
+            assert_eq!(decoded.samples.len(), expected_samples.len());
+            if seed.is_none() {
+                assert_eq!(
+                    wav,
+                    fmn_codec::encode_wav(2, 10, encoding.format(), &expected_samples),
+                );
+                assert_eq!(decoded.samples, expected_samples);
+            } else {
+                assert!(
+                    decoded
+                        .samples
+                        .iter()
+                        .zip(&expected_samples)
+                        .all(|(actual, expected)| (actual - expected).abs() <= 1.5 / 32768.0)
+                );
+            }
+            let policy = encoding.to_json(10, 2);
+            assert!(
+                output
+                    .stdout
+                    .contains(&format!("\"wav_encoding\":{policy}"))
+            );
+            let manifest = manifest(&fs, "/out/scene.wav");
+            let item = manifest
+                .items
+                .iter()
+                .find(|item| {
+                    item.item_id == 4
+                        && item.virtual_path.as_deref() == Some("native-wav-encoding.json")
+                })
+                .unwrap();
+            assert_eq!(item.digest, fmn_hash::sha256(policy.as_bytes()));
+            let observed = (wav, manifest.closure_digest);
+            if let Some(first) = &first {
+                assert_eq!(&observed, first, "worker count changed native WAV output");
+            } else {
+                first = Some(observed);
+            }
+        }
+        policy_results.push(first.unwrap());
+    }
+    for (index, (bytes, closure)) in policy_results.iter().enumerate() {
+        for (other_bytes, other_closure) in &policy_results[..index] {
+            assert_ne!(
+                bytes, other_bytes,
+                "encoding policy did not reach WAV bytes"
+            );
+            assert_ne!(closure, other_closure, "encoding policy was absent from C4");
+        }
+    }
+}
+
+#[test]
+fn compiled_replay_revalidates_wav_options_before_publication() {
+    let bytes = recording();
+    for float in [false, true] {
+        let mut command = command(&[]);
+        command.audio_dither_seed = Some(0);
+        if float {
+            command.audio_sample_format = Some(fmn_cli::WavSampleFormat::F32);
+        } else {
+            command.format = OutputFormat::Video;
+        }
+        let fs = Arc::new(VirtualFs::new());
+        let output = run(
+            command,
+            &bytes,
+            TimelineBundle::from_bytes(&bytes).unwrap(),
+            fs.clone(),
+            &|| panic!("invalid WAV encoding acquired ffmpeg"),
+        );
+        assert_eq!(output.code, code("usage"));
+        assert!(!fs.exists(Path::new("/out")));
+    }
+}
+
+#[test]
 fn subdivision_windows_join_without_a_sample_gap_or_duplicate() {
     let fs = Arc::new(VirtualFs::new());
     let bytes = recording();
@@ -569,6 +683,7 @@ fn full_artifact(path: &Path, digest: fmn_hash::Digest) -> provenance::Artifact<
         sample_rate: 10,
         channels: 2,
         sample_frames: 14,
+        wav_encoding: Some(WavEncoding::for_command(&command(&[])).unwrap()),
         video: None,
     }
 }
@@ -704,7 +819,7 @@ fn certified_wav_full_cut_and_subdivisions_have_comparable_bits_at_every_thread_
                     let m = manifest(&fs, path.to_str().unwrap());
                     assert_eq!(m.mode, ManifestMode::Certified);
                     assert!(m.outputs[0].certified);
-                    assert_eq!(m.identity.engine, "compiled-pcm:scalar:s16-no-dither/v1");
+                    assert_eq!(m.identity.engine, "compiled-pcm:scalar:wav/v2");
                     m
                 })
                 .collect();

@@ -151,8 +151,8 @@ pub(super) fn execute_prepared(
                         fs.as_ref(),
                         &WavPublicationConfig {
                             destination: destination.clone(),
-                            format: SampleFormat::S16,
-                            dither: DitherPolicy::None,
+                            format: request.wav_encoding.format(),
+                            dither: request.wav_encoding.dither(),
                             max_artifact_bytes: DEFAULT_MAX_BUNDLE_BYTES as u64,
                             profile: None,
                         },
@@ -175,6 +175,7 @@ pub(super) fn execute_prepared(
                             sample_rate: rate,
                             channels,
                             sample_frames: report.sample_frames,
+                            wav_encoding: Some(request.wav_encoding),
                             video: None,
                         },
                     )?;
@@ -236,6 +237,7 @@ pub(super) fn execute_prepared(
                             sample_rate: sound.sample_rate,
                             channels: sound.channels,
                             sample_frames: sound.sample_frames,
+                            wav_encoding: None,
                             video: Some(&report),
                         },
                     )?;
@@ -261,9 +263,17 @@ pub(super) fn execute_prepared(
             };
             let manifest = publication.json();
             let certified = publication.certified;
+            let encoding = if matches!(request.target, Target::Wav) {
+                format!(
+                    ",\"wav_encoding\":{}",
+                    request.wav_encoding.to_json(rate, channels),
+                )
+            } else {
+                String::new()
+            };
             let _ = writeln!(
                 stdout,
-                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"bundle-audio-render\",\"source\":\"compiled\",\"source_artifact\":{},\"source_sha256\":{},\"scene\":{},\"artifact\":{},\"format\":{},\"bytes\":{artifact_bytes},\"sha256\":{},\"frames\":{frames},\"fps\":{fps},\"source_frames\":[{},{}],\"source_segments\":[{},{}],\"certified\":{certified},\"manifest\":{manifest},\"soundtrack\":{{\"sample_rate\":{rate},\"channels\":{channels},\"sample_frames\":{samples}}}{subdivision}{video}}}",
+                "{{\"schema\":\"fmn.cli\",\"version\":{},\"kind\":\"bundle-audio-render\",\"source\":\"compiled\",\"source_artifact\":{},\"source_sha256\":{},\"scene\":{},\"artifact\":{},\"format\":{},\"bytes\":{artifact_bytes},\"sha256\":{},\"frames\":{frames},\"fps\":{fps},\"source_frames\":[{},{}],\"source_segments\":[{},{}],\"certified\":{certified},\"manifest\":{manifest},\"soundtrack\":{{\"sample_rate\":{rate},\"channels\":{channels},\"sample_frames\":{samples}}}{encoding}{subdivision}{video}}}",
                 fmn_cli::ROBOT_SCHEMA_VERSION,
                 quote(&source.to_string_lossy()),
                 quote(&source_digest.to_hex()),

@@ -3790,6 +3790,198 @@ fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErr
     native_soundtrack_run(ctx, false)
 }
 
+/// CLI PCM representation and dither reach the real writer and input closure.
+fn cli_wav_encoding_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_codec::{SampleFormat, WavLimits, decode_wav, encode_wav};
+    use fmn_platform::fs::{FileSystem, VirtualFs};
+    use fmn_platform::process::{FfmpegExecutable, FfmpegLocator, FfmpegLocatorError};
+
+    struct NoTool(AtomicU64);
+    impl FfmpegLocator for NoTool {
+        fn locate_ffmpeg(
+            &self,
+            _: &std::path::Path,
+        ) -> Result<FfmpegExecutable, FfmpegLocatorError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(FfmpegLocatorError::NotFound)
+        }
+    }
+    let locator = NoTool(AtomicU64::new(0));
+    // Non-s16-grid values prove that f32 preserves more than a relabelled
+    // integer encoding. The source lasts 1/4 s and the builtin places it
+    // after 1/2 s, then keeps silence through the 1 s scene end.
+    let source: Vec<f32> = (0..12_000)
+        .map(|index| ((index % 200) as f32 - 100.0) / 256.0 + 1.0 / 1_048_576.0)
+        .collect();
+    let input = encode_wav(1, 48_000, SampleFormat::F32, &source);
+    let mut expected = vec![0.0_f32; 96_000];
+    for (index, &sample) in source.iter().enumerate() {
+        expected[48_000 + 2 * index..48_002 + 2 * index].fill(sample);
+    }
+    let mut policy_outputs = Vec::new();
+    let mut policy_digests = Vec::new();
+    let mut runs = 0;
+    for (format, seed) in [
+        ("s16", None),
+        ("s16", Some(0_u64)),
+        ("s16", Some(1)),
+        ("f32", None),
+    ] {
+        let mut first = None;
+        let mut first_policy_digest = None;
+        for threads in [1, 4, 16] {
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert(fmn::builtins::SOUND_CUE_ASSET_NAME, input.clone());
+            let mut args = [
+                "--robot",
+                "--reproducible",
+                "--format",
+                "wav",
+                "--audio-sample-format",
+                format,
+                "--resolution",
+                "96x54",
+                "--fps",
+                "8",
+                "--video_dir",
+                "/wav",
+                "--threads",
+                &threads.to_string(),
+                fmn_cli::BUILTIN_SCENE_SOURCE,
+                fmn::builtins::SOUND_CUE_SCENE_NAME,
+            ]
+            .map(str::to_owned)
+            .to_vec();
+            if let Some(seed) = seed {
+                args.extend(["--audio-dither-seed".to_owned(), seed.to_string()]);
+            }
+            let output = fmn_cli::run_with_capabilities(
+                args,
+                fs.clone(),
+                Arc::new(fmn_platform::process::ScriptedRunner::new()),
+                &locator,
+            );
+            if output.code != 0 || !output.stderr.is_empty() {
+                return Err(fail(format!(
+                    "CLI WAV {format}/{seed:?}/{threads}: {}{}",
+                    output.stdout, output.stderr
+                )));
+            }
+            let bytes = fs
+                .read(std::path::Path::new("/wav/sound_cue.wav"))
+                .map_err(|error| fail(error.to_string()))?;
+            let decoded = decode_wav(&bytes, &WavLimits::default())
+                .map_err(|error| fail(error.to_string()))?;
+            let expected_format = if format == "f32" {
+                SampleFormat::F32
+            } else {
+                SampleFormat::S16
+            };
+            if decoded.format != expected_format
+                || decoded.channels != 2
+                || decoded.sample_rate != 48_000
+                || decoded.samples.len() != expected.len()
+            {
+                return Err(fail(
+                    "CLI WAV header, channel grid, or full-scene sample count drifted",
+                ));
+            }
+            if format == "f32" {
+                if decoded.samples != expected {
+                    return Err(fail(
+                        "f32 WAV lost source precision or changed cue placement/silence",
+                    ));
+                }
+            } else if seed.is_none() {
+                if bytes != encode_wav(2, 48_000, SampleFormat::S16, &expected) {
+                    return Err(fail(
+                        "default s16 output changed the specified whole-scene PCM mix",
+                    ));
+                }
+            } else if decoded
+                .samples
+                .iter()
+                .zip(&expected)
+                .any(|(&actual, &sample)| (actual - sample).abs() > 1.5 / 32_768.0)
+            {
+                return Err(fail(
+                    "TPDF output exceeded its one-LSB noise plus quantization bound",
+                ));
+            }
+            let encoding = format!(
+                "{{\"sample_rate\":48000,\"channels\":2,\"sample_format\":\"{format}\",\"dither\":\"{}\",\"dither_seed\":{}}}",
+                if seed.is_some() { "tpdf" } else { "none" },
+                seed.map_or_else(|| "null".to_owned(), |seed| seed.to_string()),
+            );
+            if !output
+                .stdout
+                .contains(&format!("\"wav_encoding\":{encoding}"))
+            {
+                return Err(fail(
+                    "WAV robot record omitted the actual PCM/dither policy",
+                ));
+            }
+            let manifest = ProvenanceManifest::from_bytes(
+                &fs.read(std::path::Path::new(
+                    "/wav/sound_cue.wav.manifest/manifest.fmnp",
+                ))
+                .map_err(|error| fail(error.to_string()))?,
+            )
+            .map_err(|error| fail(error.to_string()))?;
+            let policy = manifest
+                .items
+                .iter()
+                .find(|item| {
+                    item.item_id == 4
+                        && item.virtual_path.as_deref() == Some("native-wav-encoding.json")
+                })
+                .ok_or_else(|| fail("WAV input closure omitted its PCM/dither policy"))?;
+            if policy.digest != sha256(encoding.as_bytes()) || !manifest.outputs[0].certified {
+                return Err(fail(
+                    "WAV policy digest or certification receipt is incorrect",
+                ));
+            }
+            if first.as_ref().is_some_and(|previous| previous != &bytes)
+                || first_policy_digest.is_some_and(|previous| previous != policy.digest)
+            {
+                return Err(fail(
+                    "WAV bytes or reduction policy depend on mixer worker count",
+                ));
+            }
+            first_policy_digest = Some(policy.digest);
+            first = Some(bytes);
+            runs += 1;
+        }
+        policy_outputs.push(first.ok_or_else(|| fail("no WAV output"))?);
+        policy_digests.push(first_policy_digest.ok_or_else(|| fail("no WAV policy digest"))?);
+    }
+    for first in 0..policy_outputs.len() {
+        for second in first + 1..policy_outputs.len() {
+            if policy_outputs[first] == policy_outputs[second]
+                || policy_digests[first] == policy_digests[second]
+            {
+                return Err(fail(
+                    "distinct PCM representations/dither seeds did not affect output and closure",
+                ));
+            }
+        }
+    }
+    if locator.0.load(Ordering::SeqCst) != 0 {
+        return Err(fail("native WAV encoding consulted ffmpeg"));
+    }
+    ctx.event(
+        LogEvent::new("e2e.cli.wav_encoding")
+            .field("policies", 4_u64)
+            .field("thread_counts", 3_u64)
+            .field("runs", runs),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("dithered.wav", policy_outputs[1].clone())
+        .with_artifact("floating.wav", policy_outputs[3].clone())
+        .with_counter("cli_wav_encoding_policies", 4)
+        .with_counter("cli_wav_encoding_runs", runs))
+}
+
 /// Synthesized cues use the same public rendering route with no source file.
 fn native_memory_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     native_soundtrack_run(ctx, true)
@@ -19066,6 +19258,24 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.cli_wav_encoding.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::CliInProcess,
+        Invocation::new(cli_wav_encoding_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("cli_wav_encoding_policies", 4),
+            counter_eq("cli_wav_encoding_runs", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.cli.wav_encoding",
+            vec![
+                FieldPred::u64_eq("policies", 4),
+                FieldPred::u64_eq("runs", 12),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_memory_soundtrack_wav.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -23538,6 +23748,16 @@ fn bundle_soundtrack_capabilities_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.bundle_soundtrack_capabilities.v1")
         .expect("bundle soundtrack capabilities are registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn cli_wav_encoding_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.cli_wav_encoding.v1")
+        .expect("CLI WAV encoding scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

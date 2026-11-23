@@ -28,7 +28,7 @@ const SUITE_TEXT: &str = include_str!("../../../../SUITE.lock");
 const BUILD_ID: &str = env!("FMN_BUILD_ID");
 const TARGET: &str = env!("FMN_TARGET_TRIPLE");
 const PROFILE: &str = env!("FMN_CARGO_PROFILE");
-const WAV_ENGINE: &str = "compiled-pcm:scalar:s16-no-dither/v1";
+const WAV_ENGINE: &str = "compiled-pcm:scalar:wav/v2";
 
 impl From<ManifestError> for Failure {
     fn from(error: ManifestError) -> Self {
@@ -74,6 +74,7 @@ pub(super) struct Artifact<'a> {
     pub sample_rate: u32,
     pub channels: u16,
     pub sample_frames: u64,
+    pub wav_encoding: Option<fmn_cli::WavEncoding>,
     pub video: Option<&'a RenderReport>,
 }
 
@@ -257,14 +258,23 @@ impl Session {
         let mut items = self.items.clone();
         let engine = match (output.target, output.video) {
             (Target::Wav, None) => {
+                let encoding = output.wav_encoding.ok_or_else(|| {
+                    Failure::new("internal", "compiled WAV omitted its encoding policy")
+                })?;
+                items.push(ClosureItem::byte_input(
+                    4,
+                    "native-wav-encoding.json",
+                    encoding
+                        .to_json(output.sample_rate, output.channels)
+                        .as_bytes(),
+                    "native WAV sample format and sample-indexed PCM reduction policy",
+                )?);
                 items.push(ClosureItem::structural(
                     7,
-                    "native PCM extraction and canonical S16 publication, without rasterization",
+                    "native PCM extraction and canonical WAV publication, without rasterization",
                     &[
                         StructuralField::Text(WAV_ENGINE),
-                        StructuralField::Absent(
-                            "rasterization, resampling, gain, mixing and dithering",
-                        ),
+                        StructuralField::Absent("rasterization, resampling, gain and mixing"),
                     ],
                 )?);
                 items.push(ClosureItem::structural(
@@ -279,7 +289,8 @@ impl Session {
                 WAV_ENGINE.to_owned()
             }
             (Target::Video(format), Some(report)) if format.is_video() => {
-                if report.artifact.format != format
+                if output.wav_encoding.is_some()
+                    || report.artifact.format != format
                     || report.artifact.path.as_path() != output.destination
                     || report.artifact.digest != output.digest
                     || report.artifact.frame_count
@@ -378,7 +389,9 @@ impl Session {
                 StructuralField::Text(
                     "absolute rational frame-to-sample boundaries; zero padding; no remix",
                 ),
-                StructuralField::Text("native S16 WAV without dither; video uses governed AAC mux"),
+                StructuralField::Text(
+                    "native WAV encoding is declared in C4; video uses governed AAC mux",
+                ),
             ],
         )?;
         let declared_config_digest = declared.digest;

@@ -12,12 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fmn::rendering::{FfmpegCapability, RenderError, RenderFormat, RenderOptions, RenderReport};
-use fmn_cli::{AnimationRange, Invocation, OutputFormat, RenderCommand, RunOutput};
+use fmn_cli::{AnimationRange, Invocation, OutputFormat, RenderCommand, RunOutput, WavEncoding};
 use fmn_codec::{SampleFormat, WavAudio};
 use fmn_config::config::{DeterminismMode, Engine};
-use fmn_output::{
-    DitherPolicy, MixKernel, MixReport, WavPublicationConfig, frames_to_samples, publish_wav_new,
-};
+use fmn_output::{MixKernel, MixReport, WavPublicationConfig, frames_to_samples, publish_wav_new};
 use fmn_platform::fs::{FileSystem, FsNodeKind, StdFs};
 use fmn_scene::timeline_bundle::BundleSoundtrack;
 use fmn_scene::{DEFAULT_MAX_BUNDLE_BYTES, OutputNaming, TimelineBundle};
@@ -146,6 +144,7 @@ impl Target {
 struct Request {
     config: fmn_config::Config,
     target: Target,
+    wav_encoding: WavEncoding,
     scene: String,
     outputs: Vec<(PathBuf, Option<Range<u32>>)>,
     segments: Range<usize>,
@@ -178,6 +177,7 @@ fn prepare_with_manifests(
     fs: &dyn FileSystem,
     manifest_root: Option<&Path>,
 ) -> Result<Request, Failure> {
+    let wav_encoding = WavEncoding::for_command(command)?;
     if command.write_all || command.scene_names.len() > 1 {
         return Err(Failure::new(
             "usage",
@@ -409,6 +409,7 @@ fn prepare_with_manifests(
     Ok(Request {
         config,
         target,
+        wav_encoding,
         scene,
         outputs,
         segments,
