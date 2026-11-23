@@ -182,6 +182,30 @@ fn audio_deferred_boundary_validates_limits_and_owns_its_process_policy() {
 }
 
 #[test]
+fn scoped_decoder_borrows_a_front_door_capability_without_eager_resolution() {
+    let formats = std::sync::Mutex::new(Vec::new());
+    {
+        let mut decoder = fmn_output::ScopedAudioDecoder::with_boundary_resolver(
+            AudioDecodeLimits::default(),
+            |format| {
+                formats.lock().unwrap().push(format);
+                Err(AudioDecodeError::Capability(
+                    "borrowed locator unavailable".into(),
+                ))
+            },
+        )
+        .unwrap();
+        let wav = encode_wav(1, 8, SampleFormat::F32, &[0.25, -0.125]);
+        assert_eq!(decoder.decode(&wav).unwrap().audio.samples, [0.25, -0.125]);
+        assert!(formats.lock().unwrap().is_empty());
+        assert!(matches!(decoder.decode(b"fLaCsource"),
+            Err(AudioDecodeError::Capability(detail)) if detail == "borrowed locator unavailable"));
+        assert!(decoder.decode(&wav).unwrap().report.invocation.is_none());
+    }
+    assert_eq!(formats.into_inner().unwrap(), vec![AudioInputFormat::Flac]);
+}
+
+#[test]
 fn audio_budgets_and_damaged_pcm_do_not_fall_through_to_ffmpeg() {
     let wav = encode_wav(1, 48_000, SampleFormat::F32, &[0.0; 64]);
     let mut decoder = AudioDecoder::new(

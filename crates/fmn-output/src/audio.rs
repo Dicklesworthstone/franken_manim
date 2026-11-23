@@ -230,20 +230,32 @@ pub(crate) fn decoded_audio(
 /// Construction and PCM WAV decoding never discover, probe, or start ffmpeg.
 /// A resolved decoder is retained for the generation, so later cues cannot
 /// silently select a different executable after a PATH or source change.
-pub struct AudioDecoder {
+pub struct ScopedAudioDecoder<'a> {
     limits: AudioDecodeLimits,
     job_limits: JobLimits,
     ffmpeg_bin: Option<PathBuf>,
     boundary: Option<Boundary>,
-    boundary_resolver: Option<Box<BoundaryResolver>>,
+    boundary_resolver: Option<Box<BoundaryResolver<'a>>>,
     locator: StdFfmpegLocator,
     workdir_root: Option<PathBuf>,
 }
 
-type BoundaryResolver =
-    dyn FnMut(AudioInputFormat) -> Result<Boundary, AudioDecodeError> + Send + Sync;
+/// Owned decoder for callers whose capability outlives every decode. The
+/// scoped form additionally permits a front door to borrow its injected
+/// locator without discovering ffmpeg before a compressed asset needs it.
+pub type AudioDecoder = ScopedAudioDecoder<'static>;
 
-impl AudioDecoder {
+type BoundaryResolver<'a> =
+    dyn FnMut(AudioInputFormat) -> Result<Boundary, AudioDecodeError> + Send + Sync + 'a;
+
+impl<'a> ScopedAudioDecoder<'a> {
+    /// Construction-time source byte ceiling, for bounded reads performed
+    /// before decoding. Per-call remaining budgets can further tighten it.
+    #[must_use]
+    pub fn max_input_bytes(&self) -> u64 {
+        self.limits.max_input_bytes
+    }
+
     pub fn new(
         limits: AudioDecodeLimits,
         ffmpeg_bin: Option<PathBuf>,
@@ -349,10 +361,7 @@ impl AudioDecoder {
     /// and external decode failures are returned by [`Self::decode`].
     pub fn with_boundary_resolver(
         limits: AudioDecodeLimits,
-        resolver: impl FnMut(AudioInputFormat) -> Result<Boundary, AudioDecodeError>
-        + Send
-        + Sync
-        + 'static,
+        resolver: impl FnMut(AudioInputFormat) -> Result<Boundary, AudioDecodeError> + Send + Sync + 'a,
     ) -> Result<Self, AudioDecodeError> {
         let mut decoder = Self::new(limits, None)?;
         decoder.boundary_resolver = Some(Box::new(resolver));

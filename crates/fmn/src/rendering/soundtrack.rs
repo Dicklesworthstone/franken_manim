@@ -10,9 +10,10 @@ use fmn_anim::FramePacket;
 use fmn_codec::SampleFormat;
 use fmn_config::Config;
 use fmn_output::{
-    AudioDecodeLimits, AudioDecodeReport, AudioDecoder, DitherPolicy, InvocationReport, MixReport,
-    MixerConfig, SoundCue, SoundMixer, WavPublicationConfig, WavPublicationReport,
-    frames_to_samples, publish_wav_new, seconds_to_samples,
+    AudioDecodeLimits, AudioDecodeReport, DitherPolicy, FfmpegLimitsReport, InvocationReport,
+    JobLimits, MixReport, MixerConfig, ScopedAudioDecoder, SoundCue, SoundMixer,
+    WavPublicationConfig, WavPublicationReport, frames_to_samples, publish_wav_new,
+    seconds_to_samples,
 };
 use fmn_platform::clock::StdClock;
 use fmn_platform::fs::{FileSystem, StdFs};
@@ -22,10 +23,13 @@ use fmn_scene::{
 };
 use fmn_tex::{TexSession, TypesetSessionReport};
 
-use super::RenderError;
+use super::{FfmpegCapability, RenderError, SoundtrackDecoderOptions};
 use crate::SceneConstruct;
 
-const MAX_SOUND_ASSET_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(test)]
+use fmn_output::AudioDecoder;
+
+pub(super) const MAX_SOUND_ASSET_BYTES: usize = 64 * 1024 * 1024;
 const MAX_OMITTED_INTERVALS: usize = 1_000_000;
 
 /// Map the observed scene frame grid to a video's output frame grid.
@@ -242,7 +246,7 @@ impl PreparedSceneSoundtrack {
     pub fn end_frame(
         fs: &dyn FileSystem,
         requests: &[SoundRequest],
-        decoder: &mut AudioDecoder,
+        decoder: &mut ScopedAudioDecoder<'_>,
         config: MixerConfig,
         max_cues: usize,
     ) -> Result<u64, RenderError> {
@@ -261,12 +265,18 @@ impl PreparedSceneSoundtrack {
                     let metadata = match &request.source {
                         SoundSource::Memory(data) => (data.sample_frames(), data.sample_rate()),
                         SoundSource::File(path) => {
-                            let bytes =
-                                fs.read_bounded(path, MAX_SOUND_ASSET_BYTES)
-                                    .map_err(|error| RenderError::SoundAsset {
-                                        path: path.clone(),
-                                        error,
-                                    })?;
+                            let bytes = fs
+                                .read_bounded(
+                                    path,
+                                    MAX_SOUND_ASSET_BYTES.min(
+                                        usize::try_from(decoder.max_input_bytes())
+                                            .unwrap_or(usize::MAX),
+                                    ),
+                                )
+                                .map_err(|error| RenderError::SoundAsset {
+                                    path: path.clone(),
+                                    error,
+                                })?;
                             let decoded = decoder.decode(&bytes).map_err(|error| {
                                 RenderError::SoundDecode {
                                     source: Some(Box::new(request.source.key())),
@@ -310,7 +320,7 @@ impl PreparedSceneSoundtrack {
     pub fn new(
         fs: &dyn FileSystem,
         requests: &[SoundRequest],
-        decoder: &mut AudioDecoder,
+        decoder: &mut ScopedAudioDecoder<'_>,
         config: MixerConfig,
         timeline: Option<&SoundtrackTimeline>,
     ) -> Result<Self, RenderError> {
@@ -334,7 +344,7 @@ impl PreparedSceneSoundtrack {
     pub fn new_with_limits(
         fs: &dyn FileSystem,
         requests: &[SoundRequest],
-        decoder: &mut AudioDecoder,
+        decoder: &mut ScopedAudioDecoder<'_>,
         config: MixerConfig,
         timeline: Option<&SoundtrackTimeline>,
         limits: SoundtrackPreparationLimits,
@@ -360,8 +370,9 @@ impl PreparedSceneSoundtrack {
             let (bytes, audio, report) = match sources.entry(request.source.key()) {
                 Entry::Occupied(entry) => entry.into_mut(),
                 Entry::Vacant(entry) => {
-                    let raw_budget =
-                        MAX_SOUND_ASSET_BYTES.min(limits.max_source_bytes - source_bytes);
+                    let raw_budget = MAX_SOUND_ASSET_BYTES
+                        .min(limits.max_source_bytes - source_bytes)
+                        .min(usize::try_from(decoder.max_input_bytes()).unwrap_or(usize::MAX));
                     let bytes: Arc<[u8]> = match &request.source {
                         SoundSource::File(path) => fs
                             .read_bounded(path, raw_budget)
@@ -506,8 +517,9 @@ impl PreparedSceneSoundtrack {
 /// Native WAV export of an ordinary scene's sound requests.
 ///
 /// The scene still executes its normal animations and updaters. No pixel
-/// buffers, render teams, or video encoder are created. Input is native PCM
-/// WAV; compressed media returns the decoder's named capability refusal.
+/// buffers, render teams, or video encoder are created. PCM WAV decodes
+/// natively. Recognized compressed sources can use an explicit governed
+/// ffmpeg capability in standard mode; certified mode requires native PCM.
 /// Output is canonical signed 16-bit PCM, at the explicit mixer's sample rate
 /// and mono/stereo layout. Dither is disabled by default; callers can request
 /// seeded, sample-counter TPDF when reducing the mixed floating-point audio.
@@ -526,10 +538,15 @@ pub struct SoundtrackRenderOptions {
     /// Explicit PCM reduction policy. TPDF is keyed by the interleaved output
     /// sample index, so a seed produces identical bytes at every worker count.
     pub dither: DitherPolicy,
-    /// Per-source native WAV decoding bounds. No transcoder is admitted.
+    /// Per-source input and decoded-sample bounds, including compressed expansion.
     pub decode: AudioDecodeLimits,
     /// Cumulative source, decoded and per-cue prepared-storage admission.
     pub preparation: SoundtrackPreparationLimits,
+    /// Explicit optional authority to decode recognized compressed sources.
+    /// Native WAV never locates or starts ffmpeg. No ambient fallback is added.
+    pub ffmpeg: Option<FfmpegCapability>,
+    /// Bounds for each governed external decode, validated before scene code.
+    pub ffmpeg_limits: JobLimits,
     /// Nonzero ceiling for mixer workers. Reported workers are those used.
     pub threads: NonZeroUsize,
     /// Maximum absolute scene time in frame-clock ticks, and maximum number
@@ -558,6 +575,8 @@ impl SoundtrackRenderOptions {
             dither: DitherPolicy::None,
             decode: AudioDecodeLimits::default(),
             preparation: SoundtrackPreparationLimits::default(),
+            ffmpeg: None,
+            ffmpeg_limits: JobLimits::default(),
             threads: NonZeroUsize::MIN,
             max_scene_frames: 1_000_000,
             max_output_bytes: 64 * 1024 * 1024,
@@ -622,18 +641,12 @@ impl SoundtrackRenderOptions {
         })
     }
 
-    fn decoder(&self) -> Result<AudioDecoder, RenderError> {
-        let mut limits = self.decode.clone();
-        limits.max_input_bytes = limits
-            .max_input_bytes
-            .min(self.preparation.max_source_bytes as u64);
-        limits.max_samples = limits
-            .max_samples
-            .min(self.preparation.max_decoded_samples as u64);
-        AudioDecoder::new(limits, None).map_err(|error| RenderError::SoundDecode {
-            source: None,
-            error,
-        })
+    fn decoder_options(&self) -> SoundtrackDecoderOptions {
+        SoundtrackDecoderOptions {
+            decode: self.decode.clone(),
+            preparation: self.preparation,
+            ffmpeg_limits: self.ffmpeg_limits.clone(),
+        }
     }
 }
 
@@ -659,6 +672,12 @@ pub struct SoundtrackRenderReport {
     /// Insertion-ordered exact source bytes and decoder identities. Repeated
     /// cues share the retained source bytes; no input is reopened for receipts.
     pub inputs: Vec<SoundtrackInput>,
+    /// Governed external decodes in first-source-use order. Repeated source
+    /// paths decode once; native WAV contributes no invocation.
+    pub audio_decodes: Vec<InvocationReport>,
+    /// Admitted source/process policy. Each decode also obeys the per-source
+    /// and remaining cumulative sample ceilings.
+    pub ffmpeg_limits: FfmpegLimitsReport,
     /// Actual native typesetting/cache work during scene construction.
     pub typesetting: TypesetSessionReport,
 }
@@ -671,8 +690,9 @@ pub struct SoundtrackRenderReport {
 /// the output past the scene when necessary. A scene with no cues emits
 /// digital silence spanning its non-skipped duration.
 ///
-/// No renderer or external process is used. PCM source files are decoded by
-/// the native codec, then the native mixer and create-only WAV publication
+/// No renderer or video encoder is used. PCM sources decode natively; optional
+/// governed compressed decoding retains its exact source, tool, invocation
+/// and normalized-PCM receipts. The native mixer and create-only publication
 /// complete before the receipt is returned. Scene, source and budget failures
 /// leave the destination unpublished; existing files survive all failures.
 ///
@@ -696,7 +716,9 @@ pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
     fs: Arc<dyn FileSystem>,
 ) -> Result<SoundtrackRenderReport, RenderError> {
     let mixer = options.admitted_mixer()?;
-    let mut decoder = options.decoder()?;
+    let decoder_options = options.decoder_options();
+    let mut decoder = decoder_options.decoder(&options.config, options.ffmpeg.as_ref())?;
+    let ffmpeg_limits = decoder_options.limits_report()?;
     let runtime = RuntimeConfig::from_config(&options.config);
     let typesetting = if options.typeset_cache {
         TexSession::with_cache(&options.config, Arc::clone(&fs), Arc::new(StdClock::new()))
@@ -777,6 +799,8 @@ pub fn render_soundtrack_with_fs<P: SceneConstruct + ?Sized>(
         dither: options.dither,
         workers_used: mix.workers_used,
         inputs: prepared.inputs().to_vec(),
+        audio_decodes: prepared.invocations(),
+        ffmpeg_limits,
         typesetting: completed.typesetting_report().clone(),
     })
 }

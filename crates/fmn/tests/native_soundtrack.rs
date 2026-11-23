@@ -4,6 +4,13 @@
 #[path = "support/surround_audio.rs"]
 mod surround_audio;
 
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[path = "support/compressed_audio.rs"]
+mod compressed_audio;
+
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -41,6 +48,228 @@ fn sources() -> Arc<VirtualFs> {
     );
     fs.insert("/lead.wav", encode_wav(1, 32, SampleFormat::F32, &[1.0; 8]));
     fs
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod compressed_sources {
+    use super::*;
+    use crate::compressed_audio::Fixture;
+    use fmn_output::{AudioDecodeLimits, AudioDecoder, AudioInputFormat};
+
+    const VOICE: &[u8] = b"fLaC narration fixture";
+
+    struct Narration;
+
+    impl SceneConstruct for Narration {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage
+                .scene_mut()
+                .add_sound("/voice.asset", 0.0, None, None)?;
+            stage.wait(0.25)?;
+            stage
+                .scene_mut()
+                .add_sound("/voice.asset", -0.125, Some(-6.0), Some(-3.0))?;
+            stage.wait(0.25)?;
+            Ok(())
+        }
+    }
+
+    fn decoded_wav() -> Vec<u8> {
+        encode_wav(
+            1,
+            32,
+            SampleFormat::F32,
+            &[0.25, -0.5, 0.75, 0.0, 0.125, 0.25, -0.25, 0.5],
+        )
+    }
+
+    fn request(fixture: &Fixture, output: &str, workers: usize) -> SoundtrackRenderOptions {
+        let mut settings = options(output, workers);
+        settings.config.determinism.mode = DeterminismMode::Standard;
+        settings.config.file_writer.ffmpeg_bin = fixture.tool.to_str().unwrap().to_owned();
+        settings.ffmpeg = Some(fixture.capability.clone());
+        settings.ffmpeg_limits.timeout = std::time::Duration::from_secs(11);
+        settings.ffmpeg_limits.max_log_bytes = 73;
+        settings.ffmpeg_limits.max_artifact_bytes = 65_536;
+        settings.decode.max_input_bytes = VOICE.len() as u64;
+        settings.dither = DitherPolicy::Tpdf { seed: 53 };
+        settings
+    }
+
+    #[test]
+    fn compressed_wav_matches_native_mix_and_retains_exact_decode_receipts_at_all_workers() {
+        let wav = decoded_wav();
+        let expected_pcm = AudioDecoder::new(AudioDecodeLimits::default(), None)
+            .unwrap()
+            .decode(&wav)
+            .unwrap()
+            .report
+            .pcm_digest;
+        let native = Arc::new(VirtualFs::new());
+        native.insert("/voice.asset", wav.clone());
+        let mut reference = options("/reference.wav", 1);
+        reference.dither = DitherPolicy::Tpdf { seed: 53 };
+        render_soundtrack_with_fs(&mut Narration, reference, native.clone()).unwrap();
+        let expected = native.read(Path::new("/reference.wav")).unwrap();
+        for workers in [1, 4, 16] {
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert("/voice.asset", VOICE.to_vec());
+            let fixture = Fixture::new(Some(fs.clone()), wav.clone(), false);
+            let report = render_soundtrack_with_fs(
+                &mut Narration,
+                request(&fixture, "/voice.wav", workers),
+                fs.clone(),
+            )
+            .unwrap();
+            assert_eq!(fs.read(Path::new("/voice.wav")).unwrap(), expected);
+            assert_eq!(report.artifact.digest, fmn_hash::sha256(&expected));
+            assert_eq!(report.inputs.len(), 2);
+            assert!(Arc::ptr_eq(
+                &report.inputs[0].bytes,
+                &report.inputs[1].bytes
+            ));
+            assert_eq!(report.inputs[0].bytes.as_ref(), VOICE);
+            assert_eq!(
+                report.inputs[0].report.source_digest,
+                fmn_hash::sha256(VOICE)
+            );
+            assert_eq!(report.inputs[0].report.pcm_digest, expected_pcm);
+            assert_eq!(report.inputs[0].report.format, AudioInputFormat::Flac);
+            assert_eq!(report.audio_decodes.len(), 1);
+            let invocation = &report.audio_decodes[0];
+            assert_eq!(invocation.provenance.tool_path, fixture.tool);
+            assert_eq!(
+                invocation.provenance.tool_sha256_hex,
+                fmn_hash::sha256(&std::fs::read(&fixture.tool).unwrap()).to_hex()
+            );
+            assert!(
+                invocation
+                    .provenance
+                    .tool_version
+                    .contains("bundle-audio-fixture")
+            );
+            assert!(
+                invocation
+                    .provenance
+                    .argv
+                    .windows(2)
+                    .any(|p| p == ["-f", "flac"])
+            );
+            assert!(
+                !invocation
+                    .provenance
+                    .argv
+                    .iter()
+                    .any(|arg| arg == "-ar" || arg == "-ac")
+            );
+            assert_eq!(*fixture.locates.lock().unwrap(), vec![fixture.tool.clone()]);
+            assert_eq!(*fixture.sources.lock().unwrap(), vec![VOICE.to_vec()]);
+            let runs = fixture.runs.lock().unwrap();
+            assert_eq!(
+                runs.len(),
+                2,
+                "one version probe and one distinct source decode"
+            );
+            assert_eq!(runs[1].timeout, std::time::Duration::from_secs(11));
+            assert_eq!(runs[1].max_output_bytes, 73);
+            assert!(
+                report
+                    .ffmpeg_limits
+                    .to_json()
+                    .contains("\"max_input_bytes\":22")
+            );
+        }
+    }
+
+    #[test]
+    fn native_malformed_unknown_and_certified_sources_never_resolve_the_optional_tool() {
+        let fixture = Fixture::new(None, decoded_wav(), false);
+        for (index, source) in [
+            decoded_wav(),
+            decoded_wav()[..20].to_vec(),
+            b"#EXTM3U\nhttps://example.invalid/voice.mp3".to_vec(),
+            VOICE.to_vec(),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert("/voice.asset", source);
+            let mut settings = request(&fixture, "/voice.wav", 1);
+            settings.decode = AudioDecodeLimits::default();
+            settings.config.file_writer.ffmpeg_bin = "/unavailable/ffmpeg".into();
+            if index == 3 {
+                settings.config.determinism.mode = DeterminismMode::Certified;
+            }
+            let result = render_soundtrack_with_fs(&mut Narration, settings, fs.clone());
+            match index {
+                0 => assert!(result.unwrap().audio_decodes.is_empty()),
+                1 => assert!(matches!(
+                    result,
+                    Err(RenderError::SoundDecode {
+                        error: AudioDecodeError::Native(_),
+                        ..
+                    })
+                )),
+                2 => assert!(matches!(
+                    result,
+                    Err(RenderError::SoundDecode {
+                        error: AudioDecodeError::UnsupportedInput,
+                        ..
+                    })
+                )),
+                _ => assert!(matches!(result, Err(RenderError::SoundDecode {
+                    error: AudioDecodeError::Capability(detail), ..
+                }) if detail.contains("certified soundtrack preparation"))),
+            }
+            assert_eq!(fs.exists(Path::new("/voice.wav")), index == 0);
+        }
+        assert!(fixture.locates.lock().unwrap().is_empty());
+        assert!(fixture.runs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn compressed_source_decode_expansion_and_publication_failures_leave_no_wav() {
+        for case in 0..6 {
+            let fs = Arc::new(VirtualFs::new());
+            fs.insert("/voice.asset", VOICE.to_vec());
+            fs.insert("/preserved.wav", b"existing bytes".to_vec());
+            let fixture = Fixture::new(None, decoded_wav(), case == 4);
+            let mut settings = request(&fixture, "/refused.wav", 1);
+            match case {
+                0 => settings.decode.max_input_bytes = VOICE.len() as u64 - 1,
+                1 => settings.decode.max_samples = 1,
+                2 => settings.preparation.max_prepared_samples = 1,
+                3 => settings.ffmpeg_limits.max_artifact_bytes = 8,
+                4 => {}
+                _ => settings.ffmpeg = None,
+            }
+            let error =
+                render_soundtrack_with_fs(&mut Narration, settings, fs.clone()).unwrap_err();
+            if case == 5 {
+                assert!(matches!(
+                    error,
+                    RenderError::SoundDecode {
+                        error: AudioDecodeError::TranscoderRequired {
+                            format: AudioInputFormat::Flac
+                        },
+                        ..
+                    }
+                ));
+            }
+            if case == 0 || case == 5 {
+                assert!(fixture.locates.lock().unwrap().is_empty());
+            }
+            assert!(!fs.exists(Path::new("/refused.wav")));
+            assert_eq!(
+                fs.read(Path::new("/preserved.wav")).unwrap(),
+                b"existing bytes"
+            );
+        }
+    }
 }
 
 struct Mixed(Rc<Cell<u32>>);
@@ -219,7 +448,7 @@ fn invalid_audio_options_are_refused_before_scene_construction() {
         }
     }
     let fs = Arc::new(VirtualFs::new());
-    for invalid in 0..8 {
+    for invalid in 0..11 {
         let calls = Rc::new(Cell::new(0));
         let mut request = options("/invalid.wav", 1);
         match invalid {
@@ -230,7 +459,10 @@ fn invalid_audio_options_are_refused_before_scene_construction() {
             4 => request.mixer.channels = 3,
             5 => request.mixer.sample_rate = u32::MAX,
             6 => request.threads = NonZeroUsize::new(1025).unwrap(),
-            _ => request.output = "/".into(),
+            7 => request.output = "/".into(),
+            8 => request.ffmpeg_limits.timeout = std::time::Duration::ZERO,
+            9 => request.ffmpeg_limits.max_log_bytes = 0,
+            _ => request.ffmpeg_limits.max_artifact_bytes = 0,
         }
         assert!(
             render_soundtrack_with_fs(&mut Count(Rc::clone(&calls)), request, fs.clone()).is_err()
@@ -365,7 +597,7 @@ fn source_refusals_preserve_typed_causes_and_publication_never_clobbers() {
                 2,
                 RenderError::SoundDecode {
                     source: Some(identity),
-                    error: AudioDecodeError::TranscoderRequired { .. },
+                    error: AudioDecodeError::Capability(_),
                 },
             ) => assert_eq!(
                 identity.as_ref(),

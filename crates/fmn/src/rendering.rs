@@ -60,6 +60,7 @@ mod concatenating;
 mod ffmpeg_limits;
 mod pipeline;
 mod soundtrack;
+mod soundtrack_decoder;
 mod svg;
 pub use camera_animation::{render_camera, render_camera_with_fs};
 pub use compiled::{render_bundle, render_bundle_with_fs};
@@ -79,6 +80,7 @@ pub use soundtrack::{
     PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits, SoundtrackRenderOptions,
     SoundtrackRenderReport, SoundtrackTimeline, render_soundtrack, render_soundtrack_with_fs,
 };
+pub use soundtrack_decoder::SoundtrackDecoderOptions;
 
 pub use svg::{
     SvgRenderError, SvgRenderOptions, SvgRenderReport, render_svg, render_svg_camera,

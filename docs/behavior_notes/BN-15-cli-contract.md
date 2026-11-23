@@ -267,11 +267,14 @@ examples, and the matching Rust API precedence rules.
 The standalone native CLI uses the render API's finite 24-hour ffmpeg watchdog
 instead of the boundary's ten-minute short-job default. Its four explicit
 controls are `--ffmpeg-timeout` (whole seconds), `--ffmpeg-max-log-bytes`,
-`--ffmpeg-max-artifact-bytes`, and `--ffmpeg-max-input-bytes`. These select video
-output, reject zero/invalid bounds and native formats, and preserve the existing
-frame-count/resident-memory safeguards. The artifact cap is intersected with
-the raw-input allowance. Both the robot render receipt and C9 provenance record
-the admitted policy. Tool probes keep their own short deadlines. See
+`--ffmpeg-max-artifact-bytes`, and `--ffmpeg-max-input-bytes`. With an automatic
+format these select video output; explicit `--format wav` applies them to
+recognized compressed sound sources. Image/vector formats and zero/invalid
+bounds are refused. Video retains its frame-count/resident-memory safeguards
+and intersects the artifact cap with the raw-input allowance. WAV keeps
+compressed-source bytes and decoded PCM artifact bytes independent, with its
+native source and cumulative preparation ceilings still enforced. Both the
+robot render receipt and provenance record the admitted policy. Tool probes keep their own short deadlines. See
 [native video limits](../NATIVE_VIDEO_LIMITS.md) for defaults and usage.
 
 The Python `fmn-python` console accepts the same four flags in separate-value
@@ -435,3 +438,26 @@ The authored ledger adds this native flag with status `improved`; existing
 Reference rulings are unchanged. See [Native HDR video](../HDR_PQ_VIDEO.md) for
 commands and the precise color contract.
 
+
+## Compressed sources for native WAV output
+
+`--format wav` uses native mixing and publication for both PCM and compressed
+source cues. Source bytes select the decoder, regardless of a file suffix.
+Recognized FLAC, MPEG audio, ADTS AAC, Ogg, ISO media, AIFF and non-native WAV
+formats use the existing governed ffmpeg boundary only when required. The
+configured executable and injected locator/runner are shared with native Rust
+soundtrack and bundle export; PCM, damaged PCM and unknown inputs never probe
+a tool. The first resolved executable is retained through the render.
+
+`--reproducible` requires native PCM input and refuses compressed decoding
+before discovery. Standard output retains exact source and normalized-PCM
+digests, tool fingerprint/version, argv and decode receipts in robot metadata
+and C9 provenance. C4 `native-wav-decoding.json` records source, cumulative
+preparation and process budgets; `native-wav-encoding.json` continues to bind
+s16/f32 and deterministic dither choices. Source failures, expansion limits
+and failed decoding publish neither a WAV nor its adjacent manifest.
+
+The live WAV path observes the ordinary scene lifecycle to remove skipped
+intervals and rebase cue placement once, matching native soundtrack timing.
+It needs no raster frame buffers and preserves frame/sample rounding, cue
+offsets, tails, gains and insertion-ordered ducking.

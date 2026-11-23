@@ -16,6 +16,13 @@ mod concatenating;
 mod doctor_autotune;
 mod generated;
 mod offline_cpu;
+mod soundtrack_capture;
+#[cfg(all(
+    test,
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+mod soundtrack_decode_tests;
 mod studio_live;
 pub mod studio_preview;
 mod studio_session;
@@ -41,8 +48,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use fmn::rendering::{
-    FfmpegLimitsReport, PreparedSceneSoundtrack, SoundtrackPreparationLimits, SoundtrackReport,
-    SoundtrackTimeline,
+    FfmpegLimitsReport, PreparedSceneSoundtrack, SoundtrackDecoderOptions,
+    SoundtrackPreparationLimits, SoundtrackReport, SoundtrackTimeline,
 };
 use fmn_codec::SampleFormat;
 #[cfg(test)]
@@ -62,9 +69,9 @@ use fmn_output::{
     EncoderChoice, FfmpegArtifactReport, FfmpegSink, FfmpegSinkConfig, FfmpegSoundtrack,
     FfmpegTool, GifSink, GifSinkConfig, InvocationReport, JobLimits, ManifestIdentity,
     ManifestMode, ManifestOutput, MixReport, MixerConfig, NativeArtifactKind, NativeArtifactReport,
-    OrderedEmitter, PngSink, PngSinkConfig, PngTarget, ProvenanceManifest, SinkLimits, SinkReceipt,
-    StructuralField, SvgPublicationConfig, VideoJob, WavPublicationConfig, WireFormat, Y4mSink,
-    Y4mSinkConfig, frames_to_samples, publish_svg_new, publish_wav_new,
+    OrderedEmitter, PngSink, PngSinkConfig, PngTarget, ProvenanceManifest, ScopedAudioDecoder,
+    SinkLimits, SinkReceipt, StructuralField, SvgPublicationConfig, VideoJob, WavPublicationConfig,
+    WireFormat, Y4mSink, Y4mSinkConfig, frames_to_samples, publish_svg_new, publish_wav_new,
 };
 use fmn_platform::fs::{FileSystem, FsError, FsNodeKind};
 use fmn_render::bin::{Binning, ScreenMap, Tiling, Viewport};
@@ -298,18 +305,21 @@ pub enum SceneSourceKind {
     Python,
 }
 
-/// Optional resource bounds for an offline ffmpeg video request.
+/// Optional resource bounds for video encoding or compressed WAV source decoding.
 ///
 /// Unspecified fields use the same finite defaults as the native render API.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FfmpegLimitOptions {
-    /// Wall-clock seconds for an encode, including time spent rendering frames.
+    /// Wall-clock seconds per video encode or compressed source decode.
+    /// Video encode time includes time spent rendering frames.
     pub timeout_seconds: Option<u64>,
     /// Captured bytes per stdout/stderr stream.
     pub max_log_bytes: Option<u64>,
-    /// Maximum encoded artifact bytes, also bounded by the input allowance.
+    /// Maximum encoded video or decoded PCM artifact bytes. Video output is
+    /// additionally bounded by its input allowance.
     pub max_artifact_bytes: Option<u64>,
-    /// Cumulative raw-frame bytes supplied to the encoder.
+    /// Cumulative video raw-frame bytes, or bytes per compressed WAV source
+    /// within the native source ceiling.
     pub max_input_bytes: Option<u64>,
 }
 
@@ -328,6 +338,14 @@ impl FfmpegLimitOptions {
     /// # Errors
     /// Refuses zero bounds and deadlines outside the host monotonic clock range.
     pub fn effective_limits(&self) -> Result<(JobLimits, u64), CliError> {
+        let limits = self.requested_job_limits();
+        let max_input_bytes = self.max_input_bytes.unwrap_or(64 * 1024 * 1024 * 1024);
+        let admitted = fmn::rendering::admit_render_ffmpeg_limits(&limits, max_input_bytes)
+            .map_err(|error| CliError::new("config", error.to_string()))?;
+        Ok((admitted, max_input_bytes))
+    }
+
+    fn requested_job_limits(&self) -> JobLimits {
         let mut limits = fmn::rendering::default_render_ffmpeg_limits();
         if let Some(seconds) = self.timeout_seconds {
             limits.timeout = std::time::Duration::from_secs(seconds);
@@ -338,10 +356,22 @@ impl FfmpegLimitOptions {
         if let Some(bytes) = self.max_artifact_bytes {
             limits.max_artifact_bytes = bytes;
         }
-        let max_input_bytes = self.max_input_bytes.unwrap_or(64 * 1024 * 1024 * 1024);
-        let admitted = fmn::rendering::admit_render_ffmpeg_limits(&limits, max_input_bytes)
-            .map_err(|error| CliError::new("config", error.to_string()))?;
-        Ok((admitted, max_input_bytes))
+        limits
+    }
+
+    fn soundtrack_decoder_options(&self) -> SoundtrackDecoderOptions {
+        let mut decode = AudioDecodeLimits::default();
+        if let Some(max_input_bytes) = self.max_input_bytes {
+            decode.max_input_bytes = decode.max_input_bytes.min(max_input_bytes);
+        }
+        SoundtrackDecoderOptions {
+            decode,
+            preparation: SoundtrackPreparationLimits::default(),
+            // Source bytes and decoded PCM expansion have independent
+            // ceilings: compressed input may legitimately expand beyond its
+            // input allowance. The shared decoder enforces both budgets.
+            ffmpeg_limits: self.requested_job_limits(),
+        }
     }
 }
 
@@ -433,7 +463,7 @@ pub struct RenderCommand {
     pub audio_sample_format: Option<WavSampleFormat>,
     /// Native s16 WAV TPDF seed. Zero is a valid seed; omission disables dither.
     pub audio_dither_seed: Option<u64>,
-    /// Explicit ffmpeg wall-clock and byte budgets for video rendering.
+    /// Explicit ffmpeg wall-clock and byte budgets for video or WAV source decoding.
     pub ffmpeg_limits: FfmpegLimitOptions,
     /// Output format.
     pub format: OutputFormat,
@@ -3018,6 +3048,53 @@ struct VideoAudioInput {
     report: Arc<AudioDecodeReport>,
 }
 
+struct WavSoundtrackReport {
+    decoder_options: SoundtrackDecoderOptions,
+    ffmpeg_limits: FfmpegLimitsReport,
+    audio_decodes: Vec<InvocationReport>,
+    audio_inputs: Vec<VideoAudioInput>,
+    soundtrack: SoundtrackReport,
+}
+
+struct WavDecodeContext<'a> {
+    decoder: ScopedAudioDecoder<'a>,
+    options: SoundtrackDecoderOptions,
+}
+
+struct WavComposition<'a, 'decoder> {
+    encoding: WavEncoding,
+    decode: &'a mut WavDecodeContext<'decoder>,
+    timeline: &'a SoundtrackTimeline,
+}
+
+impl WavSoundtrackReport {
+    fn policy_json(&self) -> String {
+        let decode = self.decoder_options.effective_decode_limits();
+        let preparation = self.decoder_options.preparation;
+        format!(
+            "{{\"max_source_bytes\":{},\"max_source_samples\":{},\"max_cues\":{},\"max_retained_source_bytes\":{},\"max_decoded_samples\":{},\"max_prepared_samples\":{},\"ffmpeg_limits\":{}}}",
+            decode.max_input_bytes,
+            decode.max_samples,
+            preparation.max_cues,
+            preparation.max_source_bytes,
+            preparation.max_decoded_samples,
+            preparation.max_prepared_samples,
+            self.ffmpeg_limits.to_json(),
+        )
+    }
+
+    fn metadata_json(&self) -> String {
+        format!(
+            ",\"audio_decode_policy\":{},\"ffmpeg_limits\":{},\"audio_decodes\":{},\"audio_inputs\":{},\"soundtrack\":{}",
+            self.policy_json(),
+            self.ffmpeg_limits.to_json(),
+            ffmpeg_invocations_json(&self.audio_decodes),
+            audio_inputs_json(&self.audio_inputs),
+            soundtrack_json(Some(&self.soundtrack)),
+        )
+    }
+}
+
 impl VideoArtifactReport {
     fn hdr_pq_json(&self) -> Option<String> {
         self.hdr_pq.map(|profile| {
@@ -3030,7 +3107,16 @@ impl VideoArtifactReport {
     }
 
     fn audio_inputs_json(&self) -> String {
-        let entries = self.audio_inputs.iter().map(|input| {
+        audio_inputs_json(&self.audio_inputs)
+    }
+
+    fn soundtrack_json(&self) -> String {
+        soundtrack_json(self.soundtrack.as_ref())
+    }
+}
+
+fn audio_inputs_json(inputs: &[VideoAudioInput]) -> String {
+    let entries = inputs.iter().map(|input| {
             format!(
                 "{{\"path\":{},\"source\":{},\"source_kind\":{},\"source_sha256\":{},\"pcm_sha256\":{},\"container\":{},\"decoder\":{}}}",
                 input.source.file_path().map_or_else(
@@ -3045,11 +3131,11 @@ impl VideoArtifactReport {
                 json_string(if input.report.invocation.is_some() { "ffmpeg" } else { "native-wav" }),
             )
         }).collect::<Vec<_>>();
-        format!("[{}]", entries.join(","))
-    }
+    format!("[{}]", entries.join(","))
+}
 
-    fn soundtrack_json(&self) -> String {
-        self.soundtrack.as_ref().map_or_else(|| "null".to_owned(), |report| {
+fn soundtrack_json(soundtrack: Option<&SoundtrackReport>) -> String {
+    soundtrack.map_or_else(|| "null".to_owned(), |report| {
             format!(
                 "{{\"cues_mixed\":{},\"sample_frames\":{},\"sample_rate\":{},\"channels\":{},\"clipped_samples\":{}}}",
                 report.cues_mixed,
@@ -3059,7 +3145,6 @@ impl VideoArtifactReport {
                 report.clipped_samples,
             )
         })
-    }
 }
 
 fn encoder_probe_json(probe: &fmn_output::EncoderProbe) -> String {
@@ -3100,6 +3185,12 @@ fn ffmpeg_invocations_json(invocations: &[InvocationReport]) -> String {
 
 enum RenderArtifactReport {
     Native(NativeArtifactReport),
+    /// The final artifact is native PCM; source preparation may have used a
+    /// separately recorded governed decoder in standard mode.
+    Wav {
+        artifact: NativeArtifactReport,
+        soundtrack: Box<WavSoundtrackReport>,
+    },
     // Boxed: the encoded-video report carries the ffmpeg and soundtrack
     // provenance, far larger than the native one.
     Video(Box<VideoArtifactReport>),
@@ -3108,7 +3199,10 @@ enum RenderArtifactReport {
 impl RenderArtifactReport {
     fn path(&self) -> &Path {
         match self {
-            Self::Native(report) => &report.path,
+            Self::Native(report)
+            | Self::Wav {
+                artifact: report, ..
+            } => &report.path,
             Self::Video(report) => &report.path,
         }
     }
@@ -4661,6 +4755,22 @@ fn prepare_video_soundtrack(
 fn native_render_error(error: fmn::rendering::RenderError) -> CliError {
     let exit_name = match &error {
         fmn::rendering::RenderError::Capability(_) => "capability",
+        fmn::rendering::RenderError::SoundDecode {
+            error:
+                fmn_output::AudioDecodeError::Capability(_)
+                | fmn_output::AudioDecodeError::TranscoderRequired { .. },
+            ..
+        } => "capability",
+        fmn::rendering::RenderError::SoundDecode {
+            error:
+                fmn_output::AudioDecodeError::InvalidLimits
+                | fmn_output::AudioDecodeError::InvalidJobLimits(_),
+            ..
+        } => "config",
+        fmn::rendering::RenderError::SoundDecode {
+            error: fmn_output::AudioDecodeError::InputOversized { .. },
+            ..
+        } => "budget",
         fmn::rendering::RenderError::SoundAsset {
             error: FsError::TooLarge { .. },
             ..
@@ -5721,42 +5831,67 @@ fn publish_scene_soundtrack(
     max_artifact_bytes: u64,
     scene: &fmn_scene::Scene,
     mix_threads: usize,
-    encoding: WavEncoding,
+    composition: WavComposition<'_, '_>,
 ) -> Result<(RenderArtifactReport, Vec<SoundCueAssetInput>), CliError> {
+    let WavComposition {
+        encoding,
+        decode,
+        timeline,
+    } = composition;
+    let ffmpeg_limits = decode
+        .options
+        .limits_report()
+        .map_err(native_render_error)?;
     let requests = scene.sound_requests();
     if requests.is_empty() {
         return Err(CliError::new("scene", NO_SOUND_CUES_MESSAGE));
     }
     let scene_time = scene.time();
     let timeline_frames = frames_to_samples(
-        scene_time.frames(),
+        timeline
+            .output_frame(scene_time.frames())
+            .map_err(native_render_error)?,
         scene_time.fps(),
         SOUNDTRACK_SAMPLE_RATE,
     )
     .map_err(|error| CliError::new("scene", error.to_string()))?;
+    let payload_bytes = max_artifact_bytes.checked_sub(44).ok_or_else(|| {
+        CliError::new(
+            "budget",
+            "soundtrack artifact budget is smaller than a WAV header",
+        )
+    })?;
+    let output_frames = payload_bytes.min(u64::from(u32::MAX) - 36)
+        / (encoding.format.bytes_per_sample() * u64::from(SOUNDTRACK_CHANNELS));
     let config = fmn_output::MixerConfig {
         sample_rate: SOUNDTRACK_SAMPLE_RATE,
         channels: SOUNDTRACK_CHANNELS,
         // Bound mixed storage using the actual representation and the RIFF
         // envelope, before source preparation or timeline allocation.
-        max_output_frames: (max_artifact_bytes
-            .saturating_sub(44)
-            .min(u64::from(u32::MAX) - 36)
-            / (encoding.format.bytes_per_sample() * u64::from(SOUNDTRACK_CHANNELS)))
-        .max(1),
+        max_output_frames: output_frames.max(1),
     };
-    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None)
-        .map_err(|error| CliError::new("config", error.to_string()))?;
+    let timeline_frames = u64::try_from(timeline_frames)
+        .map_err(|_| internal("negative soundtrack output timeline"))?;
+    if timeline_frames > output_frames {
+        return Err(CliError::new(
+            "budget",
+            fmn_output::SoundError::OutputTooLong {
+                frames: timeline_frames,
+                max_frames: output_frames,
+            }
+            .to_string(),
+        ));
+    }
     let prepared = PreparedSceneSoundtrack::new_with_limits(
         fs,
         requests,
-        &mut decoder,
+        &mut decode.decoder,
         config,
-        None,
-        SoundtrackPreparationLimits::default(),
+        Some(timeline),
+        decode.options.preparation,
     )
     .map_err(native_render_error)?
-    .with_timeline_frames(u64::try_from(timeline_frames.max(0)).unwrap_or(0));
+    .with_timeline_frames(timeline_frames);
     let cue_assets = prepared
         .inputs()
         .iter()
@@ -5786,13 +5921,35 @@ fn publish_scene_soundtrack(
         &mix,
     )
     .map_err(output_adapter_error)?;
-    let artifact = RenderArtifactReport::Native(NativeArtifactReport {
-        kind: NativeArtifactKind::Wav,
-        path: report.path,
-        frame_count: report.sample_frames,
-        bytes: report.bytes,
-        digest: report.digest,
-    });
+    let artifact = RenderArtifactReport::Wav {
+        artifact: NativeArtifactReport {
+            kind: NativeArtifactKind::Wav,
+            path: report.path,
+            frame_count: report.sample_frames,
+            bytes: report.bytes,
+            digest: report.digest,
+        },
+        soundtrack: Box::new(WavSoundtrackReport {
+            decoder_options: decode.options.clone(),
+            ffmpeg_limits,
+            audio_decodes: prepared.invocations(),
+            audio_inputs: prepared
+                .inputs()
+                .iter()
+                .map(|input| VideoAudioInput {
+                    source: input.source.clone(),
+                    report: Arc::clone(&input.report),
+                })
+                .collect(),
+            soundtrack: SoundtrackReport {
+                cues_mixed: mix.cues_mixed,
+                sample_frames: mix.audio.frames() as u64,
+                sample_rate: mix.audio.sample_rate,
+                channels: mix.audio.channels,
+                clipped_samples: mix.clipped_samples,
+            },
+        }),
+    };
     Ok((artifact, cue_assets))
 }
 
@@ -5895,9 +6052,12 @@ fn requested_render_format(command: &RenderCommand) -> Result<RequestedRenderFor
         ));
     }
     if command.ffmpeg_limits.has_overrides()
-        && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
+        && !matches!(
+            command.format,
+            OutputFormat::Auto | OutputFormat::Video | OutputFormat::Wav
+        )
     {
-        return Err(usage("ffmpeg resource limits require video output"));
+        return Err(usage("ffmpeg resource limits require video or WAV output"));
     }
     if command.audio_bitrate.is_some()
         && !matches!(command.format, OutputFormat::Auto | OutputFormat::Video)
@@ -6065,7 +6225,10 @@ fn artifact_virtual_path(path: &Path) -> String {
 
 fn output_manifest_entry(mode: ManifestMode, artifact: &RenderArtifactReport) -> ManifestOutput {
     match artifact {
-        RenderArtifactReport::Native(report) => ManifestOutput {
+        RenderArtifactReport::Native(report)
+        | RenderArtifactReport::Wav {
+            artifact: report, ..
+        } => ManifestOutput {
             virtual_path: artifact_virtual_path(&report.path),
             kind: native_artifact_kind_name(report.kind).to_owned(),
             digest: report.digest,
@@ -6104,7 +6267,10 @@ const fn native_artifact_kind_name(kind: fmn_output::NativeArtifactKind) -> &'st
 
 fn manifest_artifact_kind(artifact: &RenderArtifactReport) -> &'static str {
     match artifact {
-        RenderArtifactReport::Native(report) => native_artifact_kind_name(report.kind),
+        RenderArtifactReport::Native(report)
+        | RenderArtifactReport::Wav {
+            artifact: report, ..
+        } => native_artifact_kind_name(report.kind),
         RenderArtifactReport::Video(_) => "encoded_video",
     }
 }
@@ -6275,6 +6441,28 @@ fn render_manifest(
                 StructuralField::Absent("ffmpeg invocation"),
             ],
         ),
+        RenderArtifactReport::Wav { soundtrack, .. } => {
+            let audio_decodes = ffmpeg_invocations_json(&soundtrack.audio_decodes);
+            let audio_inputs = audio_inputs_json(&soundtrack.audio_inputs);
+            ClosureItem::structural(
+                9,
+                if soundtrack.audio_decodes.is_empty() {
+                    "native soundtrack capabilities; no external tool invoked"
+                } else {
+                    "native soundtrack plus audited ffmpeg source decoding"
+                },
+                &[
+                    StructuralField::Text(fs.identity()),
+                    StructuralField::Text(process_mechanism.identity()),
+                    StructuralField::U64(u64::from(process_mechanism.policy_version())),
+                    StructuralField::Absent("host clock on render path"),
+                    StructuralField::Absent("AssetFetcher"),
+                    StructuralField::Absent("CPython portal"),
+                    StructuralField::Text(&audio_decodes),
+                    StructuralField::Text(&audio_inputs),
+                ],
+            )
+        }
         RenderArtifactReport::Video(report) => {
             let tool_path = report.tool_path.to_string_lossy();
             let resource_policy = report.ffmpeg_limits.to_json();
@@ -6395,11 +6583,13 @@ fn render_manifest(
             })
             .transpose()
             .map_err(|error| internal(error.to_string()))?,
-        RenderArtifactReport::Native(_) => None,
+        RenderArtifactReport::Native(_) | RenderArtifactReport::Wav { .. } => None,
     };
     let wav_item = if matches!(
         artifact,
-        RenderArtifactReport::Native(report) if report.kind == NativeArtifactKind::Wav
+        RenderArtifactReport::Native(report)
+            | RenderArtifactReport::Wav { artifact: report, .. }
+            if report.kind == NativeArtifactKind::Wav
     ) {
         Some(
             ClosureItem::byte_input(
@@ -6414,6 +6604,18 @@ fn render_manifest(
         )
     } else {
         None
+    };
+    let wav_decode_item = match artifact {
+        RenderArtifactReport::Wav { soundtrack, .. } => Some(
+            ClosureItem::byte_input(
+                4,
+                "native-wav-decoding.json",
+                soundtrack.policy_json().as_bytes(),
+                "native soundtrack source, cumulative preparation and governed decoder limits",
+            )
+            .map_err(|error| internal(error.to_string()))?,
+        ),
+        _ => None,
     };
     ProvenanceManifest::new(
         mode,
@@ -6433,6 +6635,7 @@ fn render_manifest(
         ]
         .into_iter()
         .chain(hdr_item)
+        .chain(wav_decode_item)
         .chain(wav_item)
         .chain(cue_items)
         .chain(font_items)
@@ -7072,6 +7275,15 @@ fn execute_native_render_with_cancellation(
         camera.is_some(),
     )?;
     let process_mechanism = runner.mechanism();
+    let mut wav_decode = if requested_format == RequestedRenderFormat::Audio {
+        let options = command.ffmpeg_limits.soundtrack_decoder_options();
+        let decoder = options
+            .decoder_with_capabilities(&config, Arc::clone(&runner), locator, std::env::temp_dir())
+            .map_err(native_render_error)?;
+        Some(WavDecodeContext { decoder, options })
+    } else {
+        None
+    };
     let target = match (requested_format, video_job) {
         (RequestedRenderFormat::Native(format), None) => RenderTarget::Native(format),
         (RequestedRenderFormat::Audio, None) => RenderTarget::Wav,
@@ -7276,10 +7488,9 @@ fn execute_native_render_with_cancellation(
                 }
                 let summary = prerun.map(|prerun| prerun.summary);
                 if matches!(target, RenderTarget::Wav | RenderTarget::Svg) {
-                    // Composition targets publish from scene state, not from
-                    // a frame stream: play the scene through a discard sink
-                    // (cancellation still checkpoints every lifecycle event)
-                    // and compose the artifact from the final state.
+                    // Composition targets need no pixels. WAV observes the
+                    // ordinary lifecycle so selected/skipped intervals share
+                    // the native soundtrack clock; SVG needs only final state.
                     let artifact_destination = destination(&name);
                     preflight_render_generation(fs.as_ref(), &artifact_destination)?;
                     if manifest_publication == ManifestPublication::Adjacent {
@@ -7289,11 +7500,19 @@ fn execute_native_render_with_cancellation(
                         )?;
                     }
                     let mut scene = resolve_builtin_program(&name)?;
+                    let mut capture = soundtrack_capture::SoundtrackCapture::default();
+                    let mut discard = NullSceneSink;
+                    let composition_sink: &mut dyn SceneSink =
+                        if matches!(target, RenderTarget::Wav) {
+                            &mut capture
+                        } else {
+                            &mut discard
+                        };
                     let completed = run_builtin_scene(
                         &mut *scene,
                         command,
                         &config,
-                        &mut NullSceneSink,
+                        composition_sink,
                         cancellation,
                         &typesetting,
                     )?;
@@ -7301,6 +7520,11 @@ fn execute_native_render_with_cancellation(
                         cancellation.cli_checkpoint()?;
                     }
                     let scene = completed.into_scene();
+                    let timeline = if matches!(target, RenderTarget::Wav) {
+                        Some(capture.finish(&scene)?)
+                    } else {
+                        None
+                    };
                     let (max_artifact_bytes, _, _) = composition_budget(&config)?;
                     let (artifact, cue_assets) = match target {
                         RenderTarget::Wav => publish_scene_soundtrack(
@@ -7309,7 +7533,15 @@ fn execute_native_render_with_cancellation(
                             max_artifact_bytes,
                             &scene,
                             render_threads,
-                            WavEncoding::from_command(command),
+                            WavComposition {
+                                encoding: WavEncoding::from_command(command),
+                                decode: wav_decode
+                                    .as_mut()
+                                    .ok_or_else(|| internal("WAV decoder was not prepared"))?,
+                                timeline: timeline
+                                    .as_ref()
+                                    .ok_or_else(|| internal("WAV timeline was not observed"))?,
+                            },
                         )?,
                         _ => {
                             let svg_camera = camera_route::camera(&config)?;
@@ -7963,8 +8195,15 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
             ),
             _ => format!("; {}", backend.route),
         };
+        let wav_soundtrack_json = match &artifact {
+            RenderArtifactReport::Wav { soundtrack, .. } => soundtrack.metadata_json(),
+            _ => String::new(),
+        };
         match artifact {
-            RenderArtifactReport::Native(report) => {
+            RenderArtifactReport::Native(report)
+            | RenderArtifactReport::Wav {
+                artifact: report, ..
+            } => {
                 if command.common.robot {
                     let _ = write!(
                         stdout,
@@ -7996,6 +8235,7 @@ fn successful_render_output(command: &RenderCommand, reports: Vec<CompletedRende
                             WavEncoding::from_command(command)
                                 .to_json(SOUNDTRACK_SAMPLE_RATE, SOUNDTRACK_CHANNELS),
                         );
+                        stdout.push_str(&wav_soundtrack_json);
                     }
                     stdout.push_str(&backend_json);
                     stdout.push_str(&manifest_json);
@@ -11327,7 +11567,7 @@ mod tests {
     }
 
     #[test]
-    fn ffmpeg_limits_reject_invalid_bounds_and_non_video_formats() {
+    fn ffmpeg_limits_reject_invalid_bounds_and_formats_without_media_decoding() {
         for flag in [
             "--ffmpeg-timeout",
             "--ffmpeg-max-log-bytes",
@@ -11342,7 +11582,7 @@ mod tests {
                     "usage"
                 );
             }
-            for format in ["png", "png_sequence", "gif", "y4m", "wav", "svg"] {
+            for format in ["png", "png_sequence", "gif", "y4m", "svg"] {
                 assert_eq!(
                     parse_args([flag, "1", "--format", format])
                         .unwrap_err()
@@ -11350,6 +11590,11 @@ mod tests {
                     "usage"
                 );
             }
+            let wav = render(parse_args([flag, "1", "--format", "wav"]).unwrap());
+            assert_eq!(
+                requested_render_format(&wav).unwrap(),
+                RequestedRenderFormat::Audio
+            );
             assert_eq!(
                 parse_args([flag, "1", "--gif"]).unwrap_err().exit_name(),
                 "usage"

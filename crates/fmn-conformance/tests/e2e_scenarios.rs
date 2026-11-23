@@ -60,6 +60,12 @@
 //! regression drill (`RegressionKind`): the runner drives the scenario
 //! red, and the repro bundle plus log artifact must appear.
 
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[path = "../../fmn/tests/support/compressed_audio.rs"]
+mod compressed_audio;
 #[path = "support/hdr_pq.rs"]
 mod hdr_pq;
 #[allow(dead_code)]
@@ -4180,6 +4186,139 @@ fn native_surround_soundtrack_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
 /// Native scene cues reach canonical WAV bytes at every requested worker count.
 fn native_soundtrack_wav_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     native_soundtrack_run(ctx, false)
+}
+
+/// Compressed narration follows the same mixer and writer as native PCM while
+/// preserving the actual source snapshot and explicit external capability.
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+fn native_compressed_soundtrack_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn::{SoundtrackRenderOptions, render_soundtrack_with_fs};
+    use fmn_codec::{SampleFormat, encode_wav};
+    use fmn_config::config::DeterminismMode;
+    use fmn_output::AudioDecodeError;
+    use fmn_platform::fs::VirtualFs;
+    use std::num::NonZeroUsize;
+    use std::path::Path;
+
+    struct Narration;
+    impl fmn::SceneConstruct for Narration {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            for _ in 0..2 {
+                stage
+                    .scene_mut()
+                    .add_sound("/voice.asset", 0.0, None, None)?;
+                stage.wait(0.25)?;
+            }
+            Ok(())
+        }
+    }
+    let source = b"fLaC narration fixture";
+    let decoded = encode_wav(1, 8, SampleFormat::F32, &[0.25, -0.5]);
+    let expected = encode_wav(
+        2,
+        8,
+        SampleFormat::S16,
+        &[0.25, 0.25, -0.5, -0.5, 0.25, 0.25, -0.5, -0.5],
+    );
+    let options = |path: &str, workers: usize, fixture: &compressed_audio::Fixture| {
+        let mut options = SoundtrackRenderOptions::new(path).unwrap();
+        options.config.camera.fps = 8;
+        options.config.determinism.mode = DeterminismMode::Standard;
+        options.config.file_writer.ffmpeg_bin = fixture.tool.to_string_lossy().into_owned();
+        options.ffmpeg = Some(fixture.capability.clone());
+        options.mixer.sample_rate = 8;
+        options.mixer.channels = 2;
+        options.mixer.max_output_frames = 32;
+        options.threads = NonZeroUsize::new(workers).unwrap();
+        options.typeset_cache = false;
+        options
+    };
+    let mut renders = 0_u64;
+    for workers in [1, 4, 16] {
+        let fs = Arc::new(VirtualFs::new());
+        fs.insert("/voice.asset", source.to_vec());
+        let fixture = compressed_audio::Fixture::new(Some(Arc::clone(&fs)), decoded.clone(), false);
+        let report = render_soundtrack_with_fs(
+            &mut Narration,
+            options("/compressed.wav", workers, &fixture),
+            fs.clone(),
+        )
+        .map_err(|error| fail(format!("compressed WAV: {error}")))?;
+        let actual = fs
+            .read(Path::new("/compressed.wav"))
+            .map_err(|error| fail(error.to_string()))?;
+        if actual != expected
+            || report.artifact.cues_mixed != 2
+            || report.audio_decodes.len() != 1
+            || report.inputs.len() != 2
+            || report.inputs.iter().any(|input| {
+                input.bytes.as_ref() != source
+                    || input.report.source_digest != sha256(source)
+                    || input.report.invocation.is_none()
+            })
+            || fixture.locates.lock().unwrap().len() != 1
+            || fixture.runs.lock().unwrap().len() != 2
+            || fixture.sources.lock().unwrap().as_slice() != [source.to_vec()]
+        {
+            return Err(fail(
+                "compressed WAV lost sample placement, cached source bytes or decoder receipts",
+            ));
+        }
+        renders += 1;
+
+        let native_fs = Arc::new(VirtualFs::new());
+        native_fs.insert("/voice.asset", decoded.clone());
+        let mut native_options = options("/native.wav", workers, &fixture);
+        native_options.config.determinism.mode = DeterminismMode::Certified;
+        let native =
+            render_soundtrack_with_fs(&mut Narration, native_options, native_fs.clone())
+                .map_err(|error| fail(format!("native WAV with unused capability: {error}")))?;
+        if native_fs
+            .read(Path::new("/native.wav"))
+            .map_err(|error| fail(error.to_string()))?
+            != expected
+            || !native.audio_decodes.is_empty()
+            || fixture.locates.lock().unwrap().len() != 1
+            || fixture.runs.lock().unwrap().len() != 2
+        {
+            return Err(fail(
+                "native WAV changed PCM or consulted the optional decoder",
+            ));
+        }
+        renders += 1;
+    }
+    let fs = Arc::new(VirtualFs::new());
+    fs.insert("/voice.asset", source.to_vec());
+    let fixture = compressed_audio::Fixture::new(None, decoded, false);
+    let mut certified = options("/refused.wav", 1, &fixture);
+    certified.config.determinism.mode = DeterminismMode::Certified;
+    let refusal = render_soundtrack_with_fs(&mut Narration, certified, fs.clone());
+    if !matches!(
+        refusal,
+        Err(fmn::rendering::RenderError::SoundDecode {
+            error: AudioDecodeError::Capability(_),
+            ..
+        })
+    ) || !fixture.locates.lock().unwrap().is_empty()
+        || !fixture.runs.lock().unwrap().is_empty()
+        || fs.exists(Path::new("/refused.wav"))
+    {
+        return Err(fail(
+            "certified compressed WAV did not refuse before external work/publication",
+        ));
+    }
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_compressed_soundtrack")
+            .field("renders", renders)
+            .field("certified_refusals", 1_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("compressed-narration.wav", expected)
+        .with_counter("compressed_wav_renders", renders)
+        .with_counter("compressed_wav_certified_refusals", 1))
 }
 
 /// CLI PCM representation and dither reach the real writer and input closure.
@@ -19713,6 +19852,29 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             ],
         )],
     ));
+    #[cfg(all(
+        any(target_os = "linux", target_os = "macos"),
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ))]
+    specs.push(spec(
+        "render_matrix.native_compressed_soundtrack.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_compressed_soundtrack_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec!["compressed-narration.wav".to_owned()]),
+            counter_eq("compressed_wav_renders", 6),
+            counter_eq("compressed_wav_certified_refusals", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_compressed_soundtrack",
+            vec![
+                FieldPred::u64_eq("renders", 6),
+                FieldPred::u64_eq("certified_refusals", 1),
+            ],
+        )],
+    ));
     specs.push(spec(
         "render_matrix.native_soundtrack_wav.v1",
         ScenarioClass::RenderMatrix,
@@ -24308,6 +24470,20 @@ fn native_soundtrack_wav_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_soundtrack_wav.v1")
         .expect("native soundtrack WAV scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[cfg(all(
+    any(target_os = "linux", target_os = "macos"),
+    any(target_arch = "x86_64", target_arch = "aarch64")
+))]
+#[test]
+fn native_compressed_soundtrack_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_compressed_soundtrack.v1")
+        .expect("native compressed soundtrack scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -55,7 +55,7 @@ pub use fmn_hash::Digest as ArtifactDigest;
 
 pub use audio::{
     AudioDecodeError, AudioDecodeLimits, AudioDecodeReport, AudioDecoder, AudioInputFormat,
-    DecodedAudio,
+    DecodedAudio, ScopedAudioDecoder,
 };
 
 pub use image::{

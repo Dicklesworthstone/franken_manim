@@ -5,14 +5,14 @@
 //! governed ffmpeg boundary. Only mixed PCM enters the portable artifact.
 use super::{BundleExportError, BundleExportOptions, BundleExportReport, SceneBundleExport};
 use crate::rendering::{
-    FfmpegCapability, PreparedSceneSoundtrack, SoundtrackInput, SoundtrackPreparationLimits,
-    SoundtrackReport,
+    FfmpegCapability, PreparedSceneSoundtrack, SoundtrackDecoderOptions, SoundtrackInput,
+    SoundtrackPreparationLimits, SoundtrackReport,
 };
 use crate::{SceneConstruct, rendering::RenderError};
-use fmn_config::{Config, config::DeterminismMode};
+use fmn_config::Config;
 use fmn_output::{
-    AudioDecodeError, AudioDecodeLimits, AudioDecoder, Boundary, FfmpegTool, InvocationReport,
-    JobLimits, MixerConfig, SoundMixer, frames_to_samples,
+    AudioDecodeLimits, InvocationReport, JobLimits, MixerConfig, ScopedAudioDecoder, SoundMixer,
+    frames_to_samples,
 };
 use fmn_platform::fs::FileSystem;
 use fmn_render::CameraConfig;
@@ -72,68 +72,14 @@ impl BundleSoundtrackOptions {
         self.decoder(config)?;
         Ok(())
     }
-    fn decoder(&self, config: &Config) -> Result<AudioDecoder, BundleExportError> {
-        let mut limits = self.decode.clone();
-        limits.max_input_bytes = limits
-            .max_input_bytes
-            .min(self.preparation.max_source_bytes as u64);
-        limits.max_samples = limits
-            .max_samples
-            .min(self.preparation.max_decoded_samples as u64);
-        let decode_error = |error| {
-            sound(RenderError::SoundDecode {
-                source: None,
-                error,
-            })
-        };
-        // Validate both independent policies without resolving a tool. The
-        // decoder still enforces its sample-derived expansion ceiling inside
-        // Boundary::decode_audio_bytes after the capability is resolved.
-        let job_limits = fmn_output::admit_render_ffmpeg_limits(
-            &self.ffmpeg_limits,
-            self.ffmpeg_limits.max_artifact_bytes,
-        )
-        .map_err(|error| decode_error(AudioDecodeError::InvalidJobLimits(error)))?;
-        let native = AudioDecoder::new(limits.clone(), None).map_err(decode_error)?;
-        let capability = self.ffmpeg.clone();
-        let certified = config.determinism.mode == DeterminismMode::Certified;
-        if capability.is_none() && !certified {
-            return Ok(native);
+    fn decoder(&self, config: &Config) -> Result<ScopedAudioDecoder<'_>, BundleExportError> {
+        SoundtrackDecoderOptions {
+            decode: self.decode.clone(),
+            preparation: self.preparation,
+            ffmpeg_limits: self.ffmpeg_limits.clone(),
         }
-        let executable = config.file_writer.ffmpeg_bin.clone();
-        if capability.is_some() && (executable.is_empty() || executable.contains('\0')) {
-            return Err(BundleExportError::InvalidOptions(
-                "soundtrack ffmpeg executable must not be empty or contain NUL",
-            ));
-        }
-        AudioDecoder::with_boundary_resolver(limits, move |format| {
-            if certified {
-                return Err(AudioDecodeError::Capability(format!(
-                    "{} decoding through ffmpeg is outside certified bundle preparation; supply native PCM WAV",
-                    format.demuxer(),
-                )));
-            }
-            let capability = capability
-                .as_ref()
-                .ok_or(AudioDecodeError::TranscoderRequired { format })?;
-            let located = capability
-                .locator
-                .locate_ffmpeg(Path::new(&executable))
-                .map_err(|error| AudioDecodeError::Capability(error.to_string()))?;
-            let tool = FfmpegTool::resolve(
-                located,
-                capability.runner.as_ref(),
-                &capability.workdir_root,
-            )?;
-            Boundary::new(
-                tool,
-                Arc::clone(&capability.runner),
-                job_limits.clone(),
-                capability.workdir_root.clone(),
-            )
-            .map_err(AudioDecodeError::Boundary)
-        })
-        .map_err(decode_error)
+        .decoder(config, self.ffmpeg.as_ref())
+        .map_err(sound)
     }
 }
 
