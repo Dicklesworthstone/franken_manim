@@ -163,6 +163,86 @@ fn clone_native(animation: &dyn Animation) -> Option<Box<dyn Animation>> {
     }
 }
 
+/// Prove that isolated preparation can only execute engine-owned code.
+/// A pure interpolation signature alone does not constrain begin or finish.
+pub(crate) fn native_preparation_supported(animation: &dyn Animation) -> bool {
+    fn rate_supported(rate: &RateFunc, depth: usize) -> bool {
+        if depth > MAX_RATE_DEPTH {
+            return false;
+        }
+        match rate {
+            RateFunc::Catalog(_) => true,
+            RateFunc::Base(function) => fmn_core::rate::tag_of(*function).is_some(),
+            RateFunc::Sampled(values) => {
+                values.len() <= MAX_ITEMS && values.iter().all(|value| value.is_finite())
+            }
+            RateFunc::Squish { inner, a, b } => {
+                a.is_finite() && b.is_finite() && rate_supported(inner, depth + 1)
+            }
+            RateFunc::Scaled { inner, proportion } => {
+                proportion.is_finite() && rate_supported(inner, depth + 1)
+            }
+            // A missing Exact lookup writes a shared failure into its table.
+            // Private preparation must never poison the owner's fallback.
+            RateFunc::Exact(_) | RateFunc::Preparing(_) => false,
+        }
+    }
+
+    fn supported(animation: &dyn Animation, depth: usize, remaining: &mut usize) -> bool {
+        let any: &dyn Any = animation;
+        if depth > MAX_NATIVE_DEPTH
+            || *remaining == 0
+            || (native_kind(animation).is_none() && !any.is::<crate::MethodAnimation>())
+        {
+            return false;
+        }
+        *remaining -= 1;
+        // Only invoke trait accessors after checking the actual dynamic type.
+        let config = &animation.state().config;
+        if !config_supported(config) || !rate_supported(&config.rate_func, 0) {
+            return false;
+        }
+        if let Some(motion) = any.downcast_ref::<MoveAlongPath>()
+            && !motion.captured_path().is_some_and(captured_path_valid)
+        {
+            return false;
+        }
+        if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+            group_controls_supported(group.continuation_controls())
+                && group
+                    .animations()
+                    .iter()
+                    .all(|child| supported(child.as_ref(), depth + 1, remaining))
+        } else {
+            true
+        }
+    }
+    supported(animation, 0, &mut 256)
+}
+
+/// Clone a completely checked native tree without invoking lifecycle hooks.
+/// The caller must separately exclude live views and updater-owned inputs.
+pub(crate) fn clone_for_native_preparation(
+    animation: &dyn Animation,
+) -> Option<Box<dyn Animation>> {
+    if !native_preparation_supported(animation) {
+        return None;
+    }
+    let any: &dyn Any = animation;
+    if let Some(value) = any.downcast_ref::<crate::MethodAnimation>() {
+        Some(Box::new(value.clone()))
+    } else if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+        let children = group
+            .animations()
+            .iter()
+            .map(|child| clone_for_native_preparation(child.as_ref()))
+            .collect::<Option<Vec<_>>>()?;
+        Some(Box::new(group.clone_for_continuation(children)))
+    } else {
+        clone_native(animation)
+    }
+}
+
 fn rate_supported(rate: &RateFunc, depth: usize) -> bool {
     if depth > MAX_RATE_DEPTH {
         return false;

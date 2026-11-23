@@ -1965,6 +1965,246 @@ fn failure_encoder_help_evidence_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
     Ok(outcome.with_counter("encoder_help_terminal_modes", 3))
 }
 
+/// Native shared-source successions retain their just-in-time semantics while
+/// their prepared frames cross the production worker and PNG publication path.
+fn native_succession_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::{AnimConfig, Succession, Transform};
+    use fmn_scene::events::{EventListener, EventPropagation, EventTarget, EventType};
+
+    struct Sequence {
+        serial: bool,
+        final_state: Vec<u8>,
+    }
+    impl fmn::SceneConstruct for Sequence {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            // The dormant listener exercises Scene's ordinary serial route.
+            // It never mutates geometry and changes no rendered sample.
+            if self.serial {
+                stage
+                    .scene_mut()
+                    .event_dispatcher_mut()
+                    .add_listener(EventListener::new(
+                        EventType::KeyPress,
+                        EventTarget::Global,
+                        |_, _, _, _| EventPropagation::Continue,
+                    ))
+                    .map_err(fmn_scene::SceneError::Event)?;
+            }
+            let source = stage.add(fmn_mobject::Mobject::new())?;
+            let circle = stage.arena_mut().add(Circle::new().radius(0.35));
+            stage.arena_mut().attach(source, circle)?;
+            stage.shift(source, [-1.2, -0.25, 0.0]);
+            stage.set_fill(source, Some(RED_C), Some(1.0), None, true);
+            stage.set_stroke(source, None, Some(0.0), None, None, true);
+
+            let first_target = stage.arena_mut().copy_family(source)?;
+            let square = stage
+                .arena_mut()
+                .add(fmn_library::Square::new().side_length(0.55));
+            stage.arena_mut().attach(first_target, square)?;
+            stage.shift(square, [0.1, 0.7, 0.0]);
+            stage.shift(first_target, [1.4, 0.3, 0.0]);
+            stage.set_fill(first_target, Some(BLUE_C), Some(1.0), None, true);
+            stage.set_stroke(first_target, None, Some(0.0), None, None, true);
+
+            let second_target = stage.arena_mut().copy_family(source)?;
+            stage.shift(second_target, [0.6, 1.0, 0.0]);
+            stage.set_fill(second_target, Some(WHITE), Some(1.0), None, true);
+            let first = Transform::new(source, first_target).with_config(AnimConfig {
+                run_time_frames: Some(5),
+                rate_func: RateFunc::linear(),
+                final_alpha_value: 0.65,
+                ..AnimConfig::default()
+            });
+            let second = Transform::new(source, second_target)
+                .with_path_arc(0.8, [0.0, 0.0, 1.0])
+                .with_config(AnimConfig {
+                    run_time_frames: Some(7),
+                    rate_func: RateFunc::linear(),
+                    final_alpha_value: 0.4,
+                    ..AnimConfig::default()
+                });
+            let mut method = stage.prepare(source.animate().shift([0.8, -0.6, 0.0])?)?;
+            method.state_mut().config.run_time_frames = Some(5);
+            method.state_mut().config.rate_func = RateFunc::linear();
+            method.state_mut().config.final_alpha_value = 0.35;
+            let sequence = Succession::with_lag_ratio(
+                stage.arena_mut(),
+                vec![Box::new(first), Box::new(second), method],
+                0.5,
+            )?
+            .with_run_time_frames(17);
+            stage.play_prepared(vec![Box::new(sequence)])?;
+            if stage.is_animating(source) || stage.is_updating_suspended(source) {
+                return Err(fmn::scene::SceneError::InvalidLifecycle(
+                    "native succession did not release its owner lifecycle",
+                )
+                .into());
+            }
+            self.final_state = stage
+                .arena()
+                .snapshot()
+                .to_bytes()
+                .map_err(fmn_scene::SceneError::Serialize)?;
+            Ok(())
+        }
+    }
+
+    #[derive(Default)]
+    struct Jobs {
+        programs: u64,
+        times: Vec<i64>,
+        owner_captures: u64,
+    }
+    impl fmn_scene::SceneSink for Jobs {
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(
+            &mut self,
+            segment: &fmn_anim::pure_frame::PureSegment,
+        ) -> Result<(), IntegrationError> {
+            self.programs += 1;
+            for frame in 1..=segment.frame_count() {
+                let job = segment
+                    .job(frame)
+                    .map_err(|error| IntegrationError::new("succession", error.to_string()))?;
+                self.times.push(job.time().frames());
+                let expected = job.time().to_f64().to_bits();
+                let observed = std::thread::spawn(move || job.materialize().time().to_bits())
+                    .join()
+                    .map_err(|_| IntegrationError::new("succession", "worker panicked"))?;
+                if observed != expected {
+                    return Err(IntegrationError::new(
+                        "succession",
+                        "worker changed nominal time",
+                    ));
+                }
+            }
+            Ok(())
+        }
+        fn capture(
+            &mut self,
+            _: fmn_scene::CaptureReason,
+            packet: FramePacket,
+        ) -> Result<(), IntegrationError> {
+            self.owner_captures += 1;
+            self.times.push(packet.time().frames());
+            Ok(())
+        }
+    }
+
+    let mut final_states = Vec::new();
+    let mut total_programs = 0;
+    let mut total_jobs = 0;
+    for serial in [true, false] {
+        let mut sequence = Sequence {
+            serial,
+            final_state: Vec::new(),
+        };
+        let mut jobs = Jobs::default();
+        let completed = fmn::run_scene(
+            &mut sequence,
+            RuntimeConfig {
+                fps: 8,
+                ..RuntimeConfig::default()
+            },
+            42,
+            &mut jobs,
+        )
+        .map_err(|error| fail(format!("native succession workers: {error}")))?;
+        let programs = u64::from(!serial);
+        let owner_captures = if serial { 17 } else { 0 };
+        if jobs.programs != programs
+            || jobs.owner_captures != owner_captures
+            || jobs.times != (1..=17).collect::<Vec<_>>()
+            || completed.report().play_count != 1
+            || completed.report().time.frames() != 17
+        {
+            return Err(fail(
+                "native succession lost its chosen dispatch or nominal frames",
+            ));
+        }
+        if !serial {
+            total_programs += jobs.programs;
+            total_jobs += jobs.times.len() as u64;
+        }
+        final_states.push(sequence.final_state);
+    }
+    if final_states[0] != final_states[1] {
+        return Err(fail("native succession changed the owner's final snapshot"));
+    }
+
+    let mut baseline: Option<Vec<Vec<u8>>> = None;
+    let mut worker_runs = 0;
+    let mut rendered_frames = 0;
+    for (serial, window, threads) in [(true, 1, 1), (false, 1, 1), (false, 2, 4), (false, 4, 16)] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options = fmn::RenderOptions::new("/succession")
+            .map_err(|error| fail(format!("native succession options: {error}")))?;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = 8;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = window;
+        let mut sequence = Sequence {
+            serial,
+            final_state: Vec::new(),
+        };
+        let report = fmn::render_with_fs(&mut sequence, options, fs.clone())
+            .map_err(|error| fail(format!("native succession render: {error}")))?;
+        let pipeline = report
+            .frame_pipeline
+            .as_ref()
+            .ok_or_else(|| fail("native succession did not use the frame pipeline"))?;
+        if report.artifact.frame_count != 17
+            || pipeline.submitted != 17
+            || pipeline.emitted != 17
+            || pipeline.outstanding_slots != 0
+            || pipeline.max_in_flight > report.execution_plan.frames_in_flight
+        {
+            return Err(fail("native succession lost bounded ordered publication"));
+        }
+        let frames = (0..17)
+            .map(|index| {
+                fs.read(&PathBuf::from("/succession").join(format!("frame_{index:06}.png")))
+                    .map_err(|error| fail(format!("native succession frame: {error}")))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        if frames[0] == frames[8] || frames[8] == frames[16] {
+            return Err(fail("native succession did not change its rendered poses"));
+        }
+        if let Some(expected) = &baseline {
+            if *expected != frames {
+                return Err(fail(format!(
+                    "native succession PNG bytes differ from serial at {threads} threads"
+                )));
+            }
+            worker_runs += 1;
+        } else {
+            baseline = Some(frames);
+        }
+        rendered_frames += report.artifact.frame_count;
+    }
+    let frames = baseline.ok_or_else(|| fail("native succession rendered no frames"))?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_succession_workers")
+            .field("programs", total_programs)
+            .field("jobs", total_jobs)
+            .field("worker_runs", worker_runs)
+            .field("rendered_frames", rendered_frames)
+            .field("serial_pixels_match", "true"),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("succession-first.png", frames[0].clone())
+        .with_artifact("succession-last.png", frames[16].clone())
+        .with_counter("native_succession_programs", total_programs)
+        .with_counter("native_succession_jobs", total_jobs)
+        .with_counter("native_succession_worker_runs", worker_runs)
+        .with_counter("native_succession_rendered_frames", rendered_frames))
+}
+
 /// Native equation and reordered-string transitions cross the public facade,
 /// materialize on a worker, and retain both nominal sampling and owner cleanup.
 fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -18748,6 +18988,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_succession_workers.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_succession_workers_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("native_succession_programs", 1),
+            counter_eq("native_succession_jobs", 17),
+            counter_eq("native_succession_worker_runs", 3),
+            counter_eq("native_succession_rendered_frames", 68),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_succession_workers",
+            vec![
+                FieldPred::u64_eq("programs", 1),
+                FieldPred::u64_eq("jobs", 17),
+                FieldPred::u64_eq("worker_runs", 3),
+                FieldPred::u64_eq("rendered_frames", 68),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_matching_workers.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -23547,6 +23809,16 @@ fn integer_matching_selectors_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.integer_matching_selectors.v1")
         .expect("native integer matching selector scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_succession_workers_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_succession_workers.v1")
+        .expect("native succession workers scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -1722,6 +1722,32 @@ struct MemberPlayback {
 }
 
 impl Succession {
+    /// A separate closed-program capability, not a generic purity claim.
+    /// Later member lifetimes remain just in time on the real scene owner.
+    pub(crate) fn can_prepare_native_frames(&self) -> bool {
+        self.active == 0
+            && self.playback.len() == 1
+            && !self.playback[0].finished
+            && self.deferred.is_none()
+            && !self.replaying
+            && self.last_time.is_none()
+            && self.last_exact_position.is_none()
+            && self.state.config.rate_func.is_linear()
+            && self.state.config.final_alpha_value.is_finite()
+            && self.state.config.run_time.is_finite()
+            && self.state.config.time_span.is_none_or(|(start, end)| {
+                start.is_finite() && end.is_finite() && end > start
+            })
+            && self.layout_lag_ratio.is_finite()
+            && self.layout_lag_ratio >= 0.0
+            // Each member retains one prepared metadata snapshot. Larger
+            // compositions preserve the existing bounded serial pipeline.
+            && self.animations.len() <= 32
+            && self.animations.iter().all(|animation| {
+                crate::continuation::native_preparation_supported(animation.as_ref())
+            })
+    }
+
     fn duration_scale(&self) -> f64 {
         1.0
     }

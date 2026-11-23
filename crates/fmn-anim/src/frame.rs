@@ -572,7 +572,8 @@ pub(crate) fn play_duration(
 /// such a consumer, omits it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BeginState {
-    /// Snapshot the begin state when the segment is pure.
+    /// Snapshot the begin state for a pure segment or a separately admitted
+    /// closed native succession program.
     Retain,
     /// Never snapshot it.
     Omit,
@@ -600,8 +601,9 @@ fn play_prologue(
     begin_animations(stage, animations)?;
     let purity = classify_play(stage, animations);
     let base_frame = clock.now().frames();
-    let begin_state =
-        (purity.is_pure() && begin == BeginState::Retain).then(|| Rc::new(stage.snapshot()));
+    let retain_native_program = begin == BeginState::Retain
+        && (purity.is_pure() || crate::pure_frame::can_freeze_succession(stage, animations));
+    let begin_state = retain_native_program.then(|| Rc::new(stage.snapshot()));
     Ok(Prologue {
         segment,
         purity,

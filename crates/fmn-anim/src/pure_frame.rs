@@ -2,9 +2,16 @@
 //!
 //! Purity alone does not make `dyn Animation` transferable. This module admits
 //! only closed native mechanisms, freezes their **prepared** state, and invokes
-//! its existing interpolation on a worker-local Stage. No begin, finish, target
-//! recipe, updater or host callback is replayed there. Unknown mechanisms,
+//! its existing interpolation on a worker-local Stage. Closed native successions
+//! prepare per-member snapshots in a private owner-side arena first. No begin,
+//! finish, target recipe, updater or host callback is replayed on a worker.
+//! Unknown mechanisms,
 //! unknown rate functions, aliased endpoints and live views remain serial.
+
+mod succession;
+
+use succession::FrozenSuccession;
+pub(crate) use succession::can_freeze_succession;
 
 use std::collections::HashSet;
 use std::rc::Rc;
@@ -27,7 +34,9 @@ use crate::{
 /// Transform's fade/grow/indication parameterizations, partial reveals,
 /// vector-opacity fades, border/fill writing and absolute rotations reuse their
 /// native mechanisms. Eager compositions recurse over those closed carriers.
-/// Preparation and cleanup still run exactly once on the scene owner.
+/// Observable preparation and cleanup still run exactly once on the scene
+/// owner. A closed native succession can also prepare isolated phase copies
+/// without authored callbacks before creating its frozen program.
 #[derive(Debug, Clone)]
 pub struct FrozenAnimation {
     mechanism: FrozenMechanism,
@@ -658,9 +667,20 @@ struct SegmentData {
     kind: SegmentKind,
     begin: FrozenRenderState,
     animations: Vec<FrozenAnimation>,
+    succession: Option<FrozenSuccession>,
     grid: FrameSegment,
     base_frame: i64,
     rng_seed: u64,
+}
+
+impl SegmentData {
+    fn animation_count(&self) -> usize {
+        if self.succession.is_some() {
+            1
+        } else {
+            self.animations.len()
+        }
+    }
 }
 
 /// An immutable native program shared by all of its bounded frame jobs.
@@ -681,7 +701,7 @@ impl std::fmt::Debug for PureSegment {
             .field("kind", &self.data.kind)
             .field("base_frame", &self.data.base_frame)
             .field("frames", &self.frame_count())
-            .field("animations", &self.data.animations.len())
+            .field("animations", &self.data.animation_count())
             .finish_non_exhaustive()
     }
 }
@@ -705,16 +725,19 @@ impl PureSegment {
         animations: &[Box<dyn Animation>],
         open: &OpenSegment,
     ) -> Result<Self, PureFrameRefusal> {
+        // Generic purity remains conservative for just-in-time lifecycles.
+        // This separate capability proves and prepares the closed native case.
+        let native_succession = can_freeze_succession(stage, animations);
         let report = open.report();
         let begin = report
             .begin_state
             .as_ref()
             .filter(|_| {
-                report.purity.is_pure()
+                (report.purity.is_pure() || native_succession)
                     && stage.updater_error().is_none()
                     && open.is_at_begin()
                     && report.n_frames > 0
-                    && crate::classify_play(stage, animations).is_pure()
+                    && (native_succession || crate::classify_play(stage, animations).is_pure())
             })
             .ok_or(PureFrameRefusal::NotAtPureBegin)?;
         if !stage.can_restore(begin)
@@ -723,12 +746,19 @@ impl PureSegment {
         {
             return Err(PureFrameRefusal::DifferentBegin);
         }
-        let frozen = freeze_animations(stage, animations)?;
+        let (frozen, succession) = if native_succession {
+            let program = FrozenSuccession::compile(stage, animations)
+                .ok_or(PureFrameRefusal::UnsupportedAnimation(0))?;
+            (Vec::new(), Some(program))
+        } else {
+            (freeze_animations(stage, animations)?, None)
+        };
         Ok(Self {
             data: Arc::new(SegmentData {
                 kind: SegmentKind::Play,
                 begin: begin.render_state(clock.now().to_f64()),
                 animations: frozen,
+                succession,
                 grid: open.segment(),
                 base_frame: report.base_frame,
                 rng_seed: rng.seed(),
@@ -772,6 +802,7 @@ impl PureSegment {
                 kind: SegmentKind::Wait,
                 begin: begin.render_state(clock.now().to_f64()),
                 animations: Vec::new(),
+                succession: None,
                 grid: open.segment(),
                 base_frame: report.base_frame,
                 rng_seed: rng.seed(),
@@ -807,13 +838,18 @@ impl PureSegment {
     ) -> Result<Option<FrameMetadata>, AnimError> {
         check_updater_error(stage)?;
         if self.data.kind != SegmentKind::Play
-            || animations.len() != self.data.animations.len()
+            || animations.len() != self.data.animation_count()
             || open.segment() != self.data.grid
             || !open.is_at_frame_boundary()
         {
             return Err(AnimError::InvalidFramePhase(
                 "pure advance requires the original play at a completed frame boundary",
             ));
+        }
+        // A succession's owner still visits every nominal sample. Its native
+        // frozen phases accelerate rendering without skipping owner lifetimes.
+        if self.data.succession.is_some() {
+            return Ok(None);
         }
         if let Some(error) = animations
             .iter()
@@ -1004,7 +1040,9 @@ impl PureSegment {
     ///
     /// Call once, even after sink failure (ordinary play likewise completes
     /// its front end after a capture failure). No per-frame observer may run
-    /// on this route. The last nominal sample is applied before the ordinary
+    /// on this route. Ordinary pure carriers apply the last nominal sample;
+    /// a prepared native succession retains every nominal owner sample and
+    /// its just-in-time lifecycles. Both then run the ordinary
     /// finish/remover/resume/zero-dt epilogue; final_alpha_value is not a frame.
     ///
     /// # Errors
@@ -1022,7 +1060,7 @@ impl PureSegment {
         }
         if self.data.kind != SegmentKind::Play
             || !open.is_at_begin()
-            || animations.len() != self.data.animations.len()
+            || animations.len() != self.data.animation_count()
             || open.report().base_frame != self.data.base_frame
             || open.report().n_frames != self.frame_count()
             || clock.now().frames() != self.data.base_frame
@@ -1031,6 +1069,29 @@ impl PureSegment {
             return Err(AnimError::InvalidFramePhase(
                 "pure play no longer at its begin boundary",
             ));
+        }
+        if self.data.succession.is_some() {
+            // Private preparation never replaces owner registrations or
+            // lifecycle state. Preserve every real begin/finish, intermediate
+            // refusal and final_alpha by running the ordinary owner driver,
+            // with allocation-free metadata captures and no renderer.
+            struct OwnerOnly;
+            impl PlayCapture for OwnerOnly {
+                fn capture(&mut self, _packet: crate::FramePacket) {}
+                fn capture_state_required(&self) -> bool {
+                    false
+                }
+            }
+            return crate::frame::drive_open_play(
+                stage,
+                clock,
+                &RngRoot::from_seed(self.data.rng_seed),
+                animations,
+                false,
+                &mut |_, _| {},
+                &mut OwnerOnly,
+                open,
+            );
         }
         let last = self.data.grid.end_time();
         let final_progression = if self.frame_count() == 0 {
@@ -1113,13 +1174,18 @@ impl PureFrameJob {
     /// # Errors
     /// An exact rate's preparation contract was violated.
     pub fn try_materialize(&self) -> Result<Stage, AnimError> {
-        let mut stage = self.data.begin.clone().materialize();
-        for animation in &self.data.animations {
-            animation.interpolate(&mut stage, self.sample.time)?;
-            if let Some(error) = animation.rate_error() {
-                return Err(error);
+        let mut stage = if let Some(program) = &self.data.succession {
+            program.materialize(self.sample.time)?
+        } else {
+            let mut stage = self.data.begin.clone().materialize();
+            for animation in &self.data.animations {
+                animation.interpolate(&mut stage, self.sample.time)?;
+                if let Some(error) = animation.rate_error() {
+                    return Err(error);
+                }
             }
-        }
+            stage
+        };
         stage.set_time_from_clock(self.time().to_f64());
         Ok(stage)
     }

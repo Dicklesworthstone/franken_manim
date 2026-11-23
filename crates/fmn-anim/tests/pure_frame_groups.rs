@@ -679,3 +679,475 @@ fn durable_group_declarations_bind_nested_controls_and_refuse_unknown_children()
     );
     assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
 }
+
+fn succession_chain(
+    lag: f64,
+    frames: Option<u64>,
+    final_alpha: f64,
+) -> (Stage, Vec<Box<dyn Animation>>) {
+    let mut stage = Stage::new();
+    let source = stage.add(Mobject::new());
+    let child = stage.add(Mobject::vector_from_points(&[
+        [-2.0, 0.0, 0.0],
+        [-1.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0],
+    ]));
+    stage.attach(source, child).unwrap();
+    stage.add_to_scene(source).unwrap();
+    let first_target = stage.copy_family(source).unwrap();
+    let extra = stage.add(Mobject::vector_from_points(&[
+        [0.0, -1.0, 0.0],
+        [1.0, -0.5, 0.0],
+        [2.0, -1.0, 0.0],
+    ]));
+    stage.attach(first_target, extra).unwrap();
+    stage.shift(first_target, [2.0, 0.5, 0.0]);
+    let second_target = stage.copy_family(source).unwrap();
+    stage.shift(second_target, [-1.0, 2.0, 0.0]);
+    let first = Transform::new(source, first_target).with_config(AnimConfig {
+        run_time: 0.17,
+        rate_func: RateFunc::linear(),
+        final_alpha_value: 0.65,
+        ..AnimConfig::default()
+    });
+    let second = Transform::new(source, second_target)
+        .with_path_arc(0.8, [0.0, 0.0, 1.0])
+        .with_config(AnimConfig {
+            run_time: 0.23,
+            rate_func: RateFunc::Catalog(CatalogRate::ThereAndBack),
+            final_alpha_value: 0.4,
+            ..AnimConfig::default()
+        });
+    let mut method = fmn_anim::prepare_animation(
+        source.animate().shift([0.0, -2.0, 0.0]).unwrap(),
+        &mut stage,
+    )
+    .unwrap();
+    method.state_mut().config.run_time = 0.11;
+    method.state_mut().config.rate_func = RateFunc::linear();
+    method.state_mut().config.final_alpha_value = final_alpha;
+    let mut sequence = Succession::with_lag_ratio(
+        &mut stage,
+        vec![Box::new(first), Box::new(second), method],
+        lag,
+    )
+    .unwrap();
+    if let Some(frames) = frames {
+        sequence = sequence.with_run_time_frames(frames);
+    }
+    (stage, vec![Box::new(sequence)])
+}
+
+#[test]
+fn native_succession_shared_source_topology_and_method_chain_match_serial_bits() {
+    for lag in [0.0, 0.5, 1.0, 1.5] {
+        for frames in [None, Some(3), Some(19)] {
+            let (stage, animations) = succession_chain(lag, frames, 0.35);
+            compare(stage, animations);
+        }
+    }
+}
+
+#[test]
+fn native_succession_zero_windows_and_skipped_members_preserve_final_alpha() {
+    for lag in [0.0, 0.3, 1.0, 1.5] {
+        let mut stage = Stage::new();
+        let source = object(&mut stage, 0.0);
+        let mut members: Vec<Box<dyn Animation>> = Vec::new();
+        for (index, frames) in [0, 1, 0, 2].into_iter().enumerate() {
+            let target = stage.copy_family(source).unwrap();
+            stage.shift(
+                target,
+                [f64::from(u32::try_from(index).unwrap() + 1), 0.0, 0.0],
+            );
+            members.push(Box::new(Transform::new(source, target).with_config(
+                AnimConfig {
+                    run_time_frames: Some(frames),
+                    rate_func: RateFunc::linear(),
+                    final_alpha_value: 0.25,
+                    ..AnimConfig::default()
+                },
+            )));
+        }
+        let mut sequence = Succession::with_lag_ratio(&mut stage, members, lag)
+            .unwrap()
+            .with_run_time_frames(7);
+        sequence.state_mut().config.time_span = Some((1.0 / 30.0, 6.0 / 30.0));
+        compare(stage, vec![Box::new(sequence)]);
+    }
+}
+
+#[test]
+fn native_succession_prepares_eager_groups_and_border_fill_finish_in_order() {
+    let mut stage = Stage::new();
+    let source = stage.add(Mobject::vector_from_points(&[
+        [-1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [1.0, 0.0, 0.0],
+    ]));
+    stage.add_to_scene(source).unwrap();
+    let border = fmn_anim::DrawBorderThenFill::new(source).with_config(AnimConfig {
+        run_time: 0.2,
+        rate_func: RateFunc::Catalog(CatalogRate::ThereAndBack),
+        final_alpha_value: 0.75,
+        ..AnimConfig::default()
+    });
+    let target = stage.copy_family(source).unwrap();
+    stage.shift(target, [3.0, 1.0, 0.0]);
+    let morph = Transform::new(source, target).with_config(AnimConfig {
+        run_time: 0.3,
+        final_alpha_value: 0.6,
+        ..AnimConfig::default()
+    });
+    let other = transform(&mut stage, -4.0, 0.15);
+    let group =
+        AnimationGroup::with_lag_ratio(&mut stage, vec![Box::new(morph), other], 0.2).unwrap();
+    let sequence = Succession::new(&mut stage, vec![Box::new(border), Box::new(group)]).unwrap();
+    compare(stage, vec![Box::new(sequence)]);
+}
+
+#[test]
+fn native_succession_keeps_exact_boundaries_above_f64_integer_precision() {
+    let boundary = (1_i64 << 53) + 1;
+    let mut stage = Stage::new();
+    let source = object(&mut stage, 0.0);
+    let a = stage.copy_family(source).unwrap();
+    let b = stage.copy_family(source).unwrap();
+    stage.shift(a, [2.0, 0.0, 0.0]);
+    stage.shift(b, [4.0, 0.0, 0.0]);
+    let first = Transform::new(source, a).with_config(AnimConfig {
+        run_time_frames: Some(boundary as u64),
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    let second = Transform::new(source, b).with_config(AnimConfig {
+        run_time_frames: Some(1),
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    let sequence = Succession::new(&mut stage, vec![Box::new(first), Box::new(second)]).unwrap();
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(sequence)];
+    let clock = RationalFrameClock::new(24).unwrap();
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let program =
+        PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(61), &animations, &open).unwrap();
+    // Only three exact samples are needed; do not loop through 2^53 frames.
+    for frame in [boundary - 1, boundary, boundary + 1] {
+        animations[0]
+            .interpolate_at_position(&mut stage, &fmn_anim::FramePosition::from_frame(frame), 24)
+            .unwrap();
+        let job = program.job(frame).unwrap();
+        stage.set_time_from_clock(job.time().to_f64());
+        assert_eq!(facts(&job.materialize()), facts(&stage), "frame={frame}");
+    }
+    assert_eq!(stage.get_center(source)[0], 4.5);
+    finish_open_play(&mut stage, &mut animations, open).unwrap();
+}
+
+#[test]
+fn native_succession_finish_preserves_owner_state_and_never_grants_generic_purity() {
+    let (mut serial, mut serial_animations) = succession_chain(1.0, Some(19), 0.35);
+    let (mut native, mut native_animations) = succession_chain(1.0, Some(19), 0.35);
+    // Include non-frame final alpha and removal in the real owner's epilogue.
+    serial_animations[0].state_mut().config.final_alpha_value = 0.4;
+    native_animations[0].state_mut().config.final_alpha_value = 0.4;
+    serial_animations[0].state_mut().config.remover = true;
+    native_animations[0].state_mut().config.remover = true;
+    let rng = RngRoot::from_seed(91);
+    let mut serial_clock = RationalFrameClock::new(30).unwrap();
+    let mut native_clock = serial_clock;
+    let mut serial_open = open_play(&mut serial, &serial_clock, &mut serial_animations).unwrap();
+    let mut native_open = open_play(&mut native, &native_clock, &mut native_animations).unwrap();
+    assert!(!native_open.report().purity.is_pure());
+    assert!(native_open.report().begin_state.is_some());
+    let before = native.snapshot().to_bytes().unwrap();
+    let program = PureSegment::freeze(
+        &native,
+        &native_clock,
+        &rng,
+        &native_animations,
+        &native_open,
+    )
+    .unwrap();
+    assert_eq!(native.snapshot().to_bytes().unwrap(), before);
+    assert!(
+        fmn_anim::reconstruct_pure_frame(
+            &mut native,
+            &mut native_animations,
+            native_open.report(),
+            &rng,
+            &program.job(1).unwrap().sample(),
+        )
+        .is_err()
+    );
+    assert!(
+        program
+            .try_advance_on_owner(
+                &mut native,
+                &mut native_clock,
+                &rng,
+                &mut native_animations,
+                &mut native_open,
+                u64::MAX,
+            )
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(native.snapshot().to_bytes().unwrap(), before);
+    assert_eq!((native_clock.now().frames(), native_open.stepped()), (0, 0));
+    advance_play(
+        &mut serial,
+        &mut serial_clock,
+        &rng,
+        &mut serial_animations,
+        &mut serial_open,
+        program.frame_count(),
+        &mut |_| {},
+    )
+    .unwrap();
+    finish_open_play(&mut serial, &mut serial_animations, serial_open).unwrap();
+    for frame in (1..=program.frame_count()).rev() {
+        let _ = program.job(frame).unwrap().materialize();
+    }
+    program
+        .finish_on_owner(
+            &mut native,
+            &mut native_clock,
+            &mut native_animations,
+            native_open,
+        )
+        .unwrap();
+    assert_eq!(facts(&native), facts(&serial));
+    assert_eq!(native_clock.now(), serial_clock.now());
+    // This includes unrooted starting copies, family topology, flags and locks.
+    assert_eq!(
+        native.snapshot().to_bytes().unwrap(),
+        serial.snapshot().to_bytes().unwrap()
+    );
+}
+
+#[test]
+fn native_succession_refuses_unknown_lifecycles_before_private_preparation() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct Effectful {
+        inner: Transform,
+        begin: Rc<Cell<usize>>,
+        finish: Rc<Cell<usize>>,
+    }
+    impl Animation for Effectful {
+        fn state(&self) -> &AnimState {
+            self.inner.state()
+        }
+        fn state_mut(&mut self) -> &mut AnimState {
+            self.inner.state_mut()
+        }
+        fn effect_signature(&self) -> AnimationSignature {
+            AnimationSignature::Pure
+        }
+        fn freeze_interpolation(&self) -> Option<fmn_anim::pure_frame::FrozenAnimation> {
+            self.inner.freeze_interpolation()
+        }
+        fn begin(&mut self, stage: &mut Stage) -> Result<(), fmn_anim::AnimError> {
+            self.begin.set(self.begin.get() + 1);
+            self.inner.begin(stage)
+        }
+        fn finish(&mut self, stage: &mut Stage) {
+            self.finish.set(self.finish.get() + 1);
+            self.inner.finish(stage);
+        }
+        fn all_mobjects(&self) -> Vec<Mob> {
+            self.inner.all_mobjects()
+        }
+        fn preflight_mobjects(&self) -> Vec<Mob> {
+            self.inner.preflight_mobjects()
+        }
+        fn interpolate_submobject(&mut self, stage: &mut Stage, mobs: &[Mob], alpha: f64) {
+            self.inner.interpolate_submobject(stage, mobs, alpha);
+        }
+    }
+
+    let mut stage = Stage::new();
+    let first = transform(&mut stage, -2.0, 0.2);
+    let source = object(&mut stage, 2.0);
+    let target = stage.copy_family(source).unwrap();
+    stage.shift(target, [1.0, 0.0, 0.0]);
+    let begins = Rc::new(Cell::new(0));
+    let finishes = Rc::new(Cell::new(0));
+    let second = Effectful {
+        inner: Transform::new(source, target),
+        begin: Rc::clone(&begins),
+        finish: Rc::clone(&finishes),
+    };
+    let sequence = Succession::new(&mut stage, vec![first, Box::new(second)]).unwrap();
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(sequence)];
+    let clock = RationalFrameClock::new(30).unwrap();
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(
+        PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(61), &animations, &open).is_err()
+    );
+    assert_eq!((begins.get(), finishes.get()), (0, 0));
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    finish_open_play(&mut stage, &mut animations, open).unwrap();
+    assert_eq!((begins.get(), finishes.get()), (1, 1));
+}
+
+#[test]
+fn native_succession_refuses_custom_rates_without_evaluating_future_members() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    fn authored_rate(alpha: f64) -> f64 {
+        CALLS.fetch_add(1, Ordering::SeqCst);
+        alpha
+    }
+
+    let mut stage = Stage::new();
+    let first = transform(&mut stage, -2.0, 0.2);
+    let mut second = transform(&mut stage, 2.0, 0.2);
+    second.state_mut().config.rate_func = RateFunc::Base(authored_rate);
+    let sequence = Succession::new(&mut stage, vec![first, second]).unwrap();
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(sequence)];
+    let clock = RationalFrameClock::new(30).unwrap();
+    CALLS.store(0, Ordering::SeqCst);
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(
+        PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(61), &animations, &open).is_err()
+    );
+    assert_eq!(CALLS.load(Ordering::SeqCst), 0);
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    finish_open_play(&mut stage, &mut animations, open).unwrap();
+    assert!(CALLS.load(Ordering::SeqCst) > 0);
+}
+
+#[test]
+fn native_succession_refuses_exact_rates_without_poisoning_shared_failure_state() {
+    let sampler = fmn_anim::rate_table::RateSampler::new(2, Ok);
+    let preparing = RateFunc::Preparing(sampler.clone());
+    assert_eq!(preparing.eval(0.0), 0.0);
+    assert_eq!(preparing.eval(1.0), 1.0);
+    let exact = sampler.finish().unwrap();
+    let mut stage = Stage::new();
+    let first = transform(&mut stage, -2.0, 0.2);
+    let mut second = transform(&mut stage, 2.0, 0.2);
+    second.state_mut().config.rate_func = exact.clone();
+    second.state_mut().config.final_alpha_value = 0.4;
+    let sequence = Succession::new(&mut stage, vec![first, second]).unwrap();
+    let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(sequence)];
+    let clock = RationalFrameClock::new(30).unwrap();
+    let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(
+        PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(61), &animations, &open).is_err()
+    );
+    assert!(exact.error().is_none());
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    // The missing final input remains an error of the real owner lifecycle.
+    assert!(finish_open_play(&mut stage, &mut animations, open).is_err());
+    assert!(exact.error().is_some());
+}
+
+#[test]
+fn native_succession_future_target_views_updaters_and_reverse_outer_rates_stay_serial() {
+    for case in 0..3 {
+        let mut stage = Stage::new();
+        let first = transform(&mut stage, -2.0, 0.2);
+        let source = object(&mut stage, 2.0);
+        let target = stage.copy_family(source).unwrap();
+        stage.shift(target, [1.0, 0.0, 0.0]);
+        let view = if case == 0 {
+            Some(stage.get_mut(target).unwrap().buffer.export_view(false))
+        } else {
+            None
+        };
+        if case == 1 {
+            stage.add_dt_updater(target, |_, _, _| {}, false).unwrap();
+        }
+        let second = Transform::new(source, target);
+        let mut sequence = Succession::new(&mut stage, vec![first, Box::new(second)]).unwrap();
+        if case == 2 {
+            sequence = sequence.with_rate_func(RateFunc::Catalog(CatalogRate::ThereAndBack));
+        }
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(sequence)];
+        let clock = RationalFrameClock::new(30).unwrap();
+        let open = open_play(&mut stage, &clock, &mut animations).unwrap();
+        let before = facts(&stage);
+        assert!(
+            PureSegment::freeze(&stage, &clock, &RngRoot::from_seed(61), &animations, &open)
+                .is_err()
+        );
+        assert_eq!(facts(&stage), before);
+        finish_open_play(&mut stage, &mut animations, open).unwrap();
+        drop(view);
+    }
+}
+
+#[test]
+fn native_succession_dispatch_uses_jobs_and_sink_refusal_keeps_serial_packets() {
+    use fmn_anim::pure_frame::{PlayCapture, play_segment_with_pure_dispatch};
+
+    struct Capture {
+        accept: bool,
+        offered: usize,
+        ordinary: usize,
+        frames: Vec<Vec<String>>,
+    }
+    impl PlayCapture for Capture {
+        fn capture(&mut self, packet: fmn_anim::FramePacket) {
+            self.ordinary += 1;
+            self.frames.push(facts(&packet.materialize_stage()));
+        }
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(&mut self, program: &PureSegment) -> bool {
+            self.offered += 1;
+            if !self.accept {
+                return false;
+            }
+            self.frames = (1..=program.frame_count())
+                .map(|frame| facts(&program.job(frame).unwrap().materialize()))
+                .collect();
+            true
+        }
+    }
+
+    let mut outcomes = Vec::new();
+    for (allow_pure, accept) in [(false, false), (true, true), (true, false)] {
+        let (mut stage, mut animations) = succession_chain(0.5, Some(17), 0.35);
+        let mut clock = RationalFrameClock::new(30).unwrap();
+        let mut capture = Capture {
+            accept,
+            offered: 0,
+            ordinary: 0,
+            frames: Vec::new(),
+        };
+        let mut boundaries = 0;
+        let report = play_segment_with_pure_dispatch(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(61),
+            &mut animations,
+            false,
+            allow_pure,
+            &mut |_, _| boundaries += 1,
+            &mut capture,
+        )
+        .unwrap();
+        assert_eq!(capture.offered, usize::from(allow_pure));
+        let ordinary = if allow_pure && accept { 0 } else { 17 };
+        assert_eq!(capture.ordinary, ordinary);
+        assert_eq!(boundaries, ordinary);
+        assert!(!report.purity.is_pure());
+        outcomes.push((
+            capture.frames,
+            facts(&stage),
+            stage.snapshot().to_bytes().unwrap(),
+            clock.now(),
+        ));
+    }
+    assert_eq!(outcomes[0], outcomes[1]);
+    assert_eq!(outcomes[0], outcomes[2]);
+}
