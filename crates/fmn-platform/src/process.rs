@@ -3076,8 +3076,7 @@ mod spawn_retry_tests {
                 command.spawn()
             },
         )
-        .err()
-        .expect("an image held write-open must never execute");
+        .expect_err("an image held write-open must never execute");
         assert_eq!(
             attempts, 8,
             "persistent loader refusal must not retry forever"
@@ -3108,8 +3107,7 @@ mod spawn_retry_tests {
                 result
             },
         )
-        .err()
-        .expect("cancellation must prevent an otherwise successful retry");
+        .expect_err("cancellation must prevent an otherwise successful retry");
         assert_eq!(attempts, 1);
         assert_eq!(
             error.startup_termination(),
@@ -3153,8 +3151,7 @@ mod spawn_retry_tests {
                 command.spawn()
             },
         )
-        .err()
-        .expect("missing image must stay a typed loader refusal");
+        .expect_err("missing image must stay a typed loader refusal");
         assert_eq!(attempts, 1);
         assert!(matches!(
             error,
