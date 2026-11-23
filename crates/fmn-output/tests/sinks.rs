@@ -1369,6 +1369,7 @@ fn mix_report() -> MixReport {
     MixReport {
         audio: WavAudio {
             channels: 2,
+            channel_mask: None,
             sample_rate: 48_000,
             format: SampleFormat::F32,
             samples: vec![0.0, 0.5, -0.5, 1.0],

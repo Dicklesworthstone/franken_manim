@@ -11,10 +11,9 @@
 //!
 //! Untrusted-input posture (§16.5): chunk sizes are bounds-checked,
 //! the sample budget is enforced before allocation, and unknown
-//! chunks are skipped, never trusted. Chunks must fit inside the declared
-//! RIFF container, including their word padding. Extensible PCM/float headers
-//! are admitted only after their complete subformat GUID and sample layout
-//! have been validated; a matching 16-bit GUID prefix is not a format proof.
+//! chunks are skipped, never trusted. Extensible WAV preserves its speaker
+//! mask and validates the complete subtype GUID; channel layout policy is
+//! explicit rather than inferred from a multichannel sample count.
 
 /// Typed refusals of the WAV codec.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,9 +22,7 @@ pub enum WavError {
     NotWav,
     /// The stream ended mid-chunk.
     Truncated,
-    /// The RIFF container is malformed or has ambiguous audio chunks.
-    BadRiff(&'static str),
-    /// No `fmt ` chunk.
+    /// No `fmt ` chunk before `data`.
     MissingFmt,
     /// No `data` chunk.
     MissingData,
@@ -42,16 +39,17 @@ pub enum WavError {
         /// The refused bit depth.
         bits: u16,
     },
+    /// The declared speakers do not form a supported, unambiguous layout.
+    UnsupportedChannelLayout {
+        /// The number of interleaved channels.
+        channels: u16,
+        /// The extensible speaker mask, or unspecified speaker positions.
+        channel_mask: Option<u32>,
+    },
     /// The sample budget was exceeded.
     TooLarge {
         /// The configured sample budget.
         max_samples: u64,
-    },
-    /// The decoded sample buffer cannot fit the target's allocation bounds
-    /// or available address space, even though its declared budget admits it.
-    AllocationFailed {
-        /// Number of interleaved f32 samples requested.
-        samples: usize,
     },
 }
 
@@ -60,7 +58,6 @@ impl std::fmt::Display for WavError {
         match self {
             Self::NotWav => write!(f, "not a RIFF/WAVE stream"),
             Self::Truncated => write!(f, "wav stream truncated"),
-            Self::BadRiff(what) => write!(f, "malformed wav container: {what}"),
             Self::MissingFmt => write!(f, "wav has no fmt chunk"),
             Self::MissingData => write!(f, "wav has no data chunk"),
             Self::BadFmt(what) => write!(f, "malformed fmt chunk: {what}"),
@@ -71,11 +68,15 @@ impl std::fmt::Display for WavError {
             Self::UnsupportedDepth { bits } => {
                 write!(f, "unsupported wav bit depth {bits}")
             }
+            Self::UnsupportedChannelLayout {
+                channels,
+                channel_mask,
+            } => write!(
+                f,
+                "unsupported wav channel layout: {channels} channels, mask {channel_mask:?}; multichannel audio requires a supported explicit speaker mask"
+            ),
             Self::TooLarge { max_samples } => {
                 write!(f, "wav exceeds the {max_samples}-sample budget")
-            }
-            Self::AllocationFailed { samples } => {
-                write!(f, "cannot allocate {samples} decoded wav samples")
             }
         }
     }
@@ -98,11 +99,121 @@ pub enum SampleFormat {
     F32,
 }
 
+/// Supported source speaker layouts in WAVE_FORMAT_EXTENSIBLE mask order.
+///
+/// Samples occur in increasing speaker-bit order, not a codec-specific
+/// surround order. See the [Microsoft speaker-mask specification][spec].
+/// Unspecified positions are accepted only for conventional mono/stereo;
+/// a channel count alone cannot distinguish, for example, quad from 4.0.
+///
+/// [spec]: https://learn.microsoft.com/en-us/windows/win32/api/mmreg/ns-mmreg-waveformatextensible
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChannelLayout {
+    /// One front-center channel.
+    Mono,
+    /// Front left and front right.
+    Stereo,
+    /// Front left, front right, and low-frequency effects (2.1).
+    StereoWithLfe,
+    /// Front left, front right, and front center (3.0).
+    Surround3,
+    /// Front left/right and back left/right.
+    Quad,
+    /// Front left/right, front center, and back center (4.0).
+    Surround4,
+    /// Front left/right, front center, and back left/right (5.0).
+    Surround5,
+    /// Front left/right, front center, and side left/right (5.0).
+    Surround5Side,
+    /// Front left/right/center, LFE, and back left/right (5.1).
+    Surround5Point1,
+    /// Front left/right/center, LFE, and side left/right (5.1).
+    Surround5Point1Side,
+    /// Front left/right/center, LFE, back center, and side left/right (6.1).
+    Surround6Point1,
+    /// Front left/right/center, LFE, back left/right, and side left/right (7.1).
+    Surround7Point1,
+}
+
+impl ChannelLayout {
+    /// The Windows speaker-position mask for this layout.
+    #[must_use]
+    pub const fn mask(self) -> u32 {
+        match self {
+            Self::Mono => 0x0004,
+            Self::Stereo => 0x0003,
+            Self::StereoWithLfe => 0x000b,
+            Self::Surround3 => 0x0007,
+            Self::Quad => 0x0033,
+            Self::Surround4 => 0x0107,
+            Self::Surround5 => 0x0037,
+            Self::Surround5Side => 0x0607,
+            Self::Surround5Point1 => 0x003f,
+            Self::Surround5Point1Side => 0x060f,
+            Self::Surround6Point1 => 0x070f,
+            Self::Surround7Point1 => 0x063f,
+        }
+    }
+
+    /// The number of channels in this speaker layout.
+    #[must_use]
+    pub const fn channels(self) -> u16 {
+        match self {
+            Self::Mono => 1,
+            Self::Stereo => 2,
+            Self::StereoWithLfe | Self::Surround3 => 3,
+            Self::Quad | Self::Surround4 => 4,
+            Self::Surround5 | Self::Surround5Side => 5,
+            Self::Surround5Point1 | Self::Surround5Point1Side => 6,
+            Self::Surround6Point1 => 7,
+            Self::Surround7Point1 => 8,
+        }
+    }
+
+    /// Resolve a declared channel count and optional speaker mask.
+    ///
+    /// # Errors
+    /// Returns [`WavError::UnsupportedChannelLayout`] for unknown positions,
+    /// a mask/count mismatch, or multichannel audio with no speaker mask.
+    pub fn from_mask(channels: u16, channel_mask: Option<u32>) -> Result<Self, WavError> {
+        let layout = match (channels, channel_mask) {
+            (1, None | Some(0x0000) | Some(0x0004)) => Some(Self::Mono),
+            (2, None | Some(0x0000) | Some(0x0003)) => Some(Self::Stereo),
+            (_, Some(mask)) => match mask {
+                0x000b => Some(Self::StereoWithLfe),
+                0x0007 => Some(Self::Surround3),
+                0x0033 => Some(Self::Quad),
+                0x0107 => Some(Self::Surround4),
+                0x0037 => Some(Self::Surround5),
+                0x0607 => Some(Self::Surround5Side),
+                0x003f => Some(Self::Surround5Point1),
+                0x060f => Some(Self::Surround5Point1Side),
+                0x070f => Some(Self::Surround6Point1),
+                0x063f => Some(Self::Surround7Point1),
+                _ => None,
+            },
+            _ => None,
+        };
+        layout.filter(|layout| layout.channels() == channels).ok_or(
+            WavError::UnsupportedChannelLayout {
+                channels,
+                channel_mask,
+            },
+        )
+    }
+}
+
 /// A decoded (or to-be-encoded) audio buffer: interleaved f32.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WavAudio {
     /// Channel count.
     pub channels: u16,
+    /// Explicit WAVE_FORMAT_EXTENSIBLE speaker positions.
+    ///
+    /// `None` includes a zero (unspecified/direct-out) mask. For more than
+    /// two channels, consumers must resolve a supported explicit layout
+    /// before mapping speakers; they must never guess from the count.
+    pub channel_mask: Option<u32>,
     /// Sample rate in Hz.
     pub sample_rate: u32,
     /// The source format (decode) / requested format (encode).
@@ -112,6 +223,17 @@ pub struct WavAudio {
     /// The exact normalization: u8 → `(v − 128)/128`; s16 → `v/32768`;
     /// s24 → `v/8388608`; s32 → `v/2147483648`; f32 verbatim.
     pub samples: Vec<f32>,
+}
+
+impl WavAudio {
+    /// Resolve the source speaker layout without changing its samples.
+    ///
+    /// # Errors
+    /// Returns [`WavError::UnsupportedChannelLayout`] for an ambiguous or
+    /// unsupported speaker layout.
+    pub fn channel_layout(&self) -> Result<ChannelLayout, WavError> {
+        ChannelLayout::from_mask(self.channels, self.channel_mask)
+    }
 }
 
 /// Decode resource budget.
@@ -130,6 +252,20 @@ impl Default for WavLimits {
     }
 }
 
+// The little-endian trailing 12 bytes shared by the registered PCM and
+// IEEE-float subtype GUIDs: xxxxxxxx-0000-0010-8000-00aa00389b71.
+const WAVE_SUBTYPE_TAIL: [u8; 12] = [
+    0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71,
+];
+
+struct WaveSpec {
+    tag: u16,
+    channels: u16,
+    rate: u32,
+    bits: u16,
+    channel_mask: Option<u32>,
+}
+
 fn read_u16(data: &[u8], at: usize) -> Result<u16, WavError> {
     data.get(at..at + 2)
         .map(|b| u16::from_le_bytes([b[0], b[1]]))
@@ -142,57 +278,99 @@ fn read_u32(data: &[u8], at: usize) -> Result<u32, WavError> {
         .ok_or(WavError::Truncated)
 }
 
-struct WavSpec {
-    channels: u16,
-    sample_rate: u32,
-    format: SampleFormat,
-    bytes_per_sample: usize,
-    block_align: usize,
-}
+/// Decode a WAV stream.
+///
+/// # Errors
+/// Every refusal in [`WavError`].
+pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError> {
+    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
+        return Err(WavError::NotWav);
+    }
+    let mut at = 12usize;
+    let mut fmt: Option<WaveSpec> = None;
+    let mut payload: Option<&[u8]> = None;
+    while at + 8 <= data.len() {
+        let name = &data[at..at + 4];
+        let size = read_u32(data, at + 4)? as usize;
+        let body = data.get(at + 8..at + 8 + size).ok_or(WavError::Truncated)?;
+        match name {
+            b"fmt " => {
+                if size < 16 {
+                    return Err(WavError::BadFmt("length"));
+                }
+                let tag = read_u16(body, 0)?;
+                let channels = read_u16(body, 2)?;
+                let rate = read_u32(body, 4)?;
+                let bits = read_u16(body, 14)?;
+                if channels == 0 {
+                    return Err(WavError::BadFmt("zero channels"));
+                }
+                let (tag, channel_mask) = if tag == 0xfffe {
+                    if size < 40 {
+                        return Err(WavError::BadFmt("truncated extensible format"));
+                    }
+                    let extension = usize::from(read_u16(body, 16)?);
+                    if extension < 22 || extension > size - 18 {
+                        return Err(WavError::BadFmt("extensible format size"));
+                    }
+                    let valid_bits = read_u16(body, 18)?;
+                    let mask = read_u32(body, 20)?;
+                    // A subtype's first two bytes are insufficient: an
+                    // unrelated GUID must not be misread as native PCM.
+                    let sub_format = read_u32(body, 24)?;
+                    if body[28..40] != WAVE_SUBTYPE_TAIL {
+                        return Err(WavError::UnsupportedFormat { format_tag: tag });
+                    }
+                    let sub_format = u16::try_from(sub_format)
+                        .map_err(|_| WavError::UnsupportedFormat { format_tag: tag })?;
+                    // The Samples field is a union: compressed formats can
+                    // store samples-per-block here, not PCM valid precision.
+                    // Preserve their existing typed transcode handoff.
+                    if matches!(sub_format, 1 | 3)
+                        && (valid_bits == 0 || valid_bits > bits || !bits.is_multiple_of(8))
+                    {
+                        return Err(WavError::BadFmt("extensible valid bits"));
+                    }
+                    if sub_format == 3 && valid_bits != bits {
+                        return Err(WavError::BadFmt(
+                            "IEEE float precision must fill its container",
+                        ));
+                    }
+                    // Integer valid bits are left-aligned in the container,
+                    // so the usual container-width divisor remains correct.
+                    // Preserve even an unsupported mask: consumer layout
+                    // policy is distinct from structural WAV decoding.
+                    (sub_format, (mask != 0).then_some(mask))
+                } else {
+                    (tag, None)
+                };
+                fmt = Some(WaveSpec {
+                    tag,
+                    channels,
+                    rate,
+                    bits,
+                    channel_mask,
+                });
+            }
+            b"data" => {
+                payload = Some(body);
+                // Chunks after data (LIST, etc.) are legal; keep
+                // scanning only for fmt if it is somehow late.
+            }
+            _ => {}
+        }
+        // Chunks are word-aligned.
+        at += 8 + size + (size & 1);
+    }
+    let WaveSpec {
+        tag,
+        channels,
+        rate: sample_rate,
+        bits,
+        channel_mask,
+    } = fmt.ok_or(WavError::MissingFmt)?;
+    let payload = payload.ok_or(WavError::MissingData)?;
 
-fn decode_fmt(body: &[u8]) -> Result<WavSpec, WavError> {
-    if body.len() < 16 {
-        return Err(WavError::BadFmt("length"));
-    }
-    let mut tag = read_u16(body, 0)?;
-    let channels = read_u16(body, 2)?;
-    let sample_rate = read_u32(body, 4)?;
-    let byte_rate = read_u32(body, 8)?;
-    let block_align = read_u16(body, 12)?;
-    let bits = read_u16(body, 14)?;
-    if channels == 0 {
-        return Err(WavError::BadFmt("zero channels"));
-    }
-    if sample_rate == 0 {
-        return Err(WavError::BadFmt("zero sample rate"));
-    }
-    if tag == 0xfffe {
-        // WAVEFORMATEXTENSIBLE is WAVEFORMATEX (18 bytes), valid bits,
-        // channel mask and a full GUID, not just the GUID's format-tag head.
-        // https://learn.microsoft.com/en-us/windows/win32/api/mmreg/ns-mmreg-waveformatextensible
-        if body.len() < 40 {
-            return Err(WavError::BadFmt("extensible length"));
-        }
-        let extension = usize::from(read_u16(body, 16)?);
-        if extension < 22 || extension > body.len() - 18 {
-            return Err(WavError::BadFmt("extensible extension size"));
-        }
-        // DEFINE_WAVEFORMATEX_GUID(tag): tag-0000-0010-8000-00aa00389b71.
-        const GUID_TAIL: [u8; 14] = [0, 0, 0, 0, 0x10, 0, 0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71];
-        if body[26..40] != GUID_TAIL {
-            return Err(WavError::UnsupportedFormat { format_tag: tag });
-        }
-        tag = read_u16(body, 24)?;
-        let valid_bits = read_u16(body, 18)?;
-        if matches!(tag, 1 | 3)
-            && (valid_bits == 0 || valid_bits > bits || (tag == 3 && valid_bits != bits))
-        {
-            return Err(WavError::BadFmt("extensible valid bits"));
-        }
-        // PCM's valid bits are left-aligned in the sample container. The
-        // ordinary signed-container divisors below therefore remain correct
-        // for e.g. 20-in-24 and 24-in-32 audio, without a lossy re-scaling.
-    }
     let (format, bytes_per_sample) = match (tag, bits) {
         (1, 8) => (SampleFormat::U8, 1),
         (1, 16) => (SampleFormat::S16, 2),
@@ -202,86 +380,10 @@ fn decode_fmt(body: &[u8]) -> Result<WavSpec, WavError> {
         (1 | 3, other) => return Err(WavError::UnsupportedDepth { bits: other }),
         (other, _) => return Err(WavError::UnsupportedFormat { format_tag: other }),
     };
-    let frame_bytes = bytes_per_sample * usize::from(channels);
-    if usize::from(block_align) != frame_bytes {
-        return Err(WavError::BadFmt("block alignment"));
-    }
-    if sample_rate.checked_mul(u32::from(block_align)) != Some(byte_rate) {
-        return Err(WavError::BadFmt("byte rate"));
-    }
-    Ok(WavSpec {
-        channels,
-        sample_rate,
-        format,
-        bytes_per_sample,
-        block_align: frame_bytes,
-    })
-}
-
-/// Decode a WAV stream.
-///
-/// Unknown chunks and bytes following the declared RIFF container are ignored.
-/// Duplicate format/data chunks are refused rather than silently replacing
-/// earlier audio. The format chunk may follow the data chunk.
-///
-/// # Errors
-/// Every refusal in [`WavError`].
-pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError> {
-    if data.len() < 12 || &data[0..4] != b"RIFF" || &data[8..12] != b"WAVE" {
-        return Err(WavError::NotWav);
-    }
-    let size = usize::try_from(read_u32(data, 4)?).map_err(|_| WavError::Truncated)?;
-    if size < 4 {
-        return Err(WavError::BadRiff("size excludes the WAVE form type"));
-    }
-    let end = size.checked_add(8).ok_or(WavError::Truncated)?;
-    let data = data.get(..end).ok_or(WavError::Truncated)?;
-    let mut at = 12usize;
-    let mut fmt: Option<&[u8]> = None;
-    let mut payload: Option<&[u8]> = None;
-    while at < data.len() {
-        let body_start = at.checked_add(8).ok_or(WavError::Truncated)?;
-        let header = data.get(at..body_start).ok_or(WavError::Truncated)?;
-        let name = &header[..4];
-        let size = usize::try_from(read_u32(header, 4)?).map_err(|_| WavError::Truncated)?;
-        let body_end = body_start.checked_add(size).ok_or(WavError::Truncated)?;
-        let body = data.get(body_start..body_end).ok_or(WavError::Truncated)?;
-        let next = body_end.checked_add(size & 1).ok_or(WavError::Truncated)?;
-        if next > data.len() {
-            return Err(WavError::Truncated);
-        }
-        match name {
-            b"fmt " => {
-                if fmt.is_some() {
-                    return Err(WavError::BadRiff("duplicate fmt chunk"));
-                }
-                fmt = Some(body);
-            }
-            b"data" => {
-                if payload.is_some() {
-                    return Err(WavError::BadRiff("duplicate data chunk"));
-                }
-                payload = Some(body);
-            }
-            _ => {}
-        }
-        // Chunks are word-aligned.
-        at = next;
-    }
-    // Validate the complete container before classifying the codec. An
-    // unsupported format may use the explicit transcode capability, but a
-    // malformed RIFF file must not escape admission through that fallback.
-    let fmt = fmt.ok_or(WavError::MissingFmt)?;
-    let payload = payload.ok_or(WavError::MissingData)?;
-    let WavSpec {
-        channels,
-        sample_rate,
-        format,
-        bytes_per_sample,
-        block_align,
-    } = decode_fmt(fmt)?;
-
-    if !payload.len().is_multiple_of(block_align) {
+    if !payload
+        .len()
+        .is_multiple_of(bytes_per_sample * usize::from(channels))
+    {
         return Err(WavError::BadFmt("incomplete interleaved sample frame"));
     }
     let count = payload.len() / bytes_per_sample;
@@ -290,13 +392,7 @@ pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError>
             max_samples: limits.max_samples,
         });
     }
-    // A caller may raise the sample budget above the target's Vec capacity
-    // ceiling (notably u8 sources decoded to f32 on wasm32). Refuse that input
-    // and allocation failures through the codec's error boundary, not a panic.
-    let mut samples = Vec::new();
-    samples
-        .try_reserve_exact(count)
-        .map_err(|_| WavError::AllocationFailed { samples: count })?;
+    let mut samples = Vec::with_capacity(count);
     match format {
         SampleFormat::U8 => {
             for &b in payload {
@@ -331,6 +427,7 @@ pub fn decode_wav(data: &[u8], limits: &WavLimits) -> Result<WavAudio, WavError>
     }
     Ok(WavAudio {
         channels,
+        channel_mask,
         sample_rate,
         format,
         samples,
@@ -388,6 +485,11 @@ pub fn encode_wav(
     out.extend_from_slice(&bits.to_le_bytes());
     out.extend_from_slice(b"data");
     out.extend_from_slice(&(data_len as u32).to_le_bytes());
+    append_samples(&mut out, format, samples);
+    out
+}
+
+fn append_samples(out: &mut Vec<u8>, format: SampleFormat, samples: &[f32]) {
     match format {
         SampleFormat::S16 => {
             for &v in samples {
@@ -400,5 +502,84 @@ pub fn encode_wav(
             }
         }
     }
-    out
+}
+
+/// Encode PCM while retaining an explicit source speaker layout.
+///
+/// Conventional mono/stereo with no mask retains [`encode_wav`]'s exact
+/// 44-byte header. An explicit layout uses a 68-byte extensible header,
+/// including valid bits and the full PCM/IEEE-float subtype GUID.
+///
+/// # Errors
+/// Refuses unsupported/ambiguous layouts, malformed sample frames, zero
+/// sample rates, non-artifact sample formats, and lengths/rates that
+/// cannot be represented by RIFF/WAVE's fields.
+pub fn encode_wav_with_layout(audio: &WavAudio, format: SampleFormat) -> Result<Vec<u8>, WavError> {
+    audio.channel_layout()?;
+    if audio.sample_rate == 0 {
+        return Err(WavError::BadFmt("zero sample rate"));
+    }
+    if !audio
+        .samples
+        .len()
+        .is_multiple_of(usize::from(audio.channels))
+    {
+        return Err(WavError::BadFmt("incomplete interleaved sample frame"));
+    }
+    let (tag, bits): (u16, u16) = match format {
+        SampleFormat::S16 => (1, 16),
+        SampleFormat::F32 => (3, 32),
+        _ => return Err(WavError::BadFmt("encoding requires s16 or f32 samples")),
+    };
+    let bytes_per_sample = u64::from(bits / 8);
+    let riff_overhead = if audio.channel_mask.is_some() { 60 } else { 36 };
+    let max_samples = (u64::from(u32::MAX) - riff_overhead) / bytes_per_sample;
+    let count =
+        u64::try_from(audio.samples.len()).map_err(|_| WavError::TooLarge { max_samples })?;
+    if count > max_samples {
+        return Err(WavError::TooLarge { max_samples });
+    }
+    let data_len =
+        u32::try_from(count * bytes_per_sample).map_err(|_| WavError::TooLarge { max_samples })?;
+    let block_align = audio
+        .channels
+        .checked_mul(bits / 8)
+        .ok_or(WavError::BadFmt("block alignment overflow"))?;
+    let byte_rate = audio
+        .sample_rate
+        .checked_mul(u32::from(block_align))
+        .ok_or(WavError::BadFmt("byte rate overflow"))?;
+    let Some(mask) = audio.channel_mask else {
+        return Ok(encode_wav(
+            audio.channels,
+            audio.sample_rate,
+            format,
+            &audio.samples,
+        ));
+    };
+    let capacity = usize::try_from(data_len)
+        .ok()
+        .and_then(|len| len.checked_add(68))
+        .ok_or(WavError::TooLarge { max_samples })?;
+    let mut out = Vec::with_capacity(capacity);
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&(60 + data_len).to_le_bytes());
+    out.extend_from_slice(b"WAVE");
+    out.extend_from_slice(b"fmt ");
+    out.extend_from_slice(&40u32.to_le_bytes());
+    out.extend_from_slice(&0xfffeu16.to_le_bytes());
+    out.extend_from_slice(&audio.channels.to_le_bytes());
+    out.extend_from_slice(&audio.sample_rate.to_le_bytes());
+    out.extend_from_slice(&byte_rate.to_le_bytes());
+    out.extend_from_slice(&block_align.to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(&22u16.to_le_bytes());
+    out.extend_from_slice(&bits.to_le_bytes());
+    out.extend_from_slice(&mask.to_le_bytes());
+    out.extend_from_slice(&u32::from(tag).to_le_bytes());
+    out.extend_from_slice(&WAVE_SUBTYPE_TAIL);
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    append_samples(&mut out, format, &audio.samples);
+    Ok(out)
 }

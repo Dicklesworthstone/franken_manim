@@ -50,7 +50,7 @@ use fmn_anim::{
     AnimError, Animation, IntoAnimation, IntoAnimations, SegmentReport, prepare_animation,
     prepare_animations,
 };
-pub use fmn_codec::{SampleFormat, WavAudio};
+pub use fmn_codec::{ChannelLayout, SampleFormat, WavAudio};
 use fmn_config::ConfigError;
 use fmn_geom::{GeomError, SpaceOpsError};
 use fmn_library::{

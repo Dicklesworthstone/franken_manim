@@ -34,7 +34,10 @@ pub use png::{
     DecodedPng, PngEncoder, PngError, PngLimits, decode as decode_png, encode_png_sequence,
     encode_rgba8, encode_rgba8_segmented,
 };
-pub use wav::{SampleFormat, WavAudio, WavError, WavLimits, decode_wav, encode_wav};
+pub use wav::{
+    ChannelLayout, SampleFormat, WavAudio, WavError, WavLimits, decode_wav, encode_wav,
+    encode_wav_with_layout,
+};
 pub use y4m::{
     DecodedY4m, Y4mColorspace, Y4mError, Y4mWriter, append_y4m_frame_nv12, decode_y4m, y4m_header,
 };

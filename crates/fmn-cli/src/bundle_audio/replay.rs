@@ -138,6 +138,7 @@ pub(super) fn execute_prepared(
                     let mix = MixReport {
                         audio: WavAudio {
                             channels,
+                            channel_mask: None,
                             sample_rate: rate,
                             format: SampleFormat::F32,
                             samples: pcm.into_samples(),

@@ -27,8 +27,52 @@ PCM conversion uses the named `blackman-windowed-sinc-64` resampler. It is a
 64-tap Blackman-windowed sinc evaluated from the exact output-index/input-rate
 ratio, with a measured contract of at most 0.1 dB passband loss through 80% of
 the lower Nyquist frequency and at least 60 dB rejection from 150% onward.
-Mono duplicates to stereo; stereo averages to mono. Other layouts are named
-refusals rather than guessed.
+Mono duplicates to stereo; stereo averages to mono. Explicit multichannel
+WAV layouts use the fixed matrix below. Missing or unsupported speaker layouts
+are named refusals rather than guessed.
+
+## Explicit surround sources
+
+Native `WAVE_FORMAT_EXTENSIBLE` PCM and floating-point WAV retain their speaker
+mask in `WavAudio::channel_mask`. `ChannelLayout` admits mono, stereo, 2.1,
+three-channel surround, quad, four-channel surround, 5.0 with back or side
+speakers, 5.1 with back or side speakers, 6.1, and 7.1. The channel count must
+match the mask. A missing or zero mask is accepted only for conventional mono
+or stereo. Other masks remain readable metadata but are refused by native
+sound admission and mixing with a typed unsupported-layout error.
+
+Interleaved channels follow the ascending speaker-bit order of the WAV mask.
+Each input frame is accumulated in that order using `f64` and this matrix:
+
+| Speaker | Left | Right |
+| --- | ---: | ---: |
+| Front left | 1 | 0 |
+| Front right | 0 | 1 |
+| Front center | `1 / sqrt(2)` | `1 / sqrt(2)` |
+| Back left or side left | `1 / sqrt(2)` | 0 |
+| Back right or side right | 0 | `1 / sqrt(2)` |
+| Back center | 0.5 | 0.5 |
+| Low-frequency effects (LFE) | 0 | 0 |
+
+Mono output averages the resulting left and right samples. LFE is omitted:
+this matrix does not invent a crossover or bass-management system. Channel
+conversion precedes resampling, cue gain, and background ducking. There is no
+intermediate normalization or clipping; only the existing final output clamp
+applies, and its clipping counter remains observable. Existing mono/stereo
+conversion keeps its original arithmetic and bytes.
+
+`encode_wav_with_layout` preserves explicit masks in a 68-byte extensible WAV
+header. `SoundData` also preserves surround masks when canonicalizing sources
+to F32 WAV, and its byte budget includes that header. Explicit conventional
+mono/stereo masks canonicalize to the existing implicit representation.
+Normalized multichannel PCM identities include the mask under a v2 hash
+domain, so equal sample numbers with different speaker assignments do not
+collide. Existing mono/stereo identities retain their v1 domain.
+
+File sources, Rust memory sources, Python `SoundData.from_wav_bytes`, native
+WAV rendering, soundtrack windows, and portable bundles share this path.
+Python's raw-sample `SoundData(samples, ...)` constructor remains mono/stereo;
+use an explicitly labelled WAV for surround input. Output remains mono/stereo.
 
 ## What stayed familiar
 
@@ -206,6 +250,18 @@ encode/mux `ffmpeg` list.
 - `crates/fmn-output/src/sound.rs`: placement arithmetic, resampler, channel
   matrix, gain/duck order, clipping, dithering, WAV golden, quality bounds, and
   thread-count equivalence.
+- `crates/fmn-codec/tests/codec2.rs`: independent extensible WAV fixtures,
+  complete subtype validation, speaker-mask preservation, and legacy encoding.
+- `crates/fmn-output/tests/audio.rs`, `tests/sound_source_edits.rs`: all
+  admitted layouts, per-speaker matrix oracles, source edits, layout identity,
+  native-only decoding, and scalar/compiled mixer equivalence.
+- `crates/fmn/tests/native_soundtrack.rs`, `tests/soundtrack_bundle.rs`,
+  and `tests/support/surround_audio.rs`: independent 5.1/7.1 fixtures through
+  public file/memory rendering and bundles, exact source budgets, shared
+  decode receipts, and output bytes at `{1,4,16}` workers.
+- `crates/fmn-conformance/tests/e2e_scenarios.rs`,
+  `render_matrix.native_surround_soundtrack.v1`: public surround-source
+  rendering, bundle parity, and malformed-layout refusal.
 - `crates/fmn-output/src/ffmpeg.rs` and `tests/boundary.rs`: sandboxed non-WAV
   decode and fake-ffmpeg capability proof.
 - `crates/fmn-conformance/tests/sound_pipeline.rs`: frame-N click placement and

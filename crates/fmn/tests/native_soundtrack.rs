@@ -1,5 +1,9 @@
 //! Exercise scene-authored native WAV output without a raster or video pipeline.
 
+#[allow(dead_code)]
+#[path = "support/surround_audio.rs"]
+mod surround_audio;
+
 use std::cell::Cell;
 use std::num::NonZeroUsize;
 use std::path::Path;
@@ -471,4 +475,12 @@ fn readme_soundtrack_example_renders_three_seconds_of_stereo_at_48_khz() {
     assert_eq!(report.artifact.path, output);
     let decoded = decode_wav(&std::fs::read(&output).unwrap(), &WavLimits::default()).unwrap();
     assert_eq!((decoded.sample_rate, decoded.channels), (48_000, 2));
+}
+
+#[test]
+fn surround_sources_reach_the_public_wav_path_with_explicit_layouts() {
+    let checked = surround_audio::verify_wav().unwrap();
+    assert_eq!(checked.renders, 24);
+    assert_eq!(checked.refusals, 3);
+    assert!(!checked.wav.is_empty());
 }

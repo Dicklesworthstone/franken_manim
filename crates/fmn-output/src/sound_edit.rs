@@ -6,7 +6,7 @@
 
 use fmn_codec::WavAudio;
 
-use crate::sound::{SoundCue, SoundError};
+use crate::sound::{SoundCue, SoundError, validate_audio};
 
 mod envelope;
 
@@ -99,27 +99,9 @@ impl SoundCue {
 }
 
 fn validated_source_frames(audio: &WavAudio) -> Result<u64, SoundError> {
-    if audio.sample_rate == 0 {
-        return Err(SoundError::InvalidConfig(
-            "source sample_rate must be nonzero",
-        ));
-    }
-    if !matches!(audio.channels, 1 | 2) {
-        return Err(SoundError::UnsupportedChannels {
-            channels: audio.channels,
-        });
-    }
-    let channels = usize::from(audio.channels);
-    if !audio.samples.len().is_multiple_of(channels) {
-        return Err(SoundError::MisalignedSamples {
-            channels: audio.channels,
-            samples: audio.samples.len(),
-        });
-    }
-    if let Some(index) = audio.samples.iter().position(|sample| !sample.is_finite()) {
-        return Err(SoundError::NonFiniteSample { index });
-    }
-    u64::try_from(audio.samples.len() / channels).map_err(|_| SoundError::SampleCountOverflow)
+    validate_audio(audio)?;
+    u64::try_from(audio.samples.len() / usize::from(audio.channels))
+        .map_err(|_| SoundError::SampleCountOverflow)
 }
 
 // A finite nonnegative f64 is an integer significand times a power of two.
@@ -171,6 +153,7 @@ mod tests {
         SoundCue::new(
             WavAudio {
                 channels,
+                channel_mask: None,
                 sample_rate: 8,
                 format: SampleFormat::F32,
                 samples: samples.to_vec(),
@@ -254,7 +237,7 @@ mod tests {
         for channels in [0, 3] {
             assert!(matches!(
                 cue(channels, &[]).trim_source_frames(0, None),
-                Err(SoundError::UnsupportedChannels { .. })
+                Err(SoundError::UnsupportedChannelLayout { .. })
             ));
         }
     }

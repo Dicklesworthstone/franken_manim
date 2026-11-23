@@ -168,6 +168,8 @@ pub struct AudioDecodeReport {
     pub source_digest: Digest,
     /// SHA-256 of the versioned, little-endian normalized PCM stream; excludes
     /// container metadata and original sample packing. Negative zero is canonical.
+    /// Mono/stereo retain the v1 identity; multichannel v2 also binds speaker
+    /// positions, so equal sample arrays with different layouts cannot collide.
     pub pcm_digest: Digest,
     pub invocation: Option<InvocationReport>,
 }
@@ -184,11 +186,7 @@ pub(crate) fn decoded_audio(
     format: AudioInputFormat,
     invocation: Option<InvocationReport>,
 ) -> Result<DecodedAudio, AudioDecodeError> {
-    if !matches!(audio.channels, 1 | 2) {
-        return Err(AudioDecodeError::InvalidPcm(
-            "only mono and stereo layouts are supported; implicit downmix is forbidden",
-        ));
-    }
+    let layout = audio.channel_layout().map_err(AudioDecodeError::Native)?;
     if audio.sample_rate == 0
         || !audio
             .samples
@@ -200,7 +198,14 @@ pub(crate) fn decoded_audio(
         ));
     }
     let mut hash = Sha256::new();
-    hash.update(b"fmn-normalized-pcm-v1\0");
+    if audio.channels <= 2 {
+        // Keep every existing mono/stereo PCM identity, including explicit
+        // extensible declarations of those conventional speaker positions.
+        hash.update(b"fmn-normalized-pcm-v1\0");
+    } else {
+        hash.update(b"fmn-normalized-pcm-v2\0");
+        hash.update(&layout.mask().to_le_bytes());
+    }
     hash.update(&audio.channels.to_le_bytes());
     hash.update(&audio.sample_rate.to_le_bytes());
     hash.update(&(audio.samples.len() as u64).to_le_bytes());

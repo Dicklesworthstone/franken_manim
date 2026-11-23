@@ -5,6 +5,7 @@ use fmn_output::{MixKernel, MixerConfig, SoundCue, SoundError, SoundMixer, frame
 fn audio(frames: usize, rate: u32, channels: u16, scale: f32) -> WavAudio {
     WavAudio {
         channels,
+        channel_mask: None,
         sample_rate: rate,
         format: SampleFormat::F32,
         samples: (0..frames * usize::from(channels))
@@ -162,6 +163,7 @@ fn unrepresentable_finite_offsets_cannot_wrap_into_the_audible_timeline() {
     ] {
         let pcm = || WavAudio {
             channels: 1,
+            channel_mask: None,
             sample_rate,
             format: SampleFormat::F32,
             samples: vec![0.5],
@@ -194,6 +196,7 @@ fn signed_sample_boundary_offsets_remain_exact_without_large_allocations() {
     let frame = i64::MAX - 1023;
     let pcm = || WavAudio {
         channels: 1,
+        channel_mask: None,
         sample_rate: 1,
         format: SampleFormat::F32,
         samples: vec![0.25, 0.75],
@@ -256,6 +259,7 @@ fn representable_offset_rounding_keeps_half_sample_and_subnormal_behavior() {
         let mut cue = SoundCue::new(
             WavAudio {
                 channels: 1,
+                channel_mask: None,
                 sample_rate: 1,
                 format: SampleFormat::F32,
                 samples: vec![0.5],

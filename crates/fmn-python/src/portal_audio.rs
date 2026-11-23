@@ -86,6 +86,7 @@ impl PySoundData {
         let data = SoundData::from_audio(
             &fmn_codec::WavAudio {
                 channels,
+                channel_mask: None,
                 sample_rate,
                 format: fmn_codec::SampleFormat::F32,
                 samples: values,

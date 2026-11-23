@@ -1044,6 +1044,7 @@ mod tests {
         let data = SoundData::from_audio(
             &fmn_codec::WavAudio {
                 channels: 1,
+                channel_mask: None,
                 sample_rate: 1,
                 format: SampleFormat::F32,
                 samples: vec![0.125; 180],
@@ -1085,6 +1086,7 @@ mod tests {
                 SoundData::from_audio(
                     &WavAudio {
                         channels: 1,
+                        channel_mask: None,
                         sample_rate: rate,
                         format: SampleFormat::F32,
                         samples,
@@ -1201,6 +1203,7 @@ mod tests {
         use fmn_scene::{SoundData, SoundDataLimits};
         let mut pcm = WavAudio {
             channels: 1,
+            channel_mask: None,
             sample_rate: 8,
             format: SampleFormat::F32,
             samples: vec![0.125, 0.25, 0.375, 0.5],
@@ -1355,6 +1358,7 @@ mod tests {
             .add(SoundCue::new(
                 WavAudio {
                     channels: 1,
+                    channel_mask: None,
                     sample_rate: 8,
                     format: SampleFormat::F32,
                     samples: vec![0.25; 16],
@@ -1367,6 +1371,7 @@ mod tests {
             .add(SoundCue {
                 audio: WavAudio {
                     channels: 1,
+                    channel_mask: None,
                     sample_rate: 11,
                     format: SampleFormat::F32,
                     samples: vec![0.125; 11],

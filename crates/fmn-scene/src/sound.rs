@@ -9,7 +9,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use fmn_codec::{SampleFormat, WavAudio, WavError, WavLimits, decode_wav, encode_wav};
+use fmn_codec::{SampleFormat, WavAudio, WavError, WavLimits, decode_wav, encode_wav_with_layout};
 use fmn_hash::{Digest, sha256};
 
 /// Source of a scene sound cue. Memory data is never interpreted as a path.
@@ -136,7 +136,8 @@ impl std::error::Error for SoundDataError {
     }
 }
 
-/// Frozen mono/stereo PCM represented by a canonical F32 WAV and its SHA-256.
+/// Frozen PCM represented by a canonical F32 WAV and its SHA-256.
+/// Surround sources retain their explicit, validated speaker layout.
 ///
 /// Construction copies the caller's samples. Clones share immutable bytes;
 /// subsequent changes to the original buffer cannot alter an authored cue.
@@ -148,6 +149,7 @@ pub struct SoundData {
     bytes: Arc<[u8]>,
     digest: Digest,
     channels: u16,
+    channel_mask: Option<u32>,
     sample_rate: u32,
     sample_frames: usize,
 }
@@ -158,6 +160,7 @@ impl fmt::Debug for SoundData {
             .field("digest", &self.digest)
             .field("bytes", &self.bytes.len())
             .field("channels", &self.channels)
+            .field("channel_mask", &self.channel_mask)
             .field("sample_rate", &self.sample_rate)
             .field("sample_frames", &self.sample_frames)
             .finish()
@@ -173,9 +176,16 @@ impl SoundData {
     /// Unsupported channels, invalid rate/alignment, non-finite samples, a
     /// byte/sample cap, or canonical sample allocation failure.
     pub fn from_audio(audio: &WavAudio, limits: SoundDataLimits) -> Result<Self, SoundDataError> {
-        if !matches!(audio.channels, 1 | 2) {
-            return Err(SoundDataError::Invalid("channels must be mono or stereo"));
-        }
+        audio.channel_layout().map_err(SoundDataError::Decode)?;
+        // Explicit mono/stereo layouts have the same canonical identity as
+        // their historical implicit forms. Surround masks remain part of the
+        // source: identical samples in different speaker positions are distinct.
+        let channel_mask = if audio.channels > 2 {
+            audio.channel_mask
+        } else {
+            None
+        };
+        let header_bytes = if channel_mask.is_some() { 68 } else { 44 };
         if audio.sample_rate == 0
             || audio
                 .sample_rate
@@ -205,7 +215,7 @@ impl SoundData {
             .samples
             .len()
             .checked_mul(4)
-            .and_then(|n| n.checked_add(44));
+            .and_then(|n| n.checked_add(header_bytes));
         if encoded_len.is_none_or(|n| n > limits.max_bytes || n - 8 > u32::MAX as usize) {
             return Err(SoundDataError::LimitExceeded {
                 resource: "canonical WAV bytes",
@@ -225,25 +235,30 @@ impl SoundData {
                 .iter()
                 .map(|&sample| if sample == 0.0 { 0.0 } else { sample }),
         );
-        let bytes: Arc<[u8]> = encode_wav(
-            audio.channels,
-            audio.sample_rate,
-            SampleFormat::F32,
-            &samples,
-        )
-        .into();
+        let canonical = WavAudio {
+            channels: audio.channels,
+            channel_mask,
+            sample_rate: audio.sample_rate,
+            format: SampleFormat::F32,
+            samples,
+        };
+        let bytes: Arc<[u8]> = encode_wav_with_layout(&canonical, SampleFormat::F32)
+            .map_err(SoundDataError::Decode)?
+            .into();
         Ok(Self {
             digest: sha256(&bytes),
             bytes,
             channels: audio.channels,
+            channel_mask,
             sample_rate: audio.sample_rate,
             sample_frames: audio.samples.len() / usize::from(audio.channels),
         })
     }
 
     /// Decode native PCM WAV and freeze its normalized samples canonically.
-    /// No subprocess or filesystem capability is used. Both source bytes and
-    /// canonical expansion are bounded before the decoder allocates samples.
+    /// No subprocess or filesystem capability is used. Source bytes and sample
+    /// allocation are bounded before decoding; the exact canonical byte budget
+    /// includes the speaker-layout header and is checked before encoding.
     ///
     /// # Errors
     /// The native WAV decoder's refusals or [`Self::from_audio`] admission errors.
@@ -282,10 +297,16 @@ impl SoundData {
         self.digest
     }
 
-    /// Number of interleaved channels (one or two).
+    /// Number of interleaved channels in the validated speaker layout.
     #[must_use]
     pub const fn channels(&self) -> u16 {
         self.channels
+    }
+
+    /// Explicit surround speaker mask; mono/stereo use their canonical implicit layout.
+    #[must_use]
+    pub const fn channel_mask(&self) -> Option<u32> {
+        self.channel_mask
     }
 
     /// PCM sample frames per second.
@@ -304,10 +325,12 @@ impl SoundData {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fmn_codec::encode_wav;
 
     fn pcm() -> WavAudio {
         WavAudio {
             channels: 2,
+            channel_mask: None,
             sample_rate: 44_100,
             format: SampleFormat::F32,
             samples: vec![0.0, -0.0, 0.25, -0.5],
@@ -362,11 +385,109 @@ mod tests {
     }
 
     #[test]
+    fn explicit_mono_and_stereo_keep_the_existing_canonical_identity() {
+        for (channels, mask) in [(1, 0x4), (2, 0x3)] {
+            let implicit = WavAudio { channels, ..pcm() };
+            let explicit = WavAudio {
+                channel_mask: Some(mask),
+                ..implicit.clone()
+            };
+            let frozen = SoundData::from_audio(&implicit, SoundDataLimits::default()).unwrap();
+            assert_eq!(
+                SoundData::from_audio(&explicit, SoundDataLimits::default()).unwrap(),
+                frozen
+            );
+            let extensible = encode_wav_with_layout(&explicit, SampleFormat::F32).unwrap();
+            assert_eq!(
+                SoundData::from_wav_bytes(&extensible, SoundDataLimits::default()).unwrap(),
+                frozen
+            );
+            assert_eq!(frozen.channel_mask(), None);
+            assert_eq!(frozen.bytes().len(), 44 + implicit.samples.len() * 4);
+        }
+    }
+
+    #[test]
+    fn surround_canonicalization_preserves_layout_and_bounds_its_header() {
+        let audio = WavAudio {
+            channels: 6,
+            channel_mask: Some(0x3f),
+            sample_rate: 48_000,
+            format: SampleFormat::F32,
+            samples: vec![0.0, -0.0, 0.5, -0.25, 0.125, -0.125],
+        };
+        let frozen = SoundData::from_audio(&audio, SoundDataLimits::default()).unwrap();
+        assert_eq!(frozen.channel_mask(), Some(0x3f));
+        assert_eq!((frozen.channels(), frozen.sample_frames()), (6, 1));
+        assert_eq!(frozen.bytes().len(), 68 + 6 * 4);
+        let decoded = decode_wav(frozen.bytes(), &WavLimits::default()).unwrap();
+        assert_eq!(decoded.channel_mask, Some(0x3f));
+        assert_eq!(decoded.samples, audio.samples);
+        assert_eq!(decoded.samples[1].to_bits(), 0);
+        assert!(Arc::ptr_eq(frozen.bytes(), frozen.clone().bytes()));
+
+        let compact = encode_wav_with_layout(&audio, SampleFormat::S16).unwrap();
+        assert_eq!(
+            SoundData::from_wav_bytes(&compact, SoundDataLimits::default()).unwrap(),
+            frozen
+        );
+        let side = WavAudio {
+            channel_mask: Some(0x60f),
+            ..audio.clone()
+        };
+        assert_ne!(
+            SoundData::from_audio(&side, SoundDataLimits::default())
+                .unwrap()
+                .digest(),
+            frozen.digest(),
+            "side and back speakers must not share a source identity"
+        );
+        for channel_mask in [None, Some(0x18f), Some(0x7)] {
+            assert!(matches!(
+                SoundData::from_audio(
+                    &WavAudio {
+                        channel_mask,
+                        ..audio.clone()
+                    },
+                    SoundDataLimits::default()
+                ),
+                Err(SoundDataError::Decode(_))
+            ));
+        }
+        for max_bytes in [compact.len(), frozen.bytes().len() - 1] {
+            assert!(matches!(
+                SoundData::from_wav_bytes(
+                    &compact,
+                    SoundDataLimits {
+                        max_bytes,
+                        max_samples: 6
+                    }
+                ),
+                Err(SoundDataError::LimitExceeded {
+                    resource: "canonical WAV bytes",
+                    ..
+                })
+            ));
+        }
+        assert_eq!(
+            SoundData::from_wav_bytes(
+                &compact,
+                SoundDataLimits {
+                    max_bytes: 92,
+                    max_samples: 6
+                }
+            )
+            .unwrap(),
+            frozen
+        );
+    }
+
+    #[test]
     fn malformed_pcm_and_expansion_budgets_are_refused_before_freezing() {
         for channels in [0, 3, u16::MAX] {
             assert!(matches!(
                 SoundData::from_audio(&WavAudio { channels, ..pcm() }, SoundDataLimits::default()),
-                Err(SoundDataError::Invalid(_))
+                Err(SoundDataError::Decode(_))
             ));
         }
         for sample_rate in [0, u32::MAX] {

@@ -294,6 +294,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pulse = SoundData::from_audio(
         &WavAudio {
             channels: 1,
+            channel_mask: None,
             sample_rate: 48_000,
             format: SampleFormat::F32,
             samples: vec![0.25; 4_800],
@@ -308,6 +309,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+Native WAV sources may also carry an explicit speaker layout: use `channel_mask: Some(ChannelLayout::Surround5Point1.mask())` for interleaved 5.1 PCM, or preserve the mask by admitting WAV bytes through `SoundData::from_wav_bytes`. The native mixer accepts the documented 2.1 through 7.1 layouts and deterministically downmixes them to mono or stereo; unlabelled multichannel sources return a typed layout error. The exact matrix and LFE policy are documented in [BN-14](docs/behavior_notes/BN-14-sample-exact-sound.md).
 
 ### Live neural-network values (Rust)
 

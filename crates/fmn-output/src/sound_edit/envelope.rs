@@ -123,6 +123,7 @@ mod tests {
         SoundCue::new(
             WavAudio {
                 channels,
+                channel_mask: None,
                 sample_rate: 8,
                 format: SampleFormat::F32,
                 samples: samples.to_vec(),

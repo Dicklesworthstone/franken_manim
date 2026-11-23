@@ -371,6 +371,7 @@ fn pcm_report(pcm: BundleSoundtrack) -> fmn_output::MixReport {
     fmn_output::MixReport {
         audio: fmn_codec::WavAudio {
             channels: pcm.channels(),
+            channel_mask: None,
             sample_rate: pcm.sample_rate(),
             format: fmn_codec::SampleFormat::F32,
             samples: pcm.into_samples(),

@@ -2,8 +2,11 @@
 
 #[cfg(all(not(target_arch = "wasm32"), feature = "exact-process"))]
 use fmn_codec::WavLimits;
-use fmn_codec::{SampleFormat, encode_wav};
+use fmn_codec::{
+    ChannelLayout, SampleFormat, WavAudio, WavError, encode_wav, encode_wav_with_layout,
+};
 use fmn_output::audio::{AudioDecodeError, AudioDecodeLimits, AudioDecoder, AudioInputFormat};
+use fmn_output::{DitherPolicy, MixKernel, MixerConfig, SoundCue, SoundError, SoundMixer};
 
 #[test]
 fn audio_native_pcm_never_needs_the_configured_executable() {
@@ -234,53 +237,6 @@ fn audio_budgets_and_damaged_pcm_do_not_fall_through_to_ffmpeg() {
 }
 
 #[test]
-fn audio_container_and_layout_refusals_do_not_resolve_an_external_tool() {
-    let source = encode_wav(1, 48_000, SampleFormat::S16, &[0.25, -0.5]);
-    let mut decoder = AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
-        panic!("malformed native WAV must not resolve an external capability")
-    })
-    .unwrap();
-    let mut outside = source.clone();
-    outside[4..8].copy_from_slice(&4_u32.to_le_bytes());
-    let mut alignment = source.clone();
-    alignment[32..34].copy_from_slice(&4_u16.to_le_bytes());
-    let mut duplicate = source.clone();
-    duplicate.extend_from_slice(&source[36..]);
-    let size = u32::try_from(duplicate.len() - 8).unwrap();
-    duplicate[4..8].copy_from_slice(&size.to_le_bytes());
-    let mut truncated_foreign = source.clone();
-    truncated_foreign[20..22].copy_from_slice(&7_u16.to_le_bytes());
-    truncated_foreign.extend_from_slice(b"JUNK\x02\x00\x00\x00x");
-    let size = u32::try_from(truncated_foreign.len() - 8).unwrap();
-    truncated_foreign[4..8].copy_from_slice(&size.to_le_bytes());
-    let mut missing_foreign = source[..36].to_vec();
-    missing_foreign[20..22].copy_from_slice(&7_u16.to_le_bytes());
-    missing_foreign[4..8].copy_from_slice(&28_u32.to_le_bytes());
-    let mut missing_depth = missing_foreign.clone();
-    missing_depth[20..22].copy_from_slice(&1_u16.to_le_bytes());
-    missing_depth[34..36].copy_from_slice(&64_u16.to_le_bytes());
-    for (malformed, expected) in [
-        (outside, fmn_codec::WavError::MissingFmt),
-        (alignment, fmn_codec::WavError::BadFmt("block alignment")),
-        (
-            duplicate,
-            fmn_codec::WavError::BadRiff("duplicate data chunk"),
-        ),
-        (truncated_foreign, fmn_codec::WavError::Truncated),
-        (missing_foreign, fmn_codec::WavError::MissingData),
-        (missing_depth, fmn_codec::WavError::MissingData),
-    ] {
-        assert!(matches!(
-            decoder.decode(&malformed),
-            Err(AudioDecodeError::Native(error)) if error == expected
-        ));
-    }
-    // A refused source does not poison this retained decoder or force a
-    // subsequent valid native source through the external-tool boundary.
-    assert!(decoder.decode(&source).is_ok());
-}
-
-#[test]
 fn audio_per_source_budgets_tighten_without_replacing_decoder_policy() {
     use std::sync::{Arc, Mutex};
 
@@ -355,16 +311,25 @@ fn audio_per_source_budgets_tighten_without_replacing_decoder_policy() {
 #[test]
 fn audio_rejects_unknown_channel_layouts_and_nonfinite_pcm() {
     let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None).unwrap();
-    for wav in [
-        encode_wav(3, 48_000, SampleFormat::F32, &[0.0; 3]),
-        encode_wav(1, 48_000, SampleFormat::F32, &[f32::NAN]),
-        encode_wav(2, 48_000, SampleFormat::F32, &[0.25]),
-    ] {
-        assert!(matches!(
-            decoder.decode(&wav),
-            Err(AudioDecodeError::InvalidPcm(_))
-        ));
-    }
+    assert!(matches!(
+        decoder.decode(&encode_wav(3, 48_000, SampleFormat::F32, &[0.0; 3])),
+        Err(AudioDecodeError::Native(
+            WavError::UnsupportedChannelLayout {
+                channels: 3,
+                channel_mask: None,
+            }
+        ))
+    ));
+    assert!(matches!(
+        decoder.decode(&encode_wav(1, 48_000, SampleFormat::F32, &[f32::NAN])),
+        Err(AudioDecodeError::InvalidPcm(_))
+    ));
+    assert!(matches!(
+        decoder.decode(&encode_wav(2, 48_000, SampleFormat::F32, &[0.25])),
+        Err(AudioDecodeError::Native(WavError::BadFmt(
+            "incomplete interleaved sample frame"
+        )))
+    ));
     let plus = decoder
         .decode(&encode_wav(1, 48_000, SampleFormat::F32, &[0.0]))
         .unwrap();
@@ -517,4 +482,283 @@ fn audio_real_file_cap_is_not_a_successfully_truncated_soundtrack() {
             BoundaryError::ArtifactOversized { .. }
         ))
     ));
+}
+
+fn layout_audio(layout: ChannelLayout, samples: Vec<f32>) -> WavAudio {
+    WavAudio {
+        channels: layout.channels(),
+        channel_mask: Some(layout.mask()),
+        sample_rate: 8_000,
+        format: SampleFormat::F32,
+        samples,
+    }
+}
+
+fn layout_mixer(channels: u16) -> SoundMixer {
+    SoundMixer::new(MixerConfig {
+        channels,
+        sample_rate: 8_000,
+        max_output_frames: 128,
+    })
+    .unwrap()
+}
+
+#[test]
+fn audio_native_speaker_impulses_reach_the_declared_mono_stereo_matrix() {
+    let k = std::f64::consts::FRAC_1_SQRT_2;
+    // Independent per-speaker analytic expectations, in file channel order.
+    // The codec's layout enum supplies admission only, not expected weights.
+    let layouts: &[(ChannelLayout, &[[f64; 2]])] = &[
+        (ChannelLayout::Mono, &[[1.0, 1.0]]),
+        (ChannelLayout::Stereo, &[[1.0, 0.0], [0.0, 1.0]]),
+        (
+            ChannelLayout::StereoWithLfe,
+            &[[1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
+        ),
+        (ChannelLayout::Surround3, &[[1.0, 0.0], [0.0, 1.0], [k, k]]),
+        (
+            ChannelLayout::Quad,
+            &[[1.0, 0.0], [0.0, 1.0], [k, 0.0], [0.0, k]],
+        ),
+        (
+            ChannelLayout::Surround4,
+            &[[1.0, 0.0], [0.0, 1.0], [k, k], [0.5, 0.5]],
+        ),
+        (
+            ChannelLayout::Surround5,
+            &[[1.0, 0.0], [0.0, 1.0], [k, k], [k, 0.0], [0.0, k]],
+        ),
+        (
+            ChannelLayout::Surround5Side,
+            &[[1.0, 0.0], [0.0, 1.0], [k, k], [k, 0.0], [0.0, k]],
+        ),
+        (
+            ChannelLayout::Surround5Point1,
+            &[
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [k, k],
+                [0.0, 0.0],
+                [k, 0.0],
+                [0.0, k],
+            ],
+        ),
+        (
+            ChannelLayout::Surround5Point1Side,
+            &[
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [k, k],
+                [0.0, 0.0],
+                [k, 0.0],
+                [0.0, k],
+            ],
+        ),
+        (
+            ChannelLayout::Surround6Point1,
+            &[
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [k, k],
+                [0.0, 0.0],
+                [0.5, 0.5],
+                [k, 0.0],
+                [0.0, k],
+            ],
+        ),
+        (
+            ChannelLayout::Surround7Point1,
+            &[
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [k, k],
+                [0.0, 0.0],
+                [k, 0.0],
+                [0.0, k],
+                [k, 0.0],
+                [0.0, k],
+            ],
+        ),
+    ];
+    let mut decoder = AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
+        panic!("native speaker layouts must never resolve an external decoder")
+    })
+    .unwrap();
+    for &(layout, weights) in layouts {
+        let channels = usize::from(layout.channels());
+        let mut samples = vec![0.0; channels * channels];
+        for channel in 0..channels {
+            samples[channel * channels + channel] = 0.5;
+        }
+        let input = layout_audio(layout, samples);
+        let decoded = decoder
+            .decode(&encode_wav_with_layout(&input, SampleFormat::F32).unwrap())
+            .unwrap();
+        assert_eq!(decoded.audio, input);
+        assert!(decoded.report.invocation.is_none());
+        for output_channels in [1, 2] {
+            let mut mixer = layout_mixer(output_channels);
+            mixer
+                .add(SoundCue::new(decoded.audio.clone(), 1, 8_000))
+                .unwrap();
+            let mut expected = vec![0.0_f32; usize::from(output_channels)];
+            for &[left, right] in weights {
+                if output_channels == 1 {
+                    expected.push(((left + right) * 0.25) as f32);
+                } else {
+                    expected.extend_from_slice(&[(left * 0.5) as f32, (right * 0.5) as f32]);
+                }
+            }
+            let expected_bits: Vec<_> = expected.iter().map(|sample| sample.to_bits()).collect();
+            for &kernel in MixKernel::ALL {
+                for threads in [1, 4, 16] {
+                    let report = mixer.mix_with_kernel(threads, kernel).unwrap();
+                    let actual: Vec<_> = report
+                        .audio
+                        .samples
+                        .iter()
+                        .map(|sample| sample.to_bits())
+                        .collect();
+                    assert_eq!(
+                        actual, expected_bits,
+                        "{layout:?}, output={output_channels}, threads={threads}"
+                    );
+                    assert_eq!(report.clipped_samples, 0);
+                    assert_eq!(report.audio.channel_mask, None);
+                    let wav = report
+                        .wav_bytes(SampleFormat::F32, DitherPolicy::None)
+                        .unwrap();
+                    assert_eq!(decoder.decode(&wav).unwrap().audio.samples, expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn audio_surround_mapping_keeps_headroom_until_final_gain_ducking_and_clamp() {
+    let foreground = layout_audio(ChannelLayout::Surround5Point1, vec![1.0; 6]);
+    let mut clipped = layout_mixer(2);
+    clipped
+        .add(SoundCue::new(foreground.clone(), 0, 8_000))
+        .unwrap();
+    let report = clipped.mix(4).unwrap();
+    assert_eq!(report.audio.samples, [1.0, 1.0]);
+    assert_eq!(report.clipped_samples, 2);
+
+    let mut gained = layout_mixer(2);
+    gained
+        .add(SoundCue::new(
+            layout_audio(ChannelLayout::Stereo, vec![0.4, 0.4]),
+            0,
+            8_000,
+        ))
+        .unwrap();
+    let mut cue = SoundCue::new(foreground, 0, 8_000);
+    cue.gain = Some(-20.0);
+    cue.gain_to_background = Some(-20.0);
+    gained.add(cue).unwrap();
+    let expected = (f64::from(0.4_f32) + 1.0 + 2.0 * std::f64::consts::FRAC_1_SQRT_2) * 0.1;
+    for &kernel in MixKernel::ALL {
+        let report = gained.mix_with_kernel(16, kernel).unwrap();
+        assert_eq!(report.clipped_samples, 0);
+        for sample in report.audio.samples {
+            assert!((f64::from(sample) - expected).abs() < 1e-7);
+        }
+    }
+    let mut lfe_only = layout_mixer(2);
+    lfe_only
+        .add(SoundCue::new(
+            layout_audio(
+                ChannelLayout::Surround5Point1,
+                vec![0.0, 0.0, 0.0, 100.0, 0.0, 0.0],
+            ),
+            0,
+            8_000,
+        ))
+        .unwrap();
+    assert_eq!(lfe_only.mix(1).unwrap().audio.samples, [0.0, 0.0]);
+}
+
+#[test]
+fn audio_pcm_identity_binds_surround_positions_and_preserves_mono_stereo_v1() {
+    let mut decoder = AudioDecoder::new(AudioDecodeLimits::default(), None).unwrap();
+    let back = layout_audio(ChannelLayout::Surround5Point1, vec![0.25; 6]);
+    let side = layout_audio(ChannelLayout::Surround5Point1Side, vec![0.25; 6]);
+    let back = decoder
+        .decode(&encode_wav_with_layout(&back, SampleFormat::F32).unwrap())
+        .unwrap();
+    let side = decoder
+        .decode(&encode_wav_with_layout(&side, SampleFormat::F32).unwrap())
+        .unwrap();
+    assert_eq!(back.audio.samples, side.audio.samples);
+    assert_ne!(back.report.pcm_digest, side.report.pcm_digest);
+    for layout in [ChannelLayout::Mono, ChannelLayout::Stereo] {
+        let audio = layout_audio(layout, vec![0.25; usize::from(layout.channels())]);
+        let explicit = decoder
+            .decode(&encode_wav_with_layout(&audio, SampleFormat::F32).unwrap())
+            .unwrap();
+        let legacy = decoder
+            .decode(&encode_wav(
+                audio.channels,
+                audio.sample_rate,
+                SampleFormat::S16,
+                &audio.samples,
+            ))
+            .unwrap();
+        assert_ne!(explicit.report.source_digest, legacy.report.source_digest);
+        assert_eq!(explicit.report.pcm_digest, legacy.report.pcm_digest);
+        // The old domain tag and field order are a compatibility contract.
+        let mut hash = fmn_hash::Sha256::new();
+        hash.update(b"fmn-normalized-pcm-v1\0");
+        hash.update(&audio.channels.to_le_bytes());
+        hash.update(&audio.sample_rate.to_le_bytes());
+        hash.update(&(audio.samples.len() as u64).to_le_bytes());
+        for sample in audio.samples {
+            hash.update(&sample.to_le_bytes());
+        }
+        assert_eq!(explicit.report.pcm_digest, hash.finalize());
+    }
+}
+
+#[test]
+fn audio_unknown_masks_and_surround_budgets_refuse_before_external_discovery() {
+    let source = layout_audio(ChannelLayout::Surround5Point1, vec![0.25; 6]);
+    let good = encode_wav_with_layout(&source, SampleFormat::F32).unwrap();
+    let mut decoder = AudioDecoder::with_boundary_resolver(AudioDecodeLimits::default(), |_| {
+        panic!("invalid source layout must not fall through to an external decoder")
+    })
+    .unwrap();
+    for mask in [0_u32, 0x3, 0x7, 0x3f000, 0x8000_003f] {
+        let mut bytes = good.clone();
+        bytes[40..44].copy_from_slice(&mask.to_le_bytes());
+        assert!(matches!(
+            decoder.decode(&bytes),
+            Err(AudioDecodeError::Native(WavError::UnsupportedChannelLayout {
+                channels: 6,
+                channel_mask,
+            })) if channel_mask == (mask != 0).then_some(mask)
+        ));
+        let mut direct = source.clone();
+        direct.channel_mask = (mask != 0).then_some(mask);
+        let mut mixer = layout_mixer(2);
+        assert!(matches!(
+            mixer.add(SoundCue::new(direct, 0, 8_000)),
+            Err(SoundError::UnsupportedChannelLayout { channels: 6, .. })
+        ));
+        assert!(mixer.is_empty());
+    }
+    assert!(matches!(
+        decoder.decode_with_limits(
+            &good,
+            &AudioDecodeLimits {
+                max_input_bytes: 1024,
+                max_samples: 5
+            },
+        ),
+        Err(AudioDecodeError::Native(WavError::TooLarge {
+            max_samples: 5
+        }))
+    ));
+    assert!(decoder.decode(&good).unwrap().report.invocation.is_none());
 }

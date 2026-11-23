@@ -1,8 +1,13 @@
 //! Deterministic WAV/PCM mixing (§14.5, fm-0m7, BN-14).
 //!
 //! The mixer consumes [`WavAudio`] buffers in the native decoder's normalized
-//! representation. Mono is duplicated to stereo; stereo is averaged to mono;
-//! no other channel layout is guessed. Sample-rate conversion uses
+//! representation. Mono is duplicated to stereo; stereo is averaged to mono.
+//! Explicit supported surround layouts are downmixed in speaker-mask order:
+//! front left/right are unity, center and the corresponding back/side speakers
+//! contribute 1/sqrt(2), back center contributes 0.5 to each side, and LFE is
+//! omitted. Mono averages that stereo result. No layout is guessed, and no
+//! intermediate normalization, clipping, or quantization changes gain.
+//! Sample-rate conversion uses
 //! [`RESAMPLER_NAME`]: a 64-tap Blackman-windowed sinc evaluated from an exact
 //! output-index/input-rate ratio, never a cumulative phase accumulator. Its
 //! public quality contract is ≤0.1 dB passband loss through 80% of the lower
@@ -194,10 +199,17 @@ impl MixKernel {
 pub enum SoundError {
     /// A mixer or cue parameter is structurally invalid.
     InvalidConfig(&'static str),
-    /// Only the explicitly defined mono/stereo matrix is accepted.
+    /// Mixer output must be mono or stereo.
     UnsupportedChannels {
         /// Refused channel count.
         channels: u16,
+    },
+    /// Input speaker positions are ambiguous or unsupported.
+    UnsupportedChannelLayout {
+        /// Refused source channel count.
+        channels: u16,
+        /// Explicit speaker mask, or unspecified positions.
+        channel_mask: Option<u32>,
     },
     /// Interleaved sample storage does not contain whole frames.
     MisalignedSamples {
@@ -259,9 +271,16 @@ impl fmt::Display for SoundError {
             Self::UnsupportedChannels { channels } => {
                 write!(
                     f,
-                    "unsupported {channels}-channel audio; only mono/stereo are defined"
+                    "unsupported {channels}-channel output; only mono/stereo are defined"
                 )
             }
+            Self::UnsupportedChannelLayout {
+                channels,
+                channel_mask,
+            } => write!(
+                f,
+                "unsupported source speaker layout: {channels} channels, mask {channel_mask:?}; multichannel input requires a supported explicit speaker mask"
+            ),
             Self::MisalignedSamples { channels, samples } => write!(
                 f,
                 "{samples} interleaved samples do not form whole {channels}-channel frames"
@@ -437,6 +456,11 @@ impl MixReport {
         dither: DitherPolicy,
     ) -> Result<Vec<u8>, SoundError> {
         validate_audio(&self.audio)?;
+        if !matches!(self.audio.channels, 1 | 2) {
+            return Err(SoundError::UnsupportedChannels {
+                channels: self.audio.channels,
+            });
+        }
         match (format, dither) {
             (SampleFormat::F32, DitherPolicy::None) => Ok(encode_wav(
                 self.audio.channels,
@@ -756,6 +780,7 @@ impl SoundMixer {
         Ok(MixReport {
             audio: WavAudio {
                 channels: self.config.channels,
+                channel_mask: None,
                 sample_rate: self.config.sample_rate,
                 format: SampleFormat::F32,
                 samples,
@@ -806,17 +831,18 @@ fn cue_placement(
     Ok((start, frames))
 }
 
-fn validate_audio(audio: &WavAudio) -> Result<(), SoundError> {
+pub(crate) fn validate_audio(audio: &WavAudio) -> Result<(), SoundError> {
     if audio.sample_rate == 0 {
         return Err(SoundError::InvalidConfig(
             "source sample_rate must be nonzero",
         ));
     }
-    if !matches!(audio.channels, 1 | 2) {
-        return Err(SoundError::UnsupportedChannels {
+    audio
+        .channel_layout()
+        .map_err(|_| SoundError::UnsupportedChannelLayout {
             channels: audio.channels,
-        });
-    }
+            channel_mask: audio.channel_mask,
+        })?;
     let channels = usize::from(audio.channels);
     if !audio.samples.len().is_multiple_of(channels) {
         return Err(SoundError::MisalignedSamples {
@@ -852,6 +878,12 @@ fn db_amplitude_optional(
 }
 
 fn map_channels(audio: &WavAudio, output_channels: u16) -> Result<Vec<f64>, SoundError> {
+    let layout = audio
+        .channel_layout()
+        .map_err(|_| SoundError::UnsupportedChannelLayout {
+            channels: audio.channels,
+            channel_mask: audio.channel_mask,
+        })?;
     let input_channels = usize::from(audio.channels);
     let output_channels = usize::from(output_channels);
     let frames = audio.samples.len() / input_channels;
@@ -874,9 +906,45 @@ fn map_channels(audio: &WavAudio, output_channels: u16) -> Result<Vec<f64>, Soun
                 mapped.push((f64::from(frame[0]) + f64::from(frame[1])) * 0.5);
             }
         }
+        (3..=8, 1 | 2) => {
+            // WAVE_FORMAT_EXTENSIBLE interleaves in ascending set-bit order.
+            // This ordered f64 sum is performed once before resampling and
+            // timeline partitioning. LFE is excluded, never folded into bass
+            // without an explicit low-pass/bass-management contract.
+            let k = std::f64::consts::FRAC_1_SQRT_2;
+            let weights: Vec<_> = [
+                (0x0001, [1.0, 0.0]), // front left
+                (0x0002, [0.0, 1.0]), // front right
+                (0x0004, [k, k]),     // front center
+                (0x0008, [0.0, 0.0]), // LFE
+                (0x0010, [k, 0.0]),   // back left
+                (0x0020, [0.0, k]),   // back right
+                (0x0100, [0.5, 0.5]), // back center
+                (0x0200, [k, 0.0]),   // side left
+                (0x0400, [0.0, k]),   // side right
+            ]
+            .into_iter()
+            .filter(|(speaker, _)| layout.mask() & *speaker != 0)
+            .map(|(_, weights)| weights)
+            .collect();
+            for frame in audio.samples.chunks_exact(input_channels) {
+                let mut stereo = [0.0_f64; 2];
+                for (&sample, weight) in frame.iter().zip(&weights) {
+                    let sample = f64::from(sample);
+                    stereo[0] += sample * weight[0];
+                    stereo[1] += sample * weight[1];
+                }
+                if output_channels == 1 {
+                    mapped.push((stereo[0] + stereo[1]) * 0.5);
+                } else {
+                    mapped.extend_from_slice(&stereo);
+                }
+            }
+        }
         _ => {
             return Err(SoundError::UnsupportedChannels {
-                channels: audio.channels,
+                channels: u16::try_from(output_channels)
+                    .map_err(|_| SoundError::SampleCountOverflow)?,
             });
         }
     }
@@ -1355,6 +1423,7 @@ mod tests {
     fn audio(sample_rate: u32, channels: u16, format: SampleFormat, samples: &[f32]) -> WavAudio {
         WavAudio {
             channels,
+            channel_mask: None,
             sample_rate,
             format,
             samples: samples.to_vec(),

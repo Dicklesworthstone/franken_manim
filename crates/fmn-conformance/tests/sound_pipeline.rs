@@ -45,6 +45,7 @@ fn frame_time_becomes_sample_exact_and_certified_wav_is_thread_invariant() {
     click_samples[0] = 1.0;
     let click = WavAudio {
         channels: 1,
+        channel_mask: None,
         sample_rate: 48_000,
         format: SampleFormat::S16,
         samples: click_samples,

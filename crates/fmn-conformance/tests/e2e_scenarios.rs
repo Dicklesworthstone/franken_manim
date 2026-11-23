@@ -84,6 +84,8 @@ mod studio_pure_seek;
 mod studio_wait_tail;
 #[path = "../../fmn/tests/support/surface_normals.rs"]
 mod surface_normals;
+#[path = "../../fmn/tests/support/surround_audio.rs"]
+mod surround_audio;
 
 // fm-longform-native-e2e-hoeffding-l59d: the Hoeffding's D explainer
 // (crates/fmn/examples/hoeffding_d), compiled here from its own sources so
@@ -3783,6 +3785,24 @@ fn prelude_families_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_artifact("prelude.png", expected)
         .with_counter("prelude_families", 4)
         .with_counter("prelude_thread_counts", checked))
+}
+
+/// Explicit surround layouts cross both authored source forms, the native
+/// audio export path, and the portable recording path against independent PCM.
+fn native_surround_soundtrack_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let checked = surround_audio::verify_wav().map_err(fail)?;
+    let bundles = surround_audio::verify_bundle().map_err(fail)?;
+    ctx.event(
+        LogEvent::new("e2e.render_matrix.native_surround_soundtrack")
+            .field("renders", checked.renders)
+            .field("refusals", checked.refusals)
+            .field("bundles", bundles),
+    );
+    Ok(RunOutcome::ok()
+        .with_artifact("surround-downmix.wav", checked.wav)
+        .with_counter("surround_renders", checked.renders)
+        .with_counter("surround_refusals", checked.refusals)
+        .with_counter("surround_bundles", bundles))
 }
 
 /// Native scene cues reach canonical WAV bytes at every requested worker count.
@@ -19238,6 +19258,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.native_surround_soundtrack.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(native_surround_soundtrack_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("surround_renders", 24),
+            counter_eq("surround_refusals", 3),
+            counter_eq("surround_bundles", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render_matrix.native_surround_soundtrack",
+            vec![
+                FieldPred::u64_eq("renders", 24),
+                FieldPred::u64_eq("refusals", 3),
+                FieldPred::u64_eq("bundles", 4),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.native_soundtrack_wav.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -23758,6 +23798,16 @@ fn cli_wav_encoding_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.cli_wav_encoding.v1")
         .expect("CLI WAV encoding scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_surround_soundtrack_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.native_surround_soundtrack.v1")
+        .expect("native surround soundtrack scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

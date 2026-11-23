@@ -630,6 +630,7 @@ fn memory_sound_requests_freeze_pcm_and_preserve_timing_and_skip_semantics() {
     use fmn_scene::{SoundData, SoundDataLimits, SoundSource};
     let mut audio = WavAudio {
         channels: 1,
+        channel_mask: None,
         sample_rate: 8,
         format: SampleFormat::F32,
         samples: vec![0.125, 0.25],

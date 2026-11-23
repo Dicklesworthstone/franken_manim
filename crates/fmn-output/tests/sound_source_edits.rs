@@ -7,6 +7,7 @@ fn cue(channels: u16, rate: u32, frame: i64, samples: &[f32]) -> SoundCue {
     SoundCue::new(
         WavAudio {
             channels,
+            channel_mask: None,
             sample_rate: rate,
             format: SampleFormat::F32,
             samples: samples.to_vec(),
@@ -152,4 +153,84 @@ fn complementary_source_fades_make_a_continuous_overlap() {
     assert_eq!(&report.audio.samples[..10], &[1.0; 10]);
     assert_eq!(&report.audio.samples[10..], &[0.0; 4]);
     assert_eq!(report.clipped_samples, 0);
+}
+
+#[test]
+fn surround_source_trim_and_fades_preserve_layout_through_native_resampling() {
+    let mut samples = Vec::new();
+    for _ in 0..6 {
+        // 7.1: FL, FR, FC, LFE, BL, BR, SL, SR.
+        samples.extend_from_slice(&[0.5, -0.25, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0]);
+    }
+    let original = SoundCue::new(
+        WavAudio {
+            channels: 8,
+            channel_mask: Some(0x63f),
+            sample_rate: 8,
+            format: SampleFormat::F32,
+            samples,
+        },
+        1,
+        8,
+    );
+    let edited = original
+        .with_source_frames(1, Some(5))
+        .unwrap()
+        .with_source_fades_frames(2, 2)
+        .unwrap();
+    assert_eq!(edited.audio.channel_mask, Some(0x63f));
+    assert_eq!(edited.audio.channels, 8);
+    assert_eq!(edited.audio.samples.len(), 32);
+    assert!(
+        edited.audio.samples[..8]
+            .iter()
+            .all(|sample| *sample == 0.0)
+    );
+    assert_eq!(
+        &edited.audio.samples[8..16],
+        &[0.5, -0.25, 0.0, 10.0, 0.0, 0.0, 0.0, 0.0]
+    );
+    assert!(
+        edited.audio.samples[24..]
+            .iter()
+            .all(|sample| *sample == 0.0)
+    );
+
+    // The only audible speakers are FL/FR. This independently specified
+    // stereo waveform must receive exactly the same resampler/placement.
+    let mut reference = mixer(2, 12).with_timeline_frames(12);
+    reference
+        .add(cue(2, 8, 1, &[0.0, 0.0, 0.5, -0.25, 0.5, -0.25, 0.0, 0.0]))
+        .unwrap();
+    let reference = reference.mix_with_kernel(1, MixKernel::Scalar).unwrap();
+    let mut mix = mixer(2, 12).with_timeline_frames(12);
+    mix.add(edited).unwrap();
+    for &kernel in MixKernel::ALL {
+        for threads in [1, 4, 16] {
+            let report = mix.mix_with_kernel(threads, kernel).unwrap();
+            assert_eq!(bits(&report.audio.samples), bits(&reference.audio.samples));
+            assert_eq!(report.clipped_samples, 0);
+            let left = mix.mix_window_with_kernel(0, 5, threads, kernel).unwrap();
+            let right = mix.mix_window_with_kernel(5, 7, threads, kernel).unwrap();
+            let mut joined = left.audio.samples;
+            joined.extend(right.audio.samples);
+            assert_eq!(bits(&joined), bits(&reference.audio.samples));
+        }
+    }
+
+    let mut unsupported = cue(3, 8, 0, &[0.25; 6]);
+    let before = unsupported.clone();
+    assert!(matches!(
+        unsupported.trim_source_frames(0, Some(1)),
+        Err(SoundError::UnsupportedChannelLayout {
+            channels: 3,
+            channel_mask: None
+        })
+    ));
+    assert_eq!(unsupported, before);
+    assert!(matches!(
+        unsupported.fade_source_frames(1, 1),
+        Err(SoundError::UnsupportedChannelLayout { .. })
+    ));
+    assert_eq!(unsupported, before);
 }

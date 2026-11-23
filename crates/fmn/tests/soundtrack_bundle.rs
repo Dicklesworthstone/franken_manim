@@ -1,4 +1,8 @@
 //! Native scenes compile into portable audible recordings and replay without assets.
+
+#[allow(dead_code)]
+#[path = "support/surround_audio.rs"]
+mod surround_audio;
 use fmn::exporting::soundtrack::*;
 use fmn::exporting::{BundleExportOptions, export_bundle_bytes, export_camera_bundle_bytes};
 use fmn::prelude::*;
@@ -16,6 +20,7 @@ use std::{cell::Cell, path::Path, rc::Rc, sync::Arc};
 fn background() -> WavAudio {
     WavAudio {
         channels: 1,
+        channel_mask: None,
         sample_rate: 8,
         format: SampleFormat::F32,
         samples: vec![0.125, 0.25, 0.375, 0.5, 0.25, 0.0, -0.125, -0.25],
@@ -24,6 +29,7 @@ fn background() -> WavAudio {
 fn lead() -> WavAudio {
     WavAudio {
         channels: 2,
+        channel_mask: None,
         sample_rate: 11,
         format: SampleFormat::F32,
         samples: vec![0.25, -0.25, 0.5, -0.5, 0.75, -0.75, 0.25, -0.25],
@@ -72,6 +78,11 @@ impl Explanation {
             calls: Rc::new(Cell::new(0)),
         }
     }
+}
+
+#[test]
+fn surround_file_and_memory_sources_export_identical_portable_stereo_pcm() {
+    assert_eq!(surround_audio::verify_bundle().unwrap(), 4);
 }
 impl SceneConstruct for Explanation {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
