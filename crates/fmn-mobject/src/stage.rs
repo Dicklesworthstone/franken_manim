@@ -655,8 +655,8 @@ pub struct Entry {
     /// The family member this one is an invisible padding copy of, set by
     /// [`Stage::add_n_more_submobjects`] (the Reference's `invisible_copy`).
     /// The binding tier publishes such a member with its source's class and
-    /// Python state (fm-b97z). Transient: cleared on every copy and move,
-    /// and not persisted.
+    /// Python state (fm-b97z). Cleared on ordinary copies and moves; durable
+    /// snapshots preserve the plain source identity, even after deletion.
     padding_source: Option<Mob>,
     pins: usize,
     pending_delete: bool,
@@ -2114,7 +2114,9 @@ impl Stage {
 
     /// The family member `mob` is an invisible padding copy of, if
     /// [`Stage::add_n_more_submobjects`] made it one (fm-b97z). A plain
-    /// handle: the source may since have been deleted.
+    /// handle: the source may since have been deleted. Durable snapshots
+    /// preserve its original generation and remint its Stage identity without
+    /// resolving it to a later occupant of the source's slot.
     #[must_use]
     pub fn padding_source(&self, mob: Mob) -> Option<Mob> {
         self.get(mob).and_then(|e| e.padding_source)
@@ -2122,9 +2124,9 @@ impl Stage {
 
     /// Whether a live entry retains an invisible padding copy's source link.
     ///
-    /// These observable links are transient and absent from durable snapshots.
-    /// Data-only checkpoint owners must reconstruct them or refuse continuation.
-    /// Detached padding members count even when their source was deleted.
+    /// Durable snapshots retain these observable identities. Detached padding
+    /// members count even when their source was deleted; provenance never
+    /// changes the source's ownership or liveness.
     #[must_use]
     pub fn has_padding_sources(&self) -> bool {
         self.slots.iter().any(|slot| {

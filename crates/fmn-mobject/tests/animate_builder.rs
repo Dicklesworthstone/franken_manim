@@ -148,7 +148,7 @@ fn overridden_animations_do_not_chain_in_either_direction() {
     );
     // A name alone is not an animation factory and cannot become a no-op
     // transform. Refuse before allocating even an unchanged target copy.
-    let before = stage.len();
+    let before = stage.snapshot_bytes().unwrap();
     let result = mob
         .animate()
         .with_override(ov)
@@ -157,7 +157,7 @@ fn overridden_animations_do_not_chain_in_either_direction() {
         result,
         Err(AnimateError::UnresolvedOverride { name: "fade_stub" })
     );
-    assert_eq!(stage.len(), before);
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
 }
 
 #[test]

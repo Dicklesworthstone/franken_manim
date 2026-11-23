@@ -5,7 +5,7 @@
 //! self-goldens (§16.3).
 //!
 //! Format guarantees, exactly the §6.7 policy:
-//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.10,
+//! - **Versioned schema ids** ([`SNAPSHOT_SCHEMA`] `FMNA/1` v1.11,
 //!   [`SCENE_STATE_SCHEMA`] `FMNA/2` v2.0; the self-golden suites hold `FMNS`):
 //!   additive-minor / breaking-major from day one — snapshots persist in
 //!   caches and repro bundles.
@@ -54,7 +54,7 @@ use crate::stage::{Mob, Snapshot, SnapshotEntry, SnapshotEntryData, Stage, Updat
 use crate::uniforms::{JointType, Uniforms};
 use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
-/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.10.
+/// The arena-snapshot document: magic `FMNA`, schema id 1, version 1.11.
 ///
 /// Minor history: 1.1 appended the shape tag; 1.2 appended `z_index`; 1.3
 /// preserves the monotonic updater-id cursor, including identities removed
@@ -75,7 +75,12 @@ use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, 
 /// the full 1.9 layout. Writers keep 1.8/1.9 for scenes without this primitive,
 /// preserving the existing canonical bytes. Older readers refuse the new
 /// version rather than silently dropping a surface's ordering semantics.
-pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 10);
+/// **1.11 appends invisible padding copies' source identities**. These plain
+/// links retain their original generation even when the source was deleted;
+/// they do not own it or serialize its Python attributes. Writers retain the
+/// previous 1.8/1.9/1.10 bytes when no entry carries padding provenance.
+pub const SNAPSHOT_SCHEMA: Schema = Schema::new(*b"FMNA", 1, 1, 11);
+const SNAPSHOT_SCHEMA_WITH_SORTED_SURFACE: Schema = Schema::new(*b"FMNA", 1, 1, 10);
 const SNAPSHOT_SCHEMA_WITH_GLOW: Schema = Schema::new(*b"FMNA", 1, 1, 9);
 const SNAPSHOT_SCHEMA_WITHOUT_GLOW: Schema = Schema::new(*b"FMNA", 1, 1, 8);
 
@@ -1019,15 +1024,23 @@ impl Snapshot {
                 )
             })
         });
-        let has_glow_table = has_sorted_surface
+        let has_padding_sources = self.slots.iter().any(|(_, entry)| {
+            entry
+                .as_ref()
+                .is_some_and(|entry| entry.padding_source.is_some())
+        });
+        let has_glow_table = has_padding_sources
+            || has_sorted_surface
             || self.slots.iter().any(|(_, entry)| {
                 entry.as_ref().is_some_and(|entry| {
                     entry.uniforms.glow_factor != 0.0
                         || entry.render_primitive == RenderPrimitive::DotCloud
                 })
             });
-        let schema = if has_sorted_surface {
+        let schema = if has_padding_sources {
             SNAPSHOT_SCHEMA
+        } else if has_sorted_surface {
+            SNAPSHOT_SCHEMA_WITH_SORTED_SURFACE
         } else if has_glow_table {
             SNAPSHOT_SCHEMA_WITH_GLOW
         } else {
@@ -1135,6 +1148,17 @@ impl Snapshot {
                 w.put_bool(entry.is_some());
                 if let Some(entry) = entry {
                     w.put_f64(entry.uniforms.glow_factor);
+                }
+            }
+        }
+        // Minor 1.11 preserves the complete 1.10 payload and appends plain
+        // provenance links. Like target/saved_state, a source can be stale;
+        // recording its original generation must never alias a recycled slot.
+        if has_padding_sources {
+            for (_, entry) in &self.slots {
+                w.put_bool(entry.is_some());
+                if let Some(entry) = entry {
+                    put_mob_opt(&mut w, entry.padding_source);
                 }
             }
         }
@@ -1435,8 +1459,8 @@ impl Snapshot {
                     tracker,
                     target,
                     saved_state,
-                    // Transient, not persisted (fm-b97z): a restored padding
-                    // member publishes as a plain shell.
+                    // Legacy snapshots have no provenance. The 1.11 table
+                    // below restores exact source identities when present.
                     padding_source: None,
                     pins,
                     pending_delete,
@@ -1623,6 +1647,26 @@ impl Snapshot {
                     && entry.render_primitive == RenderPrimitive::DotCloud
                 {
                     entry.uniforms.glow_factor = legacy_dot_glow(&entry.buffer)?;
+                }
+            }
+        }
+        if r.version().1 >= 11 {
+            for (_, entry) in &mut slots {
+                let present = r.get_bool()?;
+                match (present, entry) {
+                    (false, None) => {}
+                    (true, Some(entry)) => {
+                        // This is a plain link, not a family edge. Deleted
+                        // sources remain stale after reminting, just like
+                        // target/saved_state; their slot may now be reused.
+                        // Its Option<Mob> storage was charged with the entry.
+                        entry.padding_source = get_mob_opt(&mut r)?;
+                    }
+                    _ => {
+                        return Err(PersistError::Malformed(
+                            "padding-source table does not match arena liveness",
+                        ));
+                    }
                 }
             }
         }

@@ -1247,7 +1247,6 @@ impl NativeSceneProgram {
                 .is_some_and(|tail| !tail.factory_listeners_safe)
             || !self.preview.scene().can_resume_wait_checkpoint()
             || stage.has_native_updater_state()
-            || stage.has_padding_sources()
             || stage.has_rollback_identity_history()
         {
             return Some(NativeCheckpointFallback::TransientSceneState);

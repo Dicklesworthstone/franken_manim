@@ -3118,6 +3118,8 @@ enum ActiveMatchingKind {
     ExplicitFamily,
     NestedExplicitFamily,
     PaddedFamily,
+    NestedPaddedFamily,
+    PaddedTransform,
 }
 
 fn active_matching_program(
@@ -3146,27 +3148,42 @@ fn active_matching_program(
     let target_piece = scene.stage_mut().copy_family(piece).unwrap();
     scene.stage_mut().shift(target_piece, [0.4, 0.6, 0.0]);
     scene.stage_mut().attach(target, target_piece).unwrap();
-    if matches!(kind, ActiveMatchingKind::PaddedFamily) {
+    if matches!(
+        kind,
+        ActiveMatchingKind::PaddedFamily
+            | ActiveMatchingKind::NestedPaddedFamily
+            | ActiveMatchingKind::PaddedTransform
+    ) {
         let extra = scene.stage_mut().copy_family(target_piece).unwrap();
         scene.stage_mut().shift(extra, [0.0, -0.7, 0.0]);
         scene.stage_mut().attach(target, extra).unwrap();
     }
     scene.add(&[source]).unwrap();
     let first = fmn_anim::write(scene.stage(), source);
-    let mut matching = fmn_anim::TransformMatchingShapes::with_matched_pairs(
-        scene.stage_mut(),
-        source,
-        target,
-        &[(source, target)],
-    )
-    .unwrap();
-    assert_eq!(matching.animations().len(), 1);
-    assert_eq!(matching.animations()[0].state().mobject(), source);
-    assert!(
-        matching.animations()[0]
-            .preflight_mobjects()
-            .contains(&target)
-    );
+    let mut matching: Box<dyn Animation> = if matches!(kind, ActiveMatchingKind::PaddedTransform) {
+        // This is the ordinary Transform carrier, independent of matching's
+        // wrapper and original-family manifests. Its replacement cleanup
+        // must publish the original target after the aligned family finishes.
+        Box::new(
+            fmn_anim::replacement_transform(source, target).with_path_arc(0.75, [0.0, 0.0, 1.0]),
+        )
+    } else {
+        let matching = fmn_anim::TransformMatchingShapes::with_matched_pairs(
+            scene.stage_mut(),
+            source,
+            target,
+            &[(source, target)],
+        )
+        .unwrap();
+        assert_eq!(matching.animations().len(), 1);
+        assert_eq!(matching.animations()[0].state().mobject(), source);
+        assert!(
+            matching.animations()[0]
+                .preflight_mobjects()
+                .contains(&target)
+        );
+        Box::new(matching)
+    };
     matching.state_mut().config.final_alpha_value = 0.35;
     matching.state_mut().config.rate_func = if matches!(policy, TerminalPlayPolicy::OpaqueRate) {
         fmn_anim::RateFunc::Base(opaque_play_rate)
@@ -3174,17 +3191,20 @@ fn active_matching_program(
         fmn_anim::RateFunc::Sampled(std::sync::Arc::from([0.0, 0.9, 0.1, 1.0]))
     };
     let matching: Box<dyn Animation> = if matches!(policy, TerminalPlayPolicy::DelegatingWrapper) {
-        Box::new(DelegatingPlayAnimation(Box::new(matching)))
-    } else if matches!(kind, ActiveMatchingKind::NestedExplicitFamily) {
+        Box::new(DelegatingPlayAnimation(matching))
+    } else if matches!(
+        kind,
+        ActiveMatchingKind::NestedExplicitFamily | ActiveMatchingKind::NestedPaddedFamily
+    ) {
         Box::new(
-            fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(matching)])
+            fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![matching])
                 .unwrap()
                 .with_rate_func(fmn_anim::RateFunc::Catalog(
                     fmn_core::rate::CatalogRate::ThereAndBack,
                 )),
         )
     } else {
-        Box::new(matching)
+        matching
     };
     let source_id = scene.stage().snapshot_handle(source).unwrap();
     let piece_id = scene.stage().snapshot_handle(piece).unwrap();
@@ -3238,11 +3258,48 @@ fn active_matching_worker(
 
 #[test]
 fn active_matching_checkpoints_preserve_every_frame_and_original_target_publication() {
-    for kind in [
+    assert_active_target_replacement_continuations(&[
         ActiveMatchingKind::Pieces,
         ActiveMatchingKind::ExplicitFamily,
         ActiveMatchingKind::NestedExplicitFamily,
-    ] {
+    ]);
+}
+
+#[test]
+fn padded_matching_checkpoints_preserve_provenance_and_every_remaining_frame() {
+    assert_active_target_replacement_continuations(&[
+        ActiveMatchingKind::PaddedFamily,
+        ActiveMatchingKind::NestedPaddedFamily,
+    ]);
+}
+
+#[test]
+fn padded_replacement_transform_checkpoints_preserve_aligned_families() {
+    assert_active_target_replacement_continuations(&[ActiveMatchingKind::PaddedTransform]);
+}
+
+fn assert_source_padding(stage: &Stage, fixture: &FutureDeclarationFixture) {
+    let source = stage
+        .resolve_snapshot_handle(fixture.source.0, fixture.source.1)
+        .unwrap();
+    let original_piece = stage
+        .resolve_snapshot_handle(fixture.first_piece.0, fixture.first_piece.1)
+        .unwrap();
+    let children = stage.get(source).unwrap().submobjects();
+    assert_eq!(children.len(), 2);
+    assert_eq!(children[0], original_piece);
+    assert_ne!(children[1], original_piece);
+    assert_eq!(stage.padding_source(children[1]), Some(original_piece));
+}
+
+fn assert_active_target_replacement_continuations(kinds: &[ActiveMatchingKind]) {
+    for &kind in kinds {
+        let padded = matches!(
+            kind,
+            ActiveMatchingKind::PaddedFamily
+                | ActiveMatchingKind::NestedPaddedFamily
+                | ActiveMatchingKind::PaddedTransform
+        );
         let fixture = active_matching_program(kind, TerminalPlayPolicy::Native).unwrap();
         for saved_frame in [9, 11, 15] {
             let mut original = active_matching_worker(kind, TerminalPlayPolicy::Native, 1, 100);
@@ -3250,7 +3307,10 @@ fn active_matching_checkpoints_preserve_every_frame_and_original_target_publicat
             let saved = checkpoint(&entry, 0);
             assert_eq!(&saved.state[..8], b"FMNR\x03\0\0\0", "{kind:?}");
             let stage = original.program().unwrap().preview().stage();
-            assert!(!stage.has_padding_sources());
+            assert_eq!(stage.has_padding_sources(), padded);
+            if padded {
+                assert_source_padding(stage, &fixture);
+            }
             if !matches!(kind, ActiveMatchingKind::Pieces) {
                 let source = stage
                     .resolve_snapshot_handle(fixture.source.0, fixture.source.1)
@@ -3278,9 +3338,13 @@ fn active_matching_checkpoints_preserve_every_frame_and_original_target_publicat
                     .unwrap();
                 let report = resumed.last_restore().unwrap();
                 assert_eq!(report.mode, NativeRestoreMode::Checkpoint, "{kind:?}");
+                assert_eq!(report.frame, saved_frame as u64);
                 assert_eq!(report.fallback, None);
                 assert_eq!(resumed.last_state_hash(), Some(entry.state_hash));
                 assert_eq!(checkpoint_observation(&resumed), at_checkpoint);
+                if padded {
+                    assert_source_padding(resumed.program().unwrap().preview().stage(), &fixture);
+                }
                 assert_eq!(png(&seek(&mut resumed, saved_frame)), png(&checkpoint_png));
                 for (frame, rendered, observation) in &expected {
                     assert_eq!(
@@ -3303,6 +3367,11 @@ fn active_matching_checkpoints_preserve_every_frame_and_original_target_publicat
                     .unwrap();
                 assert_eq!(stage.roots(), &[target]);
                 assert!(!stage.roots().contains(&source));
+                if padded {
+                    // Removing an aligned source from the draw list leaves
+                    // its padding and provenance observable through handles.
+                    assert_source_padding(stage, &fixture);
+                }
                 for member in stage.family(source).into_iter().chain(stage.family(target)) {
                     assert!(!stage.is_animating(member));
                     assert!(!stage.is_updating_suspended(member));
@@ -3316,31 +3385,23 @@ fn active_matching_checkpoints_preserve_every_frame_and_original_target_publicat
 }
 
 #[test]
-fn active_matching_padding_and_unknown_hooks_keep_verified_cold_recovery() {
-    for (kind, policy) in [
-        (ActiveMatchingKind::PaddedFamily, TerminalPlayPolicy::Native),
-        (
-            ActiveMatchingKind::ExplicitFamily,
-            TerminalPlayPolicy::OpaqueRate,
-        ),
-        (
-            ActiveMatchingKind::ExplicitFamily,
-            TerminalPlayPolicy::DelegatingWrapper,
-        ),
+fn active_matching_unknown_hooks_keep_verified_cold_recovery() {
+    let kind = ActiveMatchingKind::ExplicitFamily;
+    for policy in [
+        TerminalPlayPolicy::OpaqueRate,
+        TerminalPlayPolicy::DelegatingWrapper,
     ] {
         let mut original = active_matching_worker(kind, policy, 1, 100);
         let entry = commit(&mut original, 11);
         let expected = checkpoint_observation(&original);
         let expected_png = seek(&mut original, 11);
-        let padded = matches!(kind, ActiveMatchingKind::PaddedFamily);
-        assert_eq!(
-            original
+        assert!(
+            !original
                 .program()
                 .unwrap()
                 .preview()
                 .stage()
-                .has_padding_sources(),
-            padded
+                .has_padding_sources()
         );
         let mut resumed = active_matching_worker(kind, policy, 4, 100);
         resumed
@@ -3353,20 +3414,13 @@ fn active_matching_padding_and_unknown_hooks_keep_verified_cold_recovery() {
             "{kind:?}, {policy:?}"
         );
         assert!(report.fallback.is_some());
-        if padded {
-            assert_eq!(
-                report.fallback,
-                Some(fmn_studio::native::NativeCheckpointFallback::TransientSceneState)
-            );
-        }
-        assert_eq!(
-            resumed
+        assert!(
+            !resumed
                 .program()
                 .unwrap()
                 .preview()
                 .stage()
-                .has_padding_sources(),
-            padded
+                .has_padding_sources()
         );
         assert_eq!(checkpoint_observation(&resumed), expected);
         assert_eq!(png(&seek(&mut resumed, 11)), png(&expected_png));

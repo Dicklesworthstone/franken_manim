@@ -149,7 +149,6 @@ impl NativeUpdaterRegistry {
     /// A matching id/kind alone cannot bless an opaque replacement closure.
     pub(super) fn supports(&self, stage: &Stage, manifest: &UpdaterManifest) -> bool {
         if stage.has_native_updater_state()
-            || stage.has_padding_sources()
             || stage.has_rollback_identity_history()
             || stage.updater_error().is_some()
             || stage.updater_manifest() != *manifest
@@ -179,12 +178,11 @@ impl NativeUpdaterRegistry {
         manifest: &UpdaterManifest,
     ) -> Result<(), ServiceError> {
         if scene.stage().has_native_updater_state()
-            || scene.stage().has_padding_sources()
             || scene.stage().has_rollback_identity_history()
             || scene.stage().updater_error().is_some()
         {
             return Err(rejected(
-                "transient native attributes, padding links, rollback identities or failure cannot be resumed",
+                "transient native attributes, rollback identities or failure cannot be resumed",
             ));
         }
         let identities = manifest
@@ -407,33 +405,73 @@ mod tests {
     }
 
     #[test]
-    fn transient_padding_links_block_resume_but_affine_placements_do_not() {
-        let mut stage = Stage::new();
-        let mut buffer =
-            fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), 1).unwrap();
-        buffer.write(0, "point", &[1.0, 2.0, 0.0]);
-        let mob = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
-        let registry = NativeUpdaterRegistry::new();
-        let before = stage.get(mob).unwrap().placement().coefficients();
-        stage.shift(mob, [0.125, -2.0, 0.5]);
-        assert_ne!(stage.get(mob).unwrap().placement().coefficients(), before);
-        assert!(registry.supports(&stage, &stage.updater_manifest()));
-        assert!(!stage.has_padding_sources());
-        stage.add_n_more_submobjects(mob, 1).unwrap();
-        let padding = stage.get(mob).unwrap().submobjects()[0];
-        assert_eq!(stage.padding_source(padding), Some(mob));
-        assert!(stage.has_padding_sources());
-        assert!(!registry.supports(&stage, &stage.updater_manifest()));
-        stage.detach(mob, padding);
-        stage.delete(mob).unwrap();
-        assert!(
-            stage.has_padding_sources(),
-            "detached links remain observable"
-        );
-        assert!(!registry.supports(&stage, &stage.updater_manifest()));
-        stage.delete(padding).unwrap();
-        assert!(!stage.has_padding_sources());
-        assert!(registry.supports(&stage, &stage.updater_manifest()));
+    fn durable_padding_links_survive_registered_rebind_and_deleted_sources() {
+        fn padded_scene(remove_source: bool) -> (Scene, Mob, Mob, Mob, NativeUpdaterRegistry) {
+            let (mut scene, counter, registry, _) = registered_scene();
+            let stage = scene.stage_mut();
+            let mut buffer =
+                fmn_mobject::RecordBuffer::new(fmn_mobject::RecordSchema::vmobject(), 1).unwrap();
+            buffer.write(0, "point", &[1.0, 2.0, 0.0]);
+            let mob = stage.add(fmn_mobject::Mobject::from_buffer(buffer));
+            let before = stage.get(mob).unwrap().placement().coefficients();
+            stage.shift(mob, [0.125, -2.0, 0.5]);
+            assert_ne!(stage.get(mob).unwrap().placement().coefficients(), before);
+            assert!(!stage.has_padding_sources());
+            stage.add_n_more_submobjects(mob, 1).unwrap();
+            let padding = stage.get(mob).unwrap().submobjects()[0];
+            assert_eq!(stage.padding_source(padding), Some(mob));
+            if remove_source {
+                stage.detach(mob, padding);
+                stage.delete(mob).unwrap();
+            }
+            (scene, counter, mob, padding, registry)
+        }
+
+        for remove_source in [false, true] {
+            let (mut source, counter, mob, padding, registry) = padded_scene(remove_source);
+            assert!(source.stage().has_padding_sources());
+            assert_eq!(source.stage().contains(mob), !remove_source);
+            assert!(registry.supports(source.stage(), &source.stage().updater_manifest()));
+            source.wait(Some(0.1), &mut NullSceneSink).unwrap();
+            source.rng_mut().next_u64();
+            let bytes = source.state_bytes().unwrap();
+            let before_rebind = source.stage().tracker_value(counter);
+
+            let (mut restored, restored_counter, restored_mob, restored_padding, fresh_registry) =
+                padded_scene(remove_source);
+            assert_ne!(mob, restored_mob);
+            assert_ne!(padding, restored_padding);
+            assert_eq!(registry.fingerprint(), fresh_registry.fingerprint());
+            let receipt = restored.restore_state_bytes(&bytes).unwrap();
+            assert_eq!(
+                restored.stage().padding_source(restored_padding),
+                Some(restored_mob)
+            );
+            assert_eq!(restored.stage().contains(restored_mob), !remove_source);
+            assert!(restored.stage().has_padding_sources());
+            fresh_registry
+                .rebind(&mut restored, &receipt.updaters)
+                .unwrap();
+            assert!(fresh_registry.supports(restored.stage(), &receipt.updaters));
+            assert_eq!(
+                restored.stage().tracker_value(restored_counter),
+                before_rebind,
+                "rebind must not execute an updater"
+            );
+            assert_eq!(restored.state_bytes().unwrap(), bytes);
+            assert_eq!(source.rng_mut().next_u64(), restored.rng_mut().next_u64());
+
+            source.wait(Some(0.1), &mut NullSceneSink).unwrap();
+            restored.wait(Some(0.1), &mut NullSceneSink).unwrap();
+            assert_eq!(
+                source.state_bytes().unwrap(),
+                restored.state_bytes().unwrap()
+            );
+            assert_eq!(
+                restored.stage().padding_source(restored_padding),
+                Some(restored_mob)
+            );
+        }
     }
 
     #[test]

@@ -728,6 +728,10 @@ fn snapshot_payload_reuse_keeps_live_view_isolation_and_detachment() {
         let live_storage = stage.get(mob).unwrap().buffer.storage_id();
         let first = stage.snapshot();
         let repeated = stage.snapshot();
+        // A writable point view invalidates shape-hint liveness at export,
+        // before any write. Freeze the post-export bytes as their own oracle.
+        let first_bytes = first.to_bytes().unwrap();
+        assert_eq!(repeated.to_bytes().unwrap(), first_bytes);
         assert!(!original.shares_entry_with(&first, mob));
         assert!(!first.shares_entry_with(&repeated, mob));
         for capture in [&first, &repeated] {
@@ -762,12 +766,13 @@ fn snapshot_payload_reuse_keeps_live_view_isolation_and_detachment() {
                 .read(0, "point"),
             Some(vec![8.0, 9.0, 0.0])
         );
-        assert_eq!(first.to_bytes().unwrap(), original_bytes);
-        assert_eq!(repeated.to_bytes().unwrap(), original_bytes);
+        assert_eq!(original.to_bytes().unwrap(), original_bytes);
+        assert_eq!(first.to_bytes().unwrap(), first_bytes);
+        assert_eq!(repeated.to_bytes().unwrap(), first_bytes);
 
         stage.restore(&first);
         assert!(!view.is_attached_to(&stage.get(mob).unwrap().buffer));
-        assert_eq!(stage.snapshot_bytes().unwrap(), original_bytes);
+        assert_eq!(stage.snapshot_bytes().unwrap(), first_bytes);
         drop(view);
         let restored = stage.snapshot();
         let restored_again = stage.snapshot();

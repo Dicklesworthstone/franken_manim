@@ -148,7 +148,8 @@ fn restore(worker: &mut NativeSceneWorker, checkpoint: Checkpoint) -> Result<(),
 }
 
 fn png(worker: &mut NativeSceneWorker, frame: i64) -> Result<Vec<u8>, ScenarioError> {
-    let WorkerResponse::Frame(frame) = worker
+    let requested = u64::try_from(frame).map_err(|error| fail(error.to_string()))?;
+    let WorkerResponse::Frame(capture) = worker
         .handle(SupervisorRequest::Scrub {
             scene: NAME.into(),
             frame,
@@ -157,7 +158,10 @@ fn png(worker: &mut NativeSceneWorker, frame: i64) -> Result<Vec<u8>, ScenarioEr
     else {
         return Err(fail("registered native continuation omitted its PNG"));
     };
-    match frame.payload {
+    if capture.frame_index != requested {
+        return Err(fail("native continuation returned a different frame"));
+    }
+    match capture.payload {
         FramePayload::Pipe { bytes, .. } => Ok(bytes),
         _ => Err(fail(
             "registered native continuation used an unexpected payload",
@@ -738,6 +742,72 @@ pub(super) fn run_matching(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError
     run_prepared_checkpoints(ctx, matching_program, "matching", &[4, 9, 16])
 }
 
+fn padding_program(matching: bool) -> Result<NativeSceneProgram, ServiceError> {
+    let mut scene = Scene::new(RuntimeConfig::default(), 103).map_err(service_error)?;
+    let source = scene
+        .add_mobject(fmn_mobject::Mobject::group(vec![
+            fmn_library::Circle::new().radius(0.25).build().into(),
+        ]))
+        .map_err(service_error)?;
+    let target = scene.stage_mut().add(fmn_mobject::Mobject::group(vec![
+        fmn_library::Circle::new().radius(0.35).build().into(),
+        fmn_library::Circle::new().radius(0.15).build().into(),
+    ]));
+    for (root, x, color) in [
+        (source, -0.7, fmn_core::constants::BLUE_C),
+        (target, 0.7, fmn_core::constants::RED_C),
+    ] {
+        let children = scene.stage().get(root).unwrap().submobjects().to_vec();
+        for (index, child) in children.into_iter().enumerate() {
+            scene
+                .stage_mut()
+                .shift(child, [x, 0.4 - 0.8 * index as f64, 0.0]);
+        }
+        scene
+            .stage_mut()
+            .set_fill(root, Some(color), Some(0.8), None, true);
+    }
+    // Both variants must align one source child with two target children.
+    // The resulting invisible copy's source identity is part of the saved
+    // scene even after the matching wrapper publishes its original target.
+    let mut animation: Box<dyn Animation> = if matching {
+        Box::new(
+            fmn_anim::TransformMatchingParts::with_matched_pairs(
+                scene.stage_mut(),
+                source,
+                target,
+                &[(source, target)],
+            )
+            .map_err(service_error)?,
+        )
+    } else {
+        Box::new(fmn_anim::Transform::new(source, target).with_path_arc(0.75, [0.0, 0.0, 1.0]))
+    };
+    animation.state_mut().config.run_time_frames = Some(16);
+    animation.state_mut().config.final_alpha_value = 0.35;
+    if matching {
+        animation = Box::new(
+            fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![animation])
+                .map_err(service_error)?,
+        );
+    }
+    NativeSceneProgram::new(
+        scene,
+        vec![
+            NativeSegment::Play {
+                animations: vec![animation],
+                overrides: fmn_scene::PlayOverrides::default(),
+            },
+            NativeSegment::WaitFrames { frames: 2 },
+        ],
+        18,
+    )
+}
+
+pub(super) fn run_padding(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(ctx, padding_program, "padding", &[4, 9, 16])
+}
+
 fn motion_program(pieces: bool) -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 79).map_err(service_error)?;
     let moving = scene
@@ -1170,6 +1240,43 @@ pub(super) fn run_future_native(ctx: &mut RunCtx) -> Result<RunOutcome, Scenario
     run_prepared_checkpoints(ctx, future_native_program, "future_native", &[3, 6, 7, 8])
 }
 
+#[derive(PartialEq)]
+struct PreparedFrameObservation {
+    snapshot: Vec<u8>,
+    frame: u64,
+    frames_elapsed: i64,
+    fps: u32,
+    play_count: u64,
+    effects: fmn_scene::EffectClass,
+    segment_boundary: bool,
+    stage_time: u64,
+    frame_shape: [u64; 2],
+}
+
+fn prepared_observation(
+    worker: &NativeSceneWorker,
+) -> Result<PreparedFrameObservation, ScenarioError> {
+    let program = worker
+        .program()
+        .ok_or_else(|| fail("native continuation lost its scene owner"))?;
+    let scene = program.preview().scene();
+    let stage = scene.stage();
+    Ok(PreparedFrameObservation {
+        snapshot: stage
+            .snapshot()
+            .to_bytes()
+            .map_err(|error| fail(error.to_string()))?,
+        frame: program.frame_index(),
+        frames_elapsed: scene.time().frames(),
+        fps: scene.fps(),
+        play_count: scene.play_count(),
+        effects: program.effect_class(),
+        segment_boundary: program.at_segment_boundary(),
+        stage_time: stage.time().to_bits(),
+        frame_shape: stage.frame_shape().map(f64::to_bits),
+    })
+}
+
 fn run_prepared_checkpoints(
     ctx: &mut RunCtx,
     factory: fn(bool) -> Result<NativeSceneProgram, ServiceError>,
@@ -1195,13 +1302,7 @@ fn run_prepared_checkpoints(
                 .checkpoint
                 .clone()
                 .ok_or_else(|| fail("native program omitted its checkpoint"))?;
-            let expected = original
-                .program()
-                .unwrap()
-                .preview()
-                .scene()
-                .state_bytes()
-                .map_err(|e| fail(e.to_string()))?;
+            let expected = prepared_observation(&original)?;
             // Even the shortest saved prefix cannot be replayed under this
             // budget. Recovery must restore the actual prepared lifecycle.
             original_config.max_replay_frames = 1;
@@ -1222,44 +1323,46 @@ fn run_prepared_checkpoints(
             if receipt.mode != NativeRestoreMode::Checkpoint
                 || receipt.frame != saved_frame as u64
                 || receipt.fallback.is_some()
-                || recovered
-                    .program()
-                    .unwrap()
-                    .preview()
-                    .scene()
-                    .state_bytes()
-                    .map_err(|e| fail(e.to_string()))?
-                    != expected
+                || recovered.last_state_hash() != Some(entry.state_hash)
+                || prepared_observation(&recovered)? != expected
             {
                 return Err(fail(
                     "native play checkpoint replayed or changed its prepared state",
                 ));
             }
             restored_count += 1;
+            let mut recovered_journal = Journal::new();
+            recovered_journal
+                .record(entry.try_clone().map_err(|error| fail(error.to_string()))?)
+                .map_err(|error| fail(error.to_string()))?;
             for frame in saved_frame + 1..=18 {
                 let actual = png(&mut recovered, frame)?;
                 let expected = png(&mut original, frame)?;
-                let actual_state = recovered
-                    .program()
-                    .unwrap()
-                    .preview()
-                    .scene()
-                    .state_bytes()
-                    .map_err(|e| fail(e.to_string()))?;
-                let expected_state = original
-                    .program()
-                    .unwrap()
-                    .preview()
-                    .scene()
-                    .state_bytes()
-                    .map_err(|e| fail(e.to_string()))?;
+                let actual_state = prepared_observation(&recovered)?;
+                let expected_state = prepared_observation(&original)?;
                 if actual != expected || actual_state != expected_state {
-                    return Err(fail(
-                        "native play continuation changed pixels, phase or finish state",
-                    ));
+                    return Err(fail(format!(
+                        "native {family} continuation changed pixels or runtime state at frame {frame}"
+                    )));
                 }
                 matching_frames += 1;
                 last_png = actual;
+            }
+            // The immutable observations above cover every frame. Commit
+            // only after the suffix has completed, when the trailing wait is
+            // resumable, to also bind the actual RNG and continuation cursor.
+            // A commit during active Succession would require cold replay.
+            commit(&mut original, 18, &mut journal)?;
+            commit(&mut recovered, 18, &mut recovered_journal)?;
+            let expected_final = journal.entries().last().unwrap();
+            let actual_final = recovered_journal.entries().last().unwrap();
+            if actual_final.checkpoint.is_none()
+                || actual_final.checkpoint != expected_final.checkpoint
+                || actual_final.state_hash != expected_final.state_hash
+            {
+                return Err(fail(format!(
+                    "native {family} continuation changed final canonical checkpoint or RNG state"
+                )));
             }
             last_checkpoint = state;
         }
