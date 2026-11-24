@@ -2,6 +2,7 @@
 
 use fmn_anim::{Animation, FrameMetadata, FramePacket};
 use fmn_core::color::LinearRgba;
+use fmn_library::VStyle;
 use fmn_mobject::{Mob, Stage};
 use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
