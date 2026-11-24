@@ -363,6 +363,7 @@ impl From<fmn_anim::continuation::Error> for SceneError {
         match error {
             fmn_anim::continuation::Error::Serial(error) => Self::Serialize(error),
             fmn_anim::continuation::Error::Animation(error) => Self::Animation(error),
+            fmn_anim::continuation::Error::Persistence(error) => Self::Persist(error),
             fmn_anim::continuation::Error::Invalid(reason) => Self::InvalidState(reason),
         }
     }
@@ -1640,10 +1641,18 @@ impl Scene {
     ) -> Result<Option<Vec<u8>>, SceneError> {
         self.ensure_ready()?;
         self.ensure_updaters_ready()?;
+        // A closed native succession has a serial, just-in-time lifecycle;
+        // it remains unclassified for pure frame reconstruction. The native
+        // continuation codec independently verifies its exact carrier types
+        // and saved lifecycle. Retain every other historical effect here,
+        // including a host updater phase no longer present in the live Stage.
+        let effects = self.stepped_play_purity(play);
+        let external_effects = matches!(effects, Purity::Stateful(reasons)
+            if reasons.iter().any(|reason| *reason != ImpureEffect::UnclassifiedAnimation));
         if !self.allows_unobserved_advance()
             || play.sink_error.is_some()
             || self.event_error.is_some()
-            || !self.stepped_play_purity(play).is_pure()
+            || external_effects
         {
             return Ok(None);
         }

@@ -2078,6 +2078,22 @@ impl FamilyCheckpoint {
         stage: &Stage,
         limits: SnapshotLimits,
     ) -> Result<Self, PersistError> {
+        let mut remaining = limits.max_total_decoded_bytes;
+        Self::from_bytes_with_budget(bytes, stage, &mut remaining)
+    }
+
+    /// Decode while consuming a containing document's remaining allocation
+    /// budget. The account changes only after the complete checkpoint and its
+    /// graph have passed validation; failure leaves both Stage and account
+    /// unchanged. Nested animation histories use one account for every member.
+    ///
+    /// # Errors
+    /// As [`Self::from_bytes_with_limits`].
+    pub fn from_bytes_with_budget(
+        bytes: &[u8],
+        stage: &Stage,
+        remaining: &mut usize,
+    ) -> Result<Self, PersistError> {
         let mut reader = Reader::open(
             bytes,
             FAMILY_CHECKPOINT_SCHEMA,
@@ -2088,7 +2104,7 @@ impl FamilyCheckpoint {
         if count == 0 {
             return Err(PersistError::Malformed("empty family checkpoint"));
         }
-        let mut budget = DecodeBudget::new(limits.max_total_decoded_bytes);
+        let mut budget = DecodeBudget::new(*remaining);
         preflight_count(
             &reader,
             &mut budget,
@@ -2111,6 +2127,7 @@ impl FamilyCheckpoint {
         reader.finish()?;
         let checkpoint = Self { entries };
         validate_checkpoint_graph(&checkpoint, &mut budget)?;
+        *remaining -= budget.charged;
         Ok(checkpoint)
     }
 }

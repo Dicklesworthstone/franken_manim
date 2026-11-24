@@ -3079,35 +3079,58 @@ fn future_native_declaration_changes_refuse_restore_without_mutating_current_sta
 }
 
 #[test]
-fn active_succession_keeps_verified_cold_recovery() {
+fn active_succession_restores_without_replay_and_preserves_future_frames() {
     let kind = FutureDeclarationKind::Succession;
-    for frame in [10, 15] {
+    // Cover the first child, the child boundary, the second child, and the
+    // final sampled frame whose cleanup still belongs to the next step.
+    for frame in [9, 10, 12, 15] {
         let mut original = future_declaration_worker(kind, 7, false, 1, 100);
         let entry = commit(&mut original, frame);
-        let expected = checkpoint_observation(&original);
-        let expected_png = seek(&mut original, frame);
-        let mut resumed = future_declaration_worker(kind, 7, false, 4, 100);
-        resumed
-            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint(&entry, 0)))
-            .unwrap();
-        let report = resumed.last_restore().unwrap();
-        assert_eq!(
-            report.mode,
-            NativeRestoreMode::ColdVerified,
-            "frame {frame}"
-        );
-        assert!(report.fallback.is_some());
-        assert_eq!(checkpoint_observation(&resumed), expected);
-        assert_eq!(png(&seek(&mut resumed, frame)), png(&expected_png));
+        let saved = checkpoint(&entry, 0);
+        let at_checkpoint = checkpoint_observation(&original);
+        assert!(matches!(at_checkpoint.3, EffectClass::Stateful(_)));
+        let checkpoint_png = seek(&mut original, frame);
+        let mut expected = Vec::new();
         for next in frame + 1..=18 {
+            expected.push((
+                next,
+                seek(&mut original, next),
+                checkpoint_observation(&original),
+            ));
+        }
+        let expected_final = commit(&mut original, 18);
+        for threads in [1, 4, 16] {
+            // A cold replay cannot reach any saved frame under this budget.
+            let mut resumed = future_declaration_worker(kind, 7, false, threads, 1);
+            resumed
+                .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                .unwrap();
+            let report = resumed.last_restore().unwrap();
             assert_eq!(
-                png(&seek(&mut resumed, next)),
-                png(&seek(&mut original, next))
+                report.mode,
+                NativeRestoreMode::Checkpoint,
+                "frame {frame}, threads {threads}"
             );
-            assert_eq!(
-                checkpoint_observation(&resumed),
-                checkpoint_observation(&original)
-            );
+            assert_eq!(report.fallback, None);
+            assert_eq!(report.frame, u64::try_from(frame).unwrap());
+            assert_eq!(resumed.last_state_hash(), Some(entry.state_hash));
+            assert_eq!(checkpoint_observation(&resumed), at_checkpoint);
+            assert_eq!(png(&seek(&mut resumed, frame)), png(&checkpoint_png));
+            for (next, pixels, observation) in &expected {
+                assert_eq!(
+                    png(&seek(&mut resumed, *next)),
+                    png(pixels),
+                    "saved {frame}, next {next}, threads {threads}"
+                );
+                assert_eq!(
+                    &checkpoint_observation(&resumed),
+                    observation,
+                    "saved {frame}, next {next}, threads {threads}"
+                );
+            }
+            let actual_final = commit(&mut resumed, 18);
+            assert_eq!(actual_final.state_hash, expected_final.state_hash);
+            assert_eq!(actual_final.checkpoint, expected_final.checkpoint);
         }
     }
 }

@@ -34,6 +34,155 @@ fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
     mob
 }
 
+#[test]
+fn nested_family_checkpoint_decoding_consumes_one_transactional_budget() {
+    let mut stage = Stage::new();
+    let root = vmob(
+        &mut stage,
+        &[[0.0; 3], [1.0, 2.0, 3.0]],
+        [0.2, 0.4, 0.8, 1.0],
+    );
+    let checkpoint = stage.checkpoint_family(root).unwrap();
+    let bytes = checkpoint.to_bytes().unwrap();
+    let before = stage.snapshot_bytes().unwrap();
+    let mut remaining = 1024 * 1024;
+    let decoded = FamilyCheckpoint::from_bytes_with_budget(&bytes, &stage, &mut remaining).unwrap();
+    let charged = 1024 * 1024 - remaining;
+    assert!(charged > 0);
+    assert_eq!(decoded.root(), root);
+    assert_eq!(decoded.to_bytes().unwrap(), bytes);
+
+    let mut combined = 2 * charged - 1;
+    FamilyCheckpoint::from_bytes_with_budget(&bytes, &stage, &mut combined).unwrap();
+    assert_eq!(combined, charged - 1);
+    assert!(matches!(
+        FamilyCheckpoint::from_bytes_with_budget(&bytes, &stage, &mut combined),
+        Err(PersistError::AllocationLimit { .. })
+    ));
+    assert_eq!(
+        combined,
+        charged - 1,
+        "failed child cannot consume its owner's budget"
+    );
+    for length in [0, bytes.len() / 2, bytes.len() - 1] {
+        let mut enough = charged;
+        assert!(
+            FamilyCheckpoint::from_bytes_with_budget(&bytes[..length], &stage, &mut enough)
+                .is_err()
+        );
+        assert_eq!(enough, charged);
+    }
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
+}
+
+#[test]
+fn lifecycle_only_restore_keeps_current_content_and_callbacks_and_preflights_stale_members() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let child = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    let external = stage.add(Mobject::new());
+    stage.attach(root, child).unwrap();
+    stage.attach(external, child).unwrap();
+    stage.add_to_scene(root).unwrap();
+    stage.add_to_scene(external).unwrap();
+    // A saved completed lifetime may retain pre-existing suspension. Its
+    // authentic flags must be restored rather than indiscriminately cleared.
+    stage.suspend_updating(child, false);
+    let completed = stage.checkpoint_family(root).unwrap();
+    assert_eq!(completed.members().len(), 2);
+    assert_eq!(completed.members().collect::<Vec<_>>(), [root, child]);
+
+    stage.detach(root, child);
+    stage.shift(child, [3.0, -4.0, 1.0]);
+    stage.set_animating_status(root, true, false);
+    stage.set_animating_status(child, true, false);
+    stage.suspend_updating(root, false);
+    stage.resume_updating(child, false, false);
+    stage.set_time_from_clock(1.25);
+    let points = stage.get_points(child).unwrap();
+    let roots = stage.roots().to_vec();
+    let calls = Rc::new(Cell::new(0));
+    let counter = Rc::clone(&calls);
+    stage
+        .add_updater(child, move |_, _| counter.set(counter.get() + 1), false)
+        .unwrap();
+
+    stage
+        .restore_family_checkpoint_lifecycle(&completed)
+        .unwrap();
+    assert!(!stage.is_animating(root));
+    assert!(!stage.is_animating(child));
+    assert!(!stage.is_updating_suspended(root));
+    assert!(stage.is_updating_suspended(child));
+    assert!(stage.is_animating(external), "external flags are not owned");
+    assert!(stage.get(root).unwrap().submobjects().is_empty());
+    assert_eq!(stage.get(external).unwrap().submobjects(), [child]);
+    assert_eq!(stage.get_points(child).unwrap(), points);
+    assert_eq!(stage.roots(), roots);
+    assert_eq!(stage.time(), 1.25);
+    assert_eq!(calls.get(), 0);
+    stage.resume_updating(child, false, false);
+    stage.update_mobject(child, 0.0);
+    assert_eq!(calls.get(), 1, "the registered updater was preserved");
+
+    stage.delete(child).unwrap();
+    let replacement = stage.add(Mobject::from_points(&[[9.0, 8.0, 7.0]]));
+    assert_ne!(replacement, child);
+    stage.set_animating_status(root, true, false);
+    stage.suspend_updating(root, false);
+    let before = stage.snapshot_bytes().unwrap();
+    assert!(!completed.can_restore(&stage));
+    assert!(matches!(
+        stage.restore_family_checkpoint_lifecycle(&completed),
+        Err(StageError::StaleHandle)
+    ));
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    assert_eq!(calls.get(), 1);
+}
+
+#[test]
+fn continuation_validation_context_is_bounded_isolated_and_callback_free() {
+    let mut stage = Stage::new();
+    let root = vmob(
+        &mut stage,
+        &[[0.0; 3], [1.0, 2.0, 3.0]],
+        [0.2, 0.4, 0.8, 1.0],
+    );
+    stage.add_to_scene(root).unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let counter = Rc::clone(&calls);
+    stage
+        .add_updater(root, move |_, _| counter.set(counter.get() + 1), false)
+        .unwrap();
+    let before = stage.snapshot_bytes().unwrap();
+    let mut remaining = 1024 * 1024;
+    let (snapshot, mut context) = stage
+        .continuation_validation_context(&mut remaining)
+        .unwrap();
+    let charged = 1024 * 1024 - remaining;
+    assert!(charged > 0);
+    assert!(context.contains(root));
+    context.shift(root, [10.0, 0.0, 0.0]);
+    assert_ne!(context.snapshot_bytes().unwrap(), before);
+    assert_eq!(stage.snapshot_bytes().unwrap(), before);
+    context.restore(&snapshot);
+    assert_eq!(context.snapshot_bytes().unwrap(), before);
+    assert_eq!(calls.get(), 0);
+
+    let mut too_small = charged - 1;
+    assert!(matches!(
+        stage.continuation_validation_context(&mut too_small),
+        Err(PersistError::AllocationLimit { .. })
+    ));
+    assert_eq!(too_small, charged - 1);
+    let view = stage.get_mut(root).unwrap().buffer.export_view(true);
+    let mut enough = charged;
+    assert!(stage.continuation_validation_context(&mut enough).is_err());
+    assert_eq!(enough, charged);
+    drop(view);
+    assert_eq!(calls.get(), 0);
+}
+
 /// A representative scene: a rooted family with styled children, tweaked
 /// uniforms, a value tracker, §8.3 links, and a pin.
 fn build_scene(stage: &mut Stage) -> (Mob, Mob, Mob, Mob) {

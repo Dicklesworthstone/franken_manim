@@ -21483,6 +21483,30 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_active_succession_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_native_resume::run_active_succession),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_active_succession_checkpoint.bin".into(),
+                "native_active_succession_continued.png".into(),
+            ]),
+            counter_eq("studio_active_succession_checkpoint_restores", 8),
+            counter_eq("studio_active_succession_checkpoint_frames", 52),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.active_succession_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 8),
+                FieldPred::u64_eq("matching_frames", 52),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_wait_tail_checkpoint.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioInProcess,
@@ -25999,6 +26023,16 @@ fn studio_indication_checkpoint_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_indication_checkpoint.v1")
         .expect("indication checkpoint lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_active_succession_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_active_succession_checkpoint.v1")
+        .expect("active native Succession checkpoint lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

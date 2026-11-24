@@ -1028,6 +1028,156 @@ fn stepped_wait_uses_the_same_scene_updater_release_window() {
 }
 
 #[test]
+fn durable_succession_continuation_preserves_samples_cleanup_and_stateful_classification() {
+    use fmn_anim::{Animation, ImpureEffect, Purity, Transform};
+
+    fn step(scene: &mut Scene, play: &mut fmn_scene::SteppedPlay) -> fmn_anim::FramePacket {
+        let mut sink = PacketSink::default();
+        scene.prepare_stepped_play_frame(play).unwrap().unwrap();
+        scene.complete_stepped_play_frame(play, &mut sink).unwrap();
+        sink.packet.unwrap()
+    }
+
+    for prefix in [1, 5, 8, 12] {
+        let config = RuntimeConfig {
+            fps: 24,
+            ..RuntimeConfig::default()
+        };
+        let mut source = Scene::new(config.clone(), 19).unwrap();
+        let mob = source.add_mobject(point()).unwrap();
+        let first = source
+            .stage_mut()
+            .add(Mobject::from_points(&[[2.0, 1.0, 0.0]]));
+        let second = source
+            .stage_mut()
+            .add(Mobject::from_points(&[[-3.0, 2.0, 0.0]]));
+        let mut a = Transform::new(mob, first);
+        a.state_mut().config.run_time_frames = Some(5);
+        let mut b = Transform::new(mob, second);
+        b.state_mut().config.run_time_frames = Some(7);
+        let succession =
+            Succession::new(source.stage_mut(), vec![Box::new(a), Box::new(b)]).unwrap();
+        source.wait_frames(2, &mut NullSceneSink).unwrap();
+        let mut original = source
+            .begin_stepped_play(
+                vec![Box::new(succession)],
+                PlayOverrides::default(),
+                &mut NullSceneSink,
+            )
+            .unwrap()
+            .unwrap();
+        for _ in 0..prefix {
+            step(&mut source, &mut original);
+        }
+        let purity = Purity::Stateful(vec![ImpureEffect::UnclassifiedAnimation]);
+        assert_eq!(source.stepped_play_purity(&original), purity);
+        let continuation = source
+            .checkpoint_stepped_play(&original, 8 * 1024 * 1024)
+            .unwrap()
+            .expect("closed native succession has a durable lifecycle");
+        let bytes = source.state_bytes().unwrap();
+        let mut restored = Scene::new(config, 19).unwrap();
+        restored.restore_state_bytes(&bytes).unwrap();
+        let mut resumed = restored.resume_stepped_play(&continuation).unwrap();
+        assert_eq!(
+            restored.state_bytes().unwrap(),
+            bytes,
+            "resume must not replay begin or a completed sample"
+        );
+        assert_eq!(restored.stepped_play_purity(&resumed), purity);
+        while !original.frames_complete() {
+            let expected = step(&mut source, &mut original);
+            let actual = step(&mut restored, &mut resumed);
+            assert_eq!(actual.frame_index(), expected.frame_index());
+            assert_eq!(actual.segment_frame(), expected.segment_frame());
+            assert_eq!(actual.alpha().to_bits(), expected.alpha().to_bits());
+            assert_eq!(actual.time(), expected.time());
+            assert_eq!(
+                actual.state().to_bytes().unwrap(),
+                expected.state().to_bytes().unwrap()
+            );
+            assert_eq!(
+                restored.state_bytes().unwrap(),
+                source.state_bytes().unwrap()
+            );
+        }
+        assert!(resumed.frames_complete());
+        assert_eq!(
+            restored.play_count(),
+            1,
+            "final capture retains its pending epilogue"
+        );
+        let mut expected_events = RecordingSink::default();
+        let mut actual_events = RecordingSink::default();
+        let expected = source
+            .finish_stepped_play(original, &mut expected_events)
+            .unwrap();
+        let actual = restored
+            .finish_stepped_play(resumed, &mut actual_events)
+            .unwrap();
+        assert_eq!((actual.base_frame, actual.n_frames), (2, 12));
+        assert_eq!(actual.purity, expected.purity);
+        assert_eq!(actual.purity, purity);
+        assert_eq!(actual_events.events, expected_events.events);
+        assert_eq!(restored.play_count(), 2);
+        assert_eq!(
+            restored.state_bytes().unwrap(),
+            source.state_bytes().unwrap()
+        );
+    }
+}
+
+#[test]
+fn succession_checkpoint_retains_historical_updater_refusal() {
+    use fmn_anim::Transform;
+
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        3,
+    )
+    .unwrap();
+    let mob = scene.add_mobject(point()).unwrap();
+    let target = scene
+        .stage_mut()
+        .add(Mobject::from_points(&[[1.0, 0.0, 0.0]]));
+    let updater = scene
+        .stage_mut()
+        .add_updater(mob, |_, _| {}, false)
+        .unwrap();
+    let succession = Succession::new(
+        scene.stage_mut(),
+        vec![Box::new(Transform::new(mob, target))],
+    )
+    .unwrap();
+    let mut play = scene
+        .begin_stepped_play(
+            vec![Box::new(succession)],
+            PlayOverrides::default(),
+            &mut NullSceneSink,
+        )
+        .unwrap()
+        .unwrap();
+    scene
+        .prepare_stepped_play_frame(&mut play)
+        .unwrap()
+        .unwrap();
+    scene
+        .complete_stepped_play_frame(&mut play, &mut NullSceneSink)
+        .unwrap();
+    scene.stage_mut().remove_updater(mob, updater);
+    assert!(
+        scene
+            .checkpoint_stepped_play(&play, 8 * 1024 * 1024)
+            .unwrap()
+            .is_none()
+    );
+    scene.abort_stepped_play(play, &mut NullSceneSink);
+}
+
+#[test]
 fn durable_wait_continuation_restores_updates_rng_and_pending_lifecycle_without_replay() {
     fn update(stage: &mut Stage, mob: fmn_mobject::Mob, dt: f64) {
         let x = stage.get_center(mob)[0];

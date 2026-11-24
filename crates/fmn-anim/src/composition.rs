@@ -49,6 +49,8 @@
 //! its original state — and a group that overrode it would break every
 //! remover it contains.
 
+use std::any::Any;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use fmn_core::constants::{
@@ -787,6 +789,15 @@ pub(crate) struct GroupContinuationControls {
     pub(crate) run_time_override: bool,
 }
 
+/// Native lifecycle ownership, separate from interpolation purity. A fresh
+/// member has bound timing but has not executed its just-in-time begin.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ContinuationPhase {
+    Fresh,
+    Prepared,
+    Finished,
+}
+
 struct ContinuedGroupTiming {
     state: AnimState,
     layout: ResolvedTimings,
@@ -803,6 +814,7 @@ fn continued_group_timing(
     animations: &[Box<dyn Animation>],
     controls: GroupContinuationControls,
     fps: u32,
+    begun: bool,
 ) -> Result<ContinuedGroupTiming, AnimError> {
     let invalid = || AnimError::InvalidFramePhase("inconsistent native group continuation timing");
     if !controls.layout_lag_ratio.is_finite()
@@ -853,7 +865,7 @@ fn continued_group_timing(
     if prepared.config.run_time.to_bits() != controls.timing_run_time.to_bits() {
         return Err(invalid());
     }
-    if let Some((_, end)) = prepared.config.time_span {
+    if begun && let Some((_, end)) = prepared.config.time_span {
         prepared.config.run_time = prepared.config.run_time.max(end);
     }
     if prepared.config.run_time.to_bits() != state.config.run_time.to_bits() {
@@ -945,11 +957,16 @@ impl AnimationGroup {
     }
 
     pub(crate) fn continuation_timing_valid(&self, fps: u32) -> bool {
+        self.closed_timing_valid(fps, ContinuationPhase::Prepared)
+    }
+
+    pub(crate) fn closed_timing_valid(&self, fps: u32, phase: ContinuationPhase) -> bool {
         let Ok(expected) = continued_group_timing(
             &self.state,
             &self.animations,
             self.continuation_controls(),
             fps,
+            phase != ContinuationPhase::Fresh,
         ) else {
             return false;
         };
@@ -976,15 +993,66 @@ impl AnimationGroup {
         controls: GroupContinuationControls,
         fps: u32,
     ) -> Result<Self, AnimError> {
-        let restored = continued_group_timing(&state, &animations, controls, fps)?;
+        Self::from_closed_continuation(
+            state,
+            animations,
+            controls,
+            fps,
+            ContinuationPhase::Prepared,
+        )
+    }
+
+    pub(crate) fn closed_lifecycle_valid(&self, phase: ContinuationPhase) -> bool {
+        let begun = if phase == ContinuationPhase::Fresh {
+            0
+        } else {
+            self.animations.len()
+        };
+        let finished = if phase == ContinuationPhase::Finished {
+            begun
+        } else {
+            0
+        };
+        self.begun == begun
+            && self.finished == finished
+            && self.updater_error.is_none()
+            && self.state.starting_mobject().is_none()
+            && self.state.families().is_empty()
+            && !self.state.mobject_was_updating()
+    }
+
+    pub(crate) fn from_closed_continuation(
+        state: AnimState,
+        animations: Vec<Box<dyn Animation>>,
+        controls: GroupContinuationControls,
+        fps: u32,
+        phase: ContinuationPhase,
+    ) -> Result<Self, AnimError> {
+        let restored = continued_group_timing(
+            &state,
+            &animations,
+            controls,
+            fps,
+            phase != ContinuationPhase::Fresh,
+        )?;
+        let begun = if phase == ContinuationPhase::Fresh {
+            0
+        } else {
+            animations.len()
+        };
+        let finished = if phase == ContinuationPhase::Finished {
+            begun
+        } else {
+            0
+        };
         Ok(Self {
             state: restored.state,
-            begun: animations.len(),
+            begun,
             animations,
             timings: restored.layout.seconds,
             max_end_time: restored.max_end_time,
             updater_error: None,
-            finished: 0,
+            finished,
             layout_lag_ratio: controls.layout_lag_ratio,
             duration_scale: controls.duration_scale,
             timing_run_time: controls.timing_run_time,
@@ -1696,13 +1764,13 @@ pub struct Succession {
     animations: Vec<Box<dyn Animation>>,
     timings: Vec<Interval>,
     max_end_time: f64,
-    active: usize,
+    pub(crate) active: usize,
     deferred: Option<AnimError>,
-    playback: Vec<MemberPlayback>,
-    replayable: bool,
-    replaying: bool,
-    last_time: Option<f64>,
-    last_exact_position: Option<FramePosition>,
+    pub(crate) playback: Vec<MemberPlayback>,
+    pub(crate) replayable: bool,
+    pub(crate) replaying: bool,
+    pub(crate) last_time: Option<f64>,
+    pub(crate) last_exact_position: Option<FramePosition>,
     layout_lag_ratio: f64,
     timing_run_time: f64,
     run_time_override: bool,
@@ -1714,14 +1782,243 @@ pub struct Succession {
 /// At most three content checkpoints per initialized member, independent of
 /// frame count. Lifecycle callbacks run once; revisiting a member restores its
 /// already-prepared or already-finished content instead of calling them again.
-struct MemberPlayback {
-    before: Option<FamilyCheckpoint>,
-    prepared: Option<FamilyCheckpoint>,
-    completed: Option<FamilyCheckpoint>,
-    finished: bool,
+pub(crate) struct MemberPlayback {
+    pub(crate) before: Option<MemberCheckpoint>,
+    pub(crate) prepared: Option<MemberCheckpoint>,
+    pub(crate) completed: Option<MemberCheckpoint>,
+    pub(crate) finished: bool,
+}
+
+/// A visibility-changing native member still owns descendants detached from
+/// its current root. Preserve their actual content and lifetime flags beside
+/// the visible family, keeping each saved graph independently descendant-closed.
+pub(crate) struct MemberCheckpoint {
+    pub(crate) primary: FamilyCheckpoint,
+    pub(crate) detached: Vec<FamilyCheckpoint>,
+}
+
+impl MemberCheckpoint {
+    fn capture(stage: &Stage, animation: &dyn Animation) -> Result<Self, StageError> {
+        let root = animation.state().mobject();
+        let primary = stage.checkpoint_family(root)?;
+        let mut covered: HashSet<_> = stage.family(root).into_iter().collect();
+        let mut detached = Vec::new();
+        let mut pending = vec![animation];
+        while let Some(animation) = pending.pop() {
+            let any = animation as &dyn Any;
+            if let Some(subsets) = any.downcast_ref::<crate::ShowIncreasingSubsets>() {
+                for &child in &subsets.all_submobs {
+                    if !covered.contains(&child) {
+                        let checkpoint = stage.checkpoint_family(child)?;
+                        covered.extend(stage.family(child));
+                        detached.push(checkpoint);
+                    }
+                }
+            } else {
+                // Only closed native composition data is inspected. Unknown
+                // wrappers retain their existing root-only checkpoint scope;
+                // this traversal never invokes a user inventory callback.
+                let children = if let Some(group) = any.downcast_ref::<AnimationGroup>() {
+                    Some(group.animations())
+                } else if let Some(succession) = any.downcast_ref::<Succession>() {
+                    Some(succession.animations())
+                } else {
+                    any.downcast_ref::<crate::TransformMatchingParts>()
+                        .map(crate::TransformMatchingParts::animations)
+                };
+                if let Some(children) = children {
+                    pending.extend(children.iter().rev().map(|child| child.as_ref()));
+                }
+            }
+        }
+        Ok(Self { primary, detached })
+    }
+
+    pub(crate) fn root(&self) -> Mob {
+        self.primary.root()
+    }
+
+    pub(crate) fn restore(&self, stage: &mut Stage) -> Result<(), AnimError> {
+        if !self.primary.can_restore(stage)
+            || self.detached.iter().any(|saved| !saved.can_restore(stage))
+        {
+            return Err(AnimError::Stage(StageError::StaleHandle));
+        }
+        stage.restore_family_checkpoint(&self.primary)?;
+        for saved in &self.detached {
+            stage.restore_family_checkpoint(saved)?;
+        }
+        Ok(())
+    }
+
+    fn restore_lifecycle(&self, stage: &mut Stage) -> Result<(), AnimError> {
+        if !self.primary.can_restore(stage)
+            || self.detached.iter().any(|saved| !saved.can_restore(stage))
+        {
+            return Err(AnimError::Stage(StageError::StaleHandle));
+        }
+        stage.restore_family_checkpoint_lifecycle(&self.primary)?;
+        for saved in &self.detached {
+            stage.restore_family_checkpoint_lifecycle(saved)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) struct SuccessionContinuation {
+    pub(crate) active: usize,
+    pub(crate) playback: Vec<MemberPlayback>,
+    pub(crate) replayable: bool,
+    pub(crate) replaying: bool,
+    pub(crate) last_time: Option<f64>,
+    pub(crate) last_exact_position: Option<FramePosition>,
 }
 
 impl Succession {
+    pub(crate) fn closed_lifecycle_valid(&self, phase: ContinuationPhase, fps: u32) -> bool {
+        if self.animations.is_empty()
+            || self.deferred.is_some()
+            || self.state.starting_mobject().is_some()
+            || !self.state.families().is_empty()
+            || self.state.mobject_was_updating()
+        {
+            return false;
+        }
+        let Ok(expected) = continued_group_timing(
+            &self.state,
+            &self.animations,
+            self.declaration_controls(),
+            fps,
+            phase != ContinuationPhase::Fresh,
+        ) else {
+            return false;
+        };
+        if self.state.prepared_duration() != expected.state.prepared_duration()
+            || self.state.frame_units().map(f64::to_bits)
+                != expected.state.frame_units().map(f64::to_bits)
+            || !same_intervals(&self.timings, &expected.layout.seconds)
+            || !match (&self.frame_timings, &expected.layout.frames) {
+                (None, None) => true,
+                (Some(a), Some(b)) => same_intervals(a, b),
+                _ => false,
+            }
+            || self.max_end_time.to_bits() != expected.max_end_time.to_bits()
+            || self.max_frame_end.map(f64::to_bits) != expected.max_frame_end.map(f64::to_bits)
+            || !same_exact_timings(&self.exact_timings, &expected.layout.exact)
+        {
+            return false;
+        }
+        if phase == ContinuationPhase::Fresh {
+            return self.active == 0
+                && self.playback.is_empty()
+                && !self.replayable
+                && !self.replaying
+                && self.last_time.is_none()
+                && self.last_exact_position.is_none();
+        }
+        if !self.replayable
+            || self.playback.is_empty()
+            || self.playback.len() > self.animations.len()
+            || self.active >= self.playback.len()
+            || (!self.replaying && self.active + 1 != self.playback.len())
+        {
+            return false;
+        }
+        let last = self.playback.len() - 1;
+        for (index, member) in self.playback.iter().enumerate() {
+            let root = self.animations[index].state().mobject();
+            if member
+                .before
+                .as_ref()
+                .is_none_or(|saved| saved.root() != root)
+                || member
+                    .prepared
+                    .as_ref()
+                    .is_none_or(|saved| saved.root() != root)
+                || member
+                    .completed
+                    .as_ref()
+                    .is_some_and(|saved| saved.root() != root)
+                || member.completed.is_some() != member.finished
+                || (index < last && !member.finished)
+                || (phase == ContinuationPhase::Finished && !member.finished)
+                || (phase == ContinuationPhase::Prepared && index == last && member.finished)
+            {
+                return false;
+            }
+        }
+        match (&self.last_exact_position, self.last_time) {
+            (Some(position), Some(time)) => self.exact_timings.as_ref().is_some_and(|timings| {
+                position.to_f64().to_bits() == time.to_bits()
+                    && timings.clamp_position(position).is_ok_and(|clamped| {
+                        clamped
+                            .checked_cmp(position)
+                            .is_ok_and(|order| order.is_eq())
+                    })
+                    && timings
+                        .member_at(position)
+                        .is_ok_and(|index| index == Some(self.active))
+            }),
+            (None, Some(time)) => {
+                time.is_finite()
+                    && time >= 0.0
+                    && time <= self.max_frame_end.unwrap_or(self.max_end_time)
+                    && self.member_at(time) == self.active
+            }
+            (None, None) => self.active == 0 && self.playback.len() == 1,
+            (Some(_), None) => false,
+        }
+    }
+
+    /// Restore native playback ownership and exact timing without beginning
+    /// a future member or replaying an already-finished lifecycle.
+    pub(crate) fn from_closed_continuation(
+        state: AnimState,
+        animations: Vec<Box<dyn Animation>>,
+        controls: GroupContinuationControls,
+        fps: u32,
+        phase: ContinuationPhase,
+        playback: SuccessionContinuation,
+    ) -> Result<Self, AnimError> {
+        if controls.duration_scale != 1.0 {
+            return Err(AnimError::InvalidFramePhase(
+                "invalid succession duration scale",
+            ));
+        }
+        let restored = continued_group_timing(
+            &state,
+            &animations,
+            controls,
+            fps,
+            phase != ContinuationPhase::Fresh,
+        )?;
+        let value = Self {
+            state: restored.state,
+            animations,
+            timings: restored.layout.seconds,
+            max_end_time: restored.max_end_time,
+            active: playback.active,
+            deferred: None,
+            playback: playback.playback,
+            replayable: playback.replayable,
+            replaying: playback.replaying,
+            last_time: playback.last_time,
+            last_exact_position: playback.last_exact_position,
+            layout_lag_ratio: controls.layout_lag_ratio,
+            timing_run_time: controls.timing_run_time,
+            run_time_override: controls.run_time_override,
+            frame_timings: restored.layout.frames,
+            max_frame_end: restored.max_frame_end,
+            exact_timings: restored.layout.exact,
+        };
+        if !value.closed_lifecycle_valid(phase, fps) {
+            return Err(AnimError::InvalidFramePhase(
+                "inconsistent succession playback history",
+            ));
+        }
+        Ok(value)
+    }
+
     /// A future schedule may retain this factory value only before timing or
     /// any just-in-time child lifecycle has initialized its private state.
     pub(crate) fn declaration_is_fresh(&self) -> bool {
@@ -1948,10 +2245,9 @@ impl Succession {
 
     fn begin_member(&mut self, stage: &mut Stage, index: usize) -> Result<(), AnimError> {
         check_updater_error(stage)?;
-        let mob = self.animations[index].state().mobject();
         let before = self
             .replayable
-            .then(|| stage.checkpoint_family(mob))
+            .then(|| MemberCheckpoint::capture(stage, self.animations[index].as_ref()))
             .transpose()?;
         // Own the attempted lifetime before calling user code. A canonical
         // begin may already have suspended the family when its zero sample
@@ -1973,7 +2269,7 @@ impl Succession {
         self.replayable &= self.replay_sources_are_static(stage);
         self.playback[index].prepared = self
             .replayable
-            .then(|| stage.checkpoint_family(mob))
+            .then(|| MemberCheckpoint::capture(stage, self.animations[index].as_ref()))
             .transpose()?;
         Ok(())
     }
@@ -1986,16 +2282,16 @@ impl Succession {
         check_updater_error(stage)?;
         for member in self.playback.iter().rev() {
             if let Some(before) = &member.before {
-                stage.restore_family_checkpoint(before)?;
+                before.restore(stage)?;
             }
         }
         for member in self.playback.iter().take(target) {
             if let Some(completed) = &member.completed {
-                stage.restore_family_checkpoint(completed)?;
+                completed.restore(stage)?;
             }
         }
         if let Some(prepared) = &self.playback[target].prepared {
-            stage.restore_family_checkpoint(prepared)?;
+            prepared.restore(stage)?;
         }
         Ok(())
     }
@@ -2007,7 +2303,7 @@ impl Succession {
         }
         if self.playback[index].finished {
             if let Some(completed) = &self.playback[index].completed {
-                stage.restore_family_checkpoint(completed)?;
+                completed.restore(stage)?;
             }
             return Ok(());
         }
@@ -2020,8 +2316,10 @@ impl Succession {
             return Err(error);
         }
         if self.replayable {
-            self.playback[index].completed =
-                Some(stage.checkpoint_family(self.animations[index].state().mobject())?);
+            self.playback[index].completed = Some(MemberCheckpoint::capture(
+                stage,
+                self.animations[index].as_ref(),
+            )?);
         }
         Ok(())
     }
@@ -2310,7 +2608,18 @@ impl Animation for Succession {
         let error = self.deferred_error();
         retain_animation_error(stage, &mut self.deferred, error);
         for (animation, playback) in self.animations.iter_mut().zip(&mut self.playback) {
-            if !playback.finished {
+            if playback.finished {
+                // Rewinding can restore a finished member's prepared flags,
+                // including children hidden from its current visible family.
+                // Its callbacks have already balanced once. Reapply only the
+                // authentic completed flags, preserving the observed geometry.
+                if self.replaying
+                    && let Some(completed) = &playback.completed
+                    && let Err(error) = completed.restore_lifecycle(stage)
+                {
+                    retain_animation_error(stage, &mut self.deferred, Some(error));
+                }
+            } else {
                 animation.abort(stage);
                 playback.finished = true;
             }

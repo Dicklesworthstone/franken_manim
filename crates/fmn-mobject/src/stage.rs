@@ -3423,6 +3423,62 @@ impl Stage {
         }
     }
 
+    /// Prepare an isolated context for validating saved native lifetimes.
+    /// No callbacks run and all records, images and executable registrations
+    /// remain shared by CoW. Live record views are refused before capture.
+    ///
+    /// The containing decoder supplies one aggregate allocation account. It
+    /// covers both slot tables, snapshot payloads, generations, graph edits,
+    /// and the worst-case family-query cache/workspace of this arena before
+    /// anything is allocated. The immutable snapshot can reset the returned
+    /// context repeatedly without retaining a separate arena for each child.
+    ///
+    /// # Errors
+    /// [`crate::PersistError`] for a live view or an exhausted account. An
+    /// error does not consume the account or modify the live Stage.
+    pub fn continuation_validation_context(
+        &self,
+        remaining: &mut usize,
+    ) -> Result<(Snapshot, Stage), crate::PersistError> {
+        let slots = self.slots.len();
+        let mut needed = slots.saturating_mul(
+            2 * std::mem::size_of::<Slot>()
+                + std::mem::size_of::<(u32, Option<SnapshotEntry>)>()
+                + SnapshotEntry::ALLOCATION_BYTES
+                + std::mem::size_of::<u32>(),
+        );
+        // Queries may populate one descendant table per live handle. Charge
+        // an arena-wide upper bound, including temporary traversal/index
+        // storage, instead of trusting the shape of an untrusted history.
+        needed = needed.saturating_add(
+            slots
+                .saturating_mul(slots.saturating_add(8))
+                .saturating_mul(2 * std::mem::size_of::<Mob>()),
+        );
+        for entry in self.slots.iter().filter_map(|slot| slot.entry.as_ref()) {
+            if entry.buffer.live_view_count() != 0 {
+                return Err(crate::PersistError::Malformed(
+                    "continuation validation cannot capture live record views",
+                ));
+            }
+            needed = needed.saturating_add(
+                (entry.submobjects.len().saturating_add(entry.parents.len()))
+                    .saturating_mul(4 * std::mem::size_of::<Mob>()),
+            );
+        }
+        if needed > *remaining {
+            return Err(crate::PersistError::AllocationLimit {
+                limit: *remaining,
+                needed,
+                what: "continuation validation context",
+            });
+        }
+        let snapshot = self.snapshot();
+        let context = snapshot.materialize();
+        *remaining -= needed;
+        Ok((snapshot, context))
+    }
+
     /// Restore a snapshot. Explicitly recorded handles keep their identities;
     /// handles minted after the snapshot go stale and cannot alias a later
     /// allocation in this physical arena. Updater removal identities follow
@@ -3503,6 +3559,31 @@ impl Stage {
 /// format; [`Self::from_bytes`] rebinds it against an already restored Stage.
 pub struct FamilyCheckpoint {
     pub(crate) entries: Vec<(Mob, FamilyCheckpointEntry)>,
+}
+
+impl FamilyCheckpoint {
+    /// The identity whose complete family this content checkpoint captures.
+    /// Decode validates that this first member reaches every saved entry.
+    #[must_use]
+    pub fn root(&self) -> Mob {
+        self.entries[0].0
+    }
+
+    /// Every captured identity in its original family order. This inventory
+    /// includes members that may no longer be attached to the current root.
+    pub fn members(&self) -> impl ExactSizeIterator<Item = Mob> + '_ {
+        self.entries.iter().map(|(member, _)| *member)
+    }
+
+    /// Whether every captured identity still resolves in `stage`. Owners of
+    /// several saved families can preflight the whole set before restoring
+    /// any content; recycled slots never satisfy this check.
+    #[must_use]
+    pub fn can_restore(&self, stage: &Stage) -> bool {
+        self.entries
+            .iter()
+            .all(|(member, _)| stage.contains(*member))
+    }
 }
 
 pub(crate) struct FamilyCheckpointEntry {
@@ -3611,6 +3692,31 @@ impl Stage {
             entry.render_primitive = saved.render_primitive;
             entry.replace_image_resource(saved.image.clone());
             *entry.bbox.borrow_mut() = BboxCache::default();
+        }
+        Ok(())
+    }
+
+    /// Restore only the captured animation and updater-suspension flags.
+    ///
+    /// Geometry, topology, scene membership, record views, updater registrations
+    /// and time remain unchanged. No updater or lifecycle callback is called.
+    /// A composition can therefore release an already-finished lifetime after
+    /// revisiting its prepared content without replacing the visible result.
+    ///
+    /// # Errors
+    /// [`StageError::StaleHandle`] if any captured identity is no longer live
+    /// in this Stage. All identities are checked before changing any flag.
+    pub fn restore_family_checkpoint_lifecycle(
+        &mut self,
+        checkpoint: &FamilyCheckpoint,
+    ) -> Result<(), StageError> {
+        for (member, _) in &checkpoint.entries {
+            self.try_get(*member)?;
+        }
+        for (member, saved) in &checkpoint.entries {
+            let entry = self.get_mut(*member).expect("prechecked");
+            entry.updating_suspended = saved.updating_suspended;
+            entry.is_animating = saved.is_animating;
         }
         Ok(())
     }

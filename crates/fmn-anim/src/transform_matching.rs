@@ -329,11 +329,13 @@ impl TransformMatchingParts {
     /// Its original manifests and each prepared child are validated separately
     /// by the continuation owner after their allocation budgets are charged.
     pub(crate) fn continuation_lifecycle_valid(&self, stage: &Stage) -> bool {
-        self.begun
-            && !self.finished
-            && !self.cleaned
-            && self.error.is_none()
-            && self.group.continuation_lifecycle_valid(stage)
+        self.closed_lifecycle_valid(true, false) && self.group.continuation_lifecycle_valid(stage)
+    }
+
+    /// Validate this matching wrapper's lifecycle flags independently of the
+    /// eager group's phase, which the closed-tree decoder validates separately.
+    pub(crate) fn closed_lifecycle_valid(&self, begun: bool, finished: bool) -> bool {
+        self.begun == begun && self.finished == finished && !self.cleaned && self.error.is_none()
     }
 
     /// Copy a dynamically verified native child tree without invoking hooks.
@@ -358,6 +360,18 @@ impl TransformMatchingParts {
         source: (Mob, Vec<MatchingFamilyRow>),
         target: (Mob, Vec<MatchingFamilyRow>),
     ) -> Self {
+        Self::from_closed_continuation(group, source, target, true, false)
+    }
+
+    /// Reconstitute fresh, prepared or finished matching wrappers inside a
+    /// succession. This installs only decoded native data, without arena edits.
+    pub(crate) fn from_closed_continuation(
+        group: AnimationGroup,
+        source: (Mob, Vec<MatchingFamilyRow>),
+        target: (Mob, Vec<MatchingFamilyRow>),
+        begun: bool,
+        finished: bool,
+    ) -> Self {
         Self {
             group,
             source: MatchingFamily {
@@ -368,8 +382,8 @@ impl TransformMatchingParts {
                 root: target.0,
                 layout: target.1,
             },
-            begun: true,
-            finished: false,
+            begun,
+            finished,
             cleaned: false,
             error: None,
         }

@@ -692,6 +692,7 @@ impl OpenSegment {
         segment: FrameSegment,
         base_frame: i64,
         stepped: i64,
+        purity: Purity,
     ) -> Result<Self, AnimError> {
         if segment.end_time().fps() != clock.fps()
             || segment.n_frames() <= 0
@@ -708,7 +709,7 @@ impl OpenSegment {
         Ok(Self {
             report: SegmentReport {
                 kind: SegmentKind::Play,
-                purity: Purity::Pure,
+                purity,
                 begin_state: None,
                 base_frame,
                 n_frames: segment.n_frames(),

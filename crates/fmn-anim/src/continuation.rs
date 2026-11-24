@@ -3,8 +3,9 @@
 //! A continuation owns data describing interpolation AND the remaining native
 //! lifecycle. Interpolation purity alone is insufficient: a user wrapper may
 //! delegate interpolation while adding an effectful finish hook. Actual dynamic
-//! types are checked through Any; callbacks, just-in-time compositions and
-//! unknown rates fall back. Closed eager groups retain their nested lifecycle.
+//! types are checked through Any; callbacks and unknown rates fall back.
+//! Closed compositions retain their nested lifecycle, including the bounded
+//! content history and future native recipes of just-in-time Successions.
 //! Stage contents live in the enclosing SceneState, whose identity the caller
 //! must bind to this document. Handles rebind only after that state is restored.
 
@@ -14,9 +15,12 @@ use std::sync::Arc;
 
 use fmn_hash::{Limits, Reader, Schema, SerialError, UnknownPolicy, Writer};
 use fmn_mobject::path_sampling::PathObservation;
-use fmn_mobject::{Mob, Stage};
+use fmn_mobject::{FamilyCheckpoint, Mob, PersistError, Snapshot, Stage};
 
-use crate::composition::GroupContinuationControls;
+use crate::composition::{
+    ContinuationPhase, GroupContinuationControls, MemberCheckpoint, MemberPlayback,
+    SuccessionContinuation,
+};
 use crate::creation::{IntRound, PartialGeometry};
 use crate::transform::TargetPrep;
 use crate::transform_matching::MatchingFamilyRow;
@@ -31,9 +35,11 @@ use crate::{
 // minor 5 adds exact prepared rate tables. Existing payload layouts and emitted
 // minor versions stay unchanged for older carrier/rate trees. Minor 6 adds
 // shape matching's eager group plus its original-target replacement lifecycle.
-const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 6);
+// Minor 7 carries mixed fresh/prepared/finished native lifetimes plus a
+// Succession's original content checkpoints and exact playback cursor.
+const SCHEMA: Schema = Schema::new(*b"FMPC", 1, 1, 7);
 // Declaration minor 6 binds untouched future successions and shape matching.
-// Succession still has no prepared carrier: its children begin just in time.
+// Keep declaration identity unchanged when admitting prepared Successions.
 const DECLARATION_SCHEMA: Schema = Schema::new(*b"FMPC", 2, 1, 6);
 const MAX_BYTES: usize = 64 * 1024 * 1024;
 const MAX_ITEMS: usize = 1_000_000;
@@ -47,6 +53,8 @@ pub enum Error {
     Serial(SerialError),
     /// Existing animation or rational-clock validation failure.
     Animation(AnimError),
+    /// A nested content checkpoint or validation context could not be read.
+    Persistence(PersistError),
     /// The document is inconsistent with its prepared native state.
     Invalid(&'static str),
 }
@@ -56,6 +64,7 @@ impl fmt::Display for Error {
         match self {
             Self::Serial(error) => write!(f, "play continuation: {error}"),
             Self::Animation(error) => write!(f, "play continuation: {error}"),
+            Self::Persistence(error) => write!(f, "play continuation: {error}"),
             Self::Invalid(reason) => write!(f, "invalid play continuation: {reason}"),
         }
     }
@@ -66,6 +75,7 @@ impl std::error::Error for Error {
         match self {
             Self::Serial(error) => Some(error),
             Self::Animation(error) => Some(error),
+            Self::Persistence(error) => Some(error),
             Self::Invalid(_) => None,
         }
     }
@@ -80,6 +90,12 @@ impl From<SerialError> for Error {
 impl From<AnimError> for Error {
     fn from(value: AnimError) -> Self {
         Self::Animation(value)
+    }
+}
+
+impl From<PersistError> for Error {
+    fn from(value: PersistError) -> Self {
+        Self::Persistence(value)
     }
 }
 
@@ -147,8 +163,8 @@ fn native_kind(animation: &dyn Animation) -> Option<u8> {
 }
 
 // Declaration identity is a separate capability from resuming a prepared
-// lifecycle or running private native-frame preparation. Succession remains
-// executable only as an untouched value from the fresh factory.
+// lifecycle or running private native-frame preparation. Prepared Succession
+// trees are admitted only by the closed lifecycle path below.
 fn declaration_kind(animation: &dyn Animation) -> Option<u8> {
     native_kind(animation).or_else(|| {
         let any = animation as &dyn Any;
@@ -399,6 +415,47 @@ fn native_play_supported(animations: &[Box<dyn Animation>]) -> bool {
     animations
         .iter()
         .all(|animation| native_tree_supported(animation.as_ref(), 0, &mut remaining))
+}
+
+// This admission is deliberately independent of AnimationSignature and of
+// isolated native frame preparation. Succession remains unclassified there.
+fn closed_tree_supported(animation: &dyn Animation, depth: usize, remaining: &mut usize) -> bool {
+    if depth > MAX_NATIVE_DEPTH || *remaining == 0 || declaration_kind(animation).is_none() {
+        return false;
+    }
+    *remaining -= 1;
+    if !config_supported(&animation.state().config) {
+        return false;
+    }
+    if let Some(motion) = (animation as &dyn Any).downcast_ref::<MoveAlongPath>()
+        && !motion.captured_path().is_some_and(captured_path_valid)
+    {
+        return false;
+    }
+    declaration_composition(animation).is_none_or(|(controls, children)| {
+        group_controls_supported(controls)
+            && children
+                .iter()
+                .all(|child| closed_tree_supported(child.as_ref(), depth + 1, remaining))
+    })
+}
+
+fn contains_succession(animation: &dyn Animation) -> bool {
+    (animation as &dyn Any).is::<Succession>()
+        || declaration_composition(animation).is_some_and(|(_, children)| {
+            children
+                .iter()
+                .any(|child| contains_succession(child.as_ref()))
+        })
+}
+
+fn closed_effects_supported(purity: &crate::purity::Purity) -> bool {
+    match purity {
+        crate::purity::Purity::Pure => true,
+        crate::purity::Purity::Stateful(effects) => effects
+            .iter()
+            .all(|effect| *effect == crate::purity::ImpureEffect::UnclassifiedAnimation),
+    }
 }
 
 fn declaration_tree_supported(
@@ -1288,9 +1345,17 @@ fn get_state(
     budget: &mut Budget,
     fps: u32,
     width: usize,
+    prepared: bool,
 ) -> Result<AnimState, Error> {
     let mob = get_mob(reader, stage)?;
     let config = get_config(reader, budget)?;
+    if !prepared {
+        let duration = config.duration_on_grid(fps)?;
+        let mut state = AnimState::new(mob, config);
+        state.frame_units = duration.is_frame_native().then(|| duration.frame_units());
+        state.prepared_duration = Some(duration);
+        return Ok(state);
+    }
     let starting = get_mob(reader, stage)?;
     let was_updating = reader.get_bool()?;
     let count = get_count(reader, width * 8)?;
@@ -1337,8 +1402,8 @@ fn get_path(reader: &mut Reader<'_>) -> Result<PathFunc, Error> {
     })
 }
 
-// Preparation has already run for a continuation. Its recipe is needed only
-// for the fresh factory's declaration identity, never for resumed execution.
+// Prepared members never run their recipe twice. Future Succession members
+// retain it verbatim so their just-in-time begin can still execute it once.
 fn put_preparations(writer: &mut Writer, transform: &Transform) {
     writer.put_bool(transform.start_prep.is_some());
     if let Some(prep) = &transform.start_prep {
@@ -1393,6 +1458,60 @@ fn put_preparations(writer: &mut Writer, transform: &Transform) {
             }
         }
     }
+}
+
+fn get_preparations(reader: &mut Reader<'_>, transform: &mut Transform) -> Result<(), Error> {
+    fn color(reader: &mut Reader<'_>) -> Result<[f32; 3], Error> {
+        let value = [
+            f32::from_bits(reader.get_u32()?),
+            f32::from_bits(reader.get_u32()?),
+            f32::from_bits(reader.get_u32()?),
+        ];
+        if !value.iter().all(|component| component.is_finite()) {
+            return Err(Error::Invalid("non-finite native preparation color"));
+        }
+        Ok(value)
+    }
+    transform.start_prep = if reader.get_bool()? {
+        Some(crate::transform::StartPrep {
+            opacity_zero: reader.get_bool()?,
+            scale: if reader.get_bool()? {
+                Some(get_float(reader)?)
+            } else {
+                None
+            },
+            shift: get_optional_vec(reader)?,
+            move_to: get_optional_vec(reader)?,
+            color: if reader.get_bool()? {
+                Some(color(reader)?)
+            } else {
+                None
+            },
+        })
+    } else {
+        None
+    };
+    transform.target_prep = match reader.get_u8()? {
+        0 => None,
+        1 => Some(TargetPrep::Indicate {
+            scale: get_float(reader)?,
+            color: color(reader)?,
+        }),
+        2 => Some(TargetPrep::ReversePoints),
+        3 => Some(TargetPrep::FadeOut {
+            shift: get_vec(reader)?,
+            scale: get_float(reader)?,
+        }),
+        4 => Some(TargetPrep::Color(color(reader)?)),
+        5 => Some(TargetPrep::Scale(get_float(reader)?)),
+        6 => Some(TargetPrep::Matrix([
+            get_vec(reader)?,
+            get_vec(reader)?,
+            get_vec(reader)?,
+        ])),
+        _ => return Err(Error::Invalid("unknown native preparation recipe")),
+    };
+    Ok(())
 }
 
 fn put_native(
@@ -1457,6 +1576,16 @@ fn put_native_node(
         }
         return Ok(());
     }
+    put_native_leaf(writer, stage, animation, prepared)
+}
+
+fn put_native_leaf(
+    writer: &mut Writer,
+    stage: &Stage,
+    animation: &dyn Animation,
+    prepared: bool,
+) -> Result<(), Error> {
+    let any = animation as &dyn Any;
     put_state(writer, stage, animation.state(), prepared)?;
     if let Some(value) = native_transform(animation) {
         put_mob(writer, stage, value.target)?;
@@ -1681,19 +1810,33 @@ fn get_native_node(
             Box::new(group) as Box<dyn Animation>
         });
     }
+    get_native_leaf(reader, stage, budget, fps, kind, true)
+}
+
+fn get_native_leaf(
+    reader: &mut Reader<'_>,
+    stage: &Stage,
+    budget: &mut Budget,
+    fps: u32,
+    kind: u8,
+    prepared: bool,
+) -> Result<Box<dyn Animation>, Error> {
     let width = if matches!(kind, 1 | 5 | 11) { 3 } else { 2 };
-    let state = get_state(reader, stage, budget, fps, width)?;
+    let state = get_state(reader, stage, budget, fps, width, prepared)?;
     Ok(match kind {
         1 => {
             let target = get_mob(reader, stage)?;
             let path = get_path(reader)?;
             let replace = reader.get_bool()?;
-            let target_copy = get_mob(reader, stage)?;
             let mut value = Transform::new(state.mobject(), target);
             value.state = state;
             value.path = path;
             value.replace_in_scene = replace;
-            value.target_copy = Some(target_copy);
+            if prepared {
+                value.target_copy = Some(get_mob(reader, stage)?);
+            } else {
+                get_preparations(reader, &mut value)?;
+            }
             Box::new(value)
         }
         2 => {
@@ -1764,22 +1907,24 @@ fn get_native_node(
             if !border_parameters_valid(&value) {
                 return Err(Error::Invalid("invalid border/fill stroke settings"));
             }
-            value.outline = Some(get_mob(reader, stage)?);
-            let count = get_count(reader, 8)?;
-            if count > value.state.families().len() {
-                return Err(Error::Invalid("border/fill phase count exceeds its family"));
-            }
-            value.crossed = budget.vector::<Mob>(count)?;
-            budget.charge::<Mob>(count)?;
-            budget.charge::<Mob>(value.state.families().len())?;
-            for _ in 0..count {
-                value.crossed.push(get_mob(reader, stage)?);
+            if prepared {
+                value.outline = Some(get_mob(reader, stage)?);
+                let count = get_count(reader, 8)?;
+                if count > value.state.families().len() {
+                    return Err(Error::Invalid("border/fill phase count exceeds its family"));
+                }
+                value.crossed = budget.vector::<Mob>(count)?;
+                budget.charge::<Mob>(count)?;
+                budget.charge::<Mob>(value.state.families().len())?;
+                for _ in 0..count {
+                    value.crossed.push(get_mob(reader, stage)?);
+                }
             }
             Box::new(value)
         }
         7 => {
             let count = get_count(reader, 8)?;
-            if count > state.families().len().saturating_sub(1) {
+            if prepared && count > state.families().len().saturating_sub(1) {
                 return Err(Error::Invalid(
                     "reveal child count exceeds its prepared family",
                 ));
@@ -1820,7 +1965,7 @@ fn get_native_node(
             if !flash_parameters_valid(&value) {
                 return Err(Error::Invalid("invalid passing-flash parameters"));
             }
-            let count = get_count(reader, 12)?;
+            let count = if prepared { get_count(reader, 12)? } else { 0 };
             if count > value.state.families().len() {
                 return Err(Error::Invalid(
                     "flash profile count exceeds its prepared family",
@@ -1866,19 +2011,27 @@ fn get_native_node(
                 return Err(Error::Invalid("invalid cross-fade matching dimension"));
             }
             let pieces = reader.get_bool()?;
-            let ending = get_mob(reader, stage)?;
-            let saved = get_mob(reader, stage)?;
+            let ending = if prepared {
+                Some(get_mob(reader, stage)?)
+            } else {
+                None
+            };
+            let saved = if prepared {
+                Some(get_mob(reader, stage)?)
+            } else {
+                None
+            };
             let value = FadeTransform {
                 state,
-                ending: Some(ending),
+                ending,
                 to_add_on_completion: target,
                 stretch,
                 dim_to_match,
                 pieces,
                 interpolation_scratch: Default::default(),
             };
-            if fade_source(stage, &value).and_then(|source| stage.saved_state(source))
-                != Some(saved)
+            if prepared
+                && fade_source(stage, &value).and_then(|source| stage.saved_state(source)) != saved
             {
                 return Err(Error::Invalid("cross-fade saved source differs"));
             }
@@ -1886,6 +2039,616 @@ fn get_native_node(
         }
         _ => return Err(Error::Invalid("unknown native animation kind")),
     })
+}
+
+fn put_phase(writer: &mut Writer, phase: ContinuationPhase) {
+    writer.put_u8(match phase {
+        ContinuationPhase::Fresh => 0,
+        ContinuationPhase::Prepared => 1,
+        ContinuationPhase::Finished => 2,
+    });
+}
+
+fn get_phase(reader: &mut Reader<'_>) -> Result<ContinuationPhase, Error> {
+    match reader.get_u8()? {
+        0 => Ok(ContinuationPhase::Fresh),
+        1 => Ok(ContinuationPhase::Prepared),
+        2 => Ok(ContinuationPhase::Finished),
+        _ => Err(Error::Invalid("unknown native lifecycle phase")),
+    }
+}
+
+fn put_position(writer: &mut Writer, position: &FramePosition) -> Result<(), Error> {
+    let (negative, numerator, denominator) = position.exact_parts();
+    writer.put_bool(negative);
+    for (exponent, words) in [numerator, denominator] {
+        writer.put_i32(exponent);
+        put_count(writer, words.len())?;
+        for &word in words {
+            writer.put_u64(word);
+        }
+    }
+    Ok(())
+}
+
+fn get_position(reader: &mut Reader<'_>, budget: &mut Budget) -> Result<FramePosition, Error> {
+    let negative = reader.get_bool()?;
+    let mut component = || -> Result<(i32, Vec<u64>), Error> {
+        let exponent = reader.get_i32()?;
+        let count = get_count(reader, 8)?;
+        if count > FramePosition::MAX_RATIO_BYTES / 16 {
+            return Err(Error::Invalid("exact playback position exceeds its bound"));
+        }
+        budget.charge::<u64>(count.saturating_mul(3))?;
+        let mut words = budget.vector::<u64>(count)?;
+        for _ in 0..count {
+            words.push(reader.get_u64()?);
+        }
+        Ok((exponent, words))
+    };
+    let numerator = component()?;
+    let denominator = component()?;
+    FramePosition::from_exact_parts(negative, numerator, denominator)
+        .map_err(AnimError::Clock)
+        .map_err(Error::Animation)
+}
+
+fn member_phase(member: Option<&MemberPlayback>) -> ContinuationPhase {
+    match member {
+        None => ContinuationPhase::Fresh,
+        Some(member) if member.finished => ContinuationPhase::Finished,
+        Some(_) => ContinuationPhase::Prepared,
+    }
+}
+
+fn put_checkpoint(writer: &mut Writer, checkpoint: Option<&MemberCheckpoint>) -> Result<(), Error> {
+    writer.put_bool(checkpoint.is_some());
+    if let Some(checkpoint) = checkpoint {
+        writer.put_bytes(&checkpoint.primary.to_bytes_with_limits(limits(MAX_BYTES))?);
+        put_count(writer, checkpoint.detached.len())?;
+        for detached in &checkpoint.detached {
+            writer.put_bytes(&detached.to_bytes_with_limits(limits(MAX_BYTES))?);
+        }
+    }
+    Ok(())
+}
+
+fn get_checkpoint(
+    reader: &mut Reader<'_>,
+    stage: &Stage,
+    budget: &mut Budget,
+) -> Result<Option<MemberCheckpoint>, Error> {
+    if reader.get_bool()? {
+        let primary = FamilyCheckpoint::from_bytes_with_budget(
+            reader.get_bytes()?,
+            stage,
+            &mut budget.remaining,
+        )?;
+        let count = get_count(reader, 4)?;
+        let mut detached = budget.vector::<FamilyCheckpoint>(count)?;
+        for _ in 0..count {
+            detached.push(FamilyCheckpoint::from_bytes_with_budget(
+                reader.get_bytes()?,
+                stage,
+                &mut budget.remaining,
+            )?);
+        }
+        Ok(Some(MemberCheckpoint { primary, detached }))
+    } else {
+        Ok(None)
+    }
+}
+
+fn put_closed_node(
+    writer: &mut Writer,
+    stage: &Stage,
+    animation: &dyn Animation,
+    phase: ContinuationPhase,
+    depth: usize,
+    remaining: &mut usize,
+) -> Result<(), Error> {
+    if depth > MAX_NATIVE_DEPTH || *remaining == 0 {
+        return Err(Error::Invalid(
+            "native nesting or node count exceeds its bound",
+        ));
+    }
+    *remaining -= 1;
+    let kind = declaration_kind(animation).ok_or(Error::Invalid("unsupported native animation"))?;
+    writer.put_u8(kind);
+    put_phase(writer, phase);
+    let Some((controls, children)) = declaration_composition(animation) else {
+        return put_native_leaf(writer, stage, animation, phase != ContinuationPhase::Fresh);
+    };
+    put_state(writer, stage, animation.state(), false)?;
+    put_float(writer, controls.layout_lag_ratio);
+    put_float(writer, controls.duration_scale);
+    put_float(writer, controls.timing_run_time);
+    writer.put_bool(controls.run_time_override);
+    let any = animation as &dyn Any;
+    if let Some(matching) = any.downcast_ref::<TransformMatchingParts>() {
+        for (root, layout) in matching.declaration_families() {
+            put_matching_family(writer, stage, root, layout)?;
+        }
+    }
+    put_count(writer, children.len())?;
+    let succession = any.downcast_ref::<Succession>();
+    if let Some(value) = succession {
+        put_count(writer, value.active)?;
+        writer.put_bool(value.replayable).put_bool(value.replaying);
+        writer.put_bool(value.last_time.is_some());
+        if let Some(time) = value.last_time {
+            put_float(writer, time);
+        }
+        writer.put_bool(value.last_exact_position.is_some());
+        if let Some(position) = &value.last_exact_position {
+            put_position(writer, position)?;
+        }
+        put_count(writer, value.playback.len())?;
+        for member in &value.playback {
+            writer.put_bool(member.finished);
+            put_checkpoint(writer, member.before.as_ref())?;
+            put_checkpoint(writer, member.prepared.as_ref())?;
+            put_checkpoint(writer, member.completed.as_ref())?;
+        }
+    }
+    for (index, child) in children.iter().enumerate() {
+        let child_phase = succession.map_or(phase, |value| member_phase(value.playback.get(index)));
+        put_closed_node(
+            writer,
+            stage,
+            child.as_ref(),
+            child_phase,
+            depth + 1,
+            remaining,
+        )?;
+    }
+    Ok(())
+}
+
+fn get_closed_node(
+    reader: &mut Reader<'_>,
+    stage: &Stage,
+    budget: &mut Budget,
+    fps: u32,
+    depth: usize,
+    expected_phase: ContinuationPhase,
+) -> Result<Box<dyn Animation>, Error> {
+    budget.native_node(depth)?;
+    let kind = reader.get_u8()?;
+    if !(1..=13).contains(&kind) {
+        return Err(Error::Invalid("unknown native animation kind"));
+    }
+    let phase = get_phase(reader)?;
+    if phase != expected_phase {
+        return Err(Error::Invalid(
+            "native child lifecycle disagrees with its owner",
+        ));
+    }
+    charge_carrier(budget, kind)?;
+    if !matches!(kind, 6 | 12 | 13) {
+        return get_native_leaf(
+            reader,
+            stage,
+            budget,
+            fps,
+            kind,
+            phase != ContinuationPhase::Fresh,
+        );
+    }
+    let mob = get_mob(reader, stage)?;
+    let config = get_config(reader, budget)?;
+    let controls = GroupContinuationControls {
+        layout_lag_ratio: get_float(reader)?,
+        duration_scale: get_float(reader)?,
+        timing_run_time: get_float(reader)?,
+        run_time_override: reader.get_bool()?,
+    };
+    if !group_controls_supported(controls) {
+        return Err(Error::Invalid("invalid native composition controls"));
+    }
+    let matching_families = if kind == 13 {
+        Some((
+            get_matching_family(reader, stage, budget)?,
+            get_matching_family(reader, stage, budget)?,
+        ))
+    } else {
+        None
+    };
+    let count = get_count(reader, 2)?;
+    if count > MAX_ITEMS - budget.native_items {
+        return Err(Error::Invalid("native node count exceeds its bound"));
+    }
+    charge_group_timing(budget, count)?;
+    charge_rate(budget, &config.rate_func)?;
+    budget.charge::<u8>(config.name.len())?;
+    let succession = if kind == 12 {
+        let active = get_count(reader, 0)?;
+        let replayable = reader.get_bool()?;
+        let replaying = reader.get_bool()?;
+        let last_time = if reader.get_bool()? {
+            // A huge internal exact position can project to infinity even
+            // when a parent compresses it into a short, valid frame segment.
+            // The lifecycle validator binds this projection to the exact
+            // position; cursors without an exact position still need finite
+            // seconds. Never reconstruct the rational cursor from this hint.
+            Some(f64::from_bits(reader.get_u64()?))
+        } else {
+            None
+        };
+        let last_exact_position = if reader.get_bool()? {
+            Some(get_position(reader, budget)?)
+        } else {
+            None
+        };
+        let initialized = get_count(reader, 4)?;
+        if initialized > count || active >= count {
+            return Err(Error::Invalid("succession cursor exceeds its member table"));
+        }
+        let mut playback = budget.vector::<MemberPlayback>(initialized)?;
+        for _ in 0..initialized {
+            playback.push(MemberPlayback {
+                finished: reader.get_bool()?,
+                before: get_checkpoint(reader, stage, budget)?,
+                prepared: get_checkpoint(reader, stage, budget)?,
+                completed: get_checkpoint(reader, stage, budget)?,
+            });
+        }
+        Some(SuccessionContinuation {
+            active,
+            playback,
+            replayable,
+            replaying,
+            last_time,
+            last_exact_position,
+        })
+    } else {
+        None
+    };
+    let mut children = budget.vector::<Box<dyn Animation>>(count)?;
+    for index in 0..count {
+        let child_phase = succession
+            .as_ref()
+            .map_or(phase, |value| member_phase(value.playback.get(index)));
+        children.push(get_closed_node(
+            reader,
+            stage,
+            budget,
+            fps,
+            depth + 1,
+            child_phase,
+        )?);
+    }
+    let state = AnimState::new(mob, config);
+    if let Some(playback) = succession {
+        return Ok(Box::new(Succession::from_closed_continuation(
+            state, children, controls, fps, phase, playback,
+        )?));
+    }
+    let group = AnimationGroup::from_closed_continuation(state, children, controls, fps, phase)?;
+    Ok(if let Some((source, target)) = matching_families {
+        Box::new(TransformMatchingParts::from_closed_continuation(
+            group,
+            source,
+            target,
+            phase != ContinuationPhase::Fresh,
+            phase == ContinuationPhase::Finished,
+        )) as Box<dyn Animation>
+    } else {
+        Box::new(group) as Box<dyn Animation>
+    })
+}
+
+fn closed_structure_valid(animation: &dyn Animation, phase: ContinuationPhase, fps: u32) -> bool {
+    let state = animation.state();
+    if !config_supported(&state.config) || animation.deferred_error().is_some() {
+        return false;
+    }
+    let any = animation as &dyn Any;
+    if let Some(value) = any.downcast_ref::<Succession>() {
+        return value.closed_lifecycle_valid(phase, fps)
+            && value.animations().iter().enumerate().all(|(index, child)| {
+                closed_structure_valid(child.as_ref(), member_phase(value.playback.get(index)), fps)
+            });
+    }
+    if let Some(group) = native_group(animation) {
+        if let Some(matching) = any.downcast_ref::<TransformMatchingParts>()
+            && !matching.closed_lifecycle_valid(
+                phase != ContinuationPhase::Fresh,
+                phase == ContinuationPhase::Finished,
+            )
+        {
+            return false;
+        }
+        return group.closed_lifecycle_valid(phase)
+            && group.closed_timing_valid(fps, phase)
+            && group
+                .animations()
+                .iter()
+                .all(|child| closed_structure_valid(child.as_ref(), phase, fps));
+    }
+    let Ok(duration) = state.config.duration_on_grid(fps) else {
+        return false;
+    };
+    if state.prepared_duration() != Some(&duration)
+        || state.frame_units().map(f64::to_bits)
+            != duration
+                .is_frame_native()
+                .then(|| duration.frame_units().to_bits())
+    {
+        return false;
+    }
+    if phase != ContinuationPhase::Fresh {
+        return state.starting_mobject().is_some();
+    }
+    state.starting_mobject().is_none()
+        && state.families().is_empty()
+        && !state.mobject_was_updating()
+        && native_transform(animation).is_none_or(|value| value.target_copy.is_none())
+        && any
+            .downcast_ref::<DrawBorderThenFill>()
+            .is_none_or(|value| value.outline.is_none() && value.crossed.is_empty())
+        && any
+            .downcast_ref::<VShowPassingFlash>()
+            .is_none_or(|value| value.widths.is_empty())
+        && any
+            .downcast_ref::<FadeTransform>()
+            .is_none_or(|value| value.ending.is_none())
+}
+
+/// Supplemental content belongs only to native reveal members whose prepared
+/// manifests retain the original identities after detaching them. Binding each
+/// saved descendant prevents a forged extra family from rewriting an unrelated
+/// object when a resumed succession later rewinds.
+fn validate_checkpoint_ownership(
+    stage: &Stage,
+    animation: &dyn Animation,
+    budget: &mut Budget,
+) -> Result<bool, Error> {
+    fn visit_subsets(animation: &dyn Animation, visit: &mut impl FnMut(&ShowIncreasingSubsets)) {
+        let any = animation as &dyn Any;
+        if let Some(subsets) = any.downcast_ref::<ShowIncreasingSubsets>() {
+            if subsets.state.starting_mobject().is_some() {
+                visit(subsets);
+            }
+        } else if let Some((_, children)) = declaration_composition(animation) {
+            for child in children {
+                visit_subsets(child.as_ref(), visit);
+            }
+        }
+    }
+
+    if let Some(succession) = (animation as &dyn Any).downcast_ref::<Succession>() {
+        for (child, member) in succession.animations().iter().zip(&succession.playback) {
+            let checkpoints = [
+                member.before.as_ref(),
+                member.prepared.as_ref(),
+                member.completed.as_ref(),
+            ];
+            let direct_subset = (child.as_ref() as &dyn Any).is::<ShowIncreasingSubsets>();
+            if direct_subset
+                || checkpoints
+                    .iter()
+                    .flatten()
+                    .any(|saved| !saved.detached.is_empty())
+            {
+                let mut owned_count = 0usize;
+                let mut root_count = 0usize;
+                visit_subsets(child.as_ref(), &mut |subsets| {
+                    owned_count = owned_count.saturating_add(subsets.state.families().len());
+                    root_count = root_count.saturating_add(subsets.all_submobs.len());
+                });
+                let mut owned = budget.vector::<Mob>(owned_count)?;
+                let mut roots = budget.vector::<Mob>(root_count)?;
+                visit_subsets(child.as_ref(), &mut |subsets| {
+                    owned.extend(subsets.state.families().iter().map(|row| row[0]));
+                    roots.extend_from_slice(&subsets.all_submobs);
+                });
+                owned.sort_unstable_by_key(|&mob| stage.snapshot_handle(mob));
+                owned.dedup();
+                roots.sort_unstable_by_key(|&mob| stage.snapshot_handle(mob));
+                roots.dedup();
+                let index_of = |members: &[Mob], member| {
+                    members.binary_search_by_key(&stage.snapshot_handle(member), |&mob| {
+                        stage.snapshot_handle(mob)
+                    })
+                };
+                for saved in checkpoints.into_iter().flatten() {
+                    let mut primary = budget.vector::<Mob>(saved.primary.members().len())?;
+                    primary.extend(saved.primary.members());
+                    primary.sort_unstable_by_key(|&mob| stage.snapshot_handle(mob));
+                    let mut detached_roots = budget.vector::<Mob>(saved.detached.len())?;
+                    let mut covered = budget.vector::<bool>(owned.len())?;
+                    covered.resize(owned.len(), false);
+                    for member in &primary {
+                        if let Ok(index) = index_of(&owned, *member) {
+                            covered[index] = true;
+                        }
+                    }
+                    for detached in &saved.detached {
+                        let root = detached.root();
+                        if index_of(&roots, root).is_err() || index_of(&primary, root).is_ok() {
+                            return Ok(false);
+                        }
+                        detached_roots.push(root);
+                        for member in detached.members() {
+                            let Ok(index) = index_of(&owned, member) else {
+                                return Ok(false);
+                            };
+                            covered[index] = true;
+                        }
+                    }
+                    detached_roots.sort_unstable_by_key(|&mob| stage.snapshot_handle(mob));
+                    if detached_roots.windows(2).any(|pair| pair[0] == pair[1])
+                        || (direct_subset && covered.contains(&false))
+                    {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+    if let Some((_, children)) = declaration_composition(animation) {
+        for child in children {
+            if !validate_checkpoint_ownership(stage, child.as_ref(), budget)? {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+struct ClosedValidation<'a> {
+    initial: Snapshot,
+    stage: Stage,
+    ancestors: Vec<(&'a Succession, usize)>,
+    fps: u32,
+}
+
+impl ClosedValidation<'_> {
+    fn reset(&mut self) -> Result<(), Error> {
+        self.stage.restore(&self.initial);
+        for &(succession, target) in &self.ancestors {
+            for member in succession.playback.iter().rev() {
+                member
+                    .before
+                    .as_ref()
+                    .ok_or(Error::Invalid("missing member before checkpoint"))?
+                    .restore(&mut self.stage)?;
+            }
+            for member in succession.playback.iter().take(target) {
+                member
+                    .completed
+                    .as_ref()
+                    .ok_or(Error::Invalid("missing member completed checkpoint"))?
+                    .restore(&mut self.stage)?;
+            }
+            succession.playback[target]
+                .prepared
+                .as_ref()
+                .ok_or(Error::Invalid("missing member prepared checkpoint"))?
+                .restore(&mut self.stage)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_closed_node<'a>(
+    context: &mut ClosedValidation<'a>,
+    animation: &'a dyn Animation,
+    phase: ContinuationPhase,
+) -> Result<bool, Error> {
+    let any = animation as &dyn Any;
+    if let Some(succession) = any.downcast_ref::<Succession>() {
+        for (index, child) in succession.animations().iter().enumerate() {
+            let member = succession.playback.get(index);
+            if member.is_some() {
+                context.ancestors.push((succession, index));
+            }
+            if !validate_closed_node(context, child.as_ref(), member_phase(member))? {
+                return Ok(false);
+            }
+            if let Some(member) = member {
+                if let Some(completed) = &member.completed {
+                    context.reset()?;
+                    completed.restore(&mut context.stage)?;
+                    if context.stage.is_animating(completed.root()) {
+                        return Ok(false);
+                    }
+                }
+                context.ancestors.pop();
+            }
+        }
+        return Ok(true);
+    }
+    if let Some(group) = native_group(animation) {
+        if let Some(matching) = any.downcast_ref::<TransformMatchingParts>()
+            && !matching.declaration_families_valid(&context.stage)
+        {
+            return Ok(false);
+        }
+        for child in group.animations() {
+            if !validate_closed_node(context, child.as_ref(), phase)? {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
+    }
+    context.reset()?;
+    if phase == ContinuationPhase::Fresh {
+        // Geometry can still be changed by an earlier member. Check the
+        // immutable recipe/handles, without pretending that future begin has
+        // happened in today's intermediate family layout.
+        crate::animation::validate_begin_state(
+            animation.state(),
+            &context.stage,
+            animation.preflight_mobjects(),
+        )?;
+        return Ok(true);
+    }
+    if !prepared_valid(&context.stage, animation, context.fps)? {
+        return Ok(false);
+    }
+    // A leaf's output may be reused by a later Succession member, but may
+    // never alias one of its own immutable prepared interpolation endpoints.
+    let mut outputs: Vec<_> = animation
+        .state()
+        .families()
+        .iter()
+        .map(|row| row[0])
+        .collect();
+    outputs.sort_unstable_by_key(|&mob| context.stage.snapshot_handle(mob));
+    if outputs.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Ok(false);
+    }
+    for row in animation.state().families() {
+        if row[1..].iter().any(|&endpoint| {
+            outputs
+                .binary_search_by_key(&context.stage.snapshot_handle(endpoint), |&mob| {
+                    context.stage.snapshot_handle(mob)
+                })
+                .is_ok()
+        }) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn validate_closed_play(
+    stage: &Stage,
+    animations: &[Box<dyn Animation>],
+    fps: u32,
+    budget: &mut Budget,
+) -> Result<bool, Error> {
+    if !animations.iter().all(|animation| {
+        stage.is_animating(animation.state().mobject())
+            && closed_structure_valid(animation.as_ref(), ContinuationPhase::Prepared, fps)
+    }) {
+        return Ok(false);
+    }
+    for animation in animations {
+        if !validate_checkpoint_ownership(stage, animation.as_ref(), budget)? {
+            return Ok(false);
+        }
+    }
+    let ancestors = budget.vector::<(&Succession, usize)>(MAX_NATIVE_DEPTH + 1)?;
+    let (initial, isolated) = stage.continuation_validation_context(&mut budget.remaining)?;
+    let mut context = ClosedValidation {
+        initial,
+        stage: isolated,
+        ancestors,
+        fps,
+    };
+    for animation in animations {
+        if !validate_closed_node(
+            &mut context,
+            animation.as_ref(),
+            ContinuationPhase::Prepared,
+        )? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn prepared_group_valid(stage: &Stage, group: &AnimationGroup, fps: u32) -> Result<bool, Error> {
@@ -1988,6 +2751,16 @@ pub fn capture(
     if !open.is_at_frame_boundary() {
         return Err(Error::Invalid("finish the pending frame first"));
     }
+    let mut remaining = MAX_ITEMS;
+    if animations
+        .iter()
+        .all(|animation| closed_tree_supported(animation.as_ref(), 0, &mut remaining))
+        && animations
+            .iter()
+            .any(|animation| contains_succession(animation.as_ref()))
+    {
+        return capture_closed(stage, clock, animations, open, max_bytes);
+    }
     if animations.is_empty()
         || !open.report().purity.is_pure()
         || !native_play_supported(animations)
@@ -2010,7 +2783,13 @@ pub fn capture(
     if grid != open.segment() {
         return Ok(None);
     }
-    OpenSegment::resume_closed(clock, grid, open.report().base_frame, open.stepped())?;
+    OpenSegment::resume_closed(
+        clock,
+        grid,
+        open.report().base_frame,
+        open.stepped(),
+        crate::purity::Purity::Pure,
+    )?;
     let mut writer = Writer::with_limits(emission_schema(SCHEMA, animations), limits(max_bytes));
     writer
         .put_u32(clock.fps())
@@ -2021,6 +2800,68 @@ pub fn capture(
         put_native(&mut writer, stage, animation.as_ref(), true)?;
     }
     Ok(Some(writer.finish()?))
+}
+
+fn capture_closed(
+    stage: &Stage,
+    clock: &RationalFrameClock,
+    animations: &[Box<dyn Animation>],
+    open: &OpenSegment,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, Error> {
+    if !closed_effects_supported(&open.report().purity)
+        || document_budget(animations, true).is_err()
+        || !animations.iter().all(|animation| {
+            closed_structure_valid(animation.as_ref(), ContinuationPhase::Prepared, clock.fps())
+        })
+    {
+        return Ok(None);
+    }
+    let purity = crate::classify_play(stage, animations);
+    if !closed_effects_supported(&purity) {
+        return Ok(None);
+    }
+    let grid_clock = RationalFrameClock::new(clock.fps()).map_err(AnimError::Clock)?;
+    let duration = crate::frame::play_duration(animations, clock.fps())?;
+    let grid = grid_clock
+        .segment_duration(&duration)
+        .map_err(AnimError::Clock)?;
+    if grid != open.segment() {
+        return Ok(None);
+    }
+    OpenSegment::resume_closed(
+        clock,
+        grid,
+        open.report().base_frame,
+        open.stepped(),
+        purity,
+    )?;
+    let mut writer = Writer::with_limits(SCHEMA, limits(max_bytes));
+    writer
+        .put_u32(clock.fps())
+        .put_i64(open.report().base_frame)
+        .put_i64(open.stepped());
+    put_count(&mut writer, animations.len())?;
+    let mut remaining = MAX_ITEMS;
+    for animation in animations {
+        put_closed_node(
+            &mut writer,
+            stage,
+            animation.as_ref(),
+            ContinuationPhase::Prepared,
+            0,
+            &mut remaining,
+        )?;
+    }
+    let bytes = writer.finish()?;
+    // Admission consumes the exact same aggregate decoded-history and
+    // validation-context budget as restore. No accepted checkpoint can evade
+    // its own decoder by handing each member an independent allocation cap.
+    match restore(stage, clock, &bytes) {
+        Ok(_) => Ok(Some(bytes)),
+        Err(Error::Serial(error)) => Err(Error::Serial(error)),
+        Err(_) => Ok(None),
+    }
 }
 
 /// Decode prepared native carriers against an already restored matching Stage.
@@ -2049,30 +2890,54 @@ pub fn restore(
         native_items: 0,
     };
     let mut animations = budget.vector::<Box<dyn Animation>>(count)?;
+    let closed = reader.version().1 >= 7;
     for _ in 0..count {
-        animations.push(get_native(&mut reader, stage, &mut budget, fps)?);
+        animations.push(if closed {
+            get_closed_node(
+                &mut reader,
+                stage,
+                &mut budget,
+                fps,
+                0,
+                ContinuationPhase::Prepared,
+            )?
+        } else {
+            get_native(&mut reader, stage, &mut budget, fps)?
+        });
     }
     reader.finish()?;
-    for animation in &animations {
-        if !prepared_valid(stage, animation.as_ref(), fps)? {
+    let purity = crate::classify_play(stage, &animations);
+    if closed {
+        if !closed_effects_supported(&purity)
+            || !animations
+                .iter()
+                .any(|animation| contains_succession(animation.as_ref()))
+            || !validate_closed_play(stage, &animations, fps, &mut budget)?
+        {
             return Err(Error::Invalid(
-                "prepared families or timing are inconsistent",
+                "closed native lifecycle, effects or history are inconsistent",
             ));
         }
-    }
-    if !crate::classify_play(stage, &animations).is_pure()
-        || crate::pure_frame::freeze_animations(stage, &animations).is_err()
-    {
-        return Err(Error::Invalid(
-            "prepared play has effects, aliases or live views",
-        ));
+    } else {
+        for animation in &animations {
+            if !prepared_valid(stage, animation.as_ref(), fps)? {
+                return Err(Error::Invalid(
+                    "prepared families or timing are inconsistent",
+                ));
+            }
+        }
+        if !purity.is_pure() || crate::pure_frame::freeze_animations(stage, &animations).is_err() {
+            return Err(Error::Invalid(
+                "prepared play has effects, aliases or live views",
+            ));
+        }
     }
     let grid_clock = RationalFrameClock::new(fps).map_err(AnimError::Clock)?;
     let duration = crate::frame::play_duration(&animations, fps)?;
     let grid = grid_clock
         .segment_duration(&duration)
         .map_err(AnimError::Clock)?;
-    let open = OpenSegment::resume_closed(clock, grid, base_frame, stepped)?;
+    let open = OpenSegment::resume_closed(clock, grid, base_frame, stepped, purity)?;
     Ok((animations, open))
 }
 
@@ -2238,6 +3103,89 @@ mod tests {
     use super::*;
     use fmn_core::rng::RngRoot;
     use fmn_mobject::{Mobject, Snapshot};
+
+    #[test]
+    fn succession_retains_exact_cursor_when_its_seconds_projection_overflows() {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::from_points(&[[0.0; 3]]));
+        let first_target = stage.add(Mobject::from_points(&[[2.0, 1.0, 0.0]]));
+        let last_target = stage.add(Mobject::from_points(&[[4.0, -1.0, 0.0]]));
+        stage.add_to_scene(source).unwrap();
+        let mut first = Transform::new(source, first_target);
+        first.state_mut().config.run_time = 1.0e307;
+        let mut last = Transform::new(source, last_target);
+        last.state_mut().config.run_time = 1.0e307;
+        let sequence = Succession::new(&mut stage, vec![Box::new(first), Box::new(last)])
+            .unwrap()
+            .with_run_time_frames(10);
+        let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(sequence)];
+        let mut clock = RationalFrameClock::new(1000).unwrap();
+        let rng = RngRoot::from_seed(19);
+        let mut open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+        crate::advance_play(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut animations,
+            &mut open,
+            8,
+            &mut |_| {},
+        )
+        .unwrap();
+        let sequence = (animations[0].as_ref() as &dyn Any)
+            .downcast_ref::<Succession>()
+            .unwrap();
+        assert!(sequence.last_time.unwrap().is_infinite());
+        assert!(sequence.last_exact_position.is_some());
+        let bytes = capture(&stage, &clock, &animations, &open, MAX_BYTES)
+            .unwrap()
+            .unwrap();
+        let mut restored = Stage::new();
+        let snapshot = Snapshot::from_bytes(&stage.snapshot_bytes().unwrap(), &restored).unwrap();
+        restored.restore(&snapshot.snapshot);
+        restored.set_time_from_clock(clock.now().to_f64());
+        let (mut resumed, mut cursor) = restore(&restored, &clock, &bytes).unwrap();
+        assert_eq!(
+            capture(&restored, &clock, &resumed, &cursor, MAX_BYTES)
+                .unwrap()
+                .unwrap(),
+            bytes
+        );
+        let mut resumed_clock = clock;
+        let mut direct_frames = Vec::new();
+        let mut resumed_frames = Vec::new();
+        crate::advance_play(
+            &mut stage,
+            &mut clock,
+            &rng,
+            &mut animations,
+            &mut open,
+            10,
+            &mut |frame| {
+                direct_frames.push((frame.metadata(), frame.state().to_bytes().unwrap()));
+            },
+        )
+        .unwrap();
+        crate::advance_play(
+            &mut restored,
+            &mut resumed_clock,
+            &rng,
+            &mut resumed,
+            &mut cursor,
+            10,
+            &mut |frame| {
+                resumed_frames.push((frame.metadata(), frame.state().to_bytes().unwrap()));
+            },
+        )
+        .unwrap();
+        assert_eq!(resumed_frames, direct_frames);
+        crate::finish_open_play(&mut stage, &mut animations, open).unwrap();
+        crate::finish_open_play(&mut restored, &mut resumed, cursor).unwrap();
+        assert_eq!(
+            restored.snapshot_bytes().unwrap(),
+            stage.snapshot_bytes().unwrap()
+        );
+    }
 
     fn prepared_border() -> (Stage, DrawBorderThenFill) {
         let mut stage = Stage::new();
@@ -2950,6 +3898,135 @@ mod tests {
     }
 
     #[test]
+    fn succession_decoder_refuses_inconsistent_history_without_repairing_live_state() {
+        for case in 0..8 {
+            let (mut stage, mut animations) = future_succession(false, false, 0.75);
+            let mut clock = RationalFrameClock::new(30).unwrap();
+            let mut open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+            crate::advance_play(
+                &mut stage,
+                &mut clock,
+                &RngRoot::from_seed(11),
+                &mut animations,
+                &mut open,
+                7,
+                &mut |_| {},
+            )
+            .unwrap();
+            let sequence = (animations[0].as_mut() as &mut dyn Any)
+                .downcast_mut::<Succession>()
+                .unwrap();
+            assert_eq!(sequence.playback.len(), 2);
+            match case {
+                0 => sequence.playback[0].prepared = None,
+                1 => sequence.playback[0].completed = None,
+                2 => sequence.playback[0].finished = false,
+                3 => sequence.active = 0,
+                4 => sequence.replayable = false,
+                5 => sequence.last_time = None,
+                6 => {
+                    sequence.playback[0].before = Some(MemberCheckpoint {
+                        primary: stage.checkpoint_family(sequence.group()).unwrap(),
+                        detached: Vec::new(),
+                    })
+                }
+                7 => stage.set_animating_status(sequence.group(), false, false),
+                _ => unreachable!(),
+            }
+            let before = stage.snapshot_bytes().unwrap();
+            // Bypass capture admission to produce checksum-valid hostile
+            // documents. Decode must reject the actual history/phase, not
+            // merely a damaged envelope or a stale arena handle.
+            let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+            writer
+                .put_u32(clock.fps())
+                .put_i64(open.report().base_frame)
+                .put_i64(open.stepped());
+            put_count(&mut writer, 1).unwrap();
+            let mut remaining = MAX_ITEMS;
+            put_closed_node(
+                &mut writer,
+                &stage,
+                animations[0].as_ref(),
+                ContinuationPhase::Prepared,
+                0,
+                &mut remaining,
+            )
+            .unwrap();
+            assert!(
+                restore(&stage, &clock, &writer.finish().unwrap()).is_err(),
+                "case {case}"
+            );
+            assert_eq!(stage.snapshot_bytes().unwrap(), before, "case {case}");
+        }
+    }
+
+    #[test]
+    fn succession_decoder_binds_detached_reveal_history_to_original_members() {
+        for case in 0..3 {
+            let mut stage = Stage::new();
+            let root = stage.add(Mobject::vector_from_points(&[]));
+            let child = stage.add(Mobject::vector_from_points(&[[0.0, 0.0, 0.0]]));
+            let second = stage.add(Mobject::vector_from_points(&[[1.0, 0.0, 0.0]]));
+            let unrelated = stage.add(Mobject::vector_from_points(&[[9.0, 0.0, 0.0]]));
+            stage.attach(root, child).unwrap();
+            stage.attach(root, second).unwrap();
+            let reveal = crate::show_increasing_subsets(&stage, root).unwrap();
+            let succession = Succession::new(&mut stage, vec![Box::new(reveal)]).unwrap();
+            let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(succession)];
+            let clock = RationalFrameClock::new(30).unwrap();
+            let open = crate::open_play(&mut stage, &clock, &mut animations).unwrap();
+            assert!(
+                capture(&stage, &clock, &animations, &open, MAX_BYTES)
+                    .unwrap()
+                    .is_some()
+            );
+            let sequence = (animations[0].as_mut() as &mut dyn Any)
+                .downcast_mut::<Succession>()
+                .unwrap();
+            let prepared = sequence.playback[0].prepared.as_mut().unwrap();
+            assert_eq!(prepared.detached.len(), 2);
+            match case {
+                0 => prepared
+                    .detached
+                    .push(stage.checkpoint_family(unrelated).unwrap()),
+                1 => {
+                    // Even an allowed supplemental root cannot smuggle in an
+                    // unrelated descendant absent from its original manifest.
+                    let saved = stage.snapshot();
+                    stage.attach(child, unrelated).unwrap();
+                    prepared.detached[0] = stage.checkpoint_family(child).unwrap();
+                    stage.restore(&saved);
+                }
+                2 => prepared.detached.clear(),
+                _ => unreachable!(),
+            }
+            let before = stage.snapshot_bytes().unwrap();
+            let mut writer = Writer::with_limits(SCHEMA, limits(MAX_BYTES));
+            writer
+                .put_u32(clock.fps())
+                .put_i64(open.report().base_frame)
+                .put_i64(open.stepped());
+            put_count(&mut writer, 1).unwrap();
+            let mut remaining = MAX_ITEMS;
+            put_closed_node(
+                &mut writer,
+                &stage,
+                animations[0].as_ref(),
+                ContinuationPhase::Prepared,
+                0,
+                &mut remaining,
+            )
+            .unwrap();
+            assert!(
+                restore(&stage, &clock, &writer.finish().unwrap()).is_err(),
+                "case {case}"
+            );
+            assert_eq!(stage.snapshot_bytes().unwrap(), before, "case {case}");
+        }
+    }
+
+    #[test]
     fn future_successions_bind_order_path_and_exact_timing_without_initializing_children() {
         for nested in [false, true] {
             let (stage, animations) = future_succession(false, nested, 0.75);
@@ -3051,8 +4128,8 @@ mod tests {
                     assert!(
                         capture(&stage, &clock, &animations, &open, MAX_BYTES)
                             .unwrap()
-                            .is_none(),
-                        "fresh declaration support must not admit active successions"
+                            .is_some(),
+                        "active native lifecycles use the separate durable continuation capability"
                     );
                     if phase == 2 {
                         crate::finish_open_play(&mut stage, &mut animations, open).unwrap();

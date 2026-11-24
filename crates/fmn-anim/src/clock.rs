@@ -745,10 +745,55 @@ pub struct FramePosition {
     negative: bool,
 }
 
+/// A normalized dyadic's binary exponent and little-endian significand limbs.
+type DyadicParts<'a> = (i32, &'a [u64]);
+
 impl FramePosition {
     /// Maximum input bytes per integer for [`Self::from_ratio_bytes`]. The
     /// normalized significand and binary exponent each have a 16,384-bit budget.
     pub const MAX_RATIO_BYTES: usize = MAX_DURATION_WORDS * 16;
+
+    pub(crate) fn exact_parts(&self) -> (bool, DyadicParts<'_>, DyadicParts<'_>) {
+        (
+            self.negative,
+            (self.numerator.exponent, &self.numerator.words),
+            (self.denominator.exponent, &self.denominator.words),
+        )
+    }
+
+    pub(crate) fn from_exact_parts(
+        negative: bool,
+        numerator: (i32, Vec<u64>),
+        denominator: (i32, Vec<u64>),
+    ) -> Result<Self, ClockError> {
+        let dyadic = |(exponent, words): (i32, Vec<u64>)| {
+            if words.len() > MAX_DURATION_WORDS
+                || !(-MAX_DURATION_BITS..=MAX_DURATION_BITS).contains(&exponent)
+            {
+                return Err(ClockError::DurationComplexity);
+            }
+            if (words.is_empty() && exponent != 0)
+                || words.last().is_some_and(|word| *word == 0)
+                || words.first().is_some_and(|word| word & 1 == 0)
+            {
+                return Err(ClockError::NonCanonicalDuration);
+            }
+            Ok(Dyadic {
+                words: Words::from_slice(&words),
+                exponent,
+            })
+        };
+        let numerator = dyadic(numerator)?;
+        let denominator = dyadic(denominator)?;
+        let normalized = Self::new(numerator.clone(), denominator.clone(), negative)?;
+        if normalized.numerator != numerator
+            || normalized.denominator != denominator
+            || normalized.negative != negative
+        {
+            return Err(ClockError::NonCanonicalDuration);
+        }
+        Ok(normalized)
+    }
 
     /// Lift an integer frame without converting it to floating point.
     #[must_use]

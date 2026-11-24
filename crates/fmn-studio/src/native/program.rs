@@ -1548,6 +1548,15 @@ impl NativeSceneProgram {
                 .transpose()
                 .map_err(execution_error)?
         };
+        if let Some(active) = &self.active {
+            let mut active_effects = EffectInventory::default();
+            active_effects.note(&active.purity(self.preview.scene()));
+            if checkpoint.effects & active_effects.reasons != active_effects.reasons {
+                return Err(invalid(
+                    "native checkpoint lost its active continuation effects",
+                ));
+            }
+        }
         let discard = self
             .segments
             .len()
@@ -1875,6 +1884,53 @@ mod tests {
         .unwrap();
         program.factory_fingerprint(1 << 20).unwrap();
         (program, target)
+    }
+
+    #[test]
+    fn active_succession_checkpoint_cannot_erase_its_stateful_effects() {
+        let factory = || {
+            let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+            let root = scene
+                .add_mobject(Mobject::from_points(&[[1.0, 0.0, 0.0]]))
+                .unwrap();
+            let children = [0.6, -0.25]
+                .into_iter()
+                .map(|angle| {
+                    Box::new(fmn_anim::Rotating::new(root).with_angle(angle).with_config(
+                        fmn_anim::AnimConfig {
+                            run_time_frames: Some(4),
+                            ..fmn_anim::AnimConfig::default()
+                        },
+                    )) as Box<dyn fmn_anim::Animation>
+                })
+                .collect();
+            let succession = fmn_anim::Succession::new(scene.stage_mut(), children).unwrap();
+            let mut program = NativeSceneProgram::new(
+                scene,
+                vec![NativeSegment::Play {
+                    animations: vec![Box::new(succession)],
+                    overrides: PlayOverrides::default(),
+                }],
+                8,
+            )
+            .unwrap();
+            program.factory_fingerprint(1 << 20).unwrap();
+            program
+        };
+        let mut original = factory();
+        original.advance_to(5).unwrap();
+        let CheckpointAdmission::Resume(mut cursor) =
+            original.checkpoint_admission(1 << 20).unwrap()
+        else {
+            panic!("active native succession must admit a continuation");
+        };
+        assert_ne!(cursor.effects, 0);
+        cursor.effects = 0;
+        let bytes = original.state_bytes().unwrap();
+        let mut restored = factory();
+        let error = restored.restore_checkpoint(&bytes, &cursor).unwrap_err();
+        assert!(error.message.contains("active continuation effects"));
+        assert!(restored.next_frame().is_err());
     }
 
     #[test]

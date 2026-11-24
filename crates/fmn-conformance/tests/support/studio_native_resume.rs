@@ -1163,6 +1163,17 @@ pub(super) fn run_schedules(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
 }
 
 fn future_native_program(matching: bool) -> Result<NativeSceneProgram, ServiceError> {
+    native_succession_program(matching, false)
+}
+
+fn active_succession_program(nested: bool) -> Result<NativeSceneProgram, ServiceError> {
+    native_succession_program(false, nested)
+}
+
+fn native_succession_program(
+    matching: bool,
+    nested: bool,
+) -> Result<NativeSceneProgram, ServiceError> {
     let mut scene = Scene::new(RuntimeConfig::default(), 89).map_err(service_error)?;
     let root = scene
         .add_mobject(fmn_mobject::Mobject::group(vec![
@@ -1206,10 +1217,17 @@ fn future_native_program(matching: bool) -> Result<NativeSceneProgram, ServiceEr
             run_time_frames: Some(4),
             ..fmn_anim::AnimConfig::default()
         });
-        Box::new(
+        let succession =
             fmn_anim::Succession::new(scene.stage_mut(), vec![Box::new(first), Box::new(second)])
-                .map_err(service_error)?,
-        )
+                .map_err(service_error)?;
+        if nested {
+            Box::new(
+                fmn_anim::AnimationGroup::new(scene.stage_mut(), vec![Box::new(succession)])
+                    .map_err(service_error)?,
+            )
+        } else {
+            Box::new(succession)
+        }
     };
     let drawing = fmn_anim::write(scene.stage(), root);
     NativeSceneProgram::new(
@@ -1238,6 +1256,15 @@ fn future_native_program(matching: bool) -> Result<NativeSceneProgram, ServiceEr
 
 pub(super) fn run_future_native(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     run_prepared_checkpoints(ctx, future_native_program, "future_native", &[3, 6, 7, 8])
+}
+
+pub(super) fn run_active_succession(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    run_prepared_checkpoints(
+        ctx,
+        active_succession_program,
+        "active_succession",
+        &[9, 10, 12, 15],
+    )
 }
 
 #[derive(PartialEq)]
@@ -1351,7 +1378,6 @@ fn run_prepared_checkpoints(
             // The immutable observations above cover every frame. Commit
             // only after the suffix has completed, when the trailing wait is
             // resumable, to also bind the actual RNG and continuation cursor.
-            // A commit during active Succession would require cold replay.
             commit(&mut original, 18, &mut journal)?;
             commit(&mut recovered, 18, &mut recovered_journal)?;
             let expected_final = journal.entries().last().unwrap();
