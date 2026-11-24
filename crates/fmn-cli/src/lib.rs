@@ -3371,6 +3371,20 @@ where
         !self.cancellation.is_cancelled() && self.inner.capture_state_required()
     }
 
+    fn capture_final_state_required(&self) -> bool {
+        !self.cancellation.is_cancelled() && self.inner.capture_final_state_required()
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &fmn_scene::studio_bridge::Stage,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.cancellation.scene_checkpoint()?;
+        self.inner.capture_stage(reason, stage, metadata)
+    }
+
     fn capture_metadata(
         &mut self,
         reason: CaptureReason,
@@ -5397,6 +5411,26 @@ impl SceneSink for RenderSink {
             .map_err(|error| IntegrationError::new("soundtrack", error.to_string()))
     }
 
+    fn capture_stage(
+        &mut self,
+        _reason: CaptureReason,
+        stage: &fmn_scene::studio_bridge::Stage,
+        metadata: fmn::animation::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(error.clone());
+        }
+        let result = (|| {
+            let revision = u64::try_from(metadata.frame_index())
+                .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
+            // NativeFramePipeline reserves its bounded slot before freezing
+            // rooted render data. Do not snapshot and reconstruct the arena
+            // before it can make that admission decision.
+            self.render_stage(stage, revision)
+        })();
+        self.latch_capture(result)
+    }
+
     fn capture(
         &mut self,
         _reason: CaptureReason,
@@ -5405,12 +5439,7 @@ impl SceneSink for RenderSink {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
-        let result = (|| {
-            let stage = packet.materialize_stage();
-            let revision = u64::try_from(packet.frame_index())
-                .map_err(|_| IntegrationError::new("lumen", "negative frame index"))?;
-            self.render_stage(&stage, revision)
-        })();
+        let result = self.render_packet(packet);
         self.latch_capture(result)
     }
 }
@@ -5622,6 +5651,51 @@ impl<'a> SubdividedRenderSink<'a> {
 }
 
 impl SceneSink for SubdividedRenderSink<'_> {
+    fn capture_state_required(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|active| !self.single_frame && active.sink.capture_state_required())
+    }
+
+    fn capture_final_state_required(&self) -> bool {
+        self.current
+            .as_ref()
+            .is_some_and(|active| self.single_frame || active.sink.capture_final_state_required())
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &fmn_scene::studio_bridge::Stage,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        let Some(active) = self.current.as_mut() else {
+            return Ok(());
+        };
+        if self.single_frame {
+            // Nominal segments demand only their final sample, before remover
+            // and zero-dt cleanup. A stop predicate makes every observed wait
+            // sample a possible final frame, preserving early-stop output.
+            self.final_packet = Some(fmn::animation::FramePacket::freeze_metadata(
+                stage, metadata,
+            ));
+            Ok(())
+        } else {
+            active.sink.capture_stage(reason, stage, metadata)
+        }
+    }
+
+    fn capture_metadata(
+        &mut self,
+        reason: CaptureReason,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        match self.current.as_mut() {
+            Some(active) => active.sink.capture_metadata(reason, metadata),
+            None => Ok(()),
+        }
+    }
+
     fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
         match event.phase {
             LifecyclePhase::DriveSegment if !event.skipping => {
