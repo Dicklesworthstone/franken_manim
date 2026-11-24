@@ -303,6 +303,123 @@ class SurfaceAlignmentTests(unittest.TestCase):
             self.assertEqual(left.image_file, str(path.resolve()))
             self.assertEqual(left.num_textures, 1)
 
+    def test_same_topology_surface_plays_use_native_teams_and_match_callbacks(self):
+        class CallbackTransform(m.Transform):
+            def interpolate_mobject(self, alpha):
+                # A real authored hook selects the established callback clock.
+                # Both cases still use the production Surface/Transform kernels.
+                return super().interpolate_mobject(alpha)
+
+        with tempfile.TemporaryDirectory(prefix='fmn-surface-native-') as directory:
+            root = Path(directory)
+            image_path = texture(root / 'checker.png')
+            for kind in ('surface', 'nested-group', 'textured'):
+                outputs, states = [], []
+                for mode, threads in (('callback', 1), ('native', 1), ('native', 4)):
+                    with self.subTest(kind=kind, mode=mode, threads=threads):
+                        scene = m.Scene()
+                        destination = root / f'{kind}-{mode}-{threads}'
+                        with scene.render_session(destination, format='png_sequence',
+                                                  resolution=(96, 54), fps=8, threads=threads) as session:
+                            first = surface((3, 3), color=m.BLUE)
+                            if kind == 'nested-group':
+                                first.shift((-1.25, 0, 0))
+                                second = surface((3, 3), .25, color=m.RED).shift((1.25, 0, 0))
+                                subject = m.SGroup(m.SGroup(first), second)
+                            elif kind == 'textured':
+                                subject = m.TexturedSurface(first, image_path)
+                            else:
+                                subject = first
+                            subject.set_shading(0, 0, 0)
+                            scene.add(subject)
+                            leaves = [member for member in subject.get_family()
+                                      if isinstance(member, m.Surface)
+                                      and m._surface_grid_resolution(member) is not None]
+                            identities = [(member, vars(member)['triangle_indices']) for member in leaves]
+                            # The public builder must reach native frame teams
+                            # without acquiring a geometry view during admission.
+                            builder = subject.animate.shift((.5, 0, .5))
+                            animation = (builder if mode == 'native'
+                                         else CallbackTransform(subject, subject.target))
+                            scene.play(animation, run_time=.5, rate_func=m.linear)
+                            target = subject.copy()
+                            for member in target.get_family():
+                                if (isinstance(member, m.Surface)
+                                        and m._surface_grid_resolution(member) is not None):
+                                    member.apply_function(
+                                        lambda point: point + (0, .25 * point[0] ** 2, 0))
+                                    if kind == 'textured':
+                                        member.data['im_coords'][:, 0] *= .5
+                            animation_type = m.Transform if mode == 'native' else CallbackTransform
+                            scene.play(animation_type(subject, target),
+                                       run_time=.5, rate_func=m.linear)
+                        self.assertEqual(session.result.frame_count, 8)
+                        self.assertEqual(scene.get_time(), 1.)
+                        self.assertEqual(tuple(scene.mobjects), (scene.frame, subject))
+                        stats = scene._render_performance
+                        self.assertEqual(stats['pure_play_segments'], 2 if mode == 'native' else 0)
+                        self.assertEqual(stats['pure_play_frames'], 8 if mode == 'native' else 0)
+                        self.assertEqual(stats['camera_frames'], 8)
+                        if mode == 'native':
+                            used, planned, _, _ = scene._render_plan
+                            self.assertGreaterEqual(used, 1)
+                            if planned > 1:
+                                self.assertGreater(used, 1)
+                        for member, indices in identities:
+                            self.assertIs(vars(member)['triangle_indices'], indices)
+                            self.assert_topology(member, (3, 3))
+                        frames = [path.read_bytes() for path in sorted(destination.glob('*.png'))]
+                        self.assertEqual(len(frames), 8)
+                        self.assertGreater(len(set(frames)), 1)
+                        outputs.append(frames)
+                        states.append([member.data.copy() for member in leaves])
+                self.assertEqual(outputs[0], outputs[1])
+                self.assertEqual(outputs[0], outputs[2])
+                for actual in states[1:]:
+                    self.assertEqual(len(states[0]), len(actual))
+                    for expected_rows, actual_rows in zip(states[0], actual):
+                        self.assertEqual(expected_rows.dtype, actual_rows.dtype)
+                        for field in expected_rows.dtype.names:
+                            np.testing.assert_allclose(actual_rows[field], expected_rows[field],
+                                                       rtol=0, atol=2e-6)
+
+    def test_surface_live_point_view_keeps_owner_playback_and_aliases(self):
+        with tempfile.TemporaryDirectory(prefix='fmn-surface-view-') as directory:
+            scene = m.Scene()
+            with scene.render_session(Path(directory) / 'frames', format='png_sequence',
+                                      resolution=(96, 54), fps=8, threads=4) as session:
+                obj = surface((3, 3))
+                scene.add(obj)
+                target = obj.copy().shift((.5, 0, .5))
+                points = obj.get_points()
+                expected = points.copy() + (.5, 0, .5)
+                scene.play(m.Transform(obj, target), run_time=.5, rate_func=m.linear)
+                np.testing.assert_allclose(points, expected, rtol=0, atol=2e-6)
+                np.testing.assert_allclose(obj.get_points(), points, rtol=0, atol=2e-6)
+                self.assert_topology(obj, (3, 3))
+            self.assertEqual(session.result.frame_count, 4)
+            self.assertEqual(scene._render_performance['pure_play_frames'], 0)
+
+    def test_authored_sibling_begin_can_regrid_before_surface_transform(self):
+        obj, target = surface((2, 3)), surface((2, 3), 2)
+        marker, calls = m.Point(), []
+
+        class Regrid(m.Animation):
+            def begin(self):
+                calls.append('begin')
+                obj.set_resolution((4, 2))
+                return super().begin()
+
+        scene = m.Scene()
+        scene.add(obj, marker)
+        scene.play(m.Succession(Regrid(marker, run_time=.125),
+                                m.Transform(obj, target, run_time=.125)),
+                   rate_func=m.linear)
+        self.assertEqual(calls, ['begin'])
+        self.assert_topology(obj, (4, 3))
+        np.testing.assert_allclose(obj.get_points(), grid((4, 3), 2), rtol=0, atol=2e-6)
+        self.assert_topology(target, (2, 3))
+
     def test_rendered_morph_has_valid_uv_queries_and_identical_thread_bytes(self):
         samples = []
         class Morph(m.Scene):

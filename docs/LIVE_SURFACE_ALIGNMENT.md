@@ -51,6 +51,24 @@ surface leaves use the existing ordered Transform lifecycle, including nested
 Groups and Succession, so public `resolution`, triangle indices and UV queries
 agree with the native buffer before scene updaters or frame capture run.
 
+## Native playback for matching grids
+
+A single stock `Transform` or `.animate` play over a Surface or nested SGroup
+family can use native frame workers when every corresponding leaf has the same
+stored UV shape and record schema. The family structure and shared-object
+correspondence must also match, and public `resolution` and triangle-index
+metadata must already describe those grids. Admission reads native metadata
+without exporting writable record views or materializing pending placement.
+
+This includes geometry morphs, placement changes and numeric texture-coordinate
+interpolation with unchanged texture resources. It preserves the existing
+native playback checks for updaters, camera callbacks and live writable views.
+Different grids, custom alignment/interpolation or storage accessors, arbitrary
+meshes, multiple animations in one play and animation compositions retain the
+ordered Python lifecycle. In particular, an earlier animation's `begin` may
+regrid a surface before a later transform aligns it. Authored callbacks and
+public topology updates continue to run through that path.
+
 ## Boundaries and failures
 
 Both dimensions must be at least two, the grid must match its record count, and

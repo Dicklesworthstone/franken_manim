@@ -6,7 +6,13 @@ it neither evaluates authored UV functions nor implements a second resampler.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
+from functools import wraps
+from inspect import getattr_static
 from types import SimpleNamespace
+from weakref import ref
+
+from .native_playback import _plain_state
 
 from .surface_admission import GRID_BUDGET
 
@@ -101,22 +107,142 @@ def install_surface_alignment(native):
     Surface.get_triangle_indices = get_triangle_indices
 
     previous_requires = g["_requires_python_animation"]
+    Scene, Builder = g["Scene"], g["_AnimationBuilder"]
+    previous_play = Scene.play
+    # A preceding sibling's authored begin can regrid a surface after route
+    # admission. Keep mixed plays and compositions on their ordered callback
+    # lifecycle; a single stock Transform has no intervening authored begin.
+    # Its mobject may still be a bounded nested Surface/SGroup family.
+    single_transform = ContextVar("fmn_single_surface_transform", default=None)
+    # Native builtins own their module through __self__. Weak identities keep
+    # an embedded module releasable when its globals are cleared.
+    bindings = {}
+    for name in ("_surface_grid_resolution", "_become_schema_compatible"):
+        try:
+            bindings[name] = ref(g.get(name))
+        except TypeError:
+            pass  # An older/incomplete boundary keeps the callback route.
+    native_has_points = Mobject._has_points
+    accessors = tuple((name, getattr_static(Mobject, name)) for name in
+                      ("data", "_data_array", "_has_points", "n_records", "field_names"))
+
+    def unchanged_topology(source, target):
+        if len(bindings) != 2:
+            return False
+        grid_resolution = bindings["_surface_grid_resolution"]()
+        schema_compatible = bindings["_become_schema_compatible"]()
+        if (not callable(grid_resolution) or not callable(schema_compatible)
+                or g.get("_surface_grid_resolution") is not grid_resolution
+                or g.get("_become_schema_compatible") is not schema_compatible):
+            return False
+        pending, seen = [(source, target)], set()
+        left_peers, right_peers, edges = {}, {}, 0
+        while pending:
+            left, right = pending.pop()
+            pair = (id(left), id(right))
+            if pair in seen:
+                continue
+            # A shared leaf cannot correspond to two independent leaves:
+            # native and Python family walks must see the same alias graph.
+            if (left_peers.setdefault(pair[0], pair[1]) != pair[1]
+                    or right_peers.setdefault(pair[1], pair[0]) != pair[0]):
+                return False
+            seen.add(pair)
+            if len(seen) > 65536:
+                return False
+            if not isinstance(left, Mobject) or not isinstance(right, Mobject):
+                return False
+            states = (_plain_state(left), _plain_state(right))
+            if any(state is None for state in states):
+                return False
+            # The earlier protocol guard handles copy/alignment/interpolation
+            # overrides. These storage accessors are also observed by the
+            # Python alignment path; never bypass a custom property or an
+            # instance-level replacement merely to avoid exporting a view.
+            if any(getattr_static(member, name) is not expected
+                   for member in (left, right) for name, expected in accessors):
+                return False
+            children = [state.get("submobjects") for state in states]
+            if any(type(items) not in (list, tuple, g["_LiveSubmobjects"]) for items in children):
+                return False
+            if len(children[0]) != len(children[1]):
+                return False
+            edges += len(children[0])
+            if edges > 65536:
+                return False
+            if isinstance(left, Surface) != isinstance(right, Surface):
+                return False
+            if isinstance(left, Surface):
+                a, b = grid_resolution(left), grid_resolution(right)
+                if a != b:
+                    return False
+                if a is None:
+                    # Empty SGroup roots need no UV metadata. Unstructured
+                    # meshes retain their existing callback protocol.
+                    if native_has_points(left) or native_has_points(right):
+                        return False
+                else:
+                    for member, state in zip((left, right), states):
+                        shape, indices = state.get("resolution"), state.get("triangle_indices")
+                        if (getattr_static(member, "resolution", None) is not shape
+                                or getattr_static(member, "triangle_indices", None) is not indices):
+                            return False
+                        if (type(shape) not in (tuple, list) or len(shape) != 2
+                                or any(type(value) is not int for value in shape)
+                                or tuple(shape) != a):
+                            return False
+                        if (type(indices) is not g["_np"].ndarray or indices.ndim != 1
+                                or indices.dtype.kind not in "iu"
+                                or len(indices) != 6 * (a[0] - 1) * (a[1] - 1)):
+                            return False
+            if not schema_compatible(left, right):
+                return False
+            pending.extend(zip(children[0], children[1]))
+        return True
 
     def requires(animation):
         if previous_requires(animation):
             return True
-        if isinstance(animation, Transform):
-            # The preceding shipped-protocol classifier has already refused
-            # authored attribute/family dispatch. Resolve no deferred target here.
-            # Surface leaves use the existing ordered Transform lifecycle so
-            # Python topology agrees with native records before interpolation,
-            # including Groups, Succession and targets made at begin().
-            for name in ("mobject", "target_mobject"):
-                root = getattr(animation, name, None)
-                if isinstance(root, Mobject) and any(
-                        isinstance(member, Surface) for member in root.get_family()):
-                    return True
-        return False
+        if not isinstance(animation, Transform):
+            return False
+        # The preceding shipped-protocol classifier has already refused
+        # authored attribute/family dispatch. Resolve no deferred target here.
+        roots = tuple(getattr(animation, name, None) for name in
+                      ("mobject", "target_mobject"))
+        if not any(isinstance(root, Mobject) and any(
+                isinstance(member, Surface) for member in root.get_family()) for root in roots):
+            return False
+        if (single_transform.get() is not animation
+                or getattr_static(animation, "_native_kind", None)
+                not in ("transform", "replacement_transform", "transform_from_copy")
+                or not all(isinstance(root, Mobject) for root in roots)):
+            return True
+        # Atlas validates the real grid and field schema without materializing
+        # placement or exporting writable records. No Python topology needs
+        # publication when this proof holds. Existing native admission still
+        # rejects live record views and authored per-frame callbacks.
+        try:
+            return not unchanged_topology(*roots)
+        except (ValueError, TypeError, RuntimeError):
+            # Preserve the established alignment/lifecycle error channel for
+            # malformed grids instead of failing merely while choosing a route.
+            return True
+
+    @wraps(previous_play)
+    def play(self, *animations, **kwargs):
+        if len(animations) == 1 and isinstance(animations[0], Builder):
+            animation = g["prepare_animation"](animations[0])
+            if not isinstance(animation, g["Animation"]):
+                raise TypeError("AnimationBuilder.build must return an Animation")
+            animations = (animation,)
+        candidate = (animations[0] if len(animations) == 1
+                     and isinstance(animations[0], Transform) else None)
+        token = single_transform.set(candidate)
+        try:
+            return previous_play(self, *animations, **kwargs)
+        finally:
+            single_transform.reset(token)
 
     g["_requires_python_animation"] = requires
+    Scene.play = play
     g["_FMN_SURFACE_ALIGNMENT_INSTALLED"] = True

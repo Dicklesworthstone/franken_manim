@@ -8,6 +8,7 @@ from __future__ import annotations
 import ast
 import copy
 import importlib.util
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 import unittest
@@ -166,7 +167,8 @@ def typed_background_environment():
         methods = {node.name: node for node in definitions[owner].body
                    if isinstance(node, ast.FunctionDef)}
         selected.extend(methods[name] for name in names)
-    namespace = {"_np": np, "_family_preorder": lambda root: root.get_family()}
+    namespace = {"_np": np, "_inspect": inspect,
+                 "_family_preorder": lambda root: root.get_family()}
     exec(compile(ast.Module(selected, type_ignores=[]), str(source), "exec"), namespace)  # ubs:ignore -- fixed definitions from this repository's bootstrap; no external input
 
     class Records(native.Mobject):
@@ -178,6 +180,10 @@ def typed_background_environment():
             return self.rows
         def n_records(self):
             return len(self.rows)
+        def _data_array(self):
+            return self.rows
+        def _fill_scalar_lanes(self, *args):
+            return False
         def _fill_rgba_lanes(self, *args):
             # Storage is explicitly doubled, so use the shipping view-write
             # fallback rather than claiming native lane-fill acceptance.
@@ -186,6 +192,13 @@ def typed_background_environment():
     Records._style_data = namespace["_style_data"]
     Records.set_rgba_array_by_color = namespace["set_rgba_array_by_color"]
     Records.set_fill = namespace["set_fill"]
+    # The production guard captures the base descriptors at definition time.
+    # Install its real definitions after the doubled record owner exists;
+    # both native writers decline, keeping this fixture on view writes.
+    helpers = [definitions[name] for name in (
+        "_uses_native_style_access", "_try_fill_scalar_style",
+    )]
+    exec(compile(ast.Module(helpers, type_ignores=[]), str(source), "exec"), namespace)  # ubs:ignore -- fixed definitions from this repository's bootstrap; no external input
 
     class Grid(native.Group):
         def __iter__(self):
