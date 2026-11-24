@@ -41,6 +41,62 @@ const MAX_PIXELS: u64 = 16_777_216;
 /// alive through one of its own updater closures.
 pub(crate) type ReadbackSlot = Rc<RefCell<Option<Arc<PendingCapture>>>>;
 
+/// Native handle dependencies of a sampled readback. This copyable descriptor
+/// can enter a pure renderer's final-sample closure without retaining a Python
+/// object, a readback slot or the source Scene.
+#[derive(Clone, Copy)]
+pub(crate) struct ReadbackDependencies {
+    frame_mob: Option<Mob>,
+    light_mob: Option<Mob>,
+}
+
+impl ReadbackDependencies {
+    pub(crate) fn freeze_stage(&self, stage: &Stage) -> FrozenRenderState {
+        self.freeze_stage_with_render_light(stage, None)
+    }
+
+    /// Freeze one shared sample for file output and lazy readback. A distinct
+    /// output light joins the camera dependencies without becoming a draw root.
+    pub(crate) fn freeze_stage_with_render_light(
+        &self,
+        stage: &Stage,
+        render_light: Option<Mob>,
+    ) -> FrozenRenderState {
+        if let Some(render_light) = render_light {
+            return match (self.frame_mob, self.light_mob) {
+                (Some(frame), Some(light)) => {
+                    stage.freeze_visible_render_state_with_auxiliary(&[frame, light, render_light])
+                }
+                (Some(mob), None) | (None, Some(mob)) => {
+                    stage.freeze_visible_render_state_with_auxiliary(&[mob, render_light])
+                }
+                (None, None) => stage.freeze_visible_render_state_with_auxiliary(&[render_light]),
+            };
+        }
+        match (self.frame_mob, self.light_mob) {
+            (Some(frame), Some(light)) => {
+                stage.freeze_visible_render_state_with_auxiliary(&[frame, light])
+            }
+            (Some(mob), None) | (None, Some(mob)) => {
+                stage.freeze_visible_render_state_with_auxiliary(&[mob])
+            }
+            (None, None) => stage.freeze_visible_render_state(),
+        }
+    }
+
+    pub(crate) fn freeze_packet(&self, packet: FramePacket) -> FrozenRenderState {
+        match (self.frame_mob, self.light_mob) {
+            (Some(frame), Some(light)) => {
+                packet.into_visible_render_state_with_auxiliary(&[frame, light])
+            }
+            (Some(mob), None) | (None, Some(mob)) => {
+                packet.into_visible_render_state_with_auxiliary(&[mob])
+            }
+            (None, None) => packet.into_visible_render_state(),
+        }
+    }
+}
+
 pub(crate) struct PendingCapture {
     state: FrozenRenderState,
     camera: Camera,
@@ -88,6 +144,13 @@ pub(crate) struct SceneCapture {
 }
 
 impl SceneCapture {
+    fn dependencies(&self) -> ReadbackDependencies {
+        ReadbackDependencies {
+            frame_mob: self.frame_points.map(|(mob, _)| mob),
+            light_mob: self.light_mob,
+        }
+    }
+
     fn publish(&self, state: FrozenRenderState) {
         *self.slot.borrow_mut() = Some(Arc::new(PendingCapture {
             state,
@@ -109,9 +172,21 @@ impl SceneReadback {
         self.target.is_some()
     }
 
+    pub(crate) fn dependencies(&self) -> Option<ReadbackDependencies> {
+        self.target.as_ref().map(SceneCapture::dependencies)
+    }
+
     pub(crate) fn capture(&self, packet: FramePacket) {
         if let Some(target) = &self.target {
-            target.publish(packet.into_render_state());
+            target.publish(target.dependencies().freeze_packet(packet));
+        }
+    }
+
+    /// Freeze the sampled picture and camera controls directly on the owner.
+    /// Removed objects and replay callbacks never enter this readback state.
+    pub(crate) fn capture_stage(&self, stage: &Stage) {
+        if let Some(target) = &self.target {
+            target.publish(target.dependencies().freeze_stage(stage));
         }
     }
 
@@ -1087,6 +1162,254 @@ pub fn run_portal_gauntlet_style_retention() -> Result<PortalStyleRetentionRepor
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    #[test]
+    fn rooted_scene_readback_keeps_sampled_camera_and_light_pixels_after_owner_drop() {
+        use fmn_mobject::{
+            ImageColorSpace, ImageResource, ImageSampler, Placement, RecordBuffer, RecordSchema,
+            RenderPrimitive, uniforms::Uniforms,
+        };
+
+        fn assert_send_sync_copy<T: Send + Sync + Copy>() {}
+        assert_send_sync_copy::<ReadbackDependencies>();
+        let _lock = crate::python_embedding_lock();
+        let mut source = Stage::new();
+        let schema = RecordSchema::new(
+            &[("point", 3), ("d_normal_point", 3), ("rgba", 4)],
+            &["point"],
+            &["point", "d_normal_point"],
+        )
+        .unwrap();
+        let mut records = RecordBuffer::new(schema, 4).unwrap();
+        for (index, point) in [
+            [-2.0, -1.5, 0.0],
+            [-2.0, 1.5, 0.0],
+            [2.0, -1.5, 0.0],
+            [2.0, 1.5, 0.0],
+        ]
+        .iter()
+        .enumerate()
+        {
+            assert!(records.write(index, "point", point));
+            assert!(records.write(index, "d_normal_point", &[point[0], point[1], 1.0]));
+            assert!(records.write(index, "rgba", &[0.8, 0.25, 0.1, 1.0]));
+        }
+        let surface = source.add(
+            Mobject::from_buffer(records)
+                .with_render_primitive(RenderPrimitive::SurfaceGrid { resolution: (2, 2) })
+                .with_uniforms(Uniforms {
+                    shading: [0.3, 0.2, 0.4],
+                    depth_test: true,
+                    ..Uniforms::default()
+                }),
+        );
+        source.add_to_scene(surface).unwrap();
+        let mut camera = Camera::new(fmn_render::CameraConfig {
+            resolution: (96, 64),
+            light_source_position: [0.0, 0.0, -4.0],
+            ..fmn_render::CameraConfig::default()
+        })
+        .unwrap();
+        camera
+            .frame_mut()
+            .set_euler_angles(Some(0.15), Some(0.35), None)
+            .unwrap();
+        let previous_points = PyCameraFrameCore::canonical_points(camera.frame());
+        let frame = source.add(Mobject::from_points(&previous_points));
+        source
+            .set_placement(frame, Placement::from_translation([0.75, -0.5, 0.0]))
+            .unwrap();
+        let light = source.add(Mobject::new());
+        let light_point = source.add(Mobject::from_points(&[[2.0, -3.0, 4.0]]));
+        source.attach(light, light_point).unwrap();
+        source
+            .set_placement(light_point, Placement::from_translation([1.0, 0.0, 0.5]))
+            .unwrap();
+        let render_light = source.add(Mobject::from_points(&[[6.0, 3.0, 8.0]]));
+        let image = ImageResource::rgba8(
+            1,
+            1,
+            vec![10, 20, 30, 255],
+            ImageColorSpace::Srgb,
+            ImageSampler::default(),
+        )
+        .unwrap();
+        let hidden_pixels = image.shared_pixels();
+        let hidden_image = source.add(Mobject::new().with_image_resource(image));
+        for _ in 0..512 {
+            let old = source.add(Mobject::from_points(&[[8.0, 9.0, 10.0]; 32]));
+            source.add_to_scene(old).unwrap();
+            source.remove_from_scene(old);
+        }
+        let callbacks = Rc::new(std::cell::Cell::new(0));
+        let callback_calls = Rc::clone(&callbacks);
+        source
+            .add_dt_updater(
+                surface,
+                move |_, _, _| callback_calls.set(callback_calls.get() + 1),
+                false,
+            )
+            .unwrap();
+        let views = [surface, frame, light_point]
+            .map(|mob| source.get_mut(mob).unwrap().buffer.export_view(true));
+        let slot = Rc::new(RefCell::new(None));
+        let mut readback = SceneReadback {
+            target: Some(SceneCapture {
+                slot: Rc::clone(&slot),
+                camera: camera.clone(),
+                frame_points: Some((frame, previous_points)),
+                light_mob: Some(light),
+                threads: 1,
+            }),
+        };
+        let empty = SceneReadback::default();
+        assert!(empty.dependencies().is_none());
+        empty.capture_stage(&source);
+        let dependencies = readback.dependencies().expect("bound native camera");
+        let mut captures = Vec::new();
+        for threads in [1, 4, 16] {
+            readback.target.as_mut().unwrap().threads = threads;
+            readback.capture_stage(&source);
+            let pending = slot.borrow_mut().take().unwrap();
+            assert_eq!(pending.state.retained_object_count(), 4);
+            captures.push(pending);
+        }
+        readback.capture_state(dependencies.freeze_stage(&source));
+        captures.push(slot.borrow_mut().take().unwrap());
+        let shared = dependencies.freeze_stage_with_render_light(&source, Some(render_light));
+        assert_eq!(shared.retained_object_count(), 5);
+        assert!(shared.clone().materialize().contains(render_light));
+        readback.capture_state(shared);
+        captures.push(slot.borrow_mut().take().unwrap());
+        assert_eq!(Rc::strong_count(&callbacks), 2);
+        assert_eq!(
+            Arc::strong_count(&hidden_pixels),
+            2,
+            "owner readback must never create a whole-arena snapshot cache"
+        );
+
+        let full = PendingCapture {
+            state: source.freeze_render_state(),
+            camera: camera.clone(),
+            frame_points: Some((frame, previous_points)),
+            light_mob: Some(light),
+            threads: 1,
+        };
+        let expected = full.render().unwrap().rgba.as_bytes().to_vec();
+        drop(full);
+        assert_ne!(
+            expected,
+            CameraCapture::render_stage(&source, &camera, 1)
+                .unwrap()
+                .rgba
+                .as_bytes(),
+            "the sampled camera/light controls must affect actual surface pixels"
+        );
+        let clock = fmn_anim::RationalFrameClock::new(4).unwrap();
+        let rng = fmn_core::rng::RngRoot::from_seed(19);
+        for shared in [false, true] {
+            let packet = FramePacket::freeze_barrier(&source, &clock, &rng);
+            let journal = shared.then(|| packet.clone());
+            readback.capture(packet);
+            let pending = slot.borrow_mut().take().unwrap();
+            assert_eq!(pending.state.retained_object_count(), 4);
+            captures.push(pending);
+            if let Some(journal) = journal {
+                let replay = journal.materialize_stage();
+                assert!(replay.contains(hidden_image));
+                assert_eq!(replay.updater_ids(surface).len(), 1);
+            }
+        }
+        assert!(views[0].write(0, "point", &[50.0, 50.0, 0.0]));
+        assert!(views[1].write(0, "point", &[4.0, 2.0, 0.0]));
+        assert!(views[2].write(0, "point", &[0.0, 0.0, -4.0]));
+        source.shift(render_light, [50.0, 0.0, 0.0]);
+        let changed = PendingCapture {
+            state: source.freeze_render_state(),
+            camera,
+            frame_points: Some((frame, previous_points)),
+            light_mob: Some(light),
+            threads: 1,
+        };
+        assert_ne!(expected, changed.render().unwrap().rgba.as_bytes());
+        drop(changed);
+        drop(source);
+        assert_eq!(Arc::strong_count(&hidden_pixels), 1);
+        assert_eq!(Rc::strong_count(&callbacks), 1);
+        assert_eq!(callbacks.get(), 0);
+        for capture in captures {
+            let stage = capture.state.clone().materialize();
+            assert_eq!(stage.roots(), &[surface]);
+            assert_eq!(stage.family(light), [light, light_point]);
+            if stage.contains(render_light) {
+                assert_eq!(stage.get_center(render_light), [6.0, 3.0, 8.0]);
+            }
+            assert!(stage.updater_ids(surface).is_empty());
+            assert!(!stage.contains(hidden_image));
+            let pixels =
+                std::thread::spawn(move || capture.render().unwrap().rgba.as_bytes().to_vec())
+                    .join()
+                    .unwrap();
+            assert_eq!(pixels, expected);
+        }
+    }
+
+    #[test]
+    fn rooted_scene_readback_preserves_stale_camera_and_light_refusals() {
+        let _lock = crate::python_embedding_lock();
+        Python::initialize();
+        Python::attach(|py| {
+            let mut source = Stage::new();
+            let visible = source.add(Mobject::new());
+            source.add_to_scene(visible).unwrap();
+            let deleted = source.add(Mobject::from_points(&[[1.0, 2.0, 3.0]; 5]));
+            source.delete(deleted).unwrap();
+            let replacement = source.add(Mobject::new());
+            let foreign = Stage::new().add(Mobject::new());
+            let camera = Camera::new(fmn_render::CameraConfig {
+                resolution: (16, 16),
+                ..fmn_render::CameraConfig::default()
+            })
+            .unwrap();
+            for invalid in [deleted, foreign] {
+                for is_frame in [false, true] {
+                    let slot = Rc::new(RefCell::new(None));
+                    let readback = SceneReadback {
+                        target: Some(SceneCapture {
+                            slot: Rc::clone(&slot),
+                            camera: camera.clone(),
+                            frame_points: is_frame.then_some((invalid, [[0.0; 3]; 5])),
+                            light_mob: (!is_frame).then_some(invalid),
+                            threads: 1,
+                        }),
+                    };
+                    for packet in [false, true] {
+                        if packet {
+                            readback.capture(FramePacket::freeze_barrier(
+                                &source,
+                                &fmn_anim::RationalFrameClock::new(4).unwrap(),
+                                &fmn_core::rng::RngRoot::from_seed(19),
+                            ));
+                        } else {
+                            readback.capture_stage(&source);
+                        }
+                        let pending = slot.borrow().clone().unwrap();
+                        assert_eq!(pending.state.retained_object_count(), 1);
+                        let state = pending.state.clone().materialize();
+                        assert!(!state.contains(invalid));
+                        assert!(!state.contains(replacement));
+                        let error = take_scene_capture(py, &slot)
+                            .err()
+                            .expect("invalid camera dependency must refuse readback");
+                        assert!(error.is_instance_of::<StaleHandleError>(py));
+                        assert!(Arc::ptr_eq(slot.borrow().as_ref().unwrap(), &pending));
+                    }
+                }
+            }
+        });
+    }
+
     #[test]
     fn production_style_writes_retain_geometry_and_preserve_python_semantics() {
         let report = super::run_portal_gauntlet_style_retention()

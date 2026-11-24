@@ -385,12 +385,32 @@ impl Stage {
     /// root order, live handles and allocation history are preserved. A writable
     /// view on an omitted object does not cause a copy of its record storage.
     ///
-    /// Use this only after separately freezing camera/light state. Native
-    /// interpolation, succession preparation and handle-based camera readback
-    /// require [`Self::freeze_render_state`]'s complete arena instead.
+    /// Use this after separately freezing camera/light state, or retain their
+    /// handle families with [`Self::freeze_visible_render_state_with_auxiliary`].
+    /// Native interpolation and succession preparation still require
+    /// [`Self::freeze_render_state`]'s complete arena instead.
     #[must_use]
     pub fn freeze_visible_render_state(&self) -> FrozenRenderState {
-        let members = VisibleMembers::discover(&self.roots, &[], |mob| {
+        self.freeze_visible_render_state_with_auxiliary(&[])
+    }
+
+    /// Freeze the rooted picture and explicitly needed auxiliary families.
+    ///
+    /// Camera-frame and light handles can be sampled from this immutable state
+    /// without retaining unrelated animation targets or scene history. Their
+    /// descendants remain available, but auxiliary handles do not become roots
+    /// or add draw calls. Invalid or stale handles remain absent and cannot
+    /// resolve to a later occupant of the same slot.
+    ///
+    /// This captures directly from the owner arena without creating a replay
+    /// snapshot or cloning its callbacks. Exported writable views on retained
+    /// objects are isolated by the normal render freeze protocol.
+    #[must_use]
+    pub fn freeze_visible_render_state_with_auxiliary(
+        &self,
+        auxiliary: &[Mob],
+    ) -> FrozenRenderState {
+        let members = VisibleMembers::discover(&self.roots, auxiliary, |mob| {
             self.get(mob).map(|entry| &*entry.submobjects)
         });
         let entries = members

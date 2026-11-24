@@ -372,15 +372,16 @@ fn auxiliary_families_keep_frozen_light_geometry_without_drawing_or_retaining_ot
     .unwrap();
     let hidden_image = stage.add(Mobject::new().with_image_resource(image));
     let foreign = Stage::new().add(Mobject::new());
+    let auxiliary = [light, light, stale, foreign];
+    let direct = stage.freeze_visible_render_state_with_auxiliary(&auxiliary);
     let checkpoint = stage.snapshot();
     assert_eq!(checkpoint.image_resources().count(), 1);
-    let auxiliary = [light, light, stale, foreign];
     let borrowed = checkpoint.visible_render_state_with_auxiliary(1.0, &auxiliary);
     let owned = stage
         .snapshot()
         .into_visible_render_state_with_auxiliary(1.0, &auxiliary);
     stage.shift(light, [100.0, 0.0, 0.0]);
-    for state in [borrowed, owned] {
+    for state in [direct, borrowed, owned] {
         assert_eq!(state.retained_object_count(), 3);
         assert_eq!(state.image_resources().count(), 0);
         let frame = state.materialize();
@@ -396,6 +397,73 @@ fn auxiliary_families_keep_frozen_light_geometry_without_drawing_or_retaining_ot
     assert_eq!(checkpoint.image_resources().count(), 1);
     assert!(checkpoint.materialize().contains(hidden_image));
     assert_eq!(stage.get_center(light), [107.0, 8.0, 9.0]);
+}
+
+#[test]
+fn owner_auxiliary_capture_never_snapshots_hidden_history_or_callbacks() {
+    use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler};
+
+    let mut stage = Stage::new();
+    let visible = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+    stage.add_to_scene(visible).unwrap();
+    let frame = stage.add(Mobject::from_points(&[[4.0, 5.0, 6.0]; 5]));
+    let light = stage.add(Mobject::new());
+    let light_point = stage.add(Mobject::from_points(&[[7.0, 8.0, 9.0]]));
+    stage.attach(light, light_point).unwrap();
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![10, 20, 30, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let hidden_pixels = image.shared_pixels();
+    let hidden_image = stage.add(Mobject::new().with_image_resource(image));
+    let callbacks = Rc::new(Cell::new(0));
+    let captured_callbacks = Rc::clone(&callbacks);
+    stage
+        .add_dt_updater(
+            hidden_image,
+            move |_, _, _| captured_callbacks.set(captured_callbacks.get() + 1),
+            false,
+        )
+        .unwrap();
+    for _ in 0..512 {
+        let removed = stage.add(Mobject::from_points(&[[9.0, 8.0, 7.0]; 64]));
+        stage.add_to_scene(removed).unwrap();
+        stage.remove_from_scene(removed);
+    }
+    let views = [visible, frame, light_point]
+        .map(|mob| stage.get_mut(mob).unwrap().buffer.export_view(true));
+    stage.set_time_from_clock(1.25);
+    let frozen = stage.freeze_visible_render_state_with_auxiliary(&[frame, light]);
+    assert_eq!(frozen.retained_object_count(), 4);
+    assert_eq!(frozen.image_resources().count(), 0);
+    assert_eq!(Rc::strong_count(&callbacks), 2);
+    assert_eq!(
+        Arc::strong_count(&hidden_pixels),
+        2,
+        "owner capture must not populate a whole-arena snapshot cache"
+    );
+    for view in &views {
+        assert!(view.write(0, "point", &[30.0, 40.0, 50.0]));
+    }
+    // A replay checkpoint still retains all authored inputs. Its cached entry
+    // raises this count even when the checkpoint itself is immediately dropped.
+    drop(stage.snapshot());
+    assert!(Arc::strong_count(&hidden_pixels) > 2);
+    drop(stage);
+    assert_eq!(Arc::strong_count(&hidden_pixels), 1);
+    assert_eq!(Rc::strong_count(&callbacks), 1);
+    assert_eq!(callbacks.get(), 0);
+    let captured = frozen.materialize();
+    assert_eq!(captured.time(), 1.25);
+    assert_eq!(captured.roots(), &[visible]);
+    assert_eq!(captured.get_points(visible).unwrap(), [[1.0, 2.0, 3.0]]);
+    assert_eq!(captured.get_points(frame).unwrap(), [[4.0, 5.0, 6.0]; 5]);
+    assert_eq!(captured.get_center(light), [7.0, 8.0, 9.0]);
+    assert!(!captured.contains(hidden_image));
 }
 
 #[test]

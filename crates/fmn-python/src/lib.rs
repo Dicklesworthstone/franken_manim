@@ -383,6 +383,27 @@ impl PortalRenderSession {
         }
     }
 
+    fn capture_stage(
+        &mut self,
+        stage: &Stage,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+        readback: Option<portal_readback::ReadbackDependencies>,
+    ) -> Result<Option<fmn_mobject::FrozenRenderState>, fmn_scene::IntegrationError> {
+        match self {
+            Self::Frames(session) => session.capture_owner_stage(stage, readback),
+            Self::Preview(session) => {
+                let packet =
+                    fmn_scene::studio_bridge::FramePacket::freeze_metadata(stage, metadata);
+                let captured = readback.map(|readback| readback.freeze_packet(packet.clone()));
+                session.capture(packet)?;
+                Ok(captured)
+            }
+            Self::Soundtrack { .. } | Self::Vector(_) => {
+                Ok(readback.map(|readback| readback.freeze_stage(stage)))
+            }
+        }
+    }
+
     fn bind_camera(
         &mut self,
         frame: fmn_scene::studio_bridge::CameraFrame,
@@ -515,6 +536,22 @@ fn freeze_portal_render_state(
     // camera. Keep its captured family for the ordinary world-center lookup,
     // without adding it to the scene's draw roots.
     Ok(packet.into_visible_render_state_with_auxiliary(light_mob.as_slice()))
+}
+
+fn freeze_portal_stage(
+    stage: &Stage,
+    light_mob: Option<Mob>,
+    image_inputs: &mut portal_raster::ImageInputs,
+    readback: Option<portal_readback::ReadbackDependencies>,
+) -> Result<fmn_mobject::FrozenRenderState, fmn_scene::IntegrationError> {
+    // Admission still observes the complete owner arena. The direct handoff
+    // must not create a full Snapshot, whose cache would retain hidden images
+    // and geometry even after the terminal projection discarded them.
+    image_inputs.observe(stage.image_resources())?;
+    Ok(readback.map_or_else(
+        || stage.freeze_visible_render_state_with_auxiliary(light_mob.as_slice()),
+        |readback| readback.freeze_stage_with_render_light(stage, light_mob),
+    ))
 }
 
 fn sync_portal_render_light(
@@ -957,10 +994,38 @@ impl PortalFrameSession {
         // Only the immutable render projection and native output resources
         // enter rasterization; serial waits release the GIL as pure plays do.
         let state = freeze_portal_render_state(packet, self.light_mob, &mut self.image_inputs)?;
+        self.capture_frozen_state(state, preparation_start, reservation)
+    }
+
+    fn capture_owner_stage(
+        &mut self,
+        stage: &Stage,
+        readback: Option<portal_readback::ReadbackDependencies>,
+    ) -> Result<Option<fmn_mobject::FrozenRenderState>, fmn_scene::IntegrationError> {
+        // Backpressure comes before capture, so a blocked output cannot pin
+        // another frame's payloads. The Stage itself stays on its owner while
+        // only the immutable render state enters the detached rasterizer.
+        let reservation = Python::attach(|py| py.detach(|| self.reserve_output()))?;
+        let preparation_start = Instant::now();
+        let state = freeze_portal_stage(stage, self.light_mob, &mut self.image_inputs, readback)?;
+        // File output and lazy camera pixels must share one sample. Another
+        // Python thread can write an exported view while rasterization has
+        // released the GIL; never freeze the live Stage again afterward.
+        let captured = readback.map(|_| state.clone());
+        self.capture_frozen_state(state, preparation_start, reservation)?;
+        Ok(captured)
+    }
+
+    fn capture_frozen_state(
+        &mut self,
+        state: fmn_mobject::FrozenRenderState,
+        preparation_start: Instant,
+        reservation: fmn_output::FrameReservation,
+    ) -> Result<(), fmn_scene::IntegrationError> {
         Python::attach(|py| {
             py.detach(move || {
                 let stage = state.materialize();
-                self.capture_stage(&stage, preparation_start, reservation)
+                self.render_captured_stage(&stage, preparation_start, reservation)
             })
         })
     }
@@ -981,7 +1046,7 @@ impl PortalFrameSession {
         Ok(reservation)
     }
 
-    fn capture_stage(
+    fn render_captured_stage(
         &mut self,
         stage: &fmn_mobject::Stage,
         preparation_start: Instant,
@@ -1071,7 +1136,7 @@ impl PortalFrameSession {
     fn capture_pure(
         &mut self,
         segment: &fmn_anim::pure_frame::PureSegment,
-        retain_last: bool,
+        readback: Option<portal_readback::ReadbackDependencies>,
     ) -> Result<(Vec<f64>, Option<fmn_mobject::FrozenRenderState>), fmn_scene::IntegrationError>
     {
         // Inspect all prepared endpoint materials before any prefix worker
@@ -1128,9 +1193,9 @@ impl PortalFrameSession {
                         let stage = job.try_materialize().map_err(|error| {
                             fmn_scene::IntegrationError::new("choreo", error.to_string())
                         })?;
-                        self.capture_stage(&stage, preparation_start, reservation)?;
-                        if retain_last {
-                            last_capture = Some(stage.freeze_render_state());
+                        self.render_captured_stage(&stage, preparation_start, reservation)?;
+                        if let Some(readback) = readback {
+                            last_capture = Some(readback.freeze_stage(&stage));
                         }
                         Ok(())
                     },
@@ -11919,7 +11984,7 @@ impl CameraLerp {
 }
 
 /// The portal's lifecycle sink: validates and records capture alphas, applies
-/// camera interpolation, and forwards immutable packets into an optional
+/// camera interpolation, and freezes owned render state into an optional
 /// production Lumen/Reel generation.
 #[derive(Default)]
 struct PortalSceneSink {
@@ -12008,8 +12073,8 @@ impl fmn_scene::SceneSink for PortalSceneSink {
                 "native pure plays require an active frame generation",
             ));
         };
-        let retain_last = self.readback.borrow().required();
-        let (alphas, last_capture) = session.capture_pure(segment, retain_last)?;
+        let readback = self.readback.borrow().dependencies();
+        let (alphas, last_capture) = session.capture_pure(segment, readback)?;
         self.alphas.extend(alphas);
         if let Some(state) = last_capture {
             self.readback.borrow().capture_state(state);
@@ -12050,6 +12115,36 @@ impl fmn_scene::SceneSink for PortalSceneSink {
             session.capture(packet.clone())?;
         }
         self.readback.borrow().capture(packet);
+        Ok(())
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: fmn_scene::CaptureReason,
+        stage: &Stage,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+    ) -> Result<(), fmn_scene::IntegrationError> {
+        if self.camera.is_some() && self.camera_error.is_none() && !self.camera_preapplied {
+            // Normally the camera is applied before native updaters. Preserve
+            // the old capture-before-observer ordering for the exceptional
+            // host path, whose camera callback may itself edit live objects.
+            return self.capture(
+                reason,
+                fmn_scene::studio_bridge::FramePacket::freeze_metadata(stage, metadata),
+            );
+        }
+        self.observe_capture(metadata);
+        let mut render = self.render.lock().map_err(|_| {
+            fmn_scene::IntegrationError::new("portal-render", "render session lock was poisoned")
+        })?;
+        let dependencies = self.readback.borrow().dependencies();
+        if let Some(session) = render.as_mut() {
+            if let Some(captured) = session.capture_stage(stage, metadata, dependencies)? {
+                self.readback.borrow().capture_state(captured);
+            }
+        } else {
+            self.readback.borrow().capture_stage(stage);
+        }
         Ok(())
     }
 }
@@ -16041,7 +16136,7 @@ mod tests {
     #[test]
     fn portal_render_projection_keeps_sampled_unrooted_light_without_scene_history() {
         let _lock = crate::python_embedding_lock();
-        for shared in [false, true] {
+        for (direct, shared) in [(true, false), (false, false), (false, true)] {
             let mut source = Stage::new();
             let visible = source.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
             source.add_to_scene(visible).unwrap();
@@ -16076,10 +16171,21 @@ mod tests {
                 source.update(0.25);
                 clock.advance_frames(1).unwrap();
                 let sampled_center = source.get_center(light);
-                let packet = fmn_anim::FramePacket::freeze_barrier(&source, &clock, &rng);
-                let journal = shared.then(|| packet.clone());
-                let frozen = freeze_portal_render_state(packet, Some(light), &mut inputs)
-                    .expect("freeze the sampled picture and its light family");
+                let (frozen, journal) = if direct {
+                    (
+                        freeze_portal_stage(&source, Some(light), &mut inputs, None)
+                            .expect("freeze the sampled owner picture and its light family"),
+                        None,
+                    )
+                } else {
+                    let packet = fmn_anim::FramePacket::freeze_barrier(&source, &clock, &rng);
+                    let journal = shared.then(|| packet.clone());
+                    (
+                        freeze_portal_render_state(packet, Some(light), &mut inputs)
+                            .expect("freeze the sampled packet picture and its light family"),
+                        journal,
+                    )
+                };
                 assert_eq!(frozen.retained_object_count(), 3);
                 source.shift(light, [10.0, 0.0, 0.0]);
                 let frame = frozen.materialize();
@@ -16125,15 +16231,19 @@ mod tests {
         let mut inputs = portal_raster::ImageInputs::new(false);
         for light in [deleted, foreign_light] {
             let packet = fmn_anim::FramePacket::freeze_barrier(&source, &clock, &rng);
-            let frame = freeze_portal_render_state(packet, Some(light), &mut inputs)
-                .unwrap()
-                .materialize();
-            let error = sync_portal_render_light(&mut camera, &frame, Some(light))
-                .expect_err("an invalid light must not become a default camera light");
-            assert!(error.to_string().contains("portal-render"));
-            assert!(error.to_string().contains("camera light handle is stale"));
-            assert_eq!(camera.light_source_position(), previous);
-            assert!(!frame.contains(replacement));
+            let captures = [
+                freeze_portal_render_state(packet, Some(light), &mut inputs).unwrap(),
+                freeze_portal_stage(&source, Some(light), &mut inputs, None).unwrap(),
+            ];
+            for capture in captures {
+                let frame = capture.materialize();
+                let error = sync_portal_render_light(&mut camera, &frame, Some(light))
+                    .expect_err("an invalid light must not become a default camera light");
+                assert!(error.to_string().contains("portal-render"));
+                assert!(error.to_string().contains("camera light handle is stale"));
+                assert_eq!(camera.light_source_position(), previous);
+                assert!(!frame.contains(replacement));
+            }
         }
     }
 
@@ -16160,22 +16270,109 @@ mod tests {
         let clock = fmn_anim::RationalFrameClock::new(4).unwrap();
         let rng = fmn_core::rng::RngRoot::from_seed(19);
         let packet = fmn_anim::FramePacket::freeze_barrier(&source, &clock, &rng);
-        let mut standard = portal_raster::ImageInputs::new(false);
-        let frozen = freeze_portal_render_state(packet.clone(), None, &mut standard).unwrap();
-        assert_eq!(frozen.retained_object_count(), 1);
-        assert_eq!(frozen.image_resources().count(), 0);
-        assert_eq!(standard.inputs.len(), 4097);
-        assert_eq!(packet.state().image_resources().count(), 4097);
-        let mut certified = portal_raster::ImageInputs::new(true);
-        let error = freeze_portal_render_state(packet, None, &mut certified)
+        for direct in [true, false] {
+            let mut standard = portal_raster::ImageInputs::new(false);
+            let frozen = if direct {
+                freeze_portal_stage(&source, None, &mut standard, None)
+            } else {
+                freeze_portal_render_state(packet.clone(), None, &mut standard)
+            }
+            .unwrap();
+            assert_eq!(frozen.retained_object_count(), 1);
+            assert_eq!(frozen.image_resources().count(), 0);
+            assert_eq!(standard.inputs.len(), 4097);
+            assert_eq!(packet.state().image_resources().count(), 4097);
+            let mut certified = portal_raster::ImageInputs::new(true);
+            let error = if direct {
+                freeze_portal_stage(&source, None, &mut certified, None)
+            } else {
+                freeze_portal_render_state(packet.clone(), None, &mut certified)
+            }
             .err()
             .expect("hidden images cannot bypass certified image admission");
-        assert!(error.to_string().contains("image-input"));
-        assert!(
-            error
-                .to_string()
-                .contains("render image inputs exceed the 4096-input budget")
+            assert!(error.to_string().contains("image-input"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("render image inputs exceed the 4096-input budget")
+            );
+        }
+    }
+
+    #[test]
+    fn portal_scene_readback_captures_owner_without_snapshotting_hidden_images() {
+        let _lock = crate::python_embedding_lock();
+        let mut scene = fmn_scene::Scene::new(
+            RuntimeConfig {
+                fps: 8,
+                ..RuntimeConfig::default()
+            },
+            19,
+        )
+        .unwrap();
+        let visible = scene
+            .add_mobject(Mobject::from_points(&[[0.0, 0.0, 0.0]]))
+            .unwrap();
+        scene
+            .stage_mut()
+            .add_dt_updater(
+                visible,
+                |stage, mob, dt| {
+                    stage.shift(mob, [dt, 0.0, 0.0]);
+                },
+                false,
+            )
+            .unwrap();
+        let image = fmn_mobject::ImageResource::rgba8(
+            1,
+            1,
+            vec![10, 20, 30, 255],
+            fmn_mobject::ImageColorSpace::Srgb,
+            fmn_mobject::ImageSampler::default(),
+        )
+        .unwrap();
+        let hidden_pixels = image.shared_pixels();
+        scene
+            .stage_mut()
+            .add(Mobject::new().with_image_resource(image));
+        let slot = Rc::new(RefCell::new(None));
+        let mut sink = PortalSceneSink {
+            readback: Rc::new(RefCell::new(portal_readback::SceneReadback {
+                target: Some(portal_readback::SceneCapture {
+                    slot: Rc::clone(&slot),
+                    camera: Camera::new(CameraConfig::default()).unwrap(),
+                    frame_points: None,
+                    light_mob: None,
+                    threads: 1,
+                }),
+            })),
+            readback_every_frame: true,
+            ..PortalSceneSink::default()
+        };
+        scene.show(&mut sink).unwrap();
+        scene.wait_frames(2, &mut sink).unwrap();
+        assert_eq!(sink.alphas.len(), 3);
+        assert_eq!(scene.stage().get_center(visible), [0.25, 0.0, 0.0]);
+        assert!(slot.borrow().is_some());
+        assert_eq!(
+            Arc::strong_count(&hidden_pixels),
+            2,
+            "the production SceneSink must not create a full snapshot before readback"
         );
+        let mut inputs = portal_raster::ImageInputs::new(false);
+        let state = freeze_portal_stage(
+            scene.stage(),
+            None,
+            &mut inputs,
+            sink.readback.borrow().dependencies(),
+        )
+        .unwrap();
+        assert_eq!(inputs.inputs.len(), 1);
+        assert_eq!(state.retained_object_count(), 1);
+        assert_eq!(Arc::strong_count(&hidden_pixels), 2);
+        drop(scene);
+        assert_eq!(Arc::strong_count(&hidden_pixels), 1);
+        assert!(slot.borrow().is_some());
     }
 
     #[test]

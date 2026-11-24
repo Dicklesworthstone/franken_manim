@@ -132,6 +132,7 @@ def run_scene_readback_acceptance():
         oracle = m.Camera(resolution=camera.get_pixel_shape(), background_opacity=0)
         oracle.frame.move_to(camera.frame.get_center())
         oracle.frame._core.set_shape(camera.frame.get_shape())
+        oracle.light_source.move_to(camera.light_source.get_center())
         oracle.capture(*objects)
         return oracle.get_pixel_array()
 
@@ -294,13 +295,31 @@ def run_scene_readback_acceptance():
         pure = scene()
         with pure.render_session(root / str(threads), format="png_sequence",
                                  resolution=(96, 54), fps=8, threads=threads):
-            shape = square().shift(m.LEFT)
+            # Camera controls are native handles but are not draw roots.
+            # Retaining only visible shapes would lose the moved frame/light;
+            # retaining the complete arena would pin all removed history.
+            pure.frame.shift(.4 * m.RIGHT)
+            pure.frame.scale(.8)
+            light = pure.camera.light_source
+            light.move_to((3., -4., 6.))
+            pure.add(light)
+            pure.remove(light)
+            for _ in range(32):
+                removed = square().shift(20 * m.RIGHT)
+                pure.add(removed)
+                pure.remove(removed)
+            shape = square().shift(m.LEFT).set_shading(.3, .2, .4)
             target = shape.copy().shift(2 * m.RIGHT)
             pure.add(shape)
             final_pixels = expected(pure.camera, target)
             pure.play(m.Transform(shape, target, remover=True), run_time_frames=3,
                       rate_func=m.linear)
             assert shape not in pure.mobjects
+            # Read after finish/remover and further live changes: the lazy
+            # image must still describe the last nominal rendered sample.
+            shape.shift(3 * m.UP)
+            pure.frame.shift(3 * m.LEFT)
+            light.move_to(-10 * m.OUT)
             np.testing.assert_array_equal(pure.camera.get_pixel_array(), final_pixels)
         assert pure._render_performance["pure_play_segments"] == 1
         assert pure._render_performance["pure_play_frames"] == 3
