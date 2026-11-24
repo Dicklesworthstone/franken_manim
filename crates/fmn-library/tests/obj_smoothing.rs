@@ -224,6 +224,34 @@ fn zero_area_extreme_faces_do_not_erase_valid_shared_normals() {
 }
 
 #[test]
+fn oblique_zero_area_faces_never_contribute_to_smoothing() {
+    for exponent in [-700, 0, 700] {
+        let scale = 2.0_f64.powi(exponent);
+        // The first face is exactly collinear, with an oblique direction
+        // whose division by 45 manufactures a nonzero rounded cross product.
+        // The other face has a real +X normal at their shared origin.
+        let source = format!(
+            "v 0 0 0\nv {:e} {:e} 0\nv {:e} {:e} 0\nv 0 1 0\nv 0 0 1\n",
+            scale,
+            15.0 * scale,
+            3.0 * scale,
+            45.0 * scale,
+        );
+        for faces in ["f 1 2 3\nf 1 4 5\n", "f 1 4 5\nf 1 2 3\n"] {
+            let mesh = ObjMesh::parse(format!("{source}s 1\n{faces}").as_bytes()).unwrap();
+            for (triangle, corners) in mesh.triangles.iter().enumerate() {
+                assert_eq!(mesh.corner_normal(triangle, 0), [1.0, 0.0, 0.0]);
+                assert_eq!(mesh.normals[corners[0].normal.unwrap()], [1.0, 0.0, 0.0]);
+                if corners[1].vertex == 1 {
+                    assert_eq!(mesh.corner_normal(triangle, 1), [0.0; 3]);
+                    assert_eq!(mesh.corner_normal(triangle, 2), [0.0; 3]);
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn malformed_smoothing_and_generated_normal_budgets_refuse_by_line() {
     for bad in [
         "",

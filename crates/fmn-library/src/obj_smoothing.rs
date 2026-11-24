@@ -30,14 +30,28 @@ impl Area {
                 point
             }
         };
-        let scale = corners
+        let largest = corners
             .iter()
             .flat_map(raw)
             .map(f64::abs)
             .fold(0.0, f64::max);
-        if scale == 0.0 {
+        if largest == 0.0 {
             return Self::default();
         }
+        // Conditioning by an arbitrary maximum independently rounds each
+        // component. An exactly collinear face can then acquire a tiny area;
+        // at a large source scale that residue overwhelms real neighboring
+        // faces during smoothing. A power-of-two divisor changes only the
+        // exponent of each representable ratio, preserving exact collinearity.
+        // Include subnormal source units without forming an overflowing
+        // reciprocal. The largest conditioned coordinate is in [1, 2).
+        let bits = largest.to_bits();
+        let exponent_bits = bits & (0x7ff_u64 << 52);
+        let scale = f64::from_bits(if exponent_bits == 0 {
+            1_u64 << (63 - bits.leading_zeros())
+        } else {
+            exponent_bits
+        });
         let point = |corner: &ObjCorner| {
             let value = raw(corner).map(|value| value / scale);
             if translated {

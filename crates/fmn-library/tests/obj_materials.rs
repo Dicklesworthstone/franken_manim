@@ -256,6 +256,58 @@ fn unrepresentable_midpoints_share_native_and_material_geometry() {
 }
 
 #[test]
+fn tiny_requested_heights_preserve_geometry_across_source_units() {
+    for height in [
+        1e-10,
+        1e-13,
+        1e-15,
+        1e-17,
+        f64::from(f32::MIN_POSITIVE),
+        f64::from(f32::from_bits(16)),
+    ] {
+        let reference: Mobject =
+            fmn_library::ThreeDModel::from_obj(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+                .unwrap()
+                .with_height(height)
+                .into();
+        for scale in [1.0, 1e100, 1e200, 1e308] {
+            let source = format!("v 0 0 0\nv {scale:e} 0 0\nv 0 {scale:e} 0\nf 1 2 3\n");
+            let document = ObjDocument::parse(source.as_bytes()).unwrap();
+            let material = document
+                .to_mobject(height, &BTreeMap::new(), &BTreeMap::new())
+                .expect("finite requested heights must not quantize the source scale");
+            let native: Mobject = fmn_library::ThreeDModel::from_obj(source.as_bytes())
+                .unwrap()
+                .with_height(height)
+                .into();
+            for field in ["point", "d_normal_point"] {
+                let expected = reference.buffer.read_column(field);
+                assert_eq!(
+                    native.buffer.read_column(field),
+                    expected,
+                    "{scale:e}, {height:e}"
+                );
+                assert_eq!(
+                    material.submobjects[0].buffer.read_column(field),
+                    expected,
+                    "{scale:e}, {height:e}"
+                );
+            }
+        }
+    }
+    // The material ingress still owns its stricter positive-height policy;
+    // numeric conditioning must not make an invalid request admissible.
+    let document = ObjDocument::parse(b"v 0 0 0\nv 1e308 0 0\nv 0 1e308 0\nf 1 2 3\n").unwrap();
+    for height in [0.0, -1e-15, f64::NAN, f64::INFINITY] {
+        let error = document
+            .to_mobject(height, &BTreeMap::new(), &BTreeMap::new())
+            .err()
+            .expect("invalid material-model height must still be refused");
+        assert!(error.reason.contains("model height must be positive"));
+    }
+}
+
+#[test]
 fn translated_heightless_models_keep_their_center_and_unit_scale() {
     let materials = BTreeMap::from([("A".into(), material())]);
     for low in [1e16, -1e16] {

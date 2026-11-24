@@ -876,7 +876,12 @@ impl ObjPlacement {
         let extent = max[1] - min[1];
         // A heightless source has always been centered without rescaling.
         let scale = if extent == 0.0 { 1.0 } else { height / extent };
-        if extent.is_finite() && scale.is_finite() && (scale != 0.0 || height == 0.0) {
+        // A nonzero subnormal quotient can already have lost significant
+        // relative precision. Multiplying huge source coordinates by it
+        // magnifies that quantization into wrong, representable scene geometry.
+        // Divide the centered source by its extent before applying height in
+        // that case, just as when the quotient underflows completely.
+        if extent.is_finite() && (scale.is_normal() || height == 0.0) {
             return if twice_error == [0.0; 3] {
                 Self::Affine { center, scale }
             } else {
@@ -1206,6 +1211,59 @@ f 2//2 4//4 3//3
     }
 
     #[test]
+    fn oblique_collinear_faces_stay_degenerate_at_finite_scales() {
+        for exponent in [-1070, -700, 0, 700, 1017] {
+            let scale = if exponent == -1070 {
+                f64::from_bits(16)
+            } else {
+                2.0_f64.powi(exponent)
+            };
+            assert!(scale > 0.0 && scale.is_finite());
+            for offset in [0.0, 64.0, -64.0] {
+                for axes in [[0, 1, 2], [1, 2, 0], [2, 0, 1]] {
+                    let mut source = String::new();
+                    for point in [[0.0, 0.0, 0.0], [1.0, 15.0, 0.0], [3.0, 45.0, 0.0]] {
+                        let p = axes.map(|axis| (point[axis] + offset) * scale);
+                        source.push_str(&format!("v {:e} {:e} {:e}\n", p[0], p[1], p[2]));
+                    }
+                    for winding in ["1 2 3", "1 3 2"] {
+                        let mesh = ObjMesh::parse(format!("{source}f {winding}\n").as_bytes())
+                            .expect("finite exactly collinear vertices");
+                        assert_eq!(
+                            mesh.face_normal(0),
+                            [0.0; 3],
+                            "exponent {exponent}, offset {offset}, axes {axes:?}, {winding}"
+                        );
+                        assert_eq!(mesh.corner_normal(0, 0), [0.0; 3]);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn conditioned_faces_keep_a_small_real_area_and_its_winding() {
+        for exponent in [-700, 0, 700] {
+            let scale = 2.0_f64.powi(exponent);
+            // This is the same oblique line, with its third point moved by
+            // one exactly representable binary step. Its determinant is
+            // positive, however small the source units or the deviation.
+            let deviation = 2.0_f64.powi(-40);
+            let source = format!(
+                "v 0 0 0\nv {:e} {:e} 0\nv {:e} {:e} 0\n",
+                scale,
+                15.0 * scale,
+                3.0 * scale,
+                (45.0 + deviation) * scale,
+            );
+            for (winding, expected) in [("1 2 3", 1.0), ("1 3 2", -1.0)] {
+                let mesh = ObjMesh::parse(format!("{source}f {winding}\n").as_bytes()).unwrap();
+                assert_eq!(mesh.face_normal(0), [0.0, 0.0, expected], "{exponent}");
+            }
+        }
+    }
+
+    #[test]
     fn authored_normal_direction_is_independent_of_magnitude() {
         for scale in [1.0, 1e-200, 1e200, f64::from_bits(1)] {
             // The authored normal deliberately differs from the +Z face
@@ -1446,6 +1504,48 @@ f 2//2 4//4 3//3
                     .expect("reference field"),
                 "{field}"
             );
+        }
+    }
+
+    #[test]
+    fn model_normalization_does_not_quantize_subnormal_scale_ratios() {
+        for height in [
+            3.0,
+            1e-10,
+            1e-13,
+            1e-15,
+            1e-17,
+            f64::from(f32::MIN_POSITIVE),
+            f64::from(f32::from_bits(16)),
+            -1e-15,
+            0.0,
+        ] {
+            #[allow(clippy::cast_possible_truncation)]
+            let half = (height * 0.5) as f32;
+            let expected = vec![-half, -half, 0.0, half, -half, 0.0, -half, half, 0.0];
+            let reference = Mobject::from(
+                ThreeDModel::from_obj(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+                    .unwrap()
+                    .with_height(height),
+            );
+            for scale in [1.0, 1e100, 1e200, 1e308] {
+                let source = format!("v 0 0 0\nv {scale:e} 0 0\nv 0 {scale:e} 0\nf 1 2 3\n");
+                let model = Mobject::from(
+                    ThreeDModel::from_obj(source.as_bytes())
+                        .unwrap()
+                        .with_height(height),
+                );
+                assert_eq!(
+                    model.buffer.read_column("point").unwrap(),
+                    expected,
+                    "source units {scale:e}, requested height {height:e}"
+                );
+                assert_eq!(
+                    model.buffer.read_column("d_normal_point"),
+                    reference.buffer.read_column("d_normal_point"),
+                    "source units {scale:e}, requested height {height:e}"
+                );
+            }
         }
     }
 
