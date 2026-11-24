@@ -1639,6 +1639,34 @@ impl SceneSink for RenderSink {
         self.format != RenderFormat::Png
     }
 
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &fmn_mobject::Stage,
+        _: fmn_anim::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(IntegrationError::new("native-render", error.to_string()));
+        }
+        let deferred = self.format == RenderFormat::Png;
+        let result = if deferred {
+            self.defer_captures(1)
+        } else {
+            // The pipeline reserves output capacity before freezing only the
+            // rooted picture. Detached endpoints, saved states and callbacks
+            // never enter an intermediate whole-arena snapshot.
+            self.render_stage(stage)
+        };
+        if result.is_ok() && !deferred {
+            self.saw_show |= reason == CaptureReason::Show;
+        }
+        result.map_err(|error| {
+            let message = error.to_string();
+            self.failure = Some(error);
+            IntegrationError::new("native-render", message)
+        })
+    }
+
     fn capture_metadata(
         &mut self,
         _: CaptureReason,

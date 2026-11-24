@@ -406,6 +406,135 @@ fn native_conditional_wait_and_show_use_the_active_sink_and_live_updaters() {
     assert_eq!(runs[0], runs[1], "packet demand cannot change scene timing");
 }
 
+#[test]
+fn facade_forwards_owner_captures_without_freezing_replay_packets() {
+    #[derive(Default)]
+    struct DirectSink {
+        frames: Vec<(
+            CaptureReason,
+            FrameMetadata,
+            fmn::mobject::FrozenRenderState,
+        )>,
+    }
+    impl SceneSink for DirectSink {
+        fn capture(
+            &mut self,
+            _: CaptureReason,
+            _: FramePacket,
+        ) -> std::result::Result<(), IntegrationError> {
+            panic!("the facade must preserve the sink's direct capture boundary")
+        }
+
+        fn capture_stage(
+            &mut self,
+            reason: CaptureReason,
+            stage: &fmn::mobject::Stage,
+            metadata: FrameMetadata,
+        ) -> std::result::Result<(), IntegrationError> {
+            assert_eq!(stage.time(), metadata.time().to_f64());
+            self.frames
+                .push((reason, metadata, stage.freeze_visible_render_state()));
+            Ok(())
+        }
+    }
+
+    let mut program = ConditionalWaitScene::default();
+    let mut sink = DirectSink::default();
+    let completed = run_scene(
+        &mut program,
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        19,
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(sink.frames.len(), 4);
+    let mob = program.mob.unwrap();
+    for ((reason, metadata, state), (expected_reason, frame, center)) in sink.frames.iter().zip([
+        (CaptureReason::Segment, 1, [0.125, 0.0, 0.0]),
+        (CaptureReason::Segment, 2, [0.25, 0.0, 0.0]),
+        (CaptureReason::Segment, 3, [0.375, 0.0, 0.0]),
+        (CaptureReason::Show, 3, [0.375, 0.5, 0.0]),
+    ]) {
+        assert_eq!(*reason, expected_reason);
+        assert_eq!(metadata.frame_index(), frame);
+        assert_eq!(state.clone().materialize().get_center(mob), center);
+    }
+    assert_eq!(completed.scene().stage().get_center(mob), [0.375, 0.5, 0.0]);
+}
+
+#[test]
+fn facade_preserves_final_sample_demand_before_authored_cleanup() {
+    #[derive(Default)]
+    struct FinalSink {
+        packets: Vec<FramePacket>,
+        metadata: Vec<FrameMetadata>,
+    }
+    impl SceneSink for FinalSink {
+        fn capture_state_required(&self) -> bool {
+            false
+        }
+
+        fn capture_final_state_required(&self) -> bool {
+            true
+        }
+
+        fn capture(
+            &mut self,
+            _: CaptureReason,
+            packet: FramePacket,
+        ) -> std::result::Result<(), IntegrationError> {
+            self.packets.push(packet);
+            Ok(())
+        }
+
+        fn capture_metadata(
+            &mut self,
+            _: CaptureReason,
+            metadata: FrameMetadata,
+        ) -> std::result::Result<(), IntegrationError> {
+            self.metadata.push(metadata);
+            Ok(())
+        }
+    }
+    #[derive(Default)]
+    struct SampleThenEdit(Option<Mob>);
+    impl SceneConstruct for SampleThenEdit {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            let mob = stage.add(Mobject::from_points(&[ORIGIN]))?;
+            self.0 = Some(mob);
+            stage.add_dt_updater(mob, |arena, me, dt| arena.shift(me, [dt, 0.0, 0.0]), false)?;
+            stage.wait_frames(2)?;
+            stage.shift(mob, [10.0, 0.0, 0.0]);
+            Ok(())
+        }
+    }
+    let mut program = SampleThenEdit::default();
+    let mut sink = FinalSink::default();
+    let completed = run_scene(
+        &mut program,
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        0,
+        &mut sink,
+    )
+    .unwrap();
+    assert_eq!(sink.metadata.len(), 1);
+    assert_eq!(sink.metadata[0].frame_index(), 1);
+    assert_eq!(sink.packets.len(), 1);
+    assert_eq!(sink.packets[0].frame_index(), 2);
+    let mob = program.0.unwrap();
+    assert_eq!(
+        sink.packets[0].materialize_stage().get_center(mob),
+        [0.25, 0.0, 0.0]
+    );
+    assert_eq!(completed.scene().stage().get_center(mob), [10.25, 0.0, 0.0]);
+}
+
 #[derive(Default)]
 struct FrameBoundScene {
     calls: usize,

@@ -144,6 +144,33 @@ impl fmn_scene::SceneSink for RigSink {
         self.inner.format != RenderFormat::Png
     }
 
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &fmn_mobject::Stage,
+        _: fmn_anim::FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.inner.failure {
+            return Err(IntegrationError::new("native-camera", error.to_string()));
+        }
+        let result = if self.inner.format == RenderFormat::Png {
+            self.inner.defer_captures(1)
+        } else {
+            // Resolve the camera/light trackers at this capture
+            // boundary before the pipeline freezes the visible picture.
+            // Later owner updates cannot affect either frozen component.
+            self.render_stage(stage)
+        };
+        if result.is_ok() {
+            self.inner.saw_show |= reason == CaptureReason::Show;
+        }
+        result.map_err(|error| {
+            let message = error.to_string();
+            self.inner.failure = Some(error);
+            IntegrationError::new("native-camera", message)
+        })
+    }
+
     fn capture_metadata(
         &mut self,
         _: CaptureReason,

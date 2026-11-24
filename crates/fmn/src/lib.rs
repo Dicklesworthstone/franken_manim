@@ -1750,6 +1750,19 @@ impl SceneSink for SegmentAccountingSink<'_> {
         self.inner.capture_state_required()
     }
 
+    fn capture_final_state_required(&self) -> bool {
+        self.inner.capture_final_state_required()
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &fmn_mobject::Stage,
+        metadata: fmn_anim::FrameMetadata,
+    ) -> std::result::Result<(), IntegrationError> {
+        self.inner.capture_stage(reason, stage, metadata)
+    }
+
     fn capture_metadata(
         &mut self,
         reason: CaptureReason,

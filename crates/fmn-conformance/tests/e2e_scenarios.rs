@@ -18700,6 +18700,102 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
     .join()
     .map_err(|_| fail("rooted capture worker panicked"))?
     .map_err(fail)?;
+
+    // Exercise the production Scene -> facade -> bounded pipeline boundary,
+    // not just the public snapshot projection helpers. An ordinary snapshot
+    // leaves a third image owner in the hidden entry's snapshot cache; the
+    // rooted capture must never observe that detached resource at all.
+    struct DirectScene;
+    impl fmn::SceneConstruct for DirectScene {
+        fn construct(&mut self, stage: &mut fmn::Stage<'_>) -> fmn::Result<()> {
+            let image = fmn_mobject::ImageResource::rgba8(
+                1,
+                1,
+                vec![255, 0, 255, 255],
+                fmn_mobject::ImageColorSpace::Srgb,
+                fmn_mobject::ImageSampler::default(),
+            )
+            .expect("valid one-pixel fixture");
+            let hidden_pixels = image.shared_pixels();
+            let mut hidden = Mobject::new();
+            hidden.image = Some(image);
+            stage.arena_mut().add(hidden);
+            let circle = stage.add(Circle::new().radius(0.6).color(WHITE))?;
+            stage.set_fill(circle, Some(WHITE), Some(1.0), None, true);
+            stage.set_stroke(circle, None, Some(0.0), None, None, true);
+            stage.add_dt_updater(
+                circle,
+                |arena, mob, dt| arena.shift(mob, [dt, 0.0, 0.0]),
+                false,
+            )?;
+            stage.show()?;
+            if Arc::strong_count(&hidden_pixels) != 2 {
+                return Err(
+                    SceneError::InvalidState("show captured detached image history").into(),
+                );
+            }
+            // The predicate forces the serial front end and excludes any
+            // pure-program begin snapshot from this capture observation.
+            stage.wait_until_frames(2, |_| false)?;
+            if Arc::strong_count(&hidden_pixels) != 2 {
+                return Err(SceneError::InvalidState(
+                    "stateful frames captured detached image history",
+                )
+                .into());
+            }
+            // Mutate the owner without a final capture. In-flight workers
+            // must retain their earlier geometry and style, not these edits.
+            stage.shift(circle, [10.0, 0.0, 0.0]);
+            stage.set_fill(circle, Some(RED_C), None, None, true);
+            Ok(())
+        }
+    }
+    let mut reference = None;
+    let mut direct_capture_frames = 0;
+    for threads in [1, 4, 16] {
+        let fs = Arc::new(fmn_platform::fs::VirtualFs::new());
+        let mut options =
+            fmn::RenderOptions::new("/direct").map_err(|error| fail(error.to_string()))?;
+        options.format = fmn::RenderFormat::PngSequence;
+        options.config.camera.resolution = (48, 32);
+        options.config.camera.fps = FPS;
+        options.config.sizes.frame_height = 4.0;
+        options.config.determinism.mode = fmn_config::config::DeterminismMode::Certified;
+        options.config.render.threads = fmn_config::config::ThreadPolicy::Fixed(threads);
+        options.frames_in_flight = 2;
+        let report = fmn::render_with_fs(&mut DirectScene, options, fs.clone())
+            .map_err(|error| fail(format!("direct Scene capture: {error}")))?;
+        if report.artifact.frame_count != 3
+            || report.scene.time.frames() != 2
+            || report
+                .frame_pipeline
+                .as_ref()
+                .is_none_or(|pipeline| pipeline.emitted != 3 || pipeline.outstanding_slots != 0)
+        {
+            return Err(fail("direct Scene capture changed frame accounting"));
+        }
+        let mut frames = Vec::new();
+        for index in 0..3 {
+            let bytes = fs
+                .read(&PathBuf::from(format!("/direct/frame_{index:06}.png")))
+                .map_err(|error| fail(error.to_string()))?;
+            ctx.record_asset(&format!("direct-capture/{threads}/{index}.png"), &bytes);
+            frames.push(bytes);
+        }
+        if frames[0] == frames[2] {
+            return Err(fail("direct Scene capture lost the stateful movement"));
+        }
+        if let Some(reference) = &reference {
+            if reference != &frames {
+                return Err(fail(
+                    "direct Scene capture changed certified bytes across threads",
+                ));
+            }
+        } else {
+            reference = Some(frames);
+        }
+        direct_capture_frames += 3;
+    }
     ctx.event(
         LogEvent::new("e2e.render.frozen_retained_pipeline")
             .field("frozen_equal", truth(frozen_equal))
@@ -18709,7 +18805,8 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
             .field("journal_complete", truth(journal_complete))
             .field("visible_payloads", visible_payloads)
             .field("omitted_history_objects", history.len())
-            .field("rooted_capture_frames", projection_frames),
+            .field("rooted_capture_frames", projection_frames)
+            .field("direct_capture_frames", direct_capture_frames),
     );
     if !frozen_equal || !steady_clean || !history_omitted || !journal_complete {
         return Err(fail(format!(
@@ -18721,11 +18818,13 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
     ctx.counter("rooted_capture_frames", projection_frames);
     ctx.counter("omitted_history_objects", history.len() as u64);
     ctx.counter("journal_complete", u64::from(journal_complete));
+    ctx.counter("direct_capture_frames", direct_capture_frames);
     Ok(RunOutcome::ok()
         .with_counter("frozen_equal", 1)
         .with_counter("steady_clean", 1)
         .with_counter("rooted_capture_frames", projection_frames)
         .with_counter("omitted_history_objects", history.len() as u64)
+        .with_counter("direct_capture_frames", direct_capture_frames)
         .with_counter("journal_complete", 1))
 }
 
@@ -23975,6 +24074,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 counter_eq("steady_clean", 1),
                 counter_eq("rooted_capture_frames", 9),
                 counter_eq("omitted_history_objects", 512),
+                counter_eq("direct_capture_frames", 9),
                 counter_eq("journal_complete", 1),
             ],
             vec![LogExpect::span_present(
@@ -23986,6 +24086,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                     FieldPred::str_eq("history_omitted", "true"),
                     FieldPred::str_eq("journal_complete", "true"),
                     FieldPred::u64_eq("rooted_capture_frames", 9),
+                    FieldPred::u64_eq("direct_capture_frames", 9),
                 ],
             )],
         )
@@ -26244,11 +26345,20 @@ fn typeset_cache_and_preflight_scenarios_pass() {
 }
 
 #[test]
+fn frozen_render_packet_pipeline_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.frozen_render_packet_pipeline.v1")
+        .expect("frozen render packet pipeline scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
 fn phase2_and_phase3_e2e_scenarios_pass() {
     for name in [
         "lifecycle.pg6_arena_reuse_zero_allocations.v1",
         "lifecycle.python_parallel_batch_checkpoint.v1",
-        "lifecycle.frozen_render_packet_pipeline.v1",
         "lifecycle.video_color_and_gallery_provenance.v1",
     ] {
         let scenario = catalog()

@@ -243,11 +243,35 @@ fn final_png_samples_the_completed_camera_rig_once() {
 
 #[test]
 fn non_send_camera_updaters_execute_on_scene_owner_and_affect_the_same_capture() {
-    struct Wait;
+    struct Wait(CameraRig);
     impl SceneConstruct for Wait {
         fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
             populate(stage.scene_mut())?;
-            stage.wait(0.5)?;
+            let image = fmn::mobject::ImageResource::rgba8(
+                1,
+                1,
+                vec![255, 0, 255, 255],
+                fmn::mobject::ImageColorSpace::Srgb,
+                fmn::mobject::ImageSampler::default(),
+            )
+            .unwrap();
+            let hidden_pixels = image.shared_pixels();
+            let mut hidden = Mobject::new();
+            hidden.image = Some(image);
+            stage.arena_mut().add(hidden);
+            // Predicate waits cannot prepare a pure begin-state. Any extra
+            // image owner here therefore exposes a whole-arena frame snapshot,
+            // including its retained entry cache, on the stateful render path.
+            stage.wait_until_frames(4, |_| false)?;
+            assert_eq!(Arc::strong_count(&hidden_pixels), 2);
+            // These edits have no capture. Already-admitted frames must keep
+            // both the camera and light from their own updater boundary.
+            stage
+                .arena_mut()
+                .set_tracker_value(self.0.center()[0], 100.0)?;
+            stage
+                .arena_mut()
+                .set_tracker_value(self.0.light()[0], -100.0)?;
             Ok(())
         }
     }
@@ -261,18 +285,22 @@ fn non_send_camera_updaters_execute_on_scene_owner_and_affect_the_same_capture()
         move |scene, base| {
             let rig = CameraRig::new(scene, base)?;
             scene.stage_mut().add_dt_updater(
-                rig.center()[0],
-                move |stage, mob, dt| {
+                rig.root(),
+                move |stage, _mob, dt| {
                     assert_eq!(std::thread::current().id(), owner);
                     if dt > 0.0 {
                         seen.set(seen.get() + 1);
                     }
-                    let value = stage.tracker_value(mob).unwrap();
-                    stage.set_tracker_value(mob, value + dt).unwrap();
+                    for (channel, speed) in [(rig.center()[0], 1.0), (rig.light()[0], 3.0)] {
+                        let value = stage.tracker_value(channel).unwrap();
+                        stage
+                            .set_tracker_value(channel, value + speed * dt)
+                            .unwrap();
+                    }
                 },
                 false,
             )?;
-            Ok((Wait, rig))
+            Ok((Wait(rig), rig))
         },
         options,
         fs.clone(),
@@ -287,6 +315,7 @@ fn non_send_camera_updaters_execute_on_scene_owner_and_affect_the_same_capture()
         pose.frame
             .set_center([f64::from(index) / 8.0, 0.0, 0.0])
             .unwrap();
+        pose.light_source_position[0] += 3.0 * f64::from(index) / 8.0;
         let mut renderer =
             RetainedFrameRenderer::new(config(&report.execution_plan, &base)).unwrap();
         renderer
