@@ -17,6 +17,9 @@
 //! dev-only edge of this crate (see Cargo.toml); `src/equivalence.rs` holds
 //! the frame-free budget contract.
 
+#[path = "support/near_linear_strokes.rs"]
+mod near_linear_strokes;
+
 use fmn_conformance::equivalence::{Divergence, budget_v1_failures};
 use fmn_conformance::scene_goldens::{
     EQUIVALENCE_SUBSET, TILING, corpus, frame_config, scene_named,
@@ -200,6 +203,40 @@ fn fast_cpu_stays_inside_the_versioned_v1_budget() {
     assert!(
         failures.is_empty(),
         "engine-equivalence budget v1 violated:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn bounded_cpu_line_strokes_stay_inside_the_versioned_v1_budget() {
+    let mut failures = Vec::new();
+    for case in near_linear_strokes::Case::ALL {
+        let stage = near_linear_strokes::build(case);
+        let (certified, certified_lines) =
+            near_linear_strokes::render(&stage, EngineIdentity::certified(), 1)
+                .expect("certified near-line fixture");
+        assert_eq!(
+            certified_lines, 0,
+            "certified must retain exact curve distance"
+        );
+        for &tier in Tier::ALL {
+            let identity = EngineIdentity {
+                tier,
+                ..EngineIdentity::fast()
+            };
+            let (fast, admitted) = near_linear_strokes::render(&stage, identity, FAST_THREADS)
+                .expect("fast near-line fixture");
+            assert_eq!(admitted, case.admitted(), "{case:?}, {tier:?}");
+            failures.extend(budget_v1_failures(
+                case.name(),
+                tier,
+                &divergence(&certified, &fast),
+            ));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "bounded CPU stroke violates engine-equivalence budget v1:\n{}",
         failures.join("\n")
     );
 }

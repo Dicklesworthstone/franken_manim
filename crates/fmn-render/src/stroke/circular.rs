@@ -381,8 +381,15 @@ mod tests {
         let proof = CircularStroke::from_shape(shape, segments, style, map, translate)
             .expect("ordinary current circle/arc is proved");
         let mut backing = Vec::new();
-        let slab =
-            PreparedStroke::prepare_into(&mut backing, segments, style, map, translate, false);
+        let slab = PreparedStroke::prepare_into(
+            &mut backing,
+            segments,
+            style,
+            map,
+            translate,
+            false,
+            false,
+        );
         let general = PreparedStroke::from_parts(&backing, slab);
         let mut decisions = [0; 3];
         // Probe the AA transition, both saturated sides, and open end caps

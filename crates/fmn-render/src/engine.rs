@@ -1850,6 +1850,7 @@ impl<'a> FrameJob<'a> {
                     map,
                     translate,
                     straight_segments,
+                    identity.engine == EngineKind::FastCpu,
                 );
                 let segments = arena
                     .stroke_segments
@@ -2033,6 +2034,28 @@ impl<'a> FrameJob<'a> {
             .flatten()
             .filter(|draw| draw.stroke.is_some_and(|stroke| stroke.circular.is_some()))
             .count()
+    }
+
+    /// How many prepared segments use the standard CPU's bounded chord route.
+    ///
+    /// Counts only geometric approximations, excluding semantic Line/Polyline
+    /// kernels. The certified engine always reports zero; profiles, narrow AA
+    /// bands and curves outside the screen-space bound keep the general solve.
+    #[must_use]
+    pub fn bounded_line_stroke_count(&self) -> usize {
+        self.draws()
+            .iter()
+            .flatten()
+            .filter_map(|draw| draw.stroke)
+            .map(|stroke| {
+                self.arena()
+                    .stroke_segments
+                    .slice(stroke.segments)
+                    .iter()
+                    .filter(|segment| segment.is_line_approximation())
+                    .count()
+            })
+            .sum()
     }
 
     /// The draw list, index-aligned with the instance list.

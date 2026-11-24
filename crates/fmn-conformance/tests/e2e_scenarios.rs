@@ -71,6 +71,8 @@ mod hdr_pq;
 #[allow(dead_code)]
 #[path = "../../fmn/examples/live_bar_chart.rs"]
 mod live_bar_chart_example;
+#[path = "support/near_linear_strokes.rs"]
+mod near_linear_strokes;
 #[path = "../../fmn/tests/support/obj_smoothing.rs"]
 mod obj_smoothing;
 #[path = "support/path_motion.rs"]
@@ -18891,6 +18893,88 @@ fn circular_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         .with_counter("circular_stroke_admitted_frames", admitted_frames))
 }
 
+/// Untagged, almost straight native strokes select the bounded CPU route;
+/// profiles, visible curvature and sharp AA retain full curve distance.
+fn near_linear_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (blank, _) = near_linear_strokes::render(&Stage::new(), EngineIdentity::fast(), 1)
+        .map_err(fail)?;
+    let mut fast_frames = 0_u64;
+    let mut certified_cases = 0_u64;
+    let mut bounded_strokes = 0_u64;
+    let mut declined_frames = 0_u64;
+    let mut last_digest = String::new();
+    for case in near_linear_strokes::Case::ALL {
+        let stage = near_linear_strokes::build(case);
+        let (reference, count) =
+            near_linear_strokes::render(&stage, EngineIdentity::certified(), 1).map_err(fail)?;
+        if count != 0 {
+            return Err(fail("certified stroke entered the bounded approximation"));
+        }
+        certified_cases += 1;
+        let mut first = None;
+        for threads in [1, 4, 16] {
+            let (frame, count) =
+                near_linear_strokes::render(&stage, EngineIdentity::fast(), threads)
+                    .map_err(fail)?;
+            if count != case.admitted() || frame.as_bytes() == blank.as_bytes() {
+                return Err(fail(format!(
+                    "{} at {threads} workers: {count} bounded strokes, expected {}",
+                    case.name(),
+                    case.admitted()
+                )));
+            }
+            if first
+                .as_ref()
+                .is_some_and(|pixels: &Vec<u8>| pixels.as_slice() != frame.as_bytes())
+            {
+                return Err(fail(format!(
+                    "{} changed pixels with worker count",
+                    case.name()
+                )));
+            }
+            // Full RMS/SSIM budget checks live in engine_equivalence.rs over
+            // these same fixtures; this route also trips on gross pixel error.
+            for (a, b) in reference
+                .as_bytes()
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .zip(frame.as_bytes().as_chunks::<2>().0)
+            {
+                let a = fmn_frame::half::f16_to_f64(u16::from_le_bytes(*a));
+                let b = fmn_frame::half::f16_to_f64(u16::from_le_bytes(*b));
+                let error = (a - b).abs();
+                if !error.is_finite()
+                    || error > fmn_render::engine::FAST_VISUAL_BUDGET_V1_MAX_CHANNEL_ERROR
+                {
+                    return Err(fail(format!(
+                        "{} exceeds the unchanged fast-engine channel budget",
+                        case.name()
+                    )));
+                }
+            }
+            fast_frames += 1;
+            bounded_strokes += u64::try_from(count).expect("four fixture strokes");
+            declined_frames += u64::from(count == 0);
+            last_digest = sha256(frame.as_bytes()).to_hex();
+            first = Some(frame.as_bytes().to_vec());
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.render.near_linear_strokes")
+            .field("fast_frames", fast_frames)
+            .field("certified_cases", certified_cases)
+            .field("bounded_strokes", bounded_strokes)
+            .field("declined_frames", declined_frames)
+            .field("sha256", last_digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("near_line_fast_frames", fast_frames)
+        .with_counter("near_line_certified_cases", certified_cases)
+        .with_counter("near_line_bounded_strokes", bounded_strokes)
+        .with_counter("near_line_declined_frames", declined_frames))
+}
+
 /// Long native strokes exercise the production tile index across repeated
 /// export frames, worker counts, and style/geometry invalidation.
 fn tile_binned_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -23930,6 +24014,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.near_linear_strokes.standard.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(near_linear_stroke_render_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("near_line_fast_frames", 15),
+            counter_eq("near_line_certified_cases", 5),
+            counter_eq("near_line_bounded_strokes", 12),
+            counter_eq("near_line_declined_frames", 12),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.render.near_linear_strokes",
+            vec![
+                FieldPred::u64_eq("bounded_strokes", 12),
+                FieldPred::u64_eq("declined_frames", 12),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.tile_binned_stroke_render.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -26173,6 +26277,16 @@ fn circular_stroke_render_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.circular_strokes.standard.v1")
         .expect("native circular stroke scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn near_linear_stroke_render_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.near_linear_strokes.standard.v1")
+        .expect("bounded CPU stroke scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

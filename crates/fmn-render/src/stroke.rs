@@ -204,6 +204,9 @@ pub(crate) struct PreparedSegment {
     slab: [f64; 4],
     total_arc_length: f64,
     line: bool,
+    /// A bounded standard-only approximation, distinct from an exact semantic
+    /// Line/Polyline route. Retained separately for observable route admission.
+    line_approximation: bool,
     /// Whether the arc-length station of the nearest point is observable:
     /// false for a uniform stroke ([`Style::stroke_station_is_observable`]),
     /// whose width and colour are exactly the same at every station, so the
@@ -217,6 +220,12 @@ pub(crate) struct PreparedSegment {
     /// point can receive coverage from it ([`ChordStrip`]); `None` for a
     /// degenerate chord, which keeps the slab bound alone.
     strip: Option<ChordStrip>,
+}
+
+impl PreparedSegment {
+    pub(crate) const fn is_line_approximation(&self) -> bool {
+        self.line_approximation
+    }
 }
 
 /// A conservative screen-space strip around a segment's chord line.
@@ -506,7 +515,9 @@ impl<'a> PreparedStroke<'a> {
 
     /// Derive every segment's slab and total arc length into `out`, returning
     /// the aggregate slab. Same loop, same order as the retained derivation —
-    /// only the destination is the caller's.
+    /// only the destination is the caller's. The standard CPU engine may opt
+    /// uniform strokes into the bounded chord route; certified preparation
+    /// keeps the original curve-distance kernel.
     pub(crate) fn prepare_into(
         out: &mut impl crate::arena::Sink<PreparedSegment>,
         segments: &[Segment],
@@ -514,6 +525,7 @@ impl<'a> PreparedStroke<'a> {
         map: ScreenMap,
         translate: [f64; 2],
         straight_segments: bool,
+        allow_line_approximation: bool,
     ) -> [f64; 4] {
         let mut slab = [
             f64::INFINITY,
@@ -522,6 +534,17 @@ impl<'a> PreparedStroke<'a> {
             f64::NEG_INFINITY,
         ];
         let station = style.stroke_station_is_observable();
+        // A geometric error alone does not bound a hard/narrow AA edge. At
+        // the ordinary 1.5-pixel band or wider, smoothstep's maximum slope
+        // is at most one per pixel, so the same bound limits coverage error.
+        // A profile can make the nearest station observable even when its
+        // endpoints agree; keep every authored profile on the curve route.
+        let approximate_uniform = allow_line_approximation
+            && !straight_segments
+            && !station
+            && style.stroke_profile.is_none()
+            && style.anti_alias_width.is_finite()
+            && style.anti_alias_width >= 1.5;
         let cull = if station || straight_segments {
             None
         } else {
@@ -534,6 +557,8 @@ impl<'a> PreparedStroke<'a> {
             slab[1] = slab[1].min(segment_slab[1]);
             slab[2] = slab[2].max(segment_slab[2]);
             slab[3] = slab[3].max(segment_slab[3]);
+            let line_approximation =
+                approximate_uniform && cpu_line_approximation_admitted(segment, map);
             out.put(PreparedSegment {
                 slab: segment_slab,
                 total_arc_length: if station {
@@ -541,7 +566,8 @@ impl<'a> PreparedStroke<'a> {
                 } else {
                     0.0
                 },
-                line: straight_segments,
+                line: straight_segments || line_approximation,
+                line_approximation,
                 station,
                 cull_distance_squared: cull
                     .and_then(|distance| segment_cull_distance_squared(segment, distance)),
@@ -816,7 +842,6 @@ impl<'a> PreparedStroke<'a> {
 /// scene scale. Semantic `Line`/`Polyline` hints bypass the numeric test because
 /// they are the authoritative construction identity; writable point mutation
 /// invalidates that hint before the frame job is built.
-#[cfg(any(feature = "metal", test))]
 pub(crate) const LINE_APPROXIMATION_MAX_ERROR_PX: f64 = 1.0 / 4096.0;
 
 /// Whether a segment may use capsule distance without a visible geometry move.
@@ -826,22 +851,84 @@ pub(crate) fn line_approximation_admitted(
     map: ScreenMap,
     semantic_line: bool,
 ) -> bool {
-    if semantic_line {
-        return true;
-    }
+    semantic_line
+        || line_approximation_error_px(segment, map)
+            .is_some_and(|error| error <= LINE_APPROXIMATION_MAX_ERROR_PX)
+}
+
+/// The existing chord Hausdorff bound, shared by CPU and annex admission.
+///
+/// A handle whose projection stays on the chord gives a monotone projected
+/// curve covering that chord; its maximum perpendicular deviation is half
+/// the handle's. An overshooting handle cannot use that bound.
+fn line_approximation_error_px(segment: &Segment, map: ScreenMap) -> Option<f64> {
     let chord = [segment.p2[0] - segment.p0[0], segment.p2[1] - segment.p0[1]];
     let handle = [segment.p1[0] - segment.p0[0], segment.p1[1] - segment.p0[1]];
     let chord_squared = chord[0] * chord[0] + chord[1] * chord[1];
     if chord_squared == 0.0 {
-        return handle[0] == 0.0 && handle[1] == 0.0;
+        return (handle[0] == 0.0 && handle[1] == 0.0).then_some(0.0);
     }
     let projection = (handle[0] * chord[0] + handle[1] * chord[1]) / chord_squared;
     if !(0.0..=1.0).contains(&projection) {
-        return false;
+        return None;
     }
     let twice_area = (chord[0] * handle[1] - chord[1] * handle[0]).abs();
     let maximum_object_error = 0.5 * twice_area / chord_squared.sqrt();
-    maximum_object_error * map.scale.abs() <= LINE_APPROXIMATION_MAX_ERROR_PX
+    Some(maximum_object_error * map.scale.abs())
+}
+
+/// Standard CPU proof for a uniform stroke. The CPU distance kernel includes
+/// z, so the planar bound is valid only when all controls share one z plane.
+/// Translate and scale before evaluating the bound, then reserve rounding
+/// proportional to the conditioned controls. This avoids admitting a curve
+/// whose object-space area underflows before a large screen zoom is applied.
+fn cpu_line_approximation_admitted(segment: &Segment, map: ScreenMap) -> bool {
+    if !map.scale.abs().is_normal()
+        || segment.p0[2] != segment.p1[2]
+        || segment.p0[2] != segment.p2[2]
+        || ![segment.p0, segment.p1, segment.p2]
+            .into_iter()
+            .flatten()
+            .all(f64::is_finite)
+    {
+        return false;
+    }
+    let chord = [segment.p2[0] - segment.p0[0], segment.p2[1] - segment.p0[1]];
+    let chord_squared = chord[0] * chord[0] + chord[1] * chord[1];
+    // The capsule kernel uses this same squared chord in object space.
+    if !chord_squared.is_normal() {
+        return false;
+    }
+    let scaled = |point: [f64; 3]| {
+        [
+            (point[0] - segment.p0[0]) * map.scale.abs(),
+            (point[1] - segment.p0[1]) * map.scale.abs(),
+            0.0,
+        ]
+    };
+    let conditioned = Segment {
+        p0: [0.0; 3],
+        p1: scaled(segment.p1),
+        p2: scaled(segment.p2),
+        s0: segment.s0,
+        s1: segment.s1,
+    };
+    let magnitude = [conditioned.p1, conditioned.p2]
+        .into_iter()
+        .flatten()
+        .map(f64::abs)
+        .fold(1.0, f64::max);
+    let reserve = 64.0 * f64::EPSILON * magnitude;
+    if !reserve.is_finite() || reserve >= LINE_APPROXIMATION_MAX_ERROR_PX {
+        return false;
+    }
+    let unit = ScreenMap {
+        scale: 1.0,
+        origin: [0.0; 2],
+        y_up: false,
+    };
+    line_approximation_error_px(&conditioned, unit)
+        .is_some_and(|error| error + reserve <= LINE_APPROXIMATION_MAX_ERROR_PX)
 }
 
 fn line_segment_excess_and_s(
@@ -1470,6 +1557,7 @@ mod tests {
             map,
             translate,
             straight_segments,
+            false,
         );
         (backing, slab)
     }
@@ -1878,6 +1966,233 @@ mod tests {
             "uncertain bounds must retain the original scan"
         );
         assert_eq!(entries.len(), 0, "fallback must not scatter any candidates");
+    }
+
+    #[test]
+    fn bounded_cpu_lines_require_uniform_paint_and_ordinary_aa() {
+        let segments = [Segment {
+            p0: [-1.0, 0.0, 0.0],
+            p1: [0.0, 1e-6, 0.0],
+            p2: [1.0, 0.0, 0.0],
+            s0: 0.0,
+            s1: 1.0,
+        }];
+        let map = ScreenMap {
+            scale: 60.0,
+            origin: [120.0, 80.0],
+            y_up: false,
+        };
+        let uniform = flat_stroke_style(6.0);
+        let prepare = |style: &Style, allow: bool, semantic: bool| {
+            let mut backing = Vec::new();
+            let slab = PreparedStroke::prepare_into(
+                &mut backing,
+                &segments,
+                style,
+                map,
+                [0.0; 2],
+                semantic,
+                allow,
+            );
+            (backing, slab)
+        };
+        let (fast, _) = prepare(&uniform, true, false);
+        assert!(fast[0].line && fast[0].is_line_approximation());
+        let (certified, _) = prepare(&uniform, false, false);
+        assert!(!certified[0].line && !certified[0].is_line_approximation());
+        let (semantic, _) = prepare(&uniform, true, true);
+        assert!(semantic[0].line && !semantic[0].is_line_approximation());
+
+        let mut width_ramp = uniform.clone();
+        width_ramp.stroke_width_end = 7.0;
+        let mut color_ramp = uniform.clone();
+        color_ramp.stroke_rgba_end[0] = 0.25;
+        let profile = crate::StrokeProfile::new(vec![
+            crate::StrokeKnot {
+                s: 0.0,
+                width: 6.0,
+                rgba: [1.0; 4],
+            },
+            crate::StrokeKnot {
+                s: 1.0,
+                width: 6.0,
+                rgba: [1.0; 4],
+            },
+        ])
+        .unwrap();
+        for authored in [
+            width_ramp,
+            color_ramp,
+            uniform.clone().with_stroke_profile(profile),
+        ] {
+            let (backing, _) = prepare(&authored, true, false);
+            assert!(!backing[0].line && !backing[0].is_line_approximation());
+        }
+
+        for aa in [0.0, 1e-5, 0.125, 1.49] {
+            let mut style = uniform.clone();
+            style.anti_alias_width = aa;
+            let (exact, exact_slab) = prepare(&style, false, false);
+            let (fast, fast_slab) = prepare(&style, true, false);
+            assert!(!fast[0].line && !fast[0].is_line_approximation());
+            // Probe both sides of a narrow/hard stroke edge. A geometric
+            // tolerance alone would allow large coverage changes here.
+            let half_width = half_width_px(&style, map, 0.5);
+            for offset in [-1e-4, -1e-6, 0.0, 1e-6, 1e-4] {
+                let pixel = [map.origin[0], map.origin[1] + half_width + offset];
+                let expected = PreparedStroke::from_parts(&exact, exact_slab).shade(
+                    &segments,
+                    &[],
+                    &style,
+                    map,
+                    [0.0; 2],
+                    pixel,
+                );
+                let actual = PreparedStroke::from_parts(&fast, fast_slab).shade(
+                    &segments,
+                    &[],
+                    &style,
+                    map,
+                    [0.0; 2],
+                    pixel,
+                );
+                assert_eq!(actual, expected, "hard/narrow AA changed: aa={aa}");
+            }
+        }
+        for aa in [f32::NAN, f32::INFINITY] {
+            let mut style = uniform.clone();
+            style.anti_alias_width = aa;
+            assert!(!prepare(&style, true, false).0[0].is_line_approximation());
+        }
+    }
+
+    #[test]
+    fn bounded_cpu_lines_decline_bows_overshoots_nonplanar_controls_and_zoom() {
+        let ordinary = Segment {
+            p0: [-1.0, 0.0, 0.0],
+            p1: [0.0, 1e-6, 0.0],
+            p2: [1.0, 0.0, 0.0],
+            s0: 0.0,
+            s1: 1.0,
+        };
+        let map = ScreenMap {
+            scale: 60.0,
+            origin: [0.0; 2],
+            y_up: false,
+        };
+        assert!(cpu_line_approximation_admitted(&ordinary, map));
+        for handle in [
+            [0.0, 0.01, 0.0],
+            [3.0, 0.0, 0.0],
+            [0.0, 0.0, 0.25],
+            [f64::NAN, 0.0, 0.0],
+            [0.0, f64::INFINITY, 0.0],
+        ] {
+            let changed = Segment {
+                p1: handle,
+                ..ordinary
+            };
+            assert!(!cpu_line_approximation_admitted(&changed, map));
+        }
+        assert!(!cpu_line_approximation_admitted(
+            &ordinary,
+            ScreenMap {
+                scale: 60_000.0,
+                ..map
+            }
+        ));
+        let cusp = Segment {
+            p2: ordinary.p0,
+            ..ordinary
+        };
+        assert!(!cpu_line_approximation_admitted(&cusp, map));
+        for scale in [0.0, f64::NAN, f64::INFINITY] {
+            assert!(!cpu_line_approximation_admitted(
+                &ordinary,
+                ScreenMap { scale, ..map }
+            ));
+        }
+        // The object-space area rounds to zero, but the actual screen bow
+        // is half a pixel. Conditioning must precede the geometric proof.
+        let tiny = Segment {
+            p0: [0.0; 3],
+            p1: [0.5e-150, 1e-200, 0.0],
+            p2: [1e-150, 0.0, 0.0],
+            ..ordinary
+        };
+        assert!(!cpu_line_approximation_admitted(
+            &tiny,
+            ScreenMap {
+                scale: 1e200,
+                ..map
+            }
+        ));
+    }
+
+    #[test]
+    fn bounded_cpu_line_distance_and_coverage_stay_inside_the_screen_bound() {
+        let style = flat_stroke_style(6.0);
+        for scale in [1.0, 60.0, 270.0] {
+            let map = ScreenMap {
+                scale,
+                origin: [0.375, -0.125],
+                y_up: false,
+            };
+            for direction in [[1.0, 0.0], [0.0, 1.0], [0.6, 0.8], [-0.8, 0.6]] {
+                let normal = [-direction[1], direction[0]];
+                // The midpoint of this symmetric quadratic sits exactly half
+                // the handle's perpendicular displacement from the chord.
+                let bow = 0.8 * LINE_APPROXIMATION_MAX_ERROR_PX / scale;
+                for z in [0.0, 0.25] {
+                    let segment = Segment {
+                        p0: [-direction[0], -direction[1], z],
+                        p1: [2.0 * bow * normal[0], 2.0 * bow * normal[1], z],
+                        p2: [direction[0], direction[1], z],
+                        s0: 0.0,
+                        s1: 1.0,
+                    };
+                    assert!(cpu_line_approximation_admitted(&segment, map));
+                    for along in -2..=18 {
+                        let t = f64::from(along) / 16.0;
+                        for across in -9..=9 {
+                            let offset = f64::from(across) / (3.0 * scale);
+                            let point = [
+                                (2.0 * t - 1.0) * direction[0] + offset * normal[0],
+                                (2.0 * t - 1.0) * direction[1] + offset * normal[1],
+                                0.0,
+                            ];
+                            let (exact, _) = uniform_segment_excess(&segment, &style, map, point);
+                            let (bounded, _) =
+                                line_segment_excess_and_s(&segment, &style, map, point);
+                            assert!(
+                                (exact - bounded).abs() <= LINE_APPROXIMATION_MAX_ERROR_PX,
+                                "distance moved beyond bound: {exact} vs {bounded}, \
+                                 scale={scale}, t={t}, z={z}"
+                            );
+                            let exact_coverage =
+                                aa_coverage(exact, f64::from(style.anti_alias_width));
+                            let bounded_coverage =
+                                aa_coverage(bounded, f64::from(style.anti_alias_width));
+                            assert!(
+                                (exact_coverage - bounded_coverage).abs()
+                                    <= LINE_APPROXIMATION_MAX_ERROR_PX,
+                                "coverage moved beyond bound"
+                            );
+                        }
+                    }
+                    if z == 0.0 {
+                        let midpoint = [bow * normal[0], bow * normal[1], 0.0];
+                        let (exact, _) = uniform_segment_excess(&segment, &style, map, midpoint);
+                        let (bounded, _) =
+                            line_segment_excess_and_s(&segment, &style, map, midpoint);
+                        assert!(
+                            (bounded - exact - bow * scale).abs() < 1e-9,
+                            "analytic quadratic midpoint must witness the real approximation"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
