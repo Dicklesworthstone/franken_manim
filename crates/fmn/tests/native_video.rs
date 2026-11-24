@@ -694,7 +694,7 @@ fn hdr_pq_native_movie_preserves_color_signalling_through_soundtrack_mux() {
     let mut request = options(&destination, RenderFormat::Mp4);
     request.hdr_pq = Some(profile);
     request.config.file_writer.video_codec = "auto".to_owned();
-    request.video_quality.preset = Some(fmn_output::EncoderPreset::UltraFast);
+    request.video_quality.preset = Some(fmn::rendering::EncoderPreset::UltraFast);
     request.ffmpeg = Some(capability);
     let report =
         render_with_fs(&mut Chime { sound: Some(tone) }, request, Arc::new(StdFs)).unwrap();

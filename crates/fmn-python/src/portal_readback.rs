@@ -946,7 +946,7 @@ pub fn run_portal_gauntlet_style_retention() -> Result<PortalStyleRetentionRepor
                 .get_item("scalar_style_cases")
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "style case count is absent".to_owned())?
-                .extract()
+                .extract::<u64>()
                 .map_err(|error| error.to_string())?,
             reused_outlines: 0,
             rendered_frames: 0,
