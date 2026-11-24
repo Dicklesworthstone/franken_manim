@@ -54,8 +54,8 @@ pub use mobject::{
 pub use numpy::{ExportError, LANE_BYTES, LANE_DTYPE, RecordArray, RecordArrayMut, RecordDType};
 pub use order::{BatchKey, DrawItem, DrawPlan, PassOrder, ProgramKind};
 pub use persist::{
-    DecodedSceneState, DecodedSnapshot, PersistError, SCENE_STATE_SCHEMA, SNAPSHOT_SCHEMA,
-    SceneState, SnapshotLimits, UpdaterIdentity, UpdaterKindTag, UpdaterManifest,
+    DecodedSceneState, DecodedSnapshot, FAMILY_CHECKPOINT_SCHEMA, PersistError, SCENE_STATE_SCHEMA,
+    SNAPSHOT_SCHEMA, SceneState, SnapshotLimits, UpdaterIdentity, UpdaterKindTag, UpdaterManifest,
 };
 pub use placement::Placement;
 pub use positional::PosTarget;

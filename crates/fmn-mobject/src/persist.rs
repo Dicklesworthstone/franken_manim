@@ -50,7 +50,10 @@ use fmn_core::types::Vec3;
 
 use crate::record::{RecordBuffer, RecordSchema};
 use crate::shape::{ShapeSlot, ShapeTag};
-use crate::stage::{Mob, Snapshot, SnapshotEntry, SnapshotEntryData, Stage, UpdaterFn, UpdaterId};
+use crate::stage::{
+    FamilyCheckpoint, FamilyCheckpointEntry, Mob, Snapshot, SnapshotEntry, SnapshotEntryData,
+    Stage, UpdaterFn, UpdaterId,
+};
 use crate::uniforms::{JointType, Uniforms};
 use crate::{ImageColorSpace, ImageResource, ImageSampler, ImageWrap, Placement, RenderPrimitive};
 
@@ -90,6 +93,17 @@ const SNAPSHOT_SCHEMA_WITHOUT_GLOW: Schema = Schema::new(*b"FMNA", 1, 1, 8);
 /// clock identity `(frames_elapsed, fps)`. It still embeds a
 /// [`SNAPSHOT_SCHEMA`] document as its final field.
 pub const SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNA", 2, 2, 0);
+
+/// A content-only family checkpoint: magic `FMNA`, schema id 3, version 1.0.
+///
+/// Members occur once in depth-first family order, beginning with the root.
+/// Each carries its original `(slot, generation)`, records, placement, child
+/// edges, animation flags, tracker, uniforms, shape and render material. No
+/// arena allocation state, scene roots, clock, updater functions or executable
+/// attributes, pins, parent lists, or target/saved-state links are encoded.
+/// Decoding requires every member to exist in the restored target Stage; it
+/// never allocates mobjects or resurrects a deleted identity.
+pub const FAMILY_CHECKPOINT_SCHEMA: Schema = Schema::new(*b"FMNA", 3, 1, 0);
 
 /// Errors from snapshot decode.
 #[derive(Debug, Clone, PartialEq)]
@@ -153,7 +167,8 @@ impl From<SerialError> for PersistError {
     }
 }
 
-/// Decode-time allocation budget for [`Snapshot::from_bytes`] (fm-vek.7).
+/// Decode-time allocation budget for [`Snapshot::from_bytes`] and
+/// [`FamilyCheckpoint::from_bytes`] (fm-vek.7).
 ///
 /// The encoded container is already capped by [`Limits::DEFAULT`]
 /// (256 MiB), but decoding *amplifies*: a five-byte empty-slot record
@@ -417,7 +432,10 @@ fn put_render_primitive(w: &mut Writer, primitive: RenderPrimitive) -> Result<()
     Ok(())
 }
 
-fn get_render_primitive(r: &mut Reader<'_>) -> Result<RenderPrimitive, PersistError> {
+fn get_render_primitive(
+    r: &mut Reader<'_>,
+    allow_sorted_surface: bool,
+) -> Result<RenderPrimitive, PersistError> {
     match r.get_u8()? {
         0 => Ok(RenderPrimitive::Vector),
         1 => Ok(RenderPrimitive::SurfaceGrid {
@@ -431,7 +449,7 @@ fn get_render_primitive(r: &mut Reader<'_>) -> Result<RenderPrimitive, PersistEr
         2 => Ok(RenderPrimitive::TriangleMesh),
         3 => Ok(RenderPrimitive::DotCloud),
         4 => Ok(RenderPrimitive::ImageQuad),
-        5 if r.version().1 >= 10 => Ok(RenderPrimitive::CameraSortedSurfaceGrid {
+        5 if allow_sorted_surface => Ok(RenderPrimitive::CameraSortedSurfaceGrid {
             resolution: (
                 usize::try_from(r.get_u64()?)
                     .map_err(|_| PersistError::Malformed("surface u resolution overflows"))?,
@@ -553,6 +571,132 @@ fn put_buffer(w: &mut Writer, buffer: &RecordBuffer) -> Result<(), SerialError> 
     Ok(())
 }
 
+fn get_names<'a>(
+    r: &mut Reader<'a>,
+    budget: &mut DecodeBudget,
+    what: &'static str,
+) -> Result<Vec<&'a str>, PersistError> {
+    let count = r.get_u16()? as usize;
+    // The borrowed name table itself is staging storage. The caller charges
+    // owned names separately, before the schema or locked-key set copies them.
+    preflight_count(r, budget, count, 8, std::mem::size_of::<&str>(), what)?;
+    let mut names = Vec::new();
+    budget.reserve(&mut names, count, what)?;
+    for _ in 0..count {
+        names.push(r.get_str()?);
+    }
+    Ok(names)
+}
+
+/// The current record layout is shared by arena snapshots and content-only
+/// checkpoints. Older arena documents omit only the final defaults row.
+fn get_buffer(
+    r: &mut Reader<'_>,
+    budget: &mut DecodeBudget,
+    has_defaults_section: bool,
+) -> Result<RecordBuffer, PersistError> {
+    let n_fields = r.get_u16()? as usize;
+    preflight_count(
+        r,
+        budget,
+        n_fields,
+        10,
+        std::mem::size_of::<(&str, usize)>(),
+        "record field table",
+    )?;
+    let mut fields = Vec::new();
+    budget.reserve(&mut fields, n_fields, "record field table")?;
+    for _ in 0..n_fields {
+        let name = r.get_str()?;
+        let width = r.get_u16()? as usize;
+        if width == 0 {
+            return Err(PersistError::Malformed("zero-width record field"));
+        }
+        fields.push((name, width));
+    }
+    let aligned = get_names(r, budget, "aligned key names")?;
+    let pointlike = get_names(r, budget, "pointlike key names")?;
+    let len = r.get_u32()? as usize;
+    // RecordSchema owns its names. Charge both its tables and their strings
+    // before construction rather than allocating names before budget checks.
+    budget.charge(
+        fields
+            .len()
+            .saturating_mul(std::mem::size_of::<crate::record::FieldSpec>())
+            .saturating_add(
+                aligned
+                    .len()
+                    .saturating_add(pointlike.len())
+                    .saturating_mul(std::mem::size_of::<String>()),
+            ),
+        "record schema tables",
+    )?;
+    for name in fields
+        .iter()
+        .map(|(name, _)| *name)
+        .chain(aligned.iter().copied())
+        .chain(pointlike.iter().copied())
+    {
+        budget.charge(name.len(), "record schema names")?;
+    }
+    let schema = RecordSchema::new(&fields, &aligned, &pointlike)
+        .map_err(|_| PersistError::Malformed("record schema stride overflows usize"))?;
+    let stride = schema.stride();
+    preflight_record_payload(r, len, stride, budget)?;
+    // The storage keeps revision, view and dirty-span tables for each field.
+    budget.charge(
+        n_fields.saturating_mul(
+            std::mem::size_of::<std::sync::atomic::AtomicU64>()
+                + std::mem::size_of::<std::sync::atomic::AtomicUsize>()
+                + std::mem::size_of::<std::sync::atomic::AtomicBool>()
+                + std::mem::size_of::<Option<(usize, usize)>>(),
+        ),
+        "record field state",
+    )?;
+    let mut buffer = RecordBuffer::new(schema, len)
+        .map_err(|_| PersistError::Malformed("record buffer sizing overflows usize"))?;
+    for (name, width) in &fields {
+        // The complete len * stride payload was proved to fit above.
+        let lanes = len * width;
+        budget.charge(
+            lanes.saturating_mul(std::mem::size_of::<f32>()),
+            "record column staging",
+        )?;
+        let mut column = Vec::new();
+        budget.reserve(&mut column, lanes, "record column staging")?;
+        for _ in 0..lanes {
+            column.push(r.get_f32()?);
+        }
+        buffer.write_range(name, 0, &column);
+    }
+    let locked = get_names(r, budget, "locked key names")?;
+    if !locked.is_empty() {
+        // The set stores field indices, not copies of the encoded names.
+        // Charge spare hash-table capacity and its occupancy bytes as well.
+        budget.charge(
+            locked
+                .len()
+                .saturating_mul(2 * (std::mem::size_of::<usize>() + 1)),
+            "locked key indexes",
+        )?;
+        buffer.lock_data(locked);
+    }
+    if has_defaults_section && r.get_bool()? {
+        preflight_record_payload(r, 1, stride, budget)?;
+        budget.charge(
+            stride.saturating_mul(std::mem::size_of::<f32>()),
+            "record defaults staging",
+        )?;
+        let mut row = Vec::new();
+        budget.reserve(&mut row, stride, "record defaults staging")?;
+        for _ in 0..stride {
+            row.push(r.get_f32()?);
+        }
+        buffer.restore_defaults_row(&row);
+    }
+    Ok(buffer)
+}
+
 // Before 1.9, the built-in dot renderer used a per-record f32 glow lane.
 // Preserve the records themselves (including Python's exact dtype contract),
 // but migrate the material only when one scalar represents every old point.
@@ -599,6 +743,41 @@ fn put_uniforms(w: &mut Writer, u: &Uniforms) {
         .put_bool(u.stroke_behind)
         .put_bool(u.depth_test)
         .put_bool(u.use_winding_fill);
+}
+
+fn get_uniforms(r: &mut Reader<'_>) -> Result<Uniforms, PersistError> {
+    let is_fixed_in_frame = r.get_f64()?;
+    let mut shading = [0.0; 3];
+    for lane in &mut shading {
+        *lane = r.get_f64()?;
+    }
+    let mut clip_planes = [[0.0; 4]; 4];
+    for plane in &mut clip_planes {
+        for slot in plane {
+            *slot = r.get_f64()?;
+        }
+    }
+    let anti_alias_width = r.get_f64()?;
+    let joint_type = match r.get_u8()? {
+        0 => JointType::NoJoint,
+        1 => JointType::Auto,
+        2 => JointType::Bevel,
+        3 => JointType::Miter,
+        _ => return Err(PersistError::Malformed("unknown joint type")),
+    };
+    Ok(Uniforms {
+        is_fixed_in_frame,
+        shading,
+        clip_planes,
+        anti_alias_width,
+        glow_factor: 0.0,
+        joint_type,
+        flat_stroke: r.get_bool()?,
+        scale_stroke_with_zoom: r.get_bool()?,
+        stroke_behind: r.get_bool()?,
+        depth_test: r.get_bool()?,
+        use_winding_fill: r.get_bool()?,
+    })
 }
 
 fn put_entry(w: &mut Writer, entry: &SnapshotEntry) -> Result<(), SerialError> {
@@ -1238,92 +1417,8 @@ impl Snapshot {
         for slot_index in 0..slot_count {
             let generation = r.get_u32()?;
             let entry = if r.get_bool()? {
-                // --- buffer
-                let n_fields = r.get_u16()? as usize;
-                // At least ten encoded bytes each (u64 name-length prefix
-                // + u16 width).
-                preflight_count(
-                    &r,
-                    &mut budget,
-                    n_fields,
-                    10,
-                    std::mem::size_of::<(String, usize)>(),
-                    "record field table",
-                )?;
-                let mut fields: Vec<(String, usize)> = Vec::new();
-                budget.reserve(&mut fields, n_fields, "record field table")?;
-                for _ in 0..n_fields {
-                    let name = r.get_str()?.to_owned();
-                    budget.charge(name.len(), "record field names")?;
-                    let width = r.get_u16()? as usize;
-                    if width == 0 {
-                        return Err(PersistError::Malformed("zero-width record field"));
-                    }
-                    fields.push((name, width));
-                }
-                let get_names = |r: &mut Reader<'_>,
-                                 budget: &mut DecodeBudget,
-                                 what: &'static str|
-                 -> Result<Vec<String>, PersistError> {
-                    let n = r.get_u16()? as usize;
-                    // u64 length prefix per name.
-                    preflight_count(r, budget, n, 8, std::mem::size_of::<String>(), what)?;
-                    let mut names = Vec::new();
-                    budget.reserve(&mut names, n, what)?;
-                    for _ in 0..n {
-                        let name = r.get_str()?.to_owned();
-                        budget.charge(name.len(), what)?;
-                        names.push(name);
-                    }
-                    Ok(names)
-                };
-                let aligned = get_names(&mut r, &mut budget, "aligned key names")?;
-                let pointlike = get_names(&mut r, &mut budget, "pointlike key names")?;
-                let len = r.get_u32()? as usize;
-                let field_refs: Vec<(&str, usize)> =
-                    fields.iter().map(|(n, w)| (n.as_str(), *w)).collect();
-                let aligned_refs: Vec<&str> = aligned.iter().map(String::as_str).collect();
-                let pointlike_refs: Vec<&str> = pointlike.iter().map(String::as_str).collect();
-                let schema = RecordSchema::new(&field_refs, &aligned_refs, &pointlike_refs)
-                    .map_err(|_| PersistError::Malformed("record schema stride overflows usize"))?;
-                let stride = schema.stride();
-                preflight_record_payload(&r, len, stride, &mut budget)?;
-                let mut buffer = RecordBuffer::new(schema, len)
-                    .map_err(|_| PersistError::Malformed("record buffer sizing overflows usize"))?;
-                for (name, width) in &fields {
-                    // `len * stride` lanes were just proved to fit the
-                    // container cap, so this per-field product cannot wrap.
-                    let lanes = len * width;
-                    budget.charge(
-                        lanes.saturating_mul(std::mem::size_of::<f32>()),
-                        "record column staging",
-                    )?;
-                    let mut column = Vec::new();
-                    budget.reserve(&mut column, lanes, "record column staging")?;
-                    for _ in 0..lanes {
-                        column.push(r.get_f32()?);
-                    }
-                    buffer.write_range(name, 0, &column);
-                }
-                let locked = get_names(&mut r, &mut budget, "locked key names")?;
-                if !locked.is_empty() {
-                    buffer.lock_data(locked.iter().map(String::as_str));
-                }
-                // Minor 1.7: the `_data_defaults` phantom record. Older
-                // streams have no section; the reader defaults to no row,
-                // exactly as the 1.1/1.2 branches do for their fields.
-                if r.version().1 >= 7 && r.get_bool()? {
-                    preflight_record_payload(&r, 1, stride, &mut budget)?;
-                    budget.charge(
-                        stride.saturating_mul(std::mem::size_of::<f32>()),
-                        "record defaults staging",
-                    )?;
-                    let mut row = Vec::with_capacity(stride);
-                    for _ in 0..stride {
-                        row.push(r.get_f32()?);
-                    }
-                    buffer.restore_defaults_row(&row);
-                }
+                let has_defaults_section = r.version().1 >= 7;
+                let buffer = get_buffer(&mut r, &mut budget, has_defaults_section)?;
                 // --- graph + state
                 let n_sub = r.get_u32()? as usize;
                 preflight_count(
@@ -1407,33 +1502,7 @@ impl Snapshot {
                 let pins = usize::try_from(r.get_u64()?)
                     .map_err(|_| PersistError::Malformed("pin count overflows"))?;
                 let pending_delete = r.get_bool()?;
-                // --- uniforms (field order is the schema)
-                let is_fixed_in_frame = r.get_f64()?;
-                let mut shading = [0.0; 3];
-                for lane in &mut shading {
-                    *lane = r.get_f64()?;
-                }
-                let mut clip_planes = [[0.0; 4]; 4];
-                for plane in &mut clip_planes {
-                    for slot in plane {
-                        *slot = r.get_f64()?;
-                    }
-                }
-                let anti_alias_width = r.get_f64()?;
-                let joint_type = JointType::from_code(f64::from(r.get_u8()?));
-                let uniforms = Uniforms {
-                    is_fixed_in_frame,
-                    shading,
-                    clip_planes,
-                    anti_alias_width,
-                    glow_factor: 0.0,
-                    joint_type,
-                    flat_stroke: r.get_bool()?,
-                    scale_stroke_with_zoom: r.get_bool()?,
-                    stroke_behind: r.get_bool()?,
-                    depth_test: r.get_bool()?,
-                    use_winding_fill: r.get_bool()?,
-                };
+                let uniforms = get_uniforms(&mut r)?;
                 // Schema minor 1.1 appended the shape tag; a 1.0 stream
                 // simply has no shape, which is what General means.
                 let mut shape = if r.version().1 >= 1 {
@@ -1571,7 +1640,9 @@ impl Snapshot {
                 match (present, &mut entry.1) {
                     (false, None) => {}
                     (true, Some(entry)) => {
-                        entry.render_primitive = get_render_primitive(&mut r)?;
+                        let allow_sorted_surface = r.version().1 >= 10;
+                        entry.render_primitive =
+                            get_render_primitive(&mut r, allow_sorted_surface)?;
                     }
                     _ => {
                         return Err(PersistError::Malformed(
@@ -1700,6 +1771,347 @@ impl Stage {
     /// As [`Snapshot::to_bytes`].
     pub fn snapshot_bytes(&self) -> Result<Vec<u8>, SerialError> {
         self.snapshot().to_bytes()
+    }
+}
+
+// --------------------------------------------- content-only checkpoints
+
+fn put_checkpoint_entry(w: &mut Writer, entry: &FamilyCheckpointEntry) -> Result<(), SerialError> {
+    put_buffer(w, &entry.buffer)?;
+    for coefficient in entry.placement.coefficients() {
+        w.put_f64(coefficient);
+    }
+    w.put_u32(count_u32(entry.submobjects.len())?);
+    for &child in &entry.submobjects {
+        put_mob(w, child);
+    }
+    w.put_bool(entry.updating_suspended)
+        .put_bool(entry.is_animating);
+    w.put_bool(entry.tracker.is_some());
+    if let Some(tracker) = entry.tracker {
+        w.put_u8(match tracker.kind {
+            crate::dynamics::TrackerKind::Plain => 0,
+            crate::dynamics::TrackerKind::Exponential => 1,
+            crate::dynamics::TrackerKind::Complex => 2,
+        });
+        w.put_f64(tracker.lanes[0]).put_f64(tracker.lanes[1]);
+    }
+    put_uniforms(w, &entry.uniforms);
+    w.put_f64(entry.uniforms.glow_factor);
+    put_shape(w, &entry.shape)?;
+    w.put_i32(entry.z_index);
+    put_render_primitive(w, entry.render_primitive)?;
+    w.put_bool(entry.image.is_some());
+    if let Some(image) = &entry.image {
+        put_image_resource(w, image);
+        let dark = image.dark_image();
+        w.put_bool(dark.is_some());
+        if let Some(dark) = dark {
+            put_image_resource(w, dark);
+        }
+    }
+    Ok(())
+}
+
+fn get_checkpoint_entry(
+    r: &mut Reader<'_>,
+    stage: &Stage,
+    budget: &mut DecodeBudget,
+) -> Result<FamilyCheckpointEntry, PersistError> {
+    let buffer = get_buffer(r, budget, true)?;
+    let mut coefficients = [0.0; 12];
+    for coefficient in &mut coefficients {
+        *coefficient = r.get_f64()?;
+    }
+    let placement = Placement::new(
+        [
+            [coefficients[0], coefficients[1], coefficients[2]],
+            [coefficients[4], coefficients[5], coefficients[6]],
+            [coefficients[8], coefficients[9], coefficients[10]],
+        ],
+        [coefficients[3], coefficients[7], coefficients[11]],
+    );
+    let count = r.get_u32()? as usize;
+    preflight_count(
+        r,
+        budget,
+        count,
+        8,
+        std::mem::size_of::<Mob>(),
+        "checkpoint child links",
+    )?;
+    let mut submobjects = Vec::new();
+    budget.reserve(&mut submobjects, count, "checkpoint child links")?;
+    for _ in 0..count {
+        submobjects.push(Mob::from_parts(
+            stage.stage_id(),
+            r.get_u32()?,
+            r.get_u32()?,
+        ));
+    }
+    if count != 0 {
+        budget.charge(
+            std::mem::size_of::<Vec<Mob>>() + 2 * std::mem::size_of::<usize>(),
+            "checkpoint child sharing",
+        )?;
+    }
+    let updating_suspended = r.get_bool()?;
+    let is_animating = r.get_bool()?;
+    let tracker = if r.get_bool()? {
+        let kind = match r.get_u8()? {
+            0 => crate::dynamics::TrackerKind::Plain,
+            1 => crate::dynamics::TrackerKind::Exponential,
+            2 => crate::dynamics::TrackerKind::Complex,
+            _ => return Err(PersistError::Malformed("unknown tracker kind")),
+        };
+        Some(crate::dynamics::Tracker {
+            kind,
+            lanes: [r.get_f64()?, r.get_f64()?],
+        })
+    } else {
+        None
+    };
+    let mut uniforms = get_uniforms(r)?;
+    uniforms.glow_factor = r.get_f64()?;
+    let mut shape = get_shape(r)?;
+    shape.point_revision = match shape.point_revision {
+        None => None,
+        Some(0) => Some(
+            buffer
+                .field_revision("point")
+                .ok_or(PersistError::Malformed(
+                    "checkpoint shape hint has no point field",
+                ))?,
+        ),
+        Some(_) => {
+            return Err(PersistError::Malformed(
+                "invalid checkpoint shape hint marker",
+            ));
+        }
+    };
+    let z_index = r.get_i32()?;
+    let render_primitive = get_render_primitive(r, true)?;
+    let image = if r.get_bool()? {
+        let mut image = get_image_resource(r, budget)?;
+        if r.get_bool()? {
+            budget.charge(
+                std::mem::size_of::<ImageResource>(),
+                "dark image descriptor",
+            )?;
+            let dark = get_image_resource(r, budget)?;
+            image = image
+                .with_dark_image(dark)
+                .map_err(|_| PersistError::Malformed("invalid light/dark image pair"))?;
+        }
+        Some(image)
+    } else {
+        None
+    };
+    Ok(FamilyCheckpointEntry {
+        buffer,
+        placement,
+        submobjects: submobjects.into(),
+        updating_suspended,
+        is_animating,
+        tracker,
+        uniforms,
+        z_index,
+        shape,
+        render_primitive,
+        image,
+    })
+}
+
+/// The same descendant-closed, acyclic, depth-first graph produced by
+/// Stage::family, checked without allocating a slot-index-sized arena or
+/// consuming call-stack space proportional to an untrusted family depth.
+fn validate_checkpoint_graph(
+    checkpoint: &FamilyCheckpoint,
+    budget: &mut DecodeBudget,
+) -> Result<(), PersistError> {
+    let count = checkpoint.entries.len();
+    if count == 0 {
+        return Err(PersistError::Malformed("empty family checkpoint"));
+    }
+    budget.charge(
+        count.saturating_mul(
+            std::mem::size_of::<(u64, usize)>()
+                + std::mem::size_of::<usize>()
+                + std::mem::size_of::<u8>()
+                + std::mem::size_of::<(usize, usize)>(),
+        ),
+        "checkpoint graph validation",
+    )?;
+    let mut identities = Vec::new();
+    budget.reserve(&mut identities, count, "checkpoint identity index")?;
+    identities.extend(
+        checkpoint
+            .entries
+            .iter()
+            .enumerate()
+            .map(|(index, (member, _))| (member.bits(), index)),
+    );
+    identities.sort_unstable();
+    if identities.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(PersistError::Malformed("checkpoint repeats a member"));
+    }
+    let index_of = |member: Mob| -> Result<usize, PersistError> {
+        identities
+            .binary_search_by_key(&member.bits(), |(bits, _)| *bits)
+            .map(|index| identities[index].1)
+            .map_err(|_| PersistError::Malformed("checkpoint child is outside its family"))
+    };
+    let mut last_parent = Vec::new();
+    budget.reserve(&mut last_parent, count, "checkpoint edge uniqueness")?;
+    last_parent.resize(count, usize::MAX);
+    for (parent_index, (_, entry)) in checkpoint.entries.iter().enumerate() {
+        for &child in &entry.submobjects {
+            let child_index = index_of(child)?;
+            if last_parent[child_index] == parent_index {
+                return Err(PersistError::Malformed("checkpoint repeats a child edge"));
+            }
+            last_parent[child_index] = parent_index;
+        }
+    }
+    let mut colors = Vec::new();
+    budget.reserve(&mut colors, count, "checkpoint traversal colors")?;
+    colors.resize(count, 0_u8);
+    let mut stack = Vec::new();
+    budget.reserve(&mut stack, count, "checkpoint traversal stack")?;
+    colors[0] = 1;
+    stack.push((0_usize, 0_usize));
+    let mut next_member = 1;
+    while let Some((index, next_child)) = stack.last_mut() {
+        let children = &checkpoint.entries[*index].1.submobjects;
+        let Some(&child) = children.get(*next_child) else {
+            colors[*index] = 2;
+            stack.pop();
+            continue;
+        };
+        *next_child += 1;
+        let child_index = index_of(child)?;
+        match colors[child_index] {
+            1 => {
+                return Err(PersistError::Malformed(
+                    "checkpoint family contains a cycle",
+                ));
+            }
+            2 => {}
+            _ => {
+                if child_index != next_member {
+                    return Err(PersistError::Malformed(
+                        "checkpoint members are not in family order",
+                    ));
+                }
+                next_member += 1;
+                colors[child_index] = 1;
+                stack.push((child_index, 0));
+            }
+        }
+    }
+    if next_member != count {
+        return Err(PersistError::Malformed(
+            "checkpoint has unreachable members",
+        ));
+    }
+    Ok(())
+}
+
+impl FamilyCheckpoint {
+    /// Encode the captured family under [`FAMILY_CHECKPOINT_SCHEMA`].
+    ///
+    /// Only captured content is read. The live Stage may have advanced or
+    /// rearranged the family since capture. Updater registrations and native
+    /// executable state are neither serialized nor inferred from that content.
+    ///
+    /// # Errors
+    /// [`SerialError::SizeLimit`] if the document or a fixed-width count
+    /// exceeds the production format limits.
+    pub fn to_bytes(&self) -> Result<Vec<u8>, SerialError> {
+        self.to_bytes_with_limits(Limits::DEFAULT)
+    }
+
+    /// Encode with a document/field budget checked before writer growth.
+    /// Explicit limits can only narrow the production limits; admitted bytes
+    /// are identical to [`Self::to_bytes`].
+    ///
+    /// # Errors
+    /// As [`Self::to_bytes`], under the narrower budget.
+    pub fn to_bytes_with_limits(&self, limits: Limits) -> Result<Vec<u8>, SerialError> {
+        let limits = Limits {
+            max_total: limits.max_total.min(Limits::DEFAULT.max_total),
+            max_field: limits.max_field.min(Limits::DEFAULT.max_field),
+        };
+        let mut writer = Writer::with_limits(FAMILY_CHECKPOINT_SCHEMA, limits);
+        writer.put_u32(count_u32(self.entries.len())?);
+        for (member, entry) in &self.entries {
+            put_mob(&mut writer, *member);
+            put_checkpoint_entry(&mut writer, entry)?;
+        }
+        writer.finish()
+    }
+
+    /// Decode saved family content against an already restored live Stage.
+    ///
+    /// Each serialized slot/generation adopts `stage`'s logical identity and
+    /// must resolve there. Saved child edges need not match today's layout,
+    /// but must form one complete acyclic family. No mobjects are allocated,
+    /// callbacks invoked, or live content changed. Call
+    /// [`Stage::restore_family_checkpoint`] separately to restore the content;
+    /// callers still own admission and rebinding of executable animation state.
+    ///
+    /// # Errors
+    /// [`PersistError`] for a corrupt/unsupported container, a stale member,
+    /// invalid graph, or exceeded decoded-allocation budget.
+    pub fn from_bytes(bytes: &[u8], stage: &Stage) -> Result<Self, PersistError> {
+        Self::from_bytes_with_limits(bytes, stage, SnapshotLimits::DEFAULT)
+    }
+
+    /// [`Self::from_bytes`] with an explicit aggregate decoded-allocation
+    /// budget, including record/image data and graph-validation indexes.
+    /// Every encoded count is preflighted before its storage is reserved.
+    ///
+    /// # Errors
+    /// As [`Self::from_bytes`].
+    pub fn from_bytes_with_limits(
+        bytes: &[u8],
+        stage: &Stage,
+        limits: SnapshotLimits,
+    ) -> Result<Self, PersistError> {
+        let mut reader = Reader::open(
+            bytes,
+            FAMILY_CHECKPOINT_SCHEMA,
+            Limits::DEFAULT,
+            UnknownPolicy::Strict,
+        )?;
+        let count = reader.get_u32()? as usize;
+        if count == 0 {
+            return Err(PersistError::Malformed("empty family checkpoint"));
+        }
+        let mut budget = DecodeBudget::new(limits.max_total_decoded_bytes);
+        preflight_count(
+            &reader,
+            &mut budget,
+            count,
+            8,
+            std::mem::size_of::<(Mob, FamilyCheckpointEntry)>(),
+            "checkpoint member table",
+        )?;
+        let mut entries = Vec::new();
+        budget.reserve(&mut entries, count, "checkpoint member table")?;
+        for _ in 0..count {
+            let member = stage
+                .resolve_snapshot_handle(reader.get_u32()?, reader.get_u32()?)
+                .ok_or(PersistError::Malformed("checkpoint member is not live"))?;
+            entries.push((
+                member,
+                get_checkpoint_entry(&mut reader, stage, &mut budget)?,
+            ));
+        }
+        reader.finish()?;
+        let checkpoint = Self { entries };
+        validate_checkpoint_graph(&checkpoint, &mut budget)?;
+        Ok(checkpoint)
     }
 }
 
@@ -1861,6 +2273,156 @@ impl SceneState {
 mod tests {
     use super::*;
     use crate::Mobject;
+
+    fn checkpoint_diamond() -> (Stage, Mob, Mob) {
+        let mut stage = Stage::new();
+        let root = stage.add(Mobject::new());
+        let left = stage.add(Mobject::new());
+        let right = stage.add(Mobject::new());
+        let shared = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+        let outside = stage.add(Mobject::new());
+        stage.attach(root, left).unwrap();
+        stage.attach(root, right).unwrap();
+        stage.attach(left, shared).unwrap();
+        stage.attach(right, shared).unwrap();
+        stage.attach(outside, shared).unwrap();
+        (stage, root, outside)
+    }
+
+    fn assert_checkpoint_malformed(
+        stage: &Stage,
+        checkpoint: &FamilyCheckpoint,
+        message: &'static str,
+    ) {
+        let before = stage.snapshot_bytes().unwrap();
+        let epoch = stage.topology_epoch();
+        let error = FamilyCheckpoint::from_bytes(&checkpoint.to_bytes().unwrap(), stage)
+            .map(|_| ())
+            .unwrap_err();
+        assert_eq!(error, PersistError::Malformed(message));
+        assert_eq!(stage.snapshot_bytes().unwrap(), before);
+        assert_eq!(stage.topology_epoch(), epoch);
+    }
+
+    #[test]
+    fn checkpoint_decode_refuses_incomplete_duplicated_cyclic_and_reordered_graphs() {
+        let (stage, root, outside) = checkpoint_diamond();
+        let mut empty = stage.checkpoint_family(root).unwrap();
+        empty.entries.clear();
+        assert_checkpoint_malformed(&stage, &empty, "empty family checkpoint");
+
+        let mut duplicated = stage.checkpoint_family(root).unwrap();
+        duplicated.entries[1].0 = root;
+        assert_checkpoint_malformed(&stage, &duplicated, "checkpoint repeats a member");
+
+        let mut repeated_edge = stage.checkpoint_family(root).unwrap();
+        let first_child = repeated_edge.entries[1].0;
+        repeated_edge.entries[0].1.submobjects.push(first_child);
+        assert_checkpoint_malformed(&stage, &repeated_edge, "checkpoint repeats a child edge");
+
+        let mut external_child = stage.checkpoint_family(root).unwrap();
+        external_child.entries[0].1.submobjects.push(outside);
+        assert_checkpoint_malformed(
+            &stage,
+            &external_child,
+            "checkpoint child is outside its family",
+        );
+
+        let mut cyclic = stage.checkpoint_family(root).unwrap();
+        cyclic.entries[2].1.submobjects.push(root);
+        assert_checkpoint_malformed(&stage, &cyclic, "checkpoint family contains a cycle");
+
+        let mut reordered = stage.checkpoint_family(root).unwrap();
+        reordered.entries.swap(1, 3);
+        assert_checkpoint_malformed(
+            &stage,
+            &reordered,
+            "checkpoint members are not in family order",
+        );
+
+        let mut unreachable = stage.checkpoint_family(root).unwrap();
+        // The outside parent's own capture includes the shared leaf already
+        // present above. Include only that parent to isolate reachability.
+        unreachable
+            .entries
+            .push(stage.checkpoint_family(outside).unwrap().entries.remove(0));
+        assert_checkpoint_malformed(&stage, &unreachable, "checkpoint has unreachable members");
+    }
+
+    #[test]
+    fn checkpoint_counts_refuse_before_allocating_record_or_child_tables() {
+        let (stage, root, _) = checkpoint_diamond();
+        let saved = stage.checkpoint_family(root).unwrap();
+        let root_entry = &saved.entries[0].1;
+        let mut fields = Writer::new(FAMILY_CHECKPOINT_SCHEMA);
+        fields.put_u32(1);
+        put_mob(&mut fields, root);
+        fields.put_u16(u16::MAX);
+
+        let mut children = Writer::new(FAMILY_CHECKPOINT_SCHEMA);
+        children.put_u32(1);
+        put_mob(&mut children, root);
+        put_buffer(&mut children, &root_entry.buffer).unwrap();
+        for coefficient in root_entry.placement.coefficients() {
+            children.put_f64(coefficient);
+        }
+        children.put_u32(u32::MAX);
+        for writer in [fields, children] {
+            assert!(matches!(
+                FamilyCheckpoint::from_bytes(&writer.finish().unwrap(), &stage),
+                Err(PersistError::Serial(SerialError::UnexpectedEof { .. }))
+            ));
+        }
+        assert!(matches!(
+            FamilyCheckpoint::from_bytes_with_limits(
+                &saved.to_bytes().unwrap(),
+                &stage,
+                SnapshotLimits {
+                    max_total_decoded_bytes: 1
+                },
+            ),
+            Err(PersistError::AllocationLimit {
+                what: "checkpoint member table",
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn checkpoint_validation_is_iterative_and_storage_depends_on_family_not_slot_number() {
+        let mut stage = Stage::new();
+        let mut entries = Vec::new();
+        for _ in 0..4096 {
+            let mob = stage.add(Mobject::new());
+            entries.push(stage.checkpoint_family(mob).unwrap().entries.remove(0));
+        }
+        // A saved deep chain, with all its original members still live but
+        // detached today. Decode must inspect history without replay or a
+        // recursion depth proportional to the saved graph.
+        for index in 0..entries.len() - 1 {
+            let child = entries[index + 1].0;
+            entries[index].1.submobjects.push(child);
+        }
+        let deep = FamilyCheckpoint { entries };
+        let bytes = deep.to_bytes().unwrap();
+        let decoded = FamilyCheckpoint::from_bytes(&bytes, &stage).unwrap();
+        assert_eq!(decoded.entries.len(), 4096);
+        assert_eq!(decoded.to_bytes().unwrap(), bytes);
+
+        let last = stage.add(Mobject::new());
+        let single = stage.checkpoint_family(last).unwrap().to_bytes().unwrap();
+        assert!(single.len() < 1024);
+        let decoded = FamilyCheckpoint::from_bytes_with_limits(
+            &single,
+            &stage,
+            SnapshotLimits {
+                max_total_decoded_bytes: 4096,
+            },
+        )
+        .unwrap();
+        assert_eq!(decoded.entries.len(), 1);
+        assert_eq!(decoded.entries[0].0, last);
+    }
 
     #[test]
     fn scene_clock_reader_checks_envelope_without_claiming_snapshot_validation() {

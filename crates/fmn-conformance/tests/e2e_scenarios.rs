@@ -66,6 +66,8 @@
 ))]
 #[path = "../../fmn/tests/support/compressed_audio.rs"]
 mod compressed_audio;
+#[path = "../../fmn/tests/support/family_checkpoints.rs"]
+mod family_checkpoints;
 #[path = "support/hdr_pq.rs"]
 mod hdr_pq;
 #[allow(dead_code)]
@@ -13621,6 +13623,22 @@ fn native_positional_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scena
         .with_counter("native_positional_restores", 1))
 }
 
+/// A durable family checkpoint restores its historical picture after loading
+/// an advanced scene into a new arena, retaining unrelated edits and callbacks.
+fn family_checkpoint_roundtrip_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (comparisons, frame) = family_checkpoints::verify().map_err(fail)?;
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.family_checkpoint")
+            .field("thread_counts", comparisons)
+            .field("updater_calls", 1_u64)
+            .field("external_edit_preserved", true),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("family_checkpoint_frames", comparisons)
+        .with_counter("family_checkpoint_updater_calls", 1)
+        .with_artifact("restored-family.frame", frame))
+}
+
 /// Rollback retires discarded identities without changing explicitly frozen branches.
 fn snapshot_handle_safety_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     use std::cell::Cell;
@@ -23302,6 +23320,25 @@ pub fn catalog() -> Vec<ScenarioSpec> {
 
     // LIFECYCLE DRILLS.
     specs.push(spec(
+        "lifecycle.durable_family_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(family_checkpoint_roundtrip_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("family_checkpoint_frames", 3),
+            counter_eq("family_checkpoint_updater_calls", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.family_checkpoint",
+            vec![
+                FieldPred::u64_eq("thread_counts", 3),
+                FieldPred::u64_eq("updater_calls", 1),
+                FieldPred::bool_eq("external_edit_preserved", true),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.snapshot_handle_safety.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -24822,6 +24859,16 @@ fn obj_scale_invariance_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.obj_scale_invariance.v1")
         .expect("OBJ scale-invariance scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn family_checkpoint_roundtrip_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.durable_family_checkpoint.v1")
+        .expect("durable family checkpoint scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

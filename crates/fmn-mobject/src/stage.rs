@@ -3499,22 +3499,24 @@ impl Stage {
 /// Storage is proportional to that family, with record/image data shared under
 /// the ordinary snapshot CoW rules. No frame history or detached mobjects are
 /// allocated. Every original handle must remain live when restoring.
+/// [`Self::to_bytes`] preserves this content-only scope in the canonical
+/// format; [`Self::from_bytes`] rebinds it against an already restored Stage.
 pub struct FamilyCheckpoint {
-    entries: Vec<(Mob, FamilyCheckpointEntry)>,
+    pub(crate) entries: Vec<(Mob, FamilyCheckpointEntry)>,
 }
 
-struct FamilyCheckpointEntry {
-    buffer: RecordBuffer,
-    placement: Placement,
-    submobjects: ArcVec<Mob>,
-    updating_suspended: bool,
-    is_animating: bool,
-    tracker: Option<crate::dynamics::Tracker>,
-    uniforms: Uniforms,
-    z_index: i32,
-    shape: ShapeSlot,
-    render_primitive: RenderPrimitive,
-    image: Option<ImageResource>,
+pub(crate) struct FamilyCheckpointEntry {
+    pub(crate) buffer: RecordBuffer,
+    pub(crate) placement: Placement,
+    pub(crate) submobjects: ArcVec<Mob>,
+    pub(crate) updating_suspended: bool,
+    pub(crate) is_animating: bool,
+    pub(crate) tracker: Option<crate::dynamics::Tracker>,
+    pub(crate) uniforms: Uniforms,
+    pub(crate) z_index: i32,
+    pub(crate) shape: ShapeSlot,
+    pub(crate) render_primitive: RenderPrimitive,
+    pub(crate) image: Option<ImageResource>,
 }
 
 impl Stage {

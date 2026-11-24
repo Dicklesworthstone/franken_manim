@@ -12,9 +12,10 @@ use fmn_core::rng::Pcg64Dxsm;
 use fmn_hash::{Limits, SerialError, Writer, sha256};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{
-    ImageColorSpace, ImageResource, ImageSampler, JointType, Mob, Mobject, PersistError,
-    RenderPrimitive, SNAPSHOT_SCHEMA, SceneState, Snapshot, SnapshotLimits, Stage, StageError,
-    UpdaterFn, UpdaterKindTag, UpdaterManifest,
+    FAMILY_CHECKPOINT_SCHEMA, FamilyCheckpoint, ImageColorSpace, ImageResource, ImageSampler,
+    ImageWrap, JointType, Mob, Mobject, PersistError, RenderPrimitive, SNAPSHOT_SCHEMA, SceneState,
+    ShapeTag, Snapshot, SnapshotLimits, Stage, StageError, UpdaterFn, UpdaterKindTag,
+    UpdaterManifest,
 };
 
 fn vmob(stage: &mut Stage, points: &[[f64; 3]], fill: [f32; 4]) -> Mob {
@@ -918,4 +919,417 @@ fn scene_state_decode_preflights_the_nested_snapshot() {
         decoded.snapshot.to_bytes().unwrap(),
         state.snapshot.to_bytes().unwrap()
     );
+}
+
+#[test]
+fn durable_family_checkpoint_restores_only_content_after_live_graph_and_callback_changes() {
+    let mut stage = Stage::new();
+    let (root, first, second, tracker) = build_scene(&mut stage);
+    stage.attach(root, tracker).unwrap();
+    let outside = stage.add(Mobject::new());
+    stage.attach(outside, second).unwrap();
+    stage.set_time_from_clock(1.25);
+    stage.shift(first, [2.0, -3.0, 0.5]);
+    let tag = ShapeTag::Line {
+        start: [0.0; 3],
+        end: [2.0, 0.0, 0.0],
+        path_arc: 0.25,
+        buff: 0.1,
+    };
+    stage.set_shape(first, tag);
+    stage.set_animating_status(first, true, false);
+    stage.suspend_updating(first, false);
+    stage.set_z_index(second, 43, false);
+    let defaults = vec![0.125; stage.get(second).unwrap().buffer.schema().stride()];
+    stage
+        .get_mut(second)
+        .unwrap()
+        .buffer
+        .restore_defaults_row(&defaults);
+    stage
+        .get_mut(second)
+        .unwrap()
+        .buffer
+        .lock_data(["fill_rgba", "stroke_width"]);
+    let stateful = stage
+        .add_dt_updater_with_state(
+            first,
+            7_usize,
+            |_, _| {},
+            |stage, mob, id, _| *stage.updater_state_mut::<usize>(mob, id).unwrap() += 1,
+            false,
+        )
+        .unwrap();
+    let object_points = stage.get_object_points(first).unwrap();
+    let world_points = stage.get_points(first).unwrap();
+    let placement = stage.placement(first).unwrap();
+    let second_fill = column(&stage, second, "fill_rgba");
+    let saved = stage.checkpoint_family(root).unwrap();
+    let bytes = saved.to_bytes().unwrap();
+
+    // This later layout reverses saved internal relationships. Restoring in
+    // place must detach changed edges before reinstating the captured DAG.
+    stage.replace_children(root, &[second]).unwrap();
+    stage.attach(second, first).unwrap();
+    stage.attach(first, tracker).unwrap();
+    let later = stage.add(Mobject::from_points(&[[19.0, 2.0, 0.0]]));
+    stage.attach(first, later).unwrap();
+    stage.add_to_scene(later).unwrap();
+    stage.add_to_scene(outside).unwrap();
+    stage.set_time_from_clock(73.25);
+    stage.set_tracker_value(tracker, -9.0).unwrap();
+    stage.pin(first).unwrap();
+    let target = stage.generate_target(first).unwrap();
+    stage.save_state(first).unwrap();
+    let saved_link = stage.saved_state(first);
+    *stage.updater_state_mut::<usize>(first, stateful).unwrap() = 99;
+    stage.resume_updating(first, false, false);
+    stage.set_animating_status(first, false, false);
+    stage.shift(first, [12.0, 4.0, 0.0]);
+    stage.set_z_index(second, -1, false);
+    stage.get_mut(second).unwrap().buffer.unlock_data();
+    stage.set_family_opacity_zero(second);
+    let calls = Rc::new(Cell::new(0));
+    let callback_calls = Rc::clone(&calls);
+    stage
+        .add_updater(
+            second,
+            move |_, _| callback_calls.set(callback_calls.get() + 1),
+            false,
+        )
+        .unwrap();
+    let manifest = stage.updater_manifest();
+    let roots = stage.roots().to_vec();
+    let later_points = stage.get_points(later).unwrap();
+    let live_view = stage.get_mut(first).unwrap().buffer.export_view(true);
+    assert!(live_view.write_foreign(0, "point", &[90.0, 90.0, 0.0]));
+    let live_before_decode = stage.snapshot_bytes().unwrap();
+    let topology_before_decode = stage.topology_epoch();
+    let decoded = FamilyCheckpoint::from_bytes(&bytes, &stage).unwrap();
+    assert_eq!(decoded.to_bytes().unwrap(), bytes);
+    assert_eq!(stage.snapshot_bytes().unwrap(), live_before_decode);
+    assert_eq!(stage.topology_epoch(), topology_before_decode);
+    assert_eq!(calls.get(), 0, "decode never executes callbacks");
+
+    stage.restore_family_checkpoint(&decoded).unwrap();
+    assert_eq!(stage.family(root), [root, first, second, tracker]);
+    assert_eq!(stage.get(second).unwrap().parents(), [outside, root]);
+    assert!(stage.get(first).unwrap().submobjects().is_empty());
+    assert!(stage.contains(later));
+    assert_eq!(stage.get_points(later).unwrap(), later_points);
+    assert_eq!(stage.roots(), roots);
+    assert_eq!(stage.time(), 73.25);
+    assert_eq!(stage.target(first), Some(target));
+    assert_eq!(stage.saved_state(first), saved_link);
+    assert_eq!(stage.get(first).unwrap().pins(), 2);
+    assert_eq!(stage.updater_manifest(), manifest);
+    assert_eq!(stage.updater_state::<usize>(first, stateful), Some(&99));
+    assert_eq!(stage.get_object_points(first).unwrap(), object_points);
+    assert_eq!(stage.get_points(first).unwrap(), world_points);
+    assert!(stage.placement(first).unwrap().same_bits(placement));
+    assert_eq!(stage.primitive_hint(first), Some(tag));
+    assert!(stage.is_animating(first));
+    assert!(stage.is_updating_suspended(first));
+    assert_eq!(stage.tracker_value(tracker), Some(42.5));
+    assert_eq!(stage.z_index(second), 43);
+    assert_eq!(column(&stage, second, "fill_rgba"), second_fill);
+    let buffer = &stage.get(second).unwrap().buffer;
+    assert_eq!(buffer.defaults_row(), Some(defaults.as_slice()));
+    assert!(buffer.is_locked("fill_rgba") && buffer.is_locked("stroke_width"));
+    assert!(live_view.write_foreign(0, "point", &[123.0, 0.0, 0.0]));
+    assert_eq!(stage.get_points(first).unwrap(), world_points);
+    stage.resume_updating(first, false, false);
+    stage.update_mobject(first, 0.25);
+    stage.update_mobject(second, 0.25);
+    assert_eq!(stage.updater_state::<usize>(first, stateful), Some(&100));
+    assert_eq!(calls.get(), 1, "the current updater remains installed");
+}
+
+#[test]
+fn durable_family_checkpoint_preserves_all_render_identities_and_light_dark_materials() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let primitives = [
+        RenderPrimitive::Vector,
+        RenderPrimitive::SurfaceGrid { resolution: (5, 7) },
+        RenderPrimitive::TriangleMesh,
+        RenderPrimitive::DotCloud,
+        RenderPrimitive::ImageQuad,
+        RenderPrimitive::CameraSortedSurfaceGrid { resolution: (9, 3) },
+    ];
+    let members: Vec<_> = primitives
+        .iter()
+        .map(|&primitive| {
+            let mob = stage.add(Mobject::new().with_render_primitive(primitive));
+            stage.attach(root, mob).unwrap();
+            mob
+        })
+        .collect();
+    let dark = ImageResource::rgba8(
+        2,
+        1,
+        vec![1, 2, 3, 255, 4, 5, 6, 128],
+        ImageColorSpace::Linear,
+        ImageSampler {
+            wrap_u: ImageWrap::MirroredRepeat,
+            wrap_v: ImageWrap::ClampToEdge,
+        },
+    )
+    .unwrap();
+    let material = ImageResource::rgba8(
+        2,
+        1,
+        vec![10, 20, 30, 255, 40, 50, 60, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler {
+            wrap_u: ImageWrap::MirroredRepeat,
+            wrap_v: ImageWrap::ClampToEdge,
+        },
+    )
+    .unwrap()
+    .with_dark_image(dark)
+    .unwrap();
+    stage
+        .set_image_resource(members[4], Some(material.clone()))
+        .unwrap();
+    stage
+        .get_mut(members[3])
+        .unwrap()
+        .uniforms_mut()
+        .glow_factor = 0.75;
+    let bytes = stage.checkpoint_family(root).unwrap().to_bytes().unwrap();
+    let plain = stage.add(Mobject::new());
+    for &mob in &members {
+        stage.become_mobject(mob, plain, false).unwrap();
+    }
+    let decoded = FamilyCheckpoint::from_bytes(&bytes, &stage).unwrap();
+    stage.restore_family_checkpoint(&decoded).unwrap();
+    for (&mob, primitive) in members.iter().zip(primitives) {
+        assert_eq!(stage.get(mob).unwrap().render_primitive(), primitive);
+    }
+    assert_eq!(
+        stage.get(members[4]).unwrap().image_resource(),
+        Some(&material)
+    );
+    assert_eq!(stage.get(members[3]).unwrap().uniforms().glow_factor, 0.75);
+    assert_eq!(
+        stage.checkpoint_family(root).unwrap().to_bytes().unwrap(),
+        bytes
+    );
+}
+
+#[test]
+fn durable_family_checkpoint_rebinds_only_after_matching_arena_restore() {
+    let mut original = Stage::new();
+    let (root, first, second, tracker) = build_scene(&mut original);
+    original.attach(root, tracker).unwrap();
+    let checkpoint = original.checkpoint_family(root).unwrap();
+    let bytes = checkpoint.to_bytes().unwrap();
+    original.detach(root, second);
+    original.shift(first, [7.0, 8.0, 0.0]);
+    let later = original.add(Mobject::from_points(&[[11.0, 12.0, 0.0]]));
+    original.add_to_scene(later).unwrap();
+    let live_bytes = original.snapshot_bytes().unwrap();
+    let mut restored = Stage::new();
+    let empty = restored.snapshot_bytes().unwrap();
+    assert!(matches!(
+        FamilyCheckpoint::from_bytes(&bytes, &restored),
+        Err(PersistError::Malformed("checkpoint member is not live"))
+    ));
+    assert_eq!(restored.snapshot_bytes().unwrap(), empty);
+    let arena = Snapshot::from_bytes(&live_bytes, &restored).unwrap();
+    restored.restore(&arena.snapshot);
+    assert!(
+        !restored.contains(root),
+        "the target has its own handle domain"
+    );
+    let decoded = FamilyCheckpoint::from_bytes(&bytes, &restored).unwrap();
+    assert_eq!(
+        decoded.to_bytes().unwrap(),
+        bytes,
+        "process identities stay out of the wire"
+    );
+    restored.restore_family_checkpoint(&decoded).unwrap();
+    original.restore_family_checkpoint(&checkpoint).unwrap();
+    assert_eq!(
+        restored.snapshot_bytes().unwrap(),
+        original.snapshot_bytes().unwrap()
+    );
+}
+
+#[test]
+fn durable_family_checkpoint_refuses_recycled_members_without_mutation() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::new());
+    let child = stage.add(Mobject::from_points(&[[3.0, 4.0, 0.0]]));
+    stage.attach(root, child).unwrap();
+    let bytes = stage.checkpoint_family(root).unwrap().to_bytes().unwrap();
+    let decoded = FamilyCheckpoint::from_bytes(&bytes, &stage).unwrap();
+    stage.delete(child).unwrap();
+    let replacement = stage.add(Mobject::from_points(&[[9.0, 8.0, 0.0]]));
+    stage.attach(root, replacement).unwrap();
+    let unchanged = stage.snapshot_bytes().unwrap();
+    assert!(matches!(
+        FamilyCheckpoint::from_bytes(&bytes, &stage),
+        Err(PersistError::Malformed("checkpoint member is not live"))
+    ));
+    assert_eq!(
+        stage.restore_family_checkpoint(&decoded),
+        Err(StageError::StaleHandle)
+    );
+    assert_eq!(stage.snapshot_bytes().unwrap(), unchanged);
+}
+
+#[test]
+fn durable_family_checkpoint_keeps_foreign_write_shape_hints_demoted() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::from_points(&[[0.0; 3], [1.0, 0.0, 0.0]]));
+    let tag = ShapeTag::Line {
+        start: [0.0; 3],
+        end: [1.0, 0.0, 0.0],
+        path_arc: 0.0,
+        buff: 0.0,
+    };
+    stage.set_shape(root, tag);
+    let view = stage
+        .get_mut(root)
+        .unwrap()
+        .buffer
+        .export_field_view("point", true)
+        .unwrap();
+    assert!(view.write_foreign(1, "point", &[5.0, 2.0, 0.0]));
+    let bytes = stage.checkpoint_family(root).unwrap().to_bytes().unwrap();
+    drop(view);
+    stage.set_shape(root, tag);
+    let decoded = FamilyCheckpoint::from_bytes(&bytes, &stage).unwrap();
+    stage.restore_family_checkpoint(&decoded).unwrap();
+    assert_eq!(
+        stage.shape(root),
+        tag,
+        "authored shape configuration survives"
+    );
+    assert_eq!(
+        stage.primitive_hint(root),
+        None,
+        "foreign writes are not certified geometry"
+    );
+    assert_eq!(stage.get_points(root).unwrap()[1], [5.0, 2.0, 0.0]);
+}
+
+#[test]
+fn durable_family_checkpoint_checks_container_and_both_allocation_budgets() {
+    let mut stage = Stage::new();
+    let root = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+    let checkpoint = stage.checkpoint_family(root).unwrap();
+    let bytes = checkpoint.to_bytes().unwrap();
+    assert_eq!(checkpoint.to_bytes().unwrap(), bytes);
+    assert_eq!(
+        checkpoint
+            .to_bytes_with_limits(Limits {
+                max_total: bytes.len(),
+                max_field: Limits::DEFAULT.max_field,
+            })
+            .unwrap(),
+        bytes
+    );
+    for limits in [
+        Limits {
+            max_total: bytes.len() - 1,
+            max_field: Limits::DEFAULT.max_field,
+        },
+        Limits {
+            max_total: Limits::DEFAULT.max_total,
+            max_field: 4,
+        },
+    ] {
+        assert!(matches!(
+            checkpoint.to_bytes_with_limits(limits),
+            Err(SerialError::SizeLimit { .. })
+        ));
+    }
+    let mut ceiling = 64;
+    while FamilyCheckpoint::from_bytes_with_limits(
+        &bytes,
+        &stage,
+        SnapshotLimits {
+            max_total_decoded_bytes: ceiling,
+        },
+    )
+    .is_err()
+    {
+        ceiling *= 2;
+        assert!(ceiling <= SnapshotLimits::DEFAULT.max_total_decoded_bytes);
+    }
+    let mut lower = 0;
+    while lower + 1 < ceiling {
+        let middle = (lower + ceiling) / 2;
+        if FamilyCheckpoint::from_bytes_with_limits(
+            &bytes,
+            &stage,
+            SnapshotLimits {
+                max_total_decoded_bytes: middle,
+            },
+        )
+        .is_ok()
+        {
+            ceiling = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    assert_eq!(
+        FamilyCheckpoint::from_bytes_with_limits(
+            &bytes,
+            &stage,
+            SnapshotLimits {
+                max_total_decoded_bytes: ceiling,
+            }
+        )
+        .unwrap()
+        .to_bytes()
+        .unwrap(),
+        bytes
+    );
+    assert!(matches!(
+        FamilyCheckpoint::from_bytes_with_limits(
+            &bytes,
+            &stage,
+            SnapshotLimits {
+                max_total_decoded_bytes: ceiling - 1,
+            }
+        ),
+        Err(PersistError::AllocationLimit { .. })
+    ));
+    let mut huge = Writer::new(FAMILY_CHECKPOINT_SCHEMA);
+    huge.put_u32(u32::MAX);
+    assert!(matches!(
+        FamilyCheckpoint::from_bytes(&huge.finish().unwrap(), &stage),
+        Err(PersistError::Serial(SerialError::UnexpectedEof { .. }))
+    ));
+    for length in 0..bytes.len() {
+        assert!(FamilyCheckpoint::from_bytes(&bytes[..length], &stage).is_err());
+    }
+    let mut corrupt = bytes.clone();
+    let middle = corrupt.len() / 2;
+    corrupt[middle] ^= 0x40;
+    assert!(matches!(
+        FamilyCheckpoint::from_bytes(&corrupt, &stage),
+        Err(PersistError::Serial(SerialError::ChecksumMismatch))
+    ));
+    for offset in [8, 10] {
+        let mut future = bytes.clone();
+        future[offset] += 1;
+        let body_len = future.len() - 32;
+        let digest = sha256(&future[..body_len]);
+        future[body_len..].copy_from_slice(digest.as_bytes());
+        let error = FamilyCheckpoint::from_bytes(&future, &stage)
+            .map(|_| ())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PersistError::Serial(
+                SerialError::MajorMismatch { .. } | SerialError::NewerMinor { .. }
+            )
+        ));
+    }
 }
