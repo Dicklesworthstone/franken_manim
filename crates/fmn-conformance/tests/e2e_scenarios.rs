@@ -8240,6 +8240,34 @@ fn python_portal_planar_route_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenar
         .with_counter("python_planar_surface_camera", 1))
 }
 
+/// Public Python styling must reuse native geometry while live point writers
+/// still invalidate it, with authored accessors and NumPy aliases preserved.
+fn python_portal_style_retention_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let report = manimlib::run_portal_gauntlet_style_retention()
+        .map_err(|error| fail(format!("run Python portal style retention: {error}")))?;
+    ctx.event(
+        LogEvent::new("e2e.python.style_retention")
+            .field("style_cases", report.style_cases)
+            .field("reused_outlines", report.reused_outlines)
+            .field("rendered_frames", report.rendered_frames)
+            .field("primitive_candidates", report.primitive_candidates)
+            .field("point_invalidations", report.point_invalidations)
+            .field("raw_digest", report.raw_digest),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("python_style_cases", report.style_cases)
+        .with_counter("python_style_reused_outlines", report.reused_outlines)
+        .with_counter("python_style_rendered_frames", report.rendered_frames)
+        .with_counter(
+            "python_style_primitive_candidates",
+            report.primitive_candidates,
+        )
+        .with_counter(
+            "python_style_point_invalidations",
+            report.point_invalidations,
+        ))
+}
+
 /// fm-lrni: ordinary landscape and portrait output retain the planar route,
 /// while live camera changes continue to require projection.
 fn python_portal_planar_aspects_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
@@ -22354,6 +22382,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.python_portal_style_retention.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::PythonInProcess,
+        Invocation::new(python_portal_style_retention_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("python_style_cases", 12),
+            counter_eq("python_style_reused_outlines", 36),
+            counter_eq("python_style_rendered_frames", 18),
+            counter_ge("python_style_primitive_candidates", 4),
+            counter_eq("python_style_point_invalidations", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.python.style_retention",
+            vec![
+                FieldPred::u64_eq("reused_outlines", 36),
+                FieldPred::u64_eq("point_invalidations", 2),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "render_matrix.python_portal_planar_aspects.v1",
         ScenarioClass::RenderMatrix,
         Surface::PythonInProcess,
@@ -24889,6 +24938,16 @@ fn python_planar_route_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.python_portal_planar_route.v1")
         .expect("Python planar route scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn python_style_retention_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.python_portal_style_retention.v1")
+        .expect("Python style retention scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

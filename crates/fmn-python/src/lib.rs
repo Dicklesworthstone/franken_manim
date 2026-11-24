@@ -94,9 +94,10 @@ pub use tex_preamble::run_portal_gauntlet_tex_preamble;
 
 #[cfg(feature = "gauntlet")]
 pub use portal_readback::{
-    run_portal_gauntlet_camera_frame_points, run_portal_gauntlet_disc_recovery,
-    run_portal_gauntlet_rectangle_recovery, run_portal_gauntlet_rounded_rectangle_recovery,
-    run_portal_gauntlet_scene_readback,
+    PortalStyleRetentionReport, run_portal_gauntlet_camera_frame_points,
+    run_portal_gauntlet_disc_recovery, run_portal_gauntlet_rectangle_recovery,
+    run_portal_gauntlet_rounded_rectangle_recovery, run_portal_gauntlet_scene_readback,
+    run_portal_gauntlet_style_retention,
 };
 #[cfg(feature = "gauntlet")]
 pub use portal_svg::{PortalSvgReport, run_portal_gauntlet_svg};
@@ -1508,6 +1509,20 @@ fn with_stage<T>(
         .ok_or_else(|| StaleHandleError::new_err("mobject has no detached or bound state"))?;
     let root = nursery.root;
     Ok(operation(&mut nursery.stage, root))
+}
+
+/// Style columns do not observe or modify point geometry. In particular,
+/// writing them must not bake an affine placement into the point buffer.
+fn with_style_buffer<T>(
+    proxy: &Bound<'_, BridgeMobject>,
+    operation: impl FnOnce(&mut RecordBuffer) -> T,
+) -> PyResult<T> {
+    with_stage(proxy, |stage, mob| {
+        let entry = stage
+            .get_mut(mob)
+            .ok_or_else(|| StaleHandleError::new_err("mobject handle no longer resolves"))?;
+        Ok(operation(&mut entry.buffer))
+    })?
 }
 
 /// Reconstruct the current shared-anchor geometry under the VMobject's live
@@ -3064,8 +3079,8 @@ impl BridgeMobject {
         alpha: Option<f64>,
     ) -> PyResult<bool> {
         crossing::record(CrossingClass::FieldWrite);
-        with_buffer(slf, |buffer| {
-            if buffer.schema().field_width(field) != Some(4) {
+        with_style_buffer(slf, |buffer| {
+            if buffer.is_empty() || buffer.schema().field_width(field) != Some(4) {
                 return false;
             }
             let mut column = buffer.read_column(field).expect("four-lane field exists");
@@ -3084,6 +3099,22 @@ impl BridgeMobject {
                 }
             }
             buffer.write_range(field, 0, &column)
+        })
+    }
+
+    /// Fill one scalar style column without exporting the whole structured
+    /// record. A NumPy whole-record writer invalidates point geometry even
+    /// when its caller only assigns stroke width or fill-border width.
+    /// Return false for a different layout so the Python skin can retain its
+    /// ordinary NumPy broadcasting/error behavior for authored schemas.
+    fn _fill_scalar_lanes(slf: &Bound<'_, Self>, field: &str, value: f64) -> PyResult<bool> {
+        crossing::record(CrossingClass::FieldWrite);
+        with_style_buffer(slf, |buffer| {
+            if buffer.is_empty() || buffer.schema().field_width(field) != Some(1) {
+                return false;
+            }
+            buffer.write_scalar_lanes(field, value);
+            true
         })
     }
 

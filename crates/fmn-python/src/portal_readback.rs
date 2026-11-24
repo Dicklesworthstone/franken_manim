@@ -833,8 +833,270 @@ fn run_portal_recovery(fixture: RecoveryFixture) -> Result<(u64, u64, String), S
     })
 }
 
+/// Evidence from public Python styling through the production retained renderer.
+#[cfg(any(test, feature = "gauntlet"))]
+#[derive(Debug)]
+pub struct PortalStyleRetentionReport {
+    /// Public alias, custom accessor and empty-record regression cases.
+    pub style_cases: u64,
+    /// Outlines reused after styling without reading their point columns.
+    pub reused_outlines: u64,
+    /// Actual retained frames, including same-invocation cold-render comparisons.
+    pub rendered_frames: u64,
+    /// Primitives admitted by the production fill-kernel selector.
+    pub primitive_candidates: u64,
+    /// Point-write transitions that invalidated a previously valid hint.
+    pub point_invalidations: u64,
+    /// Last standard/certified frame digest, without a reblessed golden.
+    pub raw_digest: String,
+}
+
+/// Style-only writes preserve compiled outlines, affine placement, authored
+/// accessors and live NumPy aliases. Actual point writers still demote hints.
+///
+/// # Errors
+/// Reports changed point geometry, lost retained reuse, disagreement with a
+/// fresh renderer of the same state, or a bypassed Python accessor contract.
+#[cfg(any(test, feature = "gauntlet"))]
+pub fn run_portal_gauntlet_style_retention() -> Result<PortalStyleRetentionReport, String> {
+    use fmn_render::fill::{FillKernel, instance_translation};
+
+    crate::with_python_test_module("portal style retention", |py, _module, globals| {
+        let suite = std::ffi::CString::new(include_str!("../tests/scalar_style_retention.py"))
+            .map_err(|error| error.to_string())?;
+        py.run(suite.as_c_str(), Some(globals), Some(globals))
+            .map_err(|error| error.to_string())?;
+        let mut report = PortalStyleRetentionReport {
+            style_cases: globals
+                .get_item("scalar_style_cases")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "style case count is absent".to_owned())?
+                .extract()
+                .map_err(|error| error.to_string())?,
+            reused_outlines: 0,
+            rendered_frames: 0,
+            primitive_candidates: 0,
+            point_invalidations: 0,
+            raw_digest: String::new(),
+        };
+        let frame = FrameConfig::new(
+            Viewport {
+                width: 192,
+                height: 108,
+            },
+            ScreenMap {
+                scale: 24.0,
+                origin: [96.0, 54.0],
+                y_up: true,
+            },
+            fmn_core::color::LinearRgba {
+                r: 0.04,
+                g: 0.04,
+                b: 0.06,
+                a: 1.0,
+            },
+        );
+        for engine in [EngineIdentity::fast(), EngineIdentity::certified()] {
+            py.run(c"scene = m.Scene()\nshapes = [m.Rectangle(width=.75, height=.4), m.Circle(radius=.18), m.Dot(radius=.12), m.RoundedRectangle(width=.6, height=.4, corner_radius=.08), m.Square(side_length=.4), m.Rectangle(width=.65, height=.3).rotate(.3).scale(.75)]\nfor i, shape in enumerate(shapes):\n    shape.set_fill(m.BLUE, .8).set_stroke(m.WHITE, 2).shift((-2.5 + i, .125, 0))\nscene.add(*shapes)\n", Some(globals), Some(globals))
+                .map_err(|error| error.to_string())?;
+            let scene_object = globals
+                .get_item("scene")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "style scene is absent".to_owned())?;
+            let scene = scene_object
+                .cast::<crate::PyScene>()
+                .map_err(|error| error.to_string())?;
+            let shapes = globals
+                .get_item("shapes")
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "style shapes are absent".to_owned())?;
+            let mobs = shapes
+                .cast::<PyList>()
+                .map_err(|error| error.to_string())?
+                .iter()
+                .map(|shape| {
+                    shape
+                        .cast::<BridgeMobject>()
+                        .map_err(|error| error.to_string())?
+                        .borrow()
+                        .mob
+                        .ok_or_else(|| "styled shape is detached".to_owned())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let before = {
+                let proxy = scene.borrow();
+                let native = proxy.engine.borrow();
+                mobs.iter()
+                    .map(|&mob| {
+                        let entry = native.stage().get(mob).expect("adopted style shape");
+                        (
+                            entry.buffer.field_revision("point"),
+                            native.stage().get_points(mob),
+                            entry.placement(),
+                            native.stage().primitive_hint(mob),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            if before.iter().any(|(_, _, _, hint)| hint.is_none()) {
+                return Err("constructor styling discarded a native primitive hint".into());
+            }
+            let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+                frame,
+                tiling: Tiling::default(),
+                engine,
+                threads: 1,
+            })
+            .map_err(|error| error.to_string())?;
+            let mut previous_pixels = Vec::new();
+            for step in 0..4 {
+                if step > 0 {
+                    globals
+                        .set_item("style_step", step)
+                        .map_err(|error| error.to_string())?;
+                    py.run(c"for shape in shapes:\n    shape.set_stroke(m.RED, width=2 + style_step, opacity=.9)\n    shape.set_fill(m.GREEN if style_step % 2 else m.BLUE, opacity=.5 + .1 * style_step, border_width=.1 * style_step)\n", Some(globals), Some(globals))
+                        .map_err(|error| error.to_string())?;
+                }
+                let frozen = {
+                    let proxy = scene.borrow();
+                    let native = proxy.engine.borrow();
+                    let stage = native.stage();
+                    for (&mob, expected) in mobs.iter().zip(&before) {
+                        let entry = stage.get(mob).expect("styled shape remains live");
+                        let observed = (
+                            entry.buffer.field_revision("point"),
+                            stage.get_points(mob),
+                            entry.placement(),
+                            stage.primitive_hint(mob),
+                        );
+                        if &observed != expected {
+                            return Err(format!(
+                                "style step {step} changed point geometry, placement or primitive eligibility"
+                            ));
+                        }
+                    }
+                    renderer
+                        .render(stage, 0)
+                        .map_err(|error| error.to_string())?;
+                    stage.snapshot().materialize()
+                };
+                report.rendered_frames += 1;
+                let plan = renderer.plan();
+                if step > 0 {
+                    let stats = plan.stats();
+                    if stats.shapes_compiled != 0
+                        || stats.shapes_reused != mobs.len()
+                        || stats.styles_rebuilt != mobs.len()
+                    {
+                        return Err(format!(
+                            "style step {step} did not retain outlines: {stats:?}"
+                        ));
+                    }
+                    report.reused_outlines +=
+                        u64::try_from(stats.shapes_reused).expect("small fixture");
+                }
+                if step == 0 {
+                    for instance in plan.shapes().instances() {
+                        let shape = &plan.shapes().shapes()[instance.shape as usize];
+                        let start = shape.first_segment as usize;
+                        let segments =
+                            &plan.segments()[start..start + shape.segment_count as usize];
+                        if !instance.hint_unsafe
+                            && instance.placement.is_translation()
+                            && !matches!(
+                                FillKernel::select(
+                                    shape,
+                                    segments,
+                                    frame.map,
+                                    instance_translation(instance, frame.map)
+                                ),
+                                FillKernel::General
+                            )
+                        {
+                            report.primitive_candidates += 1;
+                        }
+                    }
+                }
+                // A retained style update must match a cold render of the
+                // exact same points, placement and constructor hints. Removing
+                // a disc hint instead selects the quadratic approximation of
+                // a circle, a different (bounded-error) geometry contract.
+                let mut baseline = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+                    frame,
+                    tiling: Tiling::default(),
+                    engine,
+                    threads: 4,
+                })
+                .map_err(|error| error.to_string())?;
+                baseline
+                    .render(&frozen, 0)
+                    .map_err(|error| error.to_string())?;
+                report.rendered_frames += 1;
+                let pixels = renderer.frame().as_bytes();
+                if pixels != baseline.frame().as_bytes() {
+                    let changed = pixels
+                        .iter()
+                        .zip(baseline.frame().as_bytes())
+                        .filter(|(a, b)| a != b)
+                        .count();
+                    return Err(format!(
+                        "{engine:?} style step {step}: retained/cold frames differ in {changed} channels"
+                    ));
+                }
+                if step > 0 && pixels == previous_pixels {
+                    return Err(format!(
+                        "style step {step} did not change rendered color or width"
+                    ));
+                }
+                previous_pixels = pixels.to_vec();
+            }
+            py.run(
+                c"point_view = shapes[0].get_points()\npoint_view[1, 1] += np.float32(.375)\n",
+                Some(globals),
+                Some(globals),
+            )
+            .map_err(|error| error.to_string())?;
+            {
+                let proxy = scene.borrow();
+                let native = proxy.engine.borrow();
+                if native.stage().primitive_hint(mobs[0]).is_some() {
+                    return Err("a live point writer retained its primitive hint".into());
+                }
+                renderer
+                    .render(native.stage(), 0)
+                    .map_err(|error| error.to_string())?;
+                if renderer.plan().stats().shapes_reused >= mobs.len()
+                    || renderer.frame().as_bytes() == previous_pixels
+                {
+                    return Err(
+                        "a live point write failed to invalidate retained geometry and pixels"
+                            .into(),
+                    );
+                }
+            }
+            report.point_invalidations += 1;
+            report.rendered_frames += 1;
+            report.raw_digest = fmn_hash::sha256(renderer.frame().as_bytes()).to_hex();
+        }
+        if report.primitive_candidates < 4 {
+            return Err("native portal primitives never reached specialized fill kernels".into());
+        }
+        Ok(report)
+    })
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn production_style_writes_retain_geometry_and_preserve_python_semantics() {
+        let report = super::run_portal_gauntlet_style_retention()
+            .expect("style writes retain native outlines and public NumPy semantics");
+        assert_eq!(report.style_cases, 12);
+        assert_eq!(report.reused_outlines, 36);
+        assert_eq!(report.rendered_frames, 18);
+        assert_eq!(report.point_invalidations, 2);
+    }
+
     #[test]
     fn production_rectangle_recovery_preserves_views_snapshots_and_pixels() {
         let (rectangles, frames, _) = super::run_portal_gauntlet_rectangle_recovery()

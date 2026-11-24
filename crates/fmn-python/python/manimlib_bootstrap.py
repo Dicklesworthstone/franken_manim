@@ -2443,12 +2443,9 @@ class Mobject(_BridgeMobject):
                 None if opacity is None else float(opacity),
             )
         for mob in _family_preorder(self) if recurse else [self]:
-            kind = type(mob)
             if (
                 lanes is not None
-                and kind._style_data is Mobject._style_data
-                and kind.data is Mobject.data
-                and mob.n_records() > 0
+                and _uses_native_style_access(mob)
                 and mob._fill_rgba_lanes(name, *lanes)
             ):
                 continue
@@ -3528,6 +3525,35 @@ class Mobject(_BridgeMobject):
         )
 
 
+def _uses_native_style_access(
+    mob,
+    _methods=(
+        ("_style_data", Mobject._style_data),
+        ("data", Mobject.data),
+        ("_data_array", Mobject._data_array),
+        ("__getattribute__", Mobject.__getattribute__),
+        ("n_records", Mobject.n_records),
+        ("_fill_scalar_lanes", Mobject._fill_scalar_lanes),
+        ("_fill_rgba_lanes", Mobject._fill_rgba_lanes),
+    ),
+):
+    # A style-only write must not export a whole-record writable view: its
+    # release dirties the point field and discards retained geometry. Keep
+    # authored accessors, instance overrides, scalar conversion hooks and
+    # custom field layouts on the original NumPy path. Capture the stock
+    # methods now so a later class patch is never promoted to trusted code.
+    for name, expected in _methods:
+        if _inspect.getattr_static(mob, name) is not expected:
+            return False
+    return True
+
+
+def _try_fill_scalar_style(mob, field, value):
+    if type(value) not in (int, float, bool, _np.float16, _np.float32, _np.float64):
+        return False
+    return _uses_native_style_access(mob) and mob._fill_scalar_lanes(field, value)
+
+
 class Group(Mobject):
     """The Reference's heterogeneous Mobject group.
 
@@ -4341,7 +4367,8 @@ class VMobject(Mobject):
         if border_width is not None:
             self.border_width = border_width
             for mob in _family_preorder(self) if recurse else [self]:
-                mob._style_data()["fill_border_width"] = border_width
+                if not _try_fill_scalar_style(mob, "fill_border_width", border_width):
+                    mob._style_data()["fill_border_width"] = border_width
         return self
 
     def set_stroke(
@@ -4364,6 +4391,8 @@ class VMobject(Mobject):
 
         if width is not None:
             for mob in _family_preorder(self) if recurse else [self]:
+                if _try_fill_scalar_style(mob, "stroke_width", width):
+                    continue
                 data = mob._style_data()
                 if isinstance(width, (float, int, _np.floating)):
                     data["stroke_width"][:, 0] = width
