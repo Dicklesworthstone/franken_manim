@@ -271,10 +271,22 @@ impl CoordinateFrame {
                     if index == first { a } else { 0.0 },
                     if index == last { b } else { 1.0 },
                 );
+                // Inverse-coordinate rounding can select the segment just
+                // beyond a clipping boundary at a shared anchor. Its
+                // restriction then collapses to that anchor. Keeping this
+                // zero-length quadratic makes the region's topology depend
+                // on chart translation. Use exact geometric equality here:
+                // short curves and vertical segments still belong to it.
+                if part[0] == part[1] && part[1] == part[2] {
+                    continue;
+                }
                 if clipped.is_empty() {
                     clipped.push(part[0]);
                 }
                 clipped.extend_from_slice(&part[1..]);
+            }
+            if clipped.is_empty() {
+                continue;
             }
             let start = clipped[0];
             let baseline_end = record_point(self.c2p(&[right, 0.0]))?;

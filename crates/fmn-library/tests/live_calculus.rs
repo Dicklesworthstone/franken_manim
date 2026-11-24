@@ -203,6 +203,108 @@ fn areas_clip_actual_quadratic_x_not_curve_index_and_preserve_source() {
 }
 
 #[test]
+fn area_clipping_at_shared_anchors_preserves_topology_after_translation() {
+    let before = Axes::new()
+        .x_range([-2.0, 4.0, 1.0])
+        .y_range([-1.0, 3.0, 1.0])
+        .width(6.0)
+        .height(3.0)
+        .axis_config(AxisConfig {
+            include_tip: Some(true),
+            ..AxisConfig::default()
+        })
+        .build(&FontBook::bundled().unwrap())
+        .unwrap();
+    let shift = [-2.0, 0.75, 0.0];
+    let after = before.clone().shifted(shift);
+    let f = |x| 0.5 * x + 0.25;
+    let original = before.get_graph(f).build().unwrap();
+    let moved = after.get_graph(f).build().unwrap();
+    let original_points = original.points().to_vec();
+    let moved_points = moved.points().to_vec();
+    for reversed in [false, true] {
+        let source = if reversed {
+            VMobject::from_points(original.points().iter().rev().copied().collect())
+        } else {
+            original.clone()
+        };
+        let translated = if reversed {
+            VMobject::from_points(moved.points().iter().rev().copied().collect())
+        } else {
+            moved.clone()
+        };
+        let area = before
+            .get_area_under_graph(&source, Some([-1.0, 2.0]))
+            .unwrap();
+        let translated_area = after
+            .get_area_under_graph(&translated, Some([-1.0, 2.0]))
+            .unwrap();
+        // Fifteen drawn graph segments and three closing lines. The original
+        // clipping owner sometimes retained a sixteenth constant segment.
+        assert_eq!(area.points().len(), 37);
+        assert_eq!(translated_area.points().len(), area.points().len());
+        assert_eq!(translated_area.style(), area.style());
+        for (&actual, &point) in translated_area.points().iter().zip(area.points()) {
+            for axis in 0..3 {
+                assert!((actual[axis] - (point[axis] + shift[axis])).abs() < 1e-8);
+            }
+        }
+        for points in [area.points(), translated_area.points()] {
+            assert!(
+                points
+                    .windows(3)
+                    .step_by(2)
+                    .all(|p| p[0] != p[1] || p[1] != p[2]),
+                "clipping must not append a constant endpoint quadratic"
+            );
+            assert_eq!(points.first(), points.last());
+        }
+    }
+    assert_eq!(original.points(), original_points);
+    assert_eq!(moved.points(), moved_points);
+}
+
+#[test]
+fn area_clipping_preserves_short_and_vertical_nonconstant_quadratics() {
+    let (_, stage, _, live) = setup(64);
+    let frame = live.snapshot(&stage).unwrap();
+    let narrow = 1e-8;
+    let curve = graph(
+        &frame,
+        &[
+            [0.0, 1.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, 1.5, 0.0],
+            [1.0, 2.0, 0.0],
+            [1.0 + narrow / 2.0, 2.0, 0.0],
+            [1.0 + narrow, 2.0, 0.0],
+        ],
+    );
+    let region = frame
+        .get_area_under_graph(&curve, Some([1.0 - narrow, 1.0 + narrow]))
+        .unwrap();
+    assert_eq!(region.points().len(), 13);
+    for (actual, expected) in region.points()[..7].iter().zip([
+        [1.0 - narrow, 1.0, 0.0],
+        [1.0 - narrow / 2.0, 1.0, 0.0],
+        [1.0, 1.0, 0.0],
+        [1.0, 1.5, 0.0],
+        [1.0, 2.0, 0.0],
+        [1.0 + narrow / 2.0, 2.0, 0.0],
+        [1.0 + narrow, 2.0, 0.0],
+    ]) {
+        let expected = frame.c2p(&expected);
+        for axis in 0..3 {
+            assert!((actual[axis] - expected[axis]).abs() < narrow / 100.0);
+        }
+    }
+    assert!(region.points()[0][0] < region.points()[2][0]);
+    assert!(region.points()[4][0] < region.points()[6][0]);
+    assert!(region.points()[2][1] < region.points()[4][1]);
+}
+
+#[test]
 fn areas_preserve_discontinuity_gaps_and_intersect_the_drawn_domain() {
     let (_, stage, _, live) = setup(64);
     let frame = live.snapshot(&stage).unwrap();
