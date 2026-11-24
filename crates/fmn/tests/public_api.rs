@@ -332,7 +332,13 @@ impl SceneConstruct for ConditionalWaitScene {
     fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
         let mob = stage.add(Mobject::from_points(&[ORIGIN]))?;
         self.mob = Some(mob);
-        stage.add_dt_updater(mob, |arena, me, dt| arena.shift(me, [dt, 0.0, 0.0]), false)?;
+        stage.add_dt_updater(
+            mob,
+            |arena, me, dt| {
+                arena.shift(me, [dt, 0.0, 0.0]);
+            },
+            false,
+        )?;
         let report = stage.wait_until(1.0, |arena| {
             let center = arena.get_center(mob);
             self.observed.push(center);
@@ -344,7 +350,13 @@ impl SceneConstruct for ConditionalWaitScene {
             report.purity,
             Purity::Stateful(ref effects) if effects.contains(&ImpureEffect::StopCondition)
         ));
-        stage.add_updater(mob, |arena, me| arena.shift(me, [0.0, 0.5, 0.0]), false)?;
+        stage.add_updater(
+            mob,
+            |arena, me| {
+                arena.shift(me, [0.0, 0.5, 0.0]);
+            },
+            false,
+        )?;
         stage.show()?;
         Ok(())
     }
@@ -505,7 +517,13 @@ fn facade_preserves_final_sample_demand_before_authored_cleanup() {
         fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
             let mob = stage.add(Mobject::from_points(&[ORIGIN]))?;
             self.0 = Some(mob);
-            stage.add_dt_updater(mob, |arena, me, dt| arena.shift(me, [dt, 0.0, 0.0]), false)?;
+            stage.add_dt_updater(
+                mob,
+                |arena, me, dt| {
+                    arena.shift(me, [dt, 0.0, 0.0]);
+                },
+                false,
+            )?;
             stage.wait_frames(2)?;
             stage.shift(mob, [10.0, 0.0, 0.0]);
             Ok(())
