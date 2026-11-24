@@ -312,6 +312,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 Native WAV sources may also carry an explicit speaker layout: use `channel_mask: Some(ChannelLayout::Surround5Point1.mask())` for interleaved 5.1 PCM, or preserve the mask by admitting WAV bytes through `SoundData::from_wav_bytes`. The native mixer accepts the documented 2.1 through 7.1 layouts and deterministically downmixes them to mono or stereo; unlabelled multichannel sources return a typed layout error. The exact matrix and LFE policy are documented in [BN-14](docs/behavior_notes/BN-14-sample-exact-sound.md).
 
+### Live speech and thought bubbles (Rust)
+
+`SpeechBubble::add_to` and `ThoughtBubble::add_to` wrap existing native content
+without copying its handle. The returned `Bubble` supports fitting, pinning,
+flipping, replacing or clearing content, and resizing its body after content
+changes. Add its root to the scene and animate it like any other family:
+
+```rust,no_run
+use fmn::prelude::*;
+
+fn add_answer(stage: &mut Stage<'_>, speaker: Mob) -> fmn::Result<Bubble> {
+    let tex = TexEngine::new("fmd-math/pack/default", None)?;
+    let answer = stage.arena_mut().add(Tex::new("x = 42").build(&tex)?);
+    let mut bubble = SpeechBubble::new().add_to(stage.arena_mut(), Some(answer))?;
+    bubble.pin_to(stage.arena_mut(), speaker, true)?;
+    stage.arena_mut().add_to_scene(bubble.mobject())?;
+    Ok(bubble)
+}
+```
+
+`resize_to_content(arena, buff)` rebuilds the outline while preserving body
+handles, paint and updaters. `add_content_with_buff` fits replacement content;
+`clear` detaches it while leaving it alive for other uses. Pinning is explicit:
+call `pin_to` again after moving the speaker. Thought bubbles take the scene's
+RNG stream at construction and retain their original cloud noise on resize.
+For a custom SVG outline, use `Bubble::from_document` with your own parsed SVG.
+
 ### Live neural-network values (Rust)
 
 Supply layer sizes, activations and weights from your own model or training
@@ -798,7 +825,7 @@ A few honest boundaries:
 - **Arbitrary GLSL is out of the compatibility claim.** `set_color_by_code` and custom shader folders are excluded (a short list of corpus-specific native adapters exists for the gallery). A restricted interpreter is banked as a future decision, on demonstrated demand.
 - **GPU acceleration is an annex, not the engine.** Metal (now) and CUDA (via the frankentorch upstream ledger) accelerate `standard`-mode rendering and Studio preview only. Certified output is CPU-defined, permanently.
 - **Windows renders functionally, never bit-certifiably.** windows-x86-64 builds and passes CI, but ADR-0019 rules it out of the certified matrix until bit-identity is measured on native Windows hardware. `--reproducible` promises bits on linux-x86-64, linux-aarch64, and macos-aarch64 only.
-- **The Reference-derived drawings assets never ship.** `Lightbulb`, `VideoIcon`/`VideoSeries`, the Bubble family, and `VectorizedEarth` take user-supplied SVG files and refuse with a named error otherwise — their default art is CC BY-NC-SA video content, so point them at your own 3b1b checkout (ADR-0020).
+- **The Reference-derived drawings assets never ship.** `Lightbulb`, `VideoIcon`/`VideoSeries`, legacy SVG bubbles, and `VectorizedEarth` take user-supplied SVG files and refuse with a named error otherwise — their default art is CC BY-NC-SA video content, so point them at your own 3b1b checkout (ADR-0020). Native `SpeechBubble` and `ThoughtBubble` construct their outlines procedurally and need no external art.
 - **Python scenes are Python programs.** They may import real NumPy and do I/O; certification claims apply to the native engine and to Python scenes only as far as the input closure captures them.
 
 ## FAQ

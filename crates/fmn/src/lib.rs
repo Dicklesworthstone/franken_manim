@@ -1181,6 +1181,8 @@ pub enum LibraryError {
     NeuralNetwork(NeuralNetworkError),
     /// `Slider` and the control widgets.
     Slider(SliderError),
+    /// Content-bearing speech, thought and SVG bubbles.
+    Bubble(fmn_library::BubbleError),
     /// Drawing classes that take user-supplied art.
     Drawings(fmn_library::drawings::DrawingsAssetError),
     /// `ThreeDModel` OBJ ingestion.
@@ -1210,6 +1212,7 @@ impl LibraryError {
             | Self::Graph(GraphError::Sampling(error)) => sampling(error),
             Self::TextMatching(TextMatchingError::BudgetExceeded { .. }) => true,
             Self::TexBinding(error) => error.is_budget_exceeded(),
+            Self::Bubble(fmn_library::BubbleError::Limit { .. }) => true,
             Self::NeuralNetwork(
                 NeuralNetworkError::TooManyParts { .. } | NeuralNetworkError::TooManyValues { .. },
             ) => true,
@@ -1235,6 +1238,7 @@ impl LibraryError {
             Self::GraphAnimation(error) => error,
             Self::NeuralNetwork(error) => error,
             Self::Slider(error) => error,
+            Self::Bubble(error) => error,
             Self::Drawings(error) => error,
             Self::Obj(error) => error,
             Self::Mesh(error) => error,
@@ -1287,6 +1291,7 @@ library_error_from!(NetworkGraphError, NetworkGraph);
 library_error_from!(GraphAnimationError, GraphAnimation);
 library_error_from!(NeuralNetworkError, NeuralNetwork);
 library_error_from!(SliderError, Slider);
+library_error_from!(fmn_library::BubbleError, Bubble);
 library_error_from!(fmn_library::drawings::DrawingsAssetError, Drawings);
 library_error_from!(ObjError, Obj);
 library_error_from!(MeshError, Mesh);

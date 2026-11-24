@@ -71,6 +71,8 @@ mod hdr_pq;
 #[allow(dead_code)]
 #[path = "../../fmn/examples/live_bar_chart.rs"]
 mod live_bar_chart_example;
+#[path = "../../fmn/tests/support/native_bubbles.rs"]
+mod native_bubbles;
 #[path = "support/near_linear_strokes.rs"]
 mod near_linear_strokes;
 #[path = "../../fmn/tests/support/obj_smoothing.rs"]
@@ -15400,6 +15402,18 @@ fn piano_keyboard_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         .with_counter("piano_visible_motion", u64::from(visible_motion)))
 }
 
+fn native_bubble_lifecycle_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    let (comparisons, frame) = native_bubbles::verify().map_err(fail)?;
+    ctx.event(
+        LogEvent::new("e2e.drawings.bubble_lifecycle")
+            .field("thread_counts", 3_u64)
+            .field("frame_comparisons", comparisons),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("bubble_frame_comparisons", comparisons)
+        .with_artifact("bubble-motion.png", frame))
+}
+
 /// The drawings shelf's asset-backed families refuse by name (ADR-0020):
 /// every default constructor surfaces `AssetNotShipped` naming its class
 /// and file — never a placeholder build.
@@ -23805,6 +23819,26 @@ pub fn catalog() -> Vec<ScenarioSpec> {
     );
     specs.push(
         spec(
+            "drawings.native_bubble_lifecycle.v1",
+            ScenarioClass::LifecycleDrill,
+            Surface::RustApi,
+            Invocation::new(native_bubble_lifecycle_run),
+            vec![
+                Assertion::ExitCode(0),
+                counter_eq("bubble_frame_comparisons", 18),
+            ],
+            vec![LogExpect::span_present(
+                "e2e.drawings.bubble_lifecycle",
+                vec![
+                    FieldPred::u64_eq("thread_counts", 3),
+                    FieldPred::u64_eq("frame_comparisons", 18),
+                ],
+            )],
+        )
+        .tier(Tier::Fast),
+    );
+    specs.push(
+        spec(
             "drawings.asset_refusals_named.v1",
             ScenarioClass::LifecycleDrill,
             Surface::RustApi,
@@ -24943,6 +24977,16 @@ fn native_compressed_soundtrack_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "render_matrix.native_compressed_soundtrack.v1")
         .expect("native compressed soundtrack scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn native_bubble_lifecycle_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "drawings.native_bubble_lifecycle.v1")
+        .expect("native bubble lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

@@ -4,7 +4,7 @@
 //! lower-left (mirrored to the right), the thought cloud's trailing circles,
 //! the Reference fill/stroke, and one-RNG determinism.
 
-use fmn_core::constants::{BLACK, MED_SMALL_BUFF, RIGHT, SMALL_BUFF, WHITE};
+use fmn_core::constants::{BLACK, LEFT, MED_SMALL_BUFF, RIGHT, SMALL_BUFF, WHITE};
 use fmn_core::rng::Pcg64Dxsm;
 use fmn_library::drawings::{
     ThoughtBubbleShape, speech_bubble, speech_bubble_default, thought_bubble,
@@ -100,6 +100,49 @@ fn speech_bubble_without_content_surrounds_an_invisible_filler() {
     assert!(((max[1] - min[1]) - 1.0).abs() < 1e-9);
     assert_eq!(filler.style().fill_opacity, 0.0);
     assert_eq!(filler.style().stroke_width, 0.0);
+}
+
+#[test]
+fn speech_body_geometry_is_independent_of_content_translation() {
+    for (width, height) in [(2.0, 1.0), (1.25, f64::from(0.6_f32) + 0.25)] {
+        let content = Rectangle::new()
+            .width(width)
+            .height(height)
+            .build()
+            .unwrap();
+        for direction in [LEFT, RIGHT] {
+            let centered = speech_bubble(
+                Some(&content),
+                direction,
+                MED_SMALL_BUFF,
+                (2.0, 1.0),
+                0.5,
+                (0.2, 0.3),
+            )
+            .unwrap();
+            let centered_points = family_points(&centered.children()[0]);
+            for offset in [[1.25, 0.75, 0.5], [-3.5, -2.25, -1.0]] {
+                let placed = content.clone().shifted(offset);
+                let shifted = speech_bubble(
+                    Some(&placed),
+                    direction,
+                    MED_SMALL_BUFF,
+                    (2.0, 1.0),
+                    0.5,
+                    (0.2, 0.3),
+                )
+                .unwrap();
+                let shifted_points = family_points(&shifted.children()[0]);
+                assert_eq!(shifted_points.len(), centered_points.len());
+                for (centered, shifted) in centered_points.iter().zip(shifted_points) {
+                    for axis in 0..3 {
+                        assert!((shifted[axis] - centered[axis] - offset[axis]).abs() < 1e-9);
+                    }
+                }
+                assert_eq!(shifted.children()[1].points(), placed.points());
+            }
+        }
+    }
 }
 
 #[test]

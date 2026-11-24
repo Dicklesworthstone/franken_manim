@@ -88,6 +88,7 @@
 pub mod arc;
 pub mod boolean_ops;
 pub mod brace;
+pub mod bubble;
 pub mod code;
 pub mod controls;
 pub mod coords;
@@ -127,6 +128,10 @@ pub use arc::{
     curved_double_arrow, sector, small_dot,
 };
 pub use brace::{Brace, BraceLabel, line_brace};
+pub use bubble::{
+    Bubble, BubbleConfig, BubbleDirection, BubbleError, MAX_BUBBLE_BULGES, MAX_BUBBLE_POINTS,
+    MAX_BUBBLE_TRAIL_CIRCLES, SpeechBubble, ThoughtBubble,
+};
 pub use code::{Code, CodeTheme};
 pub use controls::{
     Button, Checkbox, ColorSliders, ControlMob, ControlMobject, ControlPanel, ControlPanelMobject,

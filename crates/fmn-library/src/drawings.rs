@@ -1216,7 +1216,19 @@ pub fn speech_bubble(
         Some(given) => given.clone(),
         None => bubble_filler(filler_shape)?,
     };
-    let corners = surrounding_corners(&content, buff);
+    // The stem meets the rectangle along a shared boundary. Resolve that
+    // contact around the origin so translating content cannot change the
+    // boolean arrangement's numerical resolution.
+    let (min, max) = content.extent().unwrap_or(([0.0; 3], [0.0; 3]));
+    let center = std::array::from_fn(|axis| 0.5 * (min[axis] + max[axis]));
+    let half_width = 0.5 * (max[0] - min[0]) + buff;
+    let half_height = 0.5 * (max[1] - min[1]) + buff;
+    let corners = [
+        [half_width, half_height, 0.0],
+        [-half_width, half_height, 0.0],
+        [-half_width, -half_height, 0.0],
+        [half_width, -half_height, 0.0],
+    ];
     let rect = crate::poly::Polygon::new(corners).round_corners(None)?;
     let (lp, rp) = (corners[2], corners[3]);
     let stem_height = stem_height_to_bubble_height * (corners[0][1] - corners[3][1]);
@@ -1230,7 +1242,7 @@ pub fn speech_bubble(
     if direction[0] > 0.0 {
         body = mirrored_horizontally(body);
     }
-    Ok(bubble_group(body, content))
+    Ok(bubble_group(body.shifted(center), content))
 }
 
 /// [`speech_bubble`] with every Reference default, around `content`.
