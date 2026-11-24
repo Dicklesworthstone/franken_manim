@@ -1224,6 +1224,8 @@ impl NativeFramePipeline {
     /// and output capacity are acquired BEFORE freezing, including with one
     /// slot. The in-order preparation worker materializes and compiles the
     /// frozen state; the scene owner may advance while this work runs.
+    /// Only the rooted picture crosses this boundary; detached scene history
+    /// stays with its owner. Camera and light values are frozen separately.
     ///
     /// # Errors
     /// Refuses closed/cancelled work or output admission immediately. Invalid
@@ -1234,7 +1236,7 @@ impl NativeFramePipeline {
         stage: &fmn_mobject::Stage,
         sequence: u64,
     ) -> Result<(), RenderError> {
-        self.capture_with(sequence, || stage.freeze_render_state())
+        self.capture_with(sequence, || stage.freeze_visible_render_state())
     }
 
     /// Consume an already observed frame without materializing another arena
@@ -1243,6 +1245,8 @@ impl NativeFramePipeline {
     /// Admission precedes conversion into the callback-free render projection.
     /// Updater references from the packet are released only on this calling
     /// thread. A packet retained by a journal keeps its full replay state.
+    /// The worker receives only the rooted picture, so detached targets and
+    /// saved states do not multiply the in-flight record payload.
     /// The packet's exact capture time, records and handle domain survive;
     /// `sequence` is the independent ordered output index.
     ///
@@ -1253,7 +1257,7 @@ impl NativeFramePipeline {
         packet: fmn_anim::FramePacket,
         sequence: u64,
     ) -> Result<(), RenderError> {
-        self.capture_with(sequence, || packet.into_render_state())
+        self.capture_with(sequence, || packet.into_visible_render_state())
     }
 
     fn capture_with(

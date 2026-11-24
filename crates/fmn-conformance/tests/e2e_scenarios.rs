@@ -18592,7 +18592,7 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
     };
     let case = scene_goldens::scene_named("circle_tex_label.v1")
         .ok_or_else(|| fail("circle_tex_label.v1 scene is missing"))?;
-    let built = (case.build)(scene_goldens::corpus());
+    let mut built = (case.build)(scene_goldens::corpus());
     let config = scene_goldens::frame_config();
     let rcfg = RetainedFrameRendererConfig {
         frame: config,
@@ -18633,22 +18633,98 @@ fn frozen_render_packet_pipeline_run(ctx: &mut RunCtx) -> Result<RunOutcome, Sce
         && measured_sync.shapes_compiled == 0
         && measured_sync.styles_rebuilt == 0
         && allocs == 0;
+    // The picture handoff must not retain detached targets or removed scene
+    // history. Its compact identities still reserve their handles, while a
+    // journal keeps the complete lifecycle snapshot for later replay.
+    let expected = renderer.frame().as_bytes().to_vec();
+    let visible_payloads = built
+        .stage
+        .freeze_visible_render_state()
+        .retained_object_count();
+    let mut history = Vec::new();
+    for index in 0..512 {
+        let mob = built.stage.add(
+            Circle::new()
+                .radius(0.2)
+                .arc_center([f64::from(index % 8) - 3.5, 2.0, 0.0])
+                .build(),
+        );
+        built
+            .stage
+            .add_to_scene(mob)
+            .map_err(|error| fail(error.to_string()))?;
+        built.stage.remove_from_scene(mob);
+        history.push(mob);
+    }
+    let clock = fmn_anim::RationalFrameClock::new(30).map_err(|error| fail(error.to_string()))?;
+    let rng = fmn_core::rng::RngRoot::from_seed(29);
+    let shared_packet = FramePacket::freeze_barrier(&built.stage, &clock, &rng);
+    let journal = shared_packet.clone();
+    let captures = [
+        built.stage.freeze_visible_render_state(),
+        shared_packet.into_visible_render_state(),
+        FramePacket::freeze_barrier(&built.stage, &clock, &rng).into_visible_render_state(),
+    ];
+    let history_omitted = visible_payloads > 0
+        && captures
+            .iter()
+            .all(|capture| capture.retained_object_count() == visible_payloads);
+    let journal_stage = journal.materialize_stage();
+    let journal_complete = history.iter().all(|mob| journal_stage.contains(*mob));
+    for root in built.stage.roots().to_vec() {
+        built.stage.shift(root, [3.0, 0.0, 0.0]);
+    }
+    let projection_frames = std::thread::spawn(move || -> Result<u64, String> {
+        let mut frames = 0;
+        for capture in captures {
+            let stage = capture.materialize();
+            for threads in [1, 4, 16] {
+                let mut renderer =
+                    RetainedFrameRenderer::new(RetainedFrameRendererConfig { threads, ..rcfg })
+                        .map_err(|error| error.to_string())?;
+                renderer
+                    .render(&stage, 0)
+                    .map_err(|error| error.to_string())?;
+                if renderer.frame().as_bytes() != expected {
+                    return Err(format!(
+                        "rooted capture changed certified pixels with {threads} threads"
+                    ));
+                }
+                frames += 1;
+            }
+        }
+        Ok(frames)
+    })
+    .join()
+    .map_err(|_| fail("rooted capture worker panicked"))?
+    .map_err(fail)?;
     ctx.event(
         LogEvent::new("e2e.render.frozen_retained_pipeline")
             .field("frozen_equal", truth(frozen_equal))
             .field("steady_clean", truth(steady_clean))
-            .field("allocs", allocs),
+            .field("allocs", allocs)
+            .field("history_omitted", truth(history_omitted))
+            .field("journal_complete", truth(journal_complete))
+            .field("visible_payloads", visible_payloads)
+            .field("omitted_history_objects", history.len())
+            .field("rooted_capture_frames", projection_frames),
     );
-    if !frozen_equal || !steady_clean {
+    if !frozen_equal || !steady_clean || !history_omitted || !journal_complete {
         return Err(fail(format!(
-            "frozen/retained pipeline failed: frozen_equal={frozen_equal}, steady_clean={steady_clean}, allocs={allocs}"
+            "frozen/retained pipeline failed: frozen_equal={frozen_equal}, steady_clean={steady_clean}, allocs={allocs}, history_omitted={history_omitted}, journal_complete={journal_complete}"
         )));
     }
     ctx.counter("frozen_equal", u64::from(frozen_equal));
     ctx.counter("steady_clean", u64::from(steady_clean));
+    ctx.counter("rooted_capture_frames", projection_frames);
+    ctx.counter("omitted_history_objects", history.len() as u64);
+    ctx.counter("journal_complete", u64::from(journal_complete));
     Ok(RunOutcome::ok()
         .with_counter("frozen_equal", 1)
-        .with_counter("steady_clean", 1))
+        .with_counter("steady_clean", 1)
+        .with_counter("rooted_capture_frames", projection_frames)
+        .with_counter("omitted_history_objects", history.len() as u64)
+        .with_counter("journal_complete", 1))
 }
 
 /// Actual Atlas constructors reach conservative circular stroke saturation;
@@ -23813,6 +23889,9 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 Assertion::ExitCode(0),
                 counter_eq("frozen_equal", 1),
                 counter_eq("steady_clean", 1),
+                counter_eq("rooted_capture_frames", 9),
+                counter_eq("omitted_history_objects", 512),
+                counter_eq("journal_complete", 1),
             ],
             vec![LogExpect::span_present(
                 "e2e.render.frozen_retained_pipeline",
@@ -23820,6 +23899,9 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                     FieldPred::str_eq("frozen_equal", "true"),
                     FieldPred::str_eq("steady_clean", "true"),
                     FieldPred::u64_eq("allocs", 0),
+                    FieldPred::str_eq("history_omitted", "true"),
+                    FieldPred::str_eq("journal_complete", "true"),
+                    FieldPred::u64_eq("rooted_capture_frames", 9),
                 ],
             )],
         )

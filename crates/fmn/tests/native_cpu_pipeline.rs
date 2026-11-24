@@ -446,6 +446,161 @@ fn owned_and_journal_shared_packets_match_the_serial_renderer_after_later_edits(
 }
 
 #[test]
+fn rooted_capture_keeps_shared_placements_and_pixels_without_hidden_history() {
+    use fmn_anim::{FramePacket, RationalFrameClock};
+    use fmn_core::rng::RngRoot;
+
+    for use_camera in [false, true] {
+        let mut one_thread_pixels = None;
+        for threads in [1_u32, 4, 16] {
+            let plan = ExecutionPlan::derive(
+                PlanRequest::certified(
+                    RenderIntent::Offline,
+                    SurfaceSpec::lumen(32, 24),
+                    OutputPixelFormat::Rgba8,
+                )
+                .with_max_cpu_threads(threads as usize)
+                .with_max_frames_in_flight(3),
+                &HardwareTopology::from_group_sizes(&[threads]).unwrap(),
+                None,
+            )
+            .unwrap();
+            let config = config(&plan);
+            let camera = use_camera.then(|| {
+                fmn_render::Camera::new(fmn_render::CameraConfig {
+                    resolution: (32, 24),
+                    background: config.frame.background,
+                    ..fmn_render::CameraConfig::default()
+                })
+                .unwrap()
+            });
+            let received = Arc::new(Mutex::new(Vec::new()));
+            let output = received.clone();
+            let emitter = OrderedEmitter::new(
+                EmitterConfig::new(
+                    FrameLayout::tight(PixelFormat::Rgba8, 32, 24).unwrap(),
+                    plan.frames_in_flight,
+                    0,
+                )
+                .unwrap(),
+                vec![SinkBinding::reliable(
+                    "rooted-capture",
+                    move |sequence, frame: &FrameBuffer| {
+                        output
+                            .lock()
+                            .unwrap()
+                            .push((sequence, frame.as_bytes().to_vec()));
+                        Ok(SinkWrite::Consumed)
+                    },
+                )],
+            )
+            .unwrap();
+            let mut pipeline =
+                NativeFramePipeline::new(plan, config, camera.clone(), emitter.handle()).unwrap();
+            let mut serial = RetainedFrameRenderer::new(config).unwrap();
+            let mut stage = Stage::new();
+            let shared = stage.add(shape());
+            let left = stage.add(Mobject::new());
+            let right = stage.add(Mobject::new());
+            let invisible_parent = stage.add(Mobject::new());
+            // These placements precede attachment, so an invisible incoming
+            // parent cannot become an extra transform of the shared drawable.
+            stage.shift(left, [-0.3, 0.2, 0.0]);
+            stage.shift(right, [0.4, -0.1, 0.0]);
+            stage.shift(invisible_parent, [100.0, 100.0, 0.0]);
+            for parent in [left, right, invisible_parent] {
+                stage.attach(parent, shared).unwrap();
+            }
+            let mut colored = Vec::new();
+            for (parent, rgba, shift) in [
+                (left, [1.0_f32, 0.1, 0.2, 0.6], [-0.6, 0.3, 0.0]),
+                (right, [0.1_f32, 1.0, 0.2, 0.6], [0.6, -0.3, 0.0]),
+            ] {
+                let mob = stage.add(shape());
+                stage
+                    .get_mut(mob)
+                    .unwrap()
+                    .buffer
+                    .write_range("fill_rgba", 0, &rgba.repeat(3));
+                stage.shift(mob, shift);
+                stage.attach(parent, mob).unwrap();
+                colored.push(mob);
+            }
+            // Separate root placements of a shared child are one batch add.
+            stage.add_many_to_scene(&[right, left]).unwrap();
+            let target = stage.generate_target(shared).unwrap();
+            let mut history = Vec::new();
+            for _ in 0..1024 {
+                let hidden = stage.add(shape());
+                stage.add_to_scene(hidden).unwrap();
+                stage.remove_from_scene(hidden);
+                history.push(hidden);
+            }
+            let mut clock = RationalFrameClock::new(30).unwrap();
+            let rng = RngRoot::from_seed(7);
+            let mut expected = Vec::new();
+            let mut journal = Vec::new();
+            for sequence in 0..6 {
+                clock.advance_frames(1).unwrap();
+                let visible = stage.freeze_visible_render_state();
+                assert_eq!(
+                    visible.retained_object_count(),
+                    5 + usize::from(sequence >= 3)
+                );
+                assert!(!visible.materialize().contains(invisible_parent));
+                if let Some(camera) = &camera {
+                    serial.render_with_camera(&stage, camera).unwrap();
+                } else {
+                    serial.render(&stage, 0).unwrap();
+                }
+                expected.push((
+                    sequence,
+                    convert_reference(serial.frame(), PixelFormat::Rgba8),
+                ));
+                if sequence % 3 == 0 {
+                    pipeline.capture(&stage, sequence).unwrap();
+                } else {
+                    let packet = FramePacket::freeze_barrier(&stage, &clock, &rng);
+                    if sequence % 3 == 2 {
+                        journal.push(packet.clone());
+                    }
+                    pipeline.capture_packet(packet, sequence).unwrap();
+                }
+                stage.shift(shared, [0.15, 0.05, 0.0]);
+                stage.shift(colored[0], [0.0, -0.1, 0.0]);
+                if sequence == 2 {
+                    stage.shift(history[0], [-2.0, 0.0, 0.0]);
+                    stage.add_to_scene(history[0]).unwrap();
+                }
+            }
+            assert_eq!(stage.target(shared), Some(target));
+            assert!(history.iter().all(|&mob| stage.contains(mob)));
+            for packet in &journal {
+                let replay = packet.materialize_stage();
+                assert_eq!(replay.target(shared), Some(target));
+                assert!(replay.contains(invisible_parent));
+                assert!(history.iter().all(|&mob| replay.contains(mob)));
+            }
+            drop(stage);
+            let stats = pipeline.finish().unwrap();
+            emitter.finish().unwrap();
+            assert_eq!(stats.emitted, 6);
+            assert_eq!(stats.outstanding_slots, 0);
+            assert_eq!(*received.lock().unwrap(), expected);
+            assert_ne!(expected[0].1, expected[5].1);
+            if let Some(previous) = &one_thread_pixels {
+                assert_eq!(
+                    previous, &expected,
+                    "{threads} threads changed certified pixels"
+                );
+            } else {
+                one_thread_pixels = Some(expected);
+            }
+        }
+    }
+}
+
+#[test]
 fn packet_handoff_releases_non_send_updater_captures_only_on_the_scene_owner() {
     use fmn_anim::{FramePacket, RationalFrameClock};
     use fmn_core::rng::RngRoot;

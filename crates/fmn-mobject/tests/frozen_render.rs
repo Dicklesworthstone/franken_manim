@@ -241,7 +241,7 @@ fn visible_handoffs_keep_shared_roots_without_retaining_detached_family_links() 
     let handoffs = [
         stage.freeze_visible_render_state(),
         snapshot.visible_render_state(0.0),
-        snapshot.clone().into_visible_render_state(0.0),
+        stage.snapshot().into_visible_render_state(0.0),
     ];
     for handoff in handoffs {
         let frame = handoff.materialize();
@@ -326,7 +326,7 @@ fn visible_capture_payload_does_not_grow_with_removed_scene_history() {
     for handoff in [
         stage.freeze_visible_render_state(),
         snapshot.visible_render_state(0.0),
-        snapshot.clone().into_visible_render_state(0.0),
+        stage.snapshot().into_visible_render_state(0.0),
     ] {
         assert_eq!(handoff.retained_object_count(), 1);
         assert_eq!(handoff.image_resources().count(), 0);
@@ -376,8 +376,8 @@ fn auxiliary_families_keep_frozen_light_geometry_without_drawing_or_retaining_ot
     assert_eq!(checkpoint.image_resources().count(), 1);
     let auxiliary = [light, light, stale, foreign];
     let borrowed = checkpoint.visible_render_state_with_auxiliary(1.0, &auxiliary);
-    let owned = checkpoint
-        .clone()
+    let owned = stage
+        .snapshot()
         .into_visible_render_state_with_auxiliary(1.0, &auxiliary);
     stage.shift(light, [100.0, 0.0, 0.0]);
     for state in [borrowed, owned] {
