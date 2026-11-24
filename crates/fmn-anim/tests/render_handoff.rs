@@ -61,3 +61,66 @@ fn unshared_and_journal_shared_packets_have_identical_frozen_render_state() {
         }
     }
 }
+
+#[test]
+fn visible_packet_projection_omits_detached_history_but_preserves_the_journal() {
+    for shared in [false, true] {
+        let mut stage = Stage::new();
+        let visible = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+        stage.add_to_scene(visible).unwrap();
+        let target = stage.generate_target(visible).unwrap();
+        let detached = stage.add(Mobject::from_points(&[[3.0, 4.0, 0.0]]));
+        stage.add_updater(detached, |_, _| {}, false).unwrap();
+        let mut clock = RationalFrameClock::new(30).unwrap();
+        clock.advance_frames(17).unwrap();
+        let packet = FramePacket::freeze_barrier(&stage, &clock, &RngRoot::from_seed(7));
+        let journal = shared.then(|| packet.clone());
+        stage.shift(visible, [5.0, 0.0, 0.0]);
+        let frozen = packet.into_visible_render_state();
+        assert_eq!(frozen.retained_object_count(), 1);
+        std::thread::spawn(move || {
+            let frame = frozen.materialize();
+            assert_eq!(frame.time(), 17.0 / 30.0);
+            assert_eq!(frame.roots(), &[visible]);
+            assert_eq!(frame.get_points(visible).unwrap(), [[1.0, 2.0, 0.0]]);
+            assert!(!frame.contains(detached));
+            assert!(!frame.contains(target));
+        })
+        .join()
+        .unwrap();
+        assert!(stage.contains(detached));
+        assert!(stage.contains(target));
+        if let Some(journal) = journal {
+            let replay = journal.materialize_stage();
+            assert!(replay.contains(target));
+            assert_eq!(replay.target(visible), Some(target));
+            assert_eq!(replay.updater_ids(detached).len(), 1);
+        }
+    }
+}
+
+#[test]
+fn packet_auxiliary_dependencies_remain_frozen_and_unrooted() {
+    for shared in [false, true] {
+        let mut stage = Stage::new();
+        let visible = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+        let light = stage.add(Mobject::from_points(&[[3.0, 4.0, 5.0]]));
+        stage.add_to_scene(visible).unwrap();
+        let clock = RationalFrameClock::new(30).unwrap();
+        let packet = FramePacket::freeze_barrier(&stage, &clock, &RngRoot::from_seed(7));
+        let journal = shared.then(|| packet.clone());
+        stage.shift(light, [10.0, 0.0, 0.0]);
+        let state = packet.into_visible_render_state_with_auxiliary(&[light]);
+        assert_eq!(state.retained_object_count(), 2);
+        let frame = state.materialize();
+        assert_eq!(frame.roots(), &[visible]);
+        assert_eq!(frame.get_center(light), [3.0, 4.0, 5.0]);
+        if let Some(journal) = journal {
+            assert_eq!(
+                journal.materialize_stage().get_center(light),
+                [3.0, 4.0, 5.0]
+            );
+        }
+        assert_eq!(stage.get_center(light), [13.0, 4.0, 5.0]);
+    }
+}

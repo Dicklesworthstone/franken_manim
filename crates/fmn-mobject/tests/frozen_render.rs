@@ -223,3 +223,240 @@ fn every_render_handoff_seeds_independent_allocation_history() {
         "materialized branches leave the source intact"
     );
 }
+
+#[test]
+fn visible_handoffs_keep_shared_roots_without_retaining_detached_family_links() {
+    let mut stage = Stage::new();
+    let shared = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    let left = stage.add(Mobject::new());
+    let right = stage.add(Mobject::new());
+    let invisible_parent = stage.add(Mobject::new());
+    for parent in [left, right, invisible_parent] {
+        stage.attach(parent, shared).unwrap();
+    }
+    stage.add_many_to_scene(&[right, left]).unwrap();
+    let saved = stage.save_state(shared).unwrap();
+    let target = stage.generate_target(shared).unwrap();
+    let snapshot = stage.snapshot();
+    let handoffs = [
+        stage.freeze_visible_render_state(),
+        snapshot.visible_render_state(0.0),
+        snapshot.clone().into_visible_render_state(0.0),
+    ];
+    for handoff in handoffs {
+        let frame = handoff.materialize();
+        assert_eq!(frame.roots(), &[right, left]);
+        assert_eq!(frame.family(right), [right, shared]);
+        assert_eq!(frame.family(left), [left, shared]);
+        assert_eq!(frame.get(shared).unwrap().parents(), &[left, right]);
+        assert_eq!(frame.get_points(shared).unwrap(), [[1.0, 2.0, 0.0]]);
+        assert_eq!(frame.target(shared), None);
+        assert_eq!(frame.saved_state(shared), None);
+        for detached in [invisible_parent, saved, target] {
+            assert!(!frame.contains(detached));
+        }
+    }
+    // Native succession/interpolation and handle-based readback still get the
+    // complete arena through the original APIs, including detached endpoints.
+    for full in [
+        stage.freeze_render_state().materialize(),
+        snapshot.render_state(0.0).materialize(),
+        snapshot.into_render_state(0.0).materialize(),
+    ] {
+        assert_eq!(full.target(shared), Some(target));
+        assert_eq!(full.saved_state(shared), Some(saved));
+        assert!(full.contains(invisible_parent));
+        assert!(full.contains(target));
+        assert!(full.contains(saved));
+    }
+    assert_eq!(
+        stage.get(shared).unwrap().parents(),
+        &[left, right, invisible_parent]
+    );
+}
+
+#[test]
+fn invisible_records_are_not_shared_but_visible_views_still_freeze() {
+    let mut stage = Stage::new();
+    let visible = stage.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+    let detached = stage.add(Mobject::from_points(&[[4.0, 5.0, 6.0]]));
+    stage.add_to_scene(visible).unwrap();
+    let visible_view = stage.get_mut(visible).unwrap().buffer.export_view(true);
+    let detached_storage = stage.get(detached).unwrap().buffer.storage_id();
+    let frozen = stage.freeze_visible_render_state();
+    assert!(visible_view.write(0, "point", &[9.0, 8.0, 7.0]));
+    stage
+        .get_mut(detached)
+        .unwrap()
+        .buffer
+        .write(0, "point", &[7.0, 6.0, 5.0]);
+    assert_eq!(
+        stage.get(detached).unwrap().buffer.storage_id(),
+        detached_storage,
+        "a raster capture must not force copy-on-write for invisible history"
+    );
+    let frame = frozen.materialize();
+    assert_eq!(frame.get_points(visible).unwrap(), [[1.0, 2.0, 3.0]]);
+    assert!(!frame.contains(detached));
+    // Becoming visible on a later frame is ordinary authored state, not an
+    // excuse to discard or modify the original hidden object.
+    stage.add_to_scene(detached).unwrap();
+    let next = stage.freeze_visible_render_state().materialize();
+    assert_eq!(next.get_points(detached).unwrap(), [[7.0, 6.0, 5.0]]);
+}
+
+#[test]
+fn visible_capture_payload_does_not_grow_with_removed_scene_history() {
+    let mut stage = Stage::new();
+    let visible = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    stage.add_to_scene(visible).unwrap();
+    let first = stage.freeze_visible_render_state();
+    assert_eq!(first.retained_object_count(), 1);
+    let mut history = Vec::new();
+    for _ in 0..4096 {
+        let mob = stage.add(Mobject::from_points(&[[3.0, 4.0, 0.0]; 64]));
+        stage.add_to_scene(mob).unwrap();
+        stage.remove_from_scene(mob);
+        history.push(mob);
+    }
+    // Keep a writable view over hidden geometry: full capture would eagerly
+    // isolate it, but picture capture has no reason to retain any of its rows.
+    let view = stage.get_mut(history[0]).unwrap().buffer.export_view(true);
+    let snapshot = stage.snapshot();
+    for handoff in [
+        stage.freeze_visible_render_state(),
+        snapshot.visible_render_state(0.0),
+        snapshot.clone().into_visible_render_state(0.0),
+    ] {
+        assert_eq!(handoff.retained_object_count(), 1);
+        assert_eq!(handoff.image_resources().count(), 0);
+        let frame = handoff.materialize();
+        assert_eq!(frame.roots(), &[visible]);
+        assert_eq!(frame.get_points(visible).unwrap(), [[1.0, 2.0, 0.0]]);
+        assert!(history.iter().all(|&mob| !frame.contains(mob)));
+    }
+    assert_eq!(stage.freeze_render_state().retained_object_count(), 4097);
+    assert_eq!(snapshot.render_state(0.0).retained_object_count(), 4097);
+    assert!(history.iter().all(|&mob| stage.contains(mob)));
+    assert!(view.write(0, "point", &[8.0, 9.0, 0.0]));
+    stage.add_to_scene(history[0]).unwrap();
+    let next = stage.freeze_visible_render_state();
+    assert_eq!(next.retained_object_count(), 2);
+    assert_eq!(
+        next.materialize().get_points(history[0]).unwrap()[0],
+        [8.0, 9.0, 0.0]
+    );
+    assert_eq!(first.retained_object_count(), 1);
+}
+
+#[test]
+fn auxiliary_families_keep_frozen_light_geometry_without_drawing_or_retaining_other_inputs() {
+    use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler};
+
+    let mut stage = Stage::new();
+    let visible = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0]]));
+    stage.add_to_scene(visible).unwrap();
+    let stale = stage.add(Mobject::new());
+    stage.delete(stale).unwrap();
+    let later_occupant = stage.add(Mobject::new());
+    let light = stage.add(Mobject::new());
+    let light_point = stage.add(Mobject::from_points(&[[7.0, 8.0, 9.0]]));
+    stage.attach(light, light_point).unwrap();
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![10, 20, 30, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let hidden_image = stage.add(Mobject::new().with_image_resource(image));
+    let foreign = Stage::new().add(Mobject::new());
+    let checkpoint = stage.snapshot();
+    assert_eq!(checkpoint.image_resources().count(), 1);
+    let auxiliary = [light, light, stale, foreign];
+    let borrowed = checkpoint.visible_render_state_with_auxiliary(1.0, &auxiliary);
+    let owned = checkpoint
+        .clone()
+        .into_visible_render_state_with_auxiliary(1.0, &auxiliary);
+    stage.shift(light, [100.0, 0.0, 0.0]);
+    for state in [borrowed, owned] {
+        assert_eq!(state.retained_object_count(), 3);
+        assert_eq!(state.image_resources().count(), 0);
+        let frame = state.materialize();
+        assert_eq!(frame.roots(), &[visible]);
+        assert_eq!(frame.family(visible), [visible]);
+        assert_eq!(frame.family(light), [light, light_point]);
+        assert_eq!(frame.get_center(light), [7.0, 8.0, 9.0]);
+        assert!(!frame.contains(hidden_image));
+        assert!(!frame.contains(stale));
+        assert!(!frame.contains(later_occupant));
+        assert!(!frame.contains(foreign));
+    }
+    assert_eq!(checkpoint.image_resources().count(), 1);
+    assert!(checkpoint.materialize().contains(hidden_image));
+    assert_eq!(stage.get_center(light), [107.0, 8.0, 9.0]);
+}
+
+#[test]
+fn omitted_live_handles_remain_reserved_after_render_arena_rollback() {
+    let mut source = Stage::new();
+    let empty = source.snapshot();
+    let detached = source.add(Mobject::new());
+    let visible = source.add(Mobject::new());
+    source.add_to_scene(visible).unwrap();
+    for handoff in [
+        source.freeze_visible_render_state(),
+        source.snapshot().visible_render_state(0.0),
+        source.snapshot().into_visible_render_state(0.0),
+    ] {
+        let mut frame = handoff.materialize();
+        assert!(!frame.contains(detached));
+        assert!(frame.contains(visible));
+        let decoded =
+            fmn_mobject::Snapshot::from_bytes(&frame.snapshot_bytes().unwrap(), &frame).unwrap();
+        let mut durable = decoded.snapshot.materialize();
+        assert_ne!(durable.add(Mobject::new()), detached);
+        frame.restore(&empty);
+        let replacements = [frame.add(Mobject::new()), frame.add(Mobject::new())];
+        assert!(!replacements.contains(&detached));
+        assert!(!replacements.contains(&visible));
+        assert!(!frame.contains(detached));
+        assert!(!frame.contains(visible));
+    }
+    assert!(source.contains(detached));
+    assert!(source.contains(visible));
+}
+
+#[test]
+fn invisible_checkpoint_callbacks_are_dropped_on_the_capturing_owner() {
+    let owner = std::thread::current().id();
+    let drops = Arc::new(Mutex::new(Vec::new()));
+    let mut stage = Stage::new();
+    let detached = stage.add(Mobject::new());
+    let marker = Rc::new(OwnerDrop {
+        owner,
+        drops: Arc::clone(&drops),
+    });
+    stage
+        .add_updater(
+            detached,
+            move |_, _| {
+                let _ = Rc::strong_count(&marker);
+            },
+            false,
+        )
+        .unwrap();
+    let checkpoint = stage.snapshot();
+    drop(stage);
+    assert!(drops.lock().unwrap().is_empty());
+    let frozen = checkpoint.into_visible_render_state(0.0);
+    assert_eq!(drops.lock().unwrap().as_slice(), &[owner]);
+    std::thread::spawn(move || {
+        let frame = frozen.materialize();
+        assert!(frame.roots().is_empty());
+        assert!(!frame.contains(detached));
+    })
+    .join()
+    .unwrap();
+}

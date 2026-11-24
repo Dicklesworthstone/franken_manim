@@ -294,6 +294,34 @@ impl FramePacket {
         }
     }
 
+    /// Consume this observed packet into only the visible rooted picture.
+    ///
+    /// Raster pipelines that already own the frozen camera/light state can
+    /// discard detached endpoints and saved states before worker dispatch.
+    /// Shared journal packets keep the complete replay snapshot. Use
+    /// [`Self::into_render_state`] for interpolation or camera handle readback.
+    #[must_use]
+    pub fn into_visible_render_state(self) -> fmn_mobject::FrozenRenderState {
+        self.into_visible_render_state_with_auxiliary(&[])
+    }
+
+    /// Retain explicitly required camera/light families alongside the picture.
+    ///
+    /// Auxiliary handles remain unrooted and cannot add draws. Their already
+    /// observed geometry is frozen at this packet's time; no callback runs.
+    /// Other detached history is released as in [`Self::into_visible_render_state`].
+    #[must_use]
+    pub fn into_visible_render_state_with_auxiliary(
+        self,
+        auxiliary: &[fmn_mobject::Mob],
+    ) -> fmn_mobject::FrozenRenderState {
+        let time = self.time.to_f64();
+        match Rc::try_unwrap(self.state) {
+            Ok(state) => state.into_visible_render_state_with_auxiliary(time, auxiliary),
+            Err(state) => state.visible_render_state_with_auxiliary(time, auxiliary),
+        }
+    }
+
     /// The keyed per-frame fork of a named substream (§6.5): a pure
     /// function of `(seed, name, frame index)`, identical from any thread
     /// in any order — the property that makes frame parallelism
