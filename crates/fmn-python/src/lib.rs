@@ -502,6 +502,42 @@ struct PortalFrameSession {
     routes: PortalRoutes,
 }
 
+fn freeze_portal_render_state(
+    packet: fmn_scene::studio_bridge::FramePacket,
+    light_mob: Option<Mob>,
+    image_inputs: &mut portal_raster::ImageInputs,
+) -> Result<fmn_mobject::FrozenRenderState, fmn_scene::IntegrationError> {
+    // Image provenance and certified admission cover the complete captured
+    // arena, including hidden animation endpoints and saved states. Observe
+    // their immutable metadata before discarding their rendering payloads.
+    image_inputs.observe(packet.state().image_resources())?;
+    // A native updater may have moved an unrooted light after Python bound the
+    // camera. Keep its captured family for the ordinary world-center lookup,
+    // without adding it to the scene's draw roots.
+    Ok(packet.into_visible_render_state_with_auxiliary(light_mob.as_slice()))
+}
+
+fn sync_portal_render_light(
+    camera: &mut Camera,
+    stage: &Stage,
+    light_mob: Option<Mob>,
+) -> Result<(), fmn_scene::IntegrationError> {
+    if let Some(light) = light_mob {
+        if stage.get(light).is_none() {
+            return Err(fmn_scene::IntegrationError::new(
+                "portal-render",
+                "camera light handle is stale",
+            ));
+        }
+        camera
+            .set_light_source_position(stage.get_center(light))
+            .map_err(|error| {
+                fmn_scene::IntegrationError::new("portal-render", error.to_string())
+            })?;
+    }
+    Ok(())
+}
+
 impl PortalFrameSession {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -920,7 +956,7 @@ impl PortalFrameSession {
         // Release callback references on the scene owner before detaching.
         // Only the immutable render projection and native output resources
         // enter rasterization; serial waits release the GIL as pure plays do.
-        let state = packet.into_render_state();
+        let state = freeze_portal_render_state(packet, self.light_mob, &mut self.image_inputs)?;
         Python::attach(|py| {
             py.detach(move || {
                 let stage = state.materialize();
@@ -952,19 +988,7 @@ impl PortalFrameSession {
         mut reservation: fmn_output::FrameReservation,
     ) -> Result<(), fmn_scene::IntegrationError> {
         self.image_inputs.observe(stage.image_resources())?;
-        if let Some(light) = self.light_mob {
-            if stage.get(light).is_none() {
-                return Err(fmn_scene::IntegrationError::new(
-                    "portal-render",
-                    "camera light handle is stale",
-                ));
-            }
-            self.camera
-                .set_light_source_position(stage.get_center(light))
-                .map_err(|error| {
-                    fmn_scene::IntegrationError::new("portal-render", error.to_string())
-                })?;
-        }
+        sync_portal_render_light(&mut self.camera, stage, self.light_mob)?;
         // fm-sq8.11: planar vector content under the default camera frame
         // takes Lumen's retained 2D route, the one standalone fmn uses (tile
         // cache, adaptive AA, revisioned plan reuse); its +Y-up screen map
@@ -16013,6 +16037,165 @@ except Exception:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn portal_render_projection_keeps_sampled_unrooted_light_without_scene_history() {
+        let _lock = crate::python_embedding_lock();
+        for shared in [false, true] {
+            let mut source = Stage::new();
+            let visible = source.add(Mobject::from_points(&[[0.0, 0.0, 0.0]]));
+            source.add_to_scene(visible).unwrap();
+            let light = source.add(Mobject::new());
+            let light_point = source.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+            source.attach(light, light_point).unwrap();
+            source
+                .set_placement(
+                    light_point,
+                    fmn_mobject::Placement::from_translation([2.0, -1.0, 4.0]),
+                )
+                .unwrap();
+            let target = source.generate_target(visible).unwrap();
+            let saved = source.save_state(visible).unwrap();
+            let history: Vec<_> = (0..64)
+                .map(|_| source.add(Mobject::from_points(&[[8.0, 9.0, 10.0]])))
+                .collect();
+            source
+                .add_dt_updater(
+                    visible,
+                    move |stage, _, dt| {
+                        stage.shift(light, [0.0, 0.0, -4.0 * dt]);
+                    },
+                    false,
+                )
+                .unwrap();
+            let mut inputs = portal_raster::ImageInputs::new(false);
+            let mut clock = fmn_anim::RationalFrameClock::new(4).unwrap();
+            let rng = fmn_core::rng::RngRoot::from_seed(19);
+            let mut camera = Camera::new(CameraConfig::default()).unwrap();
+            for _ in 0..2 {
+                source.update(0.25);
+                clock.advance_frames(1).unwrap();
+                let sampled_center = source.get_center(light);
+                let packet = fmn_anim::FramePacket::freeze_barrier(&source, &clock, &rng);
+                let journal = shared.then(|| packet.clone());
+                let frozen = freeze_portal_render_state(packet, Some(light), &mut inputs)
+                    .expect("freeze the sampled picture and its light family");
+                assert_eq!(frozen.retained_object_count(), 3);
+                source.shift(light, [10.0, 0.0, 0.0]);
+                let frame = frozen.materialize();
+                assert_eq!(frame.roots(), &[visible]);
+                assert_eq!(frame.family(light), [light, light_point]);
+                assert!(frame.updater_ids(visible).is_empty());
+                assert!(!frame.contains(target));
+                assert!(!frame.contains(saved));
+                assert!(history.iter().all(|&mob| !frame.contains(mob)));
+                sync_portal_render_light(&mut camera, &frame, Some(light)).unwrap();
+                assert_eq!(camera.light_source_position(), sampled_center);
+                assert_ne!(camera.light_source_position(), source.get_center(light));
+                if let Some(journal) = journal {
+                    let replay = journal.materialize_stage();
+                    assert_eq!(replay.get_center(light), sampled_center);
+                    assert!(replay.contains(target));
+                    assert!(replay.contains(saved));
+                    assert!(history.iter().all(|&mob| replay.contains(mob)));
+                    assert_eq!(replay.updater_ids(visible).len(), 1);
+                }
+            }
+            assert!(source.contains(target));
+            assert!(source.contains(saved));
+            assert!(history.iter().all(|&mob| source.contains(mob)));
+        }
+    }
+
+    #[test]
+    fn portal_render_projection_preserves_stale_light_refusals() {
+        let _lock = crate::python_embedding_lock();
+        let mut source = Stage::new();
+        let visible = source.add(Mobject::new());
+        source.add_to_scene(visible).unwrap();
+        let deleted = source.add(Mobject::from_points(&[[1.0, 2.0, 3.0]]));
+        source.delete(deleted).unwrap();
+        let replacement = source.add(Mobject::new());
+        let mut foreign = Stage::new();
+        let foreign_light = foreign.add(Mobject::new());
+        let clock = fmn_anim::RationalFrameClock::new(4).unwrap();
+        let rng = fmn_core::rng::RngRoot::from_seed(19);
+        let mut camera = Camera::new(CameraConfig::default()).unwrap();
+        let previous = camera.light_source_position();
+        let mut inputs = portal_raster::ImageInputs::new(false);
+        for light in [deleted, foreign_light] {
+            let packet = fmn_anim::FramePacket::freeze_barrier(&source, &clock, &rng);
+            let frame = freeze_portal_render_state(packet, Some(light), &mut inputs)
+                .unwrap()
+                .materialize();
+            let error = sync_portal_render_light(&mut camera, &frame, Some(light))
+                .expect_err("an invalid light must not become a default camera light");
+            assert!(error.to_string().contains("portal-render"));
+            assert!(error.to_string().contains("camera light handle is stale"));
+            assert_eq!(camera.light_source_position(), previous);
+            assert!(!frame.contains(replacement));
+        }
+    }
+
+    #[test]
+    fn portal_render_projection_preserves_hidden_image_provenance_and_admission() {
+        let _lock = crate::python_embedding_lock();
+        let mut source = Stage::new();
+        let visible = source.add(Mobject::new());
+        source.add_to_scene(visible).unwrap();
+        // Hidden inputs still belong to the authored capture. The certified
+        // 4096-input closure budget must be checked before visible projection.
+        for index in 0..4097 {
+            let [low, high] = u16::try_from(index).unwrap().to_le_bytes();
+            let image = fmn_mobject::ImageResource::rgba8(
+                1,
+                1,
+                vec![low, high, 0, 255],
+                fmn_mobject::ImageColorSpace::Srgb,
+                fmn_mobject::ImageSampler::default(),
+            )
+            .unwrap();
+            source.add(Mobject::new().with_image_resource(image));
+        }
+        let clock = fmn_anim::RationalFrameClock::new(4).unwrap();
+        let rng = fmn_core::rng::RngRoot::from_seed(19);
+        let packet = fmn_anim::FramePacket::freeze_barrier(&source, &clock, &rng);
+        let mut standard = portal_raster::ImageInputs::new(false);
+        let frozen = freeze_portal_render_state(packet.clone(), None, &mut standard).unwrap();
+        assert_eq!(frozen.retained_object_count(), 1);
+        assert_eq!(frozen.image_resources().count(), 0);
+        assert_eq!(standard.inputs.len(), 4097);
+        assert_eq!(packet.state().image_resources().count(), 4097);
+        let mut certified = portal_raster::ImageInputs::new(true);
+        let error = freeze_portal_render_state(packet, None, &mut certified)
+            .err()
+            .expect("hidden images cannot bypass certified image admission");
+        assert!(error.to_string().contains("image-input"));
+        assert!(
+            error
+                .to_string()
+                .contains("render image inputs exceed the 4096-input budget")
+        );
+    }
+
+    #[test]
+    fn production_portal_visible_render_handoff_preserves_hidden_light_pixels() {
+        crate::with_python_test_module("serial hidden light", |py, _module, globals| {
+            let source = CString::new(include_str!("../tests/native_pure_offload.py")).unwrap();
+            py.run(source.as_c_str(), Some(globals), Some(globals))
+                .inspect_err(|error| error.print(py))
+                .expect("load portal light rendering witness");
+            let frames = globals
+                .get_item("serial_hidden_light_capture_matches_rooted")
+                .unwrap()
+                .unwrap()
+                .call0()
+                .inspect_err(|error| error.print(py))
+                .and_then(|value| value.extract::<u64>())
+                .expect("serial hidden and rooted lights produce identical moving pixels");
+            assert_eq!(frames, 4);
+        });
+    }
 
     #[test]
     fn control_panels_follow_scoped_frame_defaults_and_placement() {

@@ -174,6 +174,42 @@ def native_light_motion_is_sampled_per_frame(root):
     assert results[0] == results[1], "native light sampling changed shaded pixels"
 
 
+def serial_hidden_light_capture_matches_rooted():
+    results = []
+    with tempfile.TemporaryDirectory(prefix="fmn-serial-hidden-light-") as directory:
+        root = Path(directory)
+        for hidden in (False, True):
+            scene = SerialScene()
+            scene.observations = []
+            destination = root / ("hidden" if hidden else "rooted")
+            with scene.render_session(destination, format="png_sequence",
+                                      resolution=(64, 36), fps=8, threads=2) as session:
+                square = m.Square(side_length=2, fill_color=m.WHITE,
+                                  fill_opacity=1, stroke_width=0).set_shading(0, 0, 1)
+                light = scene.camera.light_source
+                light.move_to(10 * m.OUT)
+                scene.add(square, light)
+                if hidden:
+                    scene.remove(light)
+                    # Keep real adopted history in the source arena while its
+                    # terminal render handoff retains only the current picture.
+                    for _ in range(32):
+                        previous = square.copy().shift(20 * m.RIGHT)
+                        scene.add(previous)
+                        scene.remove(previous)
+                square.add_updater(lambda _mob, dt: light.shift(-40 * dt * m.OUT))
+                scene.wait(.5)
+            assert session.result.frame_count == 4
+            assert scene._render_performance["pure_play_frames"] == 0
+            assert scene._render_performance["camera_frames"] == 4
+            np.testing.assert_allclose(light.get_center(), -10 * m.OUT, atol=1e-7)
+            frames = frame_bytes(destination)
+            assert len(set(frames)) > 1, "the sampled hidden light stopped moving"
+            results.append(frames)
+        assert results[0] == results[1], "hidden light or history changed serial pixels"
+    return 4
+
+
 def implicit_sources_views_and_empty_callbacks_stay_serial(root):
     class ObservedSquare(m.Square):
         def __init__(self, *args, **kwargs):

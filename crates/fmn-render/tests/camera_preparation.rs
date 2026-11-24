@@ -384,3 +384,133 @@ fn camera_preparation_rebuilds_only_changed_world_sources_and_preserves_frozen_f
         }
     }
 }
+
+#[test]
+fn rooted_render_handoffs_preserve_planar_and_camera_pixels_after_hidden_history_and_edits() {
+    for use_camera in [false, true] {
+        let mut stage = Stage::new();
+        let shared = stage.add(vector());
+        let left = stage.add(Mobject::new());
+        let right = stage.add(Mobject::new());
+        let invisible_parent = stage.add(Mobject::new());
+        // Incoming hidden parents must not change the shared child's world
+        // placement when their edges are removed from a rooted handoff.
+        stage.shift(left, [-0.3, 0.2, 0.0]);
+        stage.shift(right, [0.4, -0.1, 0.0]);
+        stage.shift(invisible_parent, [100.0, 100.0, 0.0]);
+        for parent in [left, right, invisible_parent] {
+            stage.attach(parent, shared).unwrap();
+        }
+        let mut colored = Vec::new();
+        for (parent, color, offset) in [
+            (left, [0.9_f32, 0.1, 0.2, 0.6], [-0.75, 0.3, 0.0]),
+            (right, [0.1_f32, 0.9, 0.2, 0.6], [0.75, -0.3, 0.0]),
+        ] {
+            let child = stage.add(vector());
+            assert!(stage.get_mut(child).unwrap().buffer.write_range(
+                "fill_rgba",
+                0,
+                &color.repeat(9)
+            ));
+            stage.shift(child, offset);
+            stage.attach(parent, child).unwrap();
+            colored.push(child);
+        }
+        stage.add_many_to_scene(&[right, left]).unwrap();
+        let image_mob = use_camera.then(|| {
+            let objects = [surface(), image(), dots()].map(|object| stage.add(object));
+            stage.add_many_to_scene(&objects).unwrap();
+            objects[1]
+        });
+        let target = stage.generate_target(shared).unwrap();
+        let saved = stage.save_state(shared).unwrap();
+        let hidden_image = stage.add(image());
+        let mut history = Vec::new();
+        for _ in 0..512 {
+            let previous = stage.add(vector());
+            stage.add_to_scene(previous).unwrap();
+            stage.remove_from_scene(previous);
+            history.push(previous);
+        }
+
+        let camera = use_camera.then(camera);
+        let mut serial = RetainedFrameRenderer::new(config()).unwrap();
+        let mut captures = Vec::new();
+        for frame_index in 0..3 {
+            if let Some(camera) = &camera {
+                serial.render_with_camera(&stage, camera).unwrap();
+            } else {
+                serial.render(&stage, 0).unwrap();
+            }
+            let expected = serial.frame().as_bytes().to_vec();
+            let checkpoint = stage.snapshot();
+            let states = [
+                stage.freeze_visible_render_state(),
+                checkpoint.visible_render_state(0.0),
+                stage.snapshot().into_visible_render_state(0.0),
+            ];
+            let expected_objects = 5 + 3 * usize::from(use_camera) + usize::from(frame_index > 0);
+            for state in &states {
+                assert_eq!(state.retained_object_count(), expected_objects);
+                assert_eq!(state.image_resources().count(), usize::from(use_camera));
+                let frame = state.clone().materialize();
+                assert_eq!(frame.roots(), stage.roots());
+                assert_eq!(frame.get(shared).unwrap().parents(), &[left, right]);
+                for omitted in [invisible_parent, hidden_image, target, saved] {
+                    assert!(!frame.contains(omitted));
+                }
+            }
+            captures.push((states, expected));
+            // Every frozen state is rendered only after later edits and after
+            // the live arena has gone away. Removed history can still return
+            // to the authored scene on its next frame.
+            stage.shift(shared, [0.25, 0.25, 0.0]);
+            stage.shift(colored[0], [0.0, 0.2, 0.0]);
+            if frame_index == 0 {
+                stage.shift(history[0], [0.0, 4.0, 0.0]);
+                stage.add_to_scene(history[0]).unwrap();
+                if let Some(image) = image_mob {
+                    assert!(stage.set_image_resource(image, Some(pixels(true))).unwrap());
+                }
+            }
+        }
+        assert_ne!(captures[0].1, captures[1].1);
+        assert_ne!(captures[1].1, captures[2].1);
+        assert!(history.iter().all(|&mob| stage.contains(mob)));
+        assert_eq!(stage.target(shared), Some(target));
+        assert_eq!(stage.saved_state(shared), Some(saved));
+        drop(stage);
+        drop(serial);
+
+        for threads in [1, 4, 16] {
+            let captures = captures.clone();
+            let camera = camera.clone();
+            std::thread::spawn(move || {
+                let mut settings = config();
+                settings.threads = threads;
+                let mut renderer = RetainedFrameRenderer::new(settings).unwrap();
+                // Revisit an older frozen frame after a newer one to expose
+                // stale retained geometry, image and topology dependencies.
+                for index in [2, 0, 1] {
+                    let (states, expected) = &captures[index];
+                    for state in states {
+                        let frame = state.clone().materialize();
+                        if let Some(camera) = &camera {
+                            renderer.render_with_camera(&frame, camera).unwrap();
+                        } else {
+                            renderer.render(&frame, 0).unwrap();
+                        }
+                        assert_eq!(
+                            renderer.frame().as_bytes(),
+                            expected,
+                            "{threads} threads changed rooted frame {index}; camera={}",
+                            camera.is_some(),
+                        );
+                    }
+                }
+            })
+            .join()
+            .unwrap();
+        }
+    }
+}

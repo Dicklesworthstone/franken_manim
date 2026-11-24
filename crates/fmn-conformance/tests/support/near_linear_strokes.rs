@@ -37,11 +37,7 @@ impl Case {
     }
 
     pub const fn admitted(self) -> usize {
-        if matches!(self, Self::Uniform) {
-            4
-        } else {
-            0
-        }
+        if matches!(self, Self::Uniform) { 4 } else { 0 }
     }
 }
 
@@ -71,8 +67,8 @@ pub fn build(case: Case) -> Stage {
             ],
             [end[0], end[1], 0.0],
         ];
-        let mut records =
-            RecordBuffer::new(RecordSchema::vmobject(), points.len()).expect("three vector records");
+        let mut records = RecordBuffer::new(RecordSchema::vmobject(), points.len())
+            .expect("three vector records");
         for (index, point) in points.iter().enumerate() {
             records.write(index, "point", point);
             records.write(index, "fill_rgba", &[0.0; 4]);
@@ -116,8 +112,8 @@ pub fn render(
     let mut plan = RenderPlan::new();
     plan.sync(stage, 0).map_err(|error| error.to_string())?;
     let mono = MonoTable::build(&plan, config.map).map_err(|error| error.to_string())?;
-    let bins =
-        Binning::build(&plan, config.viewport, TILING, config.map).map_err(|error| error.to_string())?;
+    let bins = Binning::build(&plan, config.viewport, TILING, config.map)
+        .map_err(|error| error.to_string())?;
     let job = FrameJob::with_identity(&plan, &mono, &bins, config, identity)
         .map_err(|error| error.to_string())?;
     let count = job.bounded_line_stroke_count();

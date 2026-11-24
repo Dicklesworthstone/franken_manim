@@ -118,6 +118,35 @@ class ImageInputTests(unittest.TestCase):
         detached["image_inputs"][0]["source_sha256"] = "edited copy"
         self.assertNotEqual(fact["source_sha256"], "edited copy")
 
+    def test_hidden_image_provenance_survives_visible_render_projection(self):
+        scene = m.Scene()
+        with scene.render_session(self.root / "hidden.png", format="png",
+                                  resolution=(96, 64), fps=8, threads=1) as session:
+            image = m.ImageMobject(PIXELS)
+            scene.add(image)
+            scene.remove(image)
+            scene.add(m.Square())
+        self.assertEqual(len(session.result.image_inputs), 1)
+        fact = session.result.image_inputs[0]
+        self.assertEqual(fact["decoder"], "embedded-rgba8")
+        self.assertEqual(fact["rgba_sha256"], hashlib.sha256(PIXELS.tobytes()).hexdigest())
+
+    def test_hidden_external_image_still_refuses_certified_rendering(self):
+        executable = self.external()
+        image = m.ImageMobject.from_bytes(bmp(PIXELS), ffmpeg_bin=executable)
+        scene = m.Scene()
+        destination = self.root / "hidden-refused.png"
+        scene._begin_native_output(str(destination), "png", 96, 64, 8, 1, 0, True)
+        try:
+            scene.add(image)
+            scene.remove(image)
+            scene.add(m.Square())
+            with self.assertRaisesRegex(RuntimeError, "certified rendering refuses ffmpeg-decoded"):
+                scene._finish_render()
+        finally:
+            scene._abort_render()
+        self.assertFalse(destination.exists(), "a hidden forbidden input bypassed admission")
+
     def test_unknown_and_corrupt_native_inputs_never_fall_through(self):
         for encoded in (b"<svg></svg>", b"\x89PNG\r\n\x1a\ninvalid", b"\xff\xd8\xffinvalid"):
             with self.subTest(encoded=encoded), self.assertRaises(ValueError):

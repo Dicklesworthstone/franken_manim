@@ -18896,8 +18896,8 @@ fn circular_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
 /// Untagged, almost straight native strokes select the bounded CPU route;
 /// profiles, visible curvature and sharp AA retain full curve distance.
 fn near_linear_stroke_render_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
-    let (blank, _) = near_linear_strokes::render(&Stage::new(), EngineIdentity::fast(), 1)
-        .map_err(fail)?;
+    let (blank, _) =
+        near_linear_strokes::render(&Stage::new(), EngineIdentity::fast(), 1).map_err(fail)?;
     let mut fast_frames = 0_u64;
     let mut certified_cases = 0_u64;
     let mut bounded_strokes = 0_u64;
