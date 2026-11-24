@@ -506,6 +506,28 @@ pub trait SceneSink {
         packet: FramePacket,
     ) -> Result<(), IntegrationError>;
 
+    /// Observe a demanded capture at the completed owner-thread boundary.
+    ///
+    /// By default this freezes the complete arena and calls [`Self::capture`],
+    /// preserving custom sinks, journals and replay consumers. Native picture
+    /// sinks may override it to reserve output capacity before freezing just
+    /// the rooted render state. Such a sink must freeze every value it retains
+    /// before returning; the next frame and animation cleanup may change the
+    /// Stage immediately afterward. Only owned, callback-free data may leave
+    /// this boundary for render workers.
+    ///
+    /// Capture demand is still checked after each updater/input boundary.
+    /// This method is not called for metadata-only or skipped segment samples;
+    /// an explicitly requested skipped-preview barrier still observes demand.
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.capture(reason, FramePacket::freeze_metadata(stage, metadata))
+    }
+
     /// Whether the next capture requires immutable scene state.
     ///
     /// Existing rendering, recording and custom sinks retain full packets by
@@ -585,7 +607,7 @@ fn capture_barrier(
     rng: &RngRoot,
 ) -> Result<(), IntegrationError> {
     if sink.capture_state_required() || sink.capture_final_state_required() {
-        sink.capture(reason, FramePacket::freeze_barrier(stage, clock, rng))
+        sink.capture_stage(reason, stage, FrameMetadata::capture_barrier(clock, rng))
     } else {
         sink.capture_metadata(reason, FrameMetadata::capture_barrier(clock, rng))
     }

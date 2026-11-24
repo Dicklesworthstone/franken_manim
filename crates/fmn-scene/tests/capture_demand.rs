@@ -3,9 +3,12 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use fmn_anim::{AnimConfig, FrameMetadata, FramePacket, RateFunc, RationalTime, Transform};
-use fmn_mobject::{Mob, Mobject, Stage};
+use fmn_mobject::{
+    FrozenRenderState, ImageColorSpace, ImageResource, ImageSampler, Mob, Mobject, Stage,
+};
 use fmn_scene::{
     CaptureReason, EventListener, EventPayload, EventPropagation, EventTarget, EventType,
     HoldDecision, HoldKind, IntegrationError, InteractiveScene, LifecycleEvent, LifecyclePhase,
@@ -75,6 +78,49 @@ impl SceneSink for Sink {
     }
 }
 
+#[derive(Default)]
+struct PictureSink {
+    observations: Sink,
+    pictures: Vec<FrozenRenderState>,
+}
+
+impl SceneSink for PictureSink {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        self.observations.event(event)
+    }
+
+    fn capture_state_required(&self) -> bool {
+        self.observations.capture_state_required()
+    }
+
+    fn capture_final_state_required(&self) -> bool {
+        self.observations.capture_final_state_required()
+    }
+
+    fn capture(&mut self, _: CaptureReason, _: FramePacket) -> Result<(), IntegrationError> {
+        panic!("picture sinks must observe the owner before a full snapshot is made")
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        assert_eq!(stage.time().to_bits(), metadata.time().to_f64().to_bits());
+        self.pictures.push(stage.freeze_visible_render_state());
+        self.observations.observe(reason, metadata)
+    }
+
+    fn capture_metadata(
+        &mut self,
+        reason: CaptureReason,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.observations.capture_metadata(reason, metadata)
+    }
+}
+
 fn scene() -> Scene {
     Scene::new(
         RuntimeConfig {
@@ -95,6 +141,226 @@ fn transform(scene: &mut Scene, mob: Mob) -> Transform {
         rate_func: RateFunc::linear(),
         ..AnimConfig::default()
     })
+}
+
+#[test]
+fn picture_capture_preserves_native_and_stepped_samples_and_lifecycle() {
+    for stepped in [false, true] {
+        for final_only in [false, true] {
+            let mut outcomes = Vec::new();
+            for direct in [false, true] {
+                let mut scene = scene();
+                let mob = scene
+                    .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+                    .unwrap();
+                let updated = scene
+                    .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+                    .unwrap();
+                let trace = Rc::new(RefCell::new(Vec::new()));
+                let seen = Rc::clone(&trace);
+                scene
+                    .stage_mut()
+                    .add_dt_updater(
+                        updated,
+                        move |stage, mob, dt| {
+                            seen.borrow_mut()
+                                .push((dt.to_bits(), stage.time().to_bits()));
+                            stage.shift(mob, [0.0, dt, 0.0]);
+                        },
+                        false,
+                    )
+                    .unwrap();
+                let mut packets = Sink {
+                    metadata_only: final_only,
+                    final_state: final_only,
+                    ..Sink::default()
+                };
+                let mut pictures = PictureSink {
+                    observations: Sink {
+                        metadata_only: final_only,
+                        final_state: final_only,
+                        ..Sink::default()
+                    },
+                    ..PictureSink::default()
+                };
+                let sink: &mut dyn SceneSink = if direct { &mut pictures } else { &mut packets };
+                let animation = transform(&mut scene, mob);
+                if stepped {
+                    let mut play = scene
+                        .begin_stepped_play(
+                            vec![Box::new(animation)],
+                            PlayOverrides::default(),
+                            sink,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    while scene
+                        .prepare_stepped_play_frame(&mut play)
+                        .unwrap()
+                        .is_some()
+                    {
+                        scene.complete_stepped_play_frame(&mut play, sink).unwrap();
+                    }
+                    scene.finish_stepped_play(play, sink).unwrap();
+                    let mut wait = scene.begin_stepped_wait_frames(2, sink).unwrap();
+                    while scene
+                        .prepare_stepped_wait_frame(&mut wait)
+                        .unwrap()
+                        .is_some()
+                    {
+                        scene.complete_stepped_wait_frame(&mut wait, sink).unwrap();
+                    }
+                    scene.finish_stepped_wait(wait, sink).unwrap();
+                } else {
+                    scene
+                        .play(vec![Box::new(animation)], PlayOverrides::default(), sink)
+                        .unwrap();
+                    scene.wait_frames(2, sink).unwrap();
+                }
+                scene
+                    .wait_until_frames(8, &mut |stage| stage.time() >= 0.875, sink)
+                    .unwrap();
+                scene.show(sink).unwrap();
+                let idle = scene.prepare_idle_frame(sink).unwrap();
+                scene.complete_idle_frame(idle, sink).unwrap();
+
+                let summarize = |stage: Stage| {
+                    (
+                        stage.time().to_bits(),
+                        stage.get_center(mob).map(f64::to_bits),
+                        stage.get_center(updated).map(f64::to_bits),
+                    )
+                };
+                let (samples, events, frames) = if direct {
+                    (
+                        pictures.observations.samples,
+                        pictures.observations.events,
+                        pictures
+                            .pictures
+                            .into_iter()
+                            .map(|state| summarize(state.materialize()))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    (
+                        packets.samples,
+                        packets.events,
+                        packets
+                            .packets
+                            .into_iter()
+                            .map(|packet| summarize(packet.materialize_stage()))
+                            .collect::<Vec<_>>(),
+                    )
+                };
+                assert_eq!(samples.len(), 9);
+                assert_eq!(frames.len(), if final_only { 6 } else { 9 });
+                outcomes.push((
+                    samples,
+                    events,
+                    frames,
+                    trace.borrow().clone(),
+                    scene.time(),
+                ));
+            }
+            assert_eq!(
+                outcomes[0], outcomes[1],
+                "stepped={stepped}, final_only={final_only}"
+            );
+        }
+    }
+}
+
+#[test]
+fn picture_capture_never_snapshots_hidden_history_and_isolates_writable_views() {
+    let mut scene = scene();
+    let visible = scene
+        .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+        .unwrap();
+    let hidden = scene.stage_mut().add(Mobject::from_points(&[[10.0; 3]]));
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![1, 2, 3, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let hidden_pixels = image.shared_pixels();
+    scene
+        .stage_mut()
+        .set_image_resource(hidden, Some(image))
+        .unwrap();
+    let view = scene
+        .stage_mut()
+        .get_mut(visible)
+        .unwrap()
+        .buffer
+        .export_view(true);
+    let mut sink = PictureSink::default();
+    scene
+        .wait_until_frames(3, &mut |_| false, &mut sink)
+        .unwrap();
+    scene.show(&mut sink).unwrap();
+
+    // A full snapshot would clone the detached image into the arena's snapshot
+    // cache even if that packet were immediately projected and discarded.
+    assert_eq!(Arc::strong_count(&hidden_pixels), 2);
+    assert_eq!(sink.pictures.len(), 4);
+    assert!(view.write(0, "point", &[7.0, 8.0, 9.0]));
+    for picture in sink.pictures {
+        assert_eq!(picture.retained_object_count(), 1);
+        let stage = picture.materialize();
+        assert!(!stage.contains(hidden));
+        assert_eq!(stage.get_center(visible), [0.0; 3]);
+    }
+    assert_eq!(scene.stage().get_center(visible), [7.0, 8.0, 9.0]);
+    assert!(scene.stage().contains(hidden));
+
+    // Replay consumers still receive complete, immutable state by default.
+    let mut replay = Sink::default();
+    scene.show(&mut replay).unwrap();
+    assert!(Arc::strong_count(&hidden_pixels) > 2);
+    assert!(view.write(0, "point", &[20.0; 3]));
+    let snapshot = replay.packets[0].materialize_stage();
+    assert!(snapshot.contains(hidden));
+    assert_eq!(snapshot.get_center(visible), [7.0, 8.0, 9.0]);
+}
+
+#[test]
+fn picture_capture_failure_preserves_segment_completion_and_first_error() {
+    let mut scene = scene();
+    let mob = scene
+        .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+        .unwrap();
+    let animation = transform(&mut scene, mob);
+    let mut sink = PictureSink {
+        observations: Sink {
+            fail_at: Some(2),
+            ..Sink::default()
+        },
+        ..PictureSink::default()
+    };
+    let error = scene
+        .play(
+            vec![Box::new(animation)],
+            PlayOverrides::default(),
+            &mut sink,
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("capture failed"));
+    assert_eq!(sink.pictures.len(), 2);
+    assert_eq!(sink.observations.samples.len(), 2);
+    assert_eq!(scene.time().frames(), 3);
+    assert_eq!(scene.play_count(), 1);
+    assert_eq!(scene.stage().get_center(mob), [3.0, 0.0, 0.0]);
+    assert!(!scene.stage().is_animating(mob));
+    assert!(
+        !sink
+            .observations
+            .events
+            .iter()
+            .any(|event| event.phase == LifecyclePhase::PostPlay)
+    );
 }
 
 #[test]

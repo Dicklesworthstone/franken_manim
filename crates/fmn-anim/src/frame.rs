@@ -159,7 +159,7 @@ fn capture_sample(
     // a render/recording consumer during this very frame.
     if capture.capture_state_required() || (final_sample && capture.capture_final_state_required())
     {
-        capture.capture(FramePacket::freeze(stage, clock, rng, sample));
+        capture.capture_stage(stage, FrameMetadata::capture(clock, rng, sample));
     } else {
         capture.capture_metadata(FrameMetadata::capture(clock, rng, sample));
     }
@@ -189,14 +189,7 @@ impl FramePacket {
         rng: &RngRoot,
         sample: &FrameSample,
     ) -> Self {
-        Self {
-            frame_index: clock.now().frames(),
-            segment_frame: sample.frame,
-            alpha: sample.alpha,
-            time: clock.now(),
-            rng_seed: rng.seed(),
-            state: Rc::new(stage.snapshot()),
-        }
+        Self::freeze_metadata(stage, FrameMetadata::capture(clock, rng, sample))
     }
 
     /// Freeze the current state outside a sampled animation segment.
@@ -209,12 +202,24 @@ impl FramePacket {
     /// rational clock.
     #[must_use]
     pub fn freeze_barrier(stage: &Stage, clock: &RationalFrameClock, rng: &RngRoot) -> Self {
+        Self::freeze_metadata(stage, FrameMetadata::capture_barrier(clock, rng))
+    }
+
+    /// Freeze complete replay state at an already observed capture boundary.
+    ///
+    /// This is the default for capture consumers that need the full arena.
+    /// Render-only consumers can instead freeze the rooted picture directly
+    /// from the same owner-thread boundary, after admitting output capacity.
+    /// The metadata must describe this Stage's current sampled state; no
+    /// animation, updater or clock transition occurs here.
+    #[must_use]
+    pub fn freeze_metadata(stage: &Stage, metadata: FrameMetadata) -> Self {
         Self {
-            frame_index: clock.now().frames(),
-            segment_frame: 0,
-            alpha: 1.0,
-            time: clock.now(),
-            rng_seed: rng.seed(),
+            frame_index: metadata.frame_index,
+            segment_frame: metadata.segment_frame,
+            alpha: metadata.alpha,
+            time: metadata.time,
+            rng_seed: metadata.rng_seed,
             state: Rc::new(stage.snapshot()),
         }
     }

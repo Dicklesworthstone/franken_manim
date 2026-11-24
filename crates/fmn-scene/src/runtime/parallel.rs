@@ -42,6 +42,16 @@ impl PlayCapture for NativeSegmentCapture<'_> {
         }
     }
 
+    fn capture_stage(&mut self, stage: &fmn_mobject::Stage, metadata: FrameMetadata) {
+        if self.error.is_none()
+            && let Err(error) = self
+                .sink
+                .capture_stage(CaptureReason::Segment, stage, metadata)
+        {
+            *self.error = Some(error);
+        }
+    }
+
     fn accepts_pure_segments(&self) -> bool {
         self.error.is_none() && self.sink.accepts_pure_segments()
     }

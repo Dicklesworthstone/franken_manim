@@ -1197,6 +1197,18 @@ pub trait PlayCapture {
     /// Consume an ordinary owner-thread capture.
     fn capture(&mut self, packet: crate::FramePacket);
 
+    /// Freeze a demanded sample at its completed owner-thread boundary.
+    ///
+    /// The default preserves the full immutable packet contract. A native
+    /// picture consumer may override this to admit bounded output capacity
+    /// before freezing only visible render state. It must finish observing
+    /// the Stage and freeze everything it retains before returning: animation
+    /// cleanup or the next frame may immediately change the live arena.
+    /// Worker jobs must contain owned, callback-free data, never the Stage.
+    fn capture_stage(&mut self, stage: &Stage, metadata: crate::FrameMetadata) {
+        self.capture(crate::FramePacket::freeze_metadata(stage, metadata));
+    }
+
     /// Whether the next ordinary capture needs an immutable scene snapshot.
     ///
     /// The default preserves existing full-packet consumers. Opting out only
