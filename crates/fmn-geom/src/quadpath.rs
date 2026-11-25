@@ -38,6 +38,13 @@ pub const MAX_SUBDIVIDED_CURVES: usize = 65_536;
 /// decomposition is API behavior).
 const SUBPATH_END_ATOL: f64 = 1e-4;
 
+/// A move between contours is encoded in a curve slot, but is not a
+/// quadratic to draw or subdivide. Keep the same disambiguation as the
+/// public subpath decomposition, including its distinction from null runs.
+fn is_subpath_break([anchor, handle, next]: [Vec3; 3]) -> bool {
+    anchor == handle && (0..3).any(|axis| (handle[axis] - next[axis]).abs() > SUBPATH_END_ATOL)
+}
+
 /// The angle below which `add_arc_to` degrades to a line.
 const ARC_ANGLE_THRESHOLD: f64 = 1e-3;
 
@@ -266,7 +273,10 @@ fn preferred_curve(norms: &[f64], left: usize, right: usize) -> usize {
     }
 }
 
-fn curve_winner_tree(norms: &[f64]) -> Result<(Vec<usize>, usize), GeomError> {
+fn curve_winner_tree(
+    norms: &[f64],
+    eligible: impl Fn(usize) -> bool,
+) -> Result<(Vec<usize>, usize), GeomError> {
     let leaf_count =
         norms
             .len()
@@ -283,7 +293,9 @@ fn curve_winner_tree(norms: &[f64]) -> Result<(Vec<usize>, usize), GeomError> {
         })?;
     let mut tree = vec![NO_CURVE; tree_len];
     for index in 0..norms.len() {
-        tree[leaf_count + index] = index;
+        if eligible(index) {
+            tree[leaf_count + index] = index;
+        }
     }
     for node in (1..leaf_count).rev() {
         tree[node] = preferred_curve(norms, tree[2 * node], tree[2 * node + 1]);
@@ -888,8 +900,7 @@ impl QuadPath {
             let a0 = self.points[2 * i];
             let h = self.points[2 * i + 1];
             let a1 = self.points[2 * i + 2];
-            let is_break = a0 == h && (0..3).any(|k| (h[k] - a1[k]).abs() > SUBPATH_END_ATOL);
-            if is_break {
+            if is_subpath_break([a0, h, a1]) {
                 ends.push(2 * i);
             }
         }
@@ -934,7 +945,8 @@ impl QuadPath {
     // -------------------------------------------------------- subdivision
 
     /// `subdivide_curves_by_condition`: split each curve into `f(curve) + 1`
-    /// equal-parameter pieces.
+    /// equal-parameter pieces. Pen-up moves between subpaths remain intact:
+    /// subdividing a move as a quadratic would create a visible bridge.
     ///
     /// The callback is evaluated exactly once per input curve during a
     /// preflight. Per-curve arithmetic, the aggregate piece count, and the
@@ -951,7 +963,10 @@ impl QuadPath {
         let mut pieces_per_curve = Vec::with_capacity(tuples.len());
         let mut total_curves = 0usize;
         for &tup in &tuples {
-            let subdivisions = tuple_to_subdivisions(tup);
+            let requested = tuple_to_subdivisions(tup);
+            // Preserve callback observation order, but a contour separator
+            // consumes exactly one slot regardless of requested density.
+            let subdivisions = if is_subpath_break(tup) { 0 } else { requested };
             let pieces =
                 subdivisions
                     .checked_add(1)
@@ -1014,7 +1029,10 @@ impl QuadPath {
     }
 
     /// `insert_n_curves_to_point_list`: distribute `n` extra curves over the
-    /// longest curves (null curves never split), preserving the traced shape.
+    /// longest curves, preserving the traced shape. Pen-up moves never split,
+    /// including when every drawable curve has a zero-length anchor chord.
+    /// A path containing only moves is padded with stationary curves at its
+    /// first anchor, preserving both the requested point count and contours.
     ///
     /// The shared-anchor input is validated and the final curve and point
     /// counts are checked against [`MAX_SUBDIVIDED_CURVES`] before selection
@@ -1070,6 +1088,12 @@ impl QuadPath {
         let tuples: Vec<[Vec3; 3]> = (0..points.len().saturating_sub(1) / 2)
             .map(|i| [points[2 * i], points[2 * i + 1], points[2 * i + 2]])
             .collect();
+        if tuples.iter().all(|&tuple| is_subpath_break(tuple)) {
+            let mut new_points = Vec::with_capacity(point_count);
+            new_points.resize(2 * n, points[0]);
+            new_points.extend_from_slice(points);
+            return Ok(new_points);
+        }
         let mut norms: Vec<f64> = tuples
             .iter()
             .map(|tup| {
@@ -1081,7 +1105,10 @@ impl QuadPath {
             })
             .collect();
         let mut ipc = vec![0usize; tuples.len()];
-        let (mut winners, winner_leaves) = curve_winner_tree(&norms)?;
+        // Exclude moves structurally, not by scoring them as zero: closed
+        // quadratics and underflowed chords can also have zero priority.
+        let (mut winners, winner_leaves) =
+            curve_winner_tree(&norms, |index| !is_subpath_break(tuples[index]))?;
         for _ in 0..n {
             let index = winners[1];
             let next_count =
@@ -1105,6 +1132,11 @@ impl QuadPath {
         let mut new_points = Vec::with_capacity(point_count);
         new_points.push(points[0]);
         for (tup, &n_inserts) in tuples.iter().zip(ipc.iter()) {
+            if n_inserts == 0 {
+                // Preserve untouched separators and signed zeros exactly.
+                new_points.extend_from_slice(&tup[1..]);
+                continue;
+            }
             let alphas = bezier::linspace(0.0, 1.0, n_inserts + 2);
             for pair in alphas.windows(2) {
                 let sub = bezier::partial_quadratic(tup, pair[0], pair[1]);
@@ -2015,12 +2047,129 @@ mod tests {
         let anchors: Vec<f64> = inserted.iter().step_by(2).map(|point| point[0]).collect();
         assert_eq!(anchors, vec![0.0, 0.5, 1.0, 2.0, 3.0, 4.0, 5.0]);
 
-        let (tree, _) = curve_winner_tree(&[1.0, f64::NAN, 100.0]).unwrap();
+        let (tree, _) = curve_winner_tree(&[1.0, f64::NAN, 100.0], |_| true).unwrap();
         assert_eq!(tree[1], 2, "later NaN is ignored like np.argmax");
-        let (tree, _) = curve_winner_tree(&[f64::NAN, 100.0]).unwrap();
+        let (tree, _) = curve_winner_tree(&[f64::NAN, 100.0], |_| true).unwrap();
         assert_eq!(tree[1], 0, "leading NaN remains the first winner");
-        let (tree, _) = curve_winner_tree(&[2.0, 2.0, 2.0]).unwrap();
+        let (tree, _) = curve_winner_tree(&[2.0, 2.0, 2.0], |_| true).unwrap();
         assert_eq!(tree[1], 0, "first index wins equal priorities");
+    }
+
+    #[test]
+    fn subdivision_preserves_pen_up_moves_and_each_contours_geometry() {
+        let mut path = QuadPath::from_points(vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 2.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [11.0, -2.0, 0.0],
+            [12.0, 0.0, 0.0],
+        ])
+        .unwrap();
+        let original = path.clone();
+        let calls = Cell::new(0);
+        path.subdivide_curves_by_condition(|_| {
+            calls.set(calls.get() + 1);
+            3
+        })
+        .unwrap();
+        assert_eq!(calls.get(), 3, "observe each original slot exactly once");
+        assert_eq!(path.num_curves(), 9, "eight pieces and one pen-up move");
+        let contours = path.subpaths();
+        assert_eq!(contours.len(), 2);
+        for (source, contour) in original.subpaths().iter().zip(&contours) {
+            assert_eq!(contour.len(), 9);
+            assert_eq!(contour.first(), source.first());
+            assert_eq!(contour.last(), source.last());
+            let expected = [source[0], source[1], source[2]];
+            for (piece, actual) in contour.windows(3).step_by(2).enumerate() {
+                for sample in 0..=8 {
+                    let alpha = sample as f64 / 8.0;
+                    let a = bezier::quadratic_point(actual[0], actual[1], actual[2], alpha);
+                    let b = bezier::quadratic_point(
+                        expected[0],
+                        expected[1],
+                        expected[2],
+                        (piece as f64 + alpha) / 4.0,
+                    );
+                    assert!(a.iter().zip(b).all(|(a, b)| (a - b).abs() < 1e-12));
+                }
+            }
+        }
+        assert_eq!(&path.points()[8..11], &original.points()[2..5]);
+    }
+
+    #[test]
+    fn curve_insertion_never_selects_a_move_in_zero_chord_ties() {
+        let points = vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 2.0, 0.0],
+            [10.0, 0.0, 0.0],
+        ];
+        let inserted = QuadPath::insert_n_curves_to_point_list(
+            6,
+            &points,
+            DEFAULT_TOLERANCE_FOR_POINT_EQUALITY,
+        )
+        .unwrap();
+        assert_eq!(inserted.len(), points.len() + 12);
+        assert_eq!(&inserted[..3], &points[..3], "the pen-up move stays exact");
+        let path = QuadPath::from_points(inserted).unwrap();
+        let contours = path.subpaths();
+        assert_eq!(contours.len(), 2);
+        assert_eq!(contours[0], &[points[0]]);
+        assert_eq!(contours[1].len(), 15);
+        for point in contours[1] {
+            assert!(
+                (point[0] - 10.0).abs() < 1e-12,
+                "no phantom stroke across the gap"
+            );
+        }
+        let length = crate::arclength::ArcLengthTable::for_path(&path).total();
+        assert!((length - 2.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn move_only_paths_can_be_padded_without_drawing_the_jumps() {
+        let points = vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 0.0, 0.0],
+            [10.0, 20.0, 0.0],
+        ];
+        let mut path = QuadPath::from_points(points.clone()).unwrap();
+        path.subdivide_curves_by_condition(|_| usize::MAX).unwrap();
+        assert_eq!(path.points(), points, "moves consume no subdivision budget");
+        path.insert_n_curves(7).unwrap();
+        assert_eq!(path.points().len(), points.len() + 14);
+        let contours = path.subpaths();
+        assert_eq!(contours.len(), 3);
+        for (contour, anchor) in contours.iter().zip([points[0], points[2], points[4]]) {
+            assert!(contour.iter().all(|&point| point == anchor));
+        }
+        assert_eq!(
+            crate::arclength::ArcLengthTable::for_path(&path).total(),
+            0.0
+        );
+    }
+
+    #[test]
+    fn subdivision_keeps_short_stationary_handle_curves_drawable() {
+        let mut path = QuadPath::from_points(vec![
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [SUBPATH_END_ATOL / 2.0, 0.0, 0.0],
+        ])
+        .unwrap();
+        path.subdivide_curves_by_condition(|_| 3).unwrap();
+        assert_eq!(path.num_curves(), 4);
+        assert_eq!(path.subpaths().len(), 1);
+        let length = crate::arclength::ArcLengthTable::for_path(&path).total();
+        assert!((length - SUBPATH_END_ATOL / 2.0).abs() < 1e-18);
     }
 
     #[test]

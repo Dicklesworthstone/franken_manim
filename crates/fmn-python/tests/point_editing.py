@@ -8,6 +8,50 @@ import manimlib as m
 
 
 class PointEditingTests(unittest.TestCase):
+    def test_subdivision_keeps_compound_contours_separate_on_live_and_detached_paths(self):
+        points = np.array([
+            [-3., 0., 0.], [-2.5, 0., 0.], [-2., 0., 0.],
+            [-2., 0., 0.], [1., 0., 0.], [2.5, 0., 0.], [4., 0., 0.],
+        ])
+        for bound in (False, True):
+            with self.subTest(bound=bound):
+                path = m.VMobject().set_points(points)
+                if bound:
+                    scene = m.Scene()
+                    scene.add(path)
+                old_view = path.get_points()
+                calls = []
+
+                def subdivide(*curve):
+                    calls.append(curve)
+                    return 3
+
+                self.assertIs(path.subdivide_curves_by_condition(subdivide), path)
+                self.assertEqual(len(calls), 3)
+                self.assertEqual(path.get_num_curves(), 9)
+                contours = path.get_subpaths()
+                self.assertEqual([len(contour) for contour in contours], [9, 9])
+                np.testing.assert_array_equal(contours[0][[0, -1]], points[[0, 2]])
+                np.testing.assert_array_equal(contours[1][[0, -1]], points[[4, 6]])
+                np.testing.assert_array_equal(old_view, points)
+                self.assertAlmostEqual(path.get_arc_length(), 4.)
+                for alpha, x in ((.125, -2.5), (.25, 1.), (.5, 2.)):
+                    np.testing.assert_allclose(path.point_from_proportion(alpha), [x, 0., 0.])
+
+    def test_curve_insertion_preserves_moves_even_when_every_chord_is_zero(self):
+        for last in ([10., 2., 0.], [10., 0., 0.]):
+            with self.subTest(last=last):
+                points = np.array([[0., 0., 0.], [0., 0., 0.], [10., 0., 0.],
+                                   last, [10., 0., 0.]])
+                path = m.VMobject().set_points(points)
+                path.insert_n_curves(6)
+                self.assertEqual(path.get_num_points(), len(points) + 12)
+                np.testing.assert_array_equal(path.get_points()[:3], points[:3])
+                contours = path.get_subpaths()
+                self.assertEqual(len(contours), 2)
+                np.testing.assert_allclose(contours[1][:, 0], 10., rtol=0., atol=1e-12)
+                self.assertAlmostEqual(path.get_arc_length(), 2. if last[1] else 0.)
+
     def test_empty_point_tables_clear_geometry_without_changing_identity(self):
         for empty in ([], (), np.empty((0,)), np.empty((0, 3))):
             with self.subTest(empty=repr(empty)):

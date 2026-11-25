@@ -17495,56 +17495,61 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
     }
     // Independent analytic compound-path oracle: the one-unit and three-unit
     // drawn contours consume 1/4 and 3/4 of the motion; the pen-up gap is free.
-    let compound = parity_vmob(
-        &mut stage,
-        &[
-            [-3.0, 0.0, 0.0],
-            [-2.5, 0.0, 0.0],
-            [-2.0, 0.0, 0.0],
-            [-2.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.5, 0.0, 0.0],
-            [4.0, 0.0, 0.0],
-        ],
-    );
-    let observation = fmn_mobject::path_sampling::PathSampler::default()
-        .observe(&stage, compound)
-        .map_err(|error| fail(format!("compound observation: {error}")))?;
-    if observation.total_length() != 4.0 {
-        return Err(fail("compound observation counted a pen-up gap"));
-    }
+    let compound_points = vec![
+        [-3.0, 0.0, 0.0],
+        [-2.5, 0.0, 0.0],
+        [-2.0, 0.0, 0.0],
+        [-2.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [2.5, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+    ];
     let mut compound_samples = 0_u64;
-    for captured in [false, true] {
-        let moving = parity_vmob(&mut stage, &[[0.0; 3]]);
-        let mut motion = if captured {
-            MoveAlongPath::from_observation(moving, observation.clone())
-        } else {
-            MoveAlongPath::new(moving, compound)
-        };
-        motion.state_mut().config.rate_func = RateFunc::linear();
-        motion
-            .begin(&mut stage)
-            .map_err(|error| fail(format!("compound motion begin: {error}")))?;
-        for (alpha, x) in [
-            (0.0, -3.0),
-            (0.125, -2.5),
-            (0.25, 1.0),
-            (0.5, 2.0),
-            (1.0, 4.0),
-        ] {
-            motion.interpolate(&mut stage, alpha);
-            if let Some(error) = motion.deferred_error() {
-                return Err(fail(format!("compound motion: {error}")));
+    for subdivisions in [0, 3] {
+        let mut compound_path = fmn_geom::QuadPath::from_points(compound_points.clone())
+            .map_err(|error| fail(format!("compound path: {error}")))?;
+        compound_path
+            .subdivide_curves_by_condition(|_| subdivisions)
+            .map_err(|error| fail(format!("compound subdivision: {error}")))?;
+        let compound = parity_vmob(&mut stage, compound_path.points());
+        let observation = fmn_mobject::path_sampling::PathSampler::default()
+            .observe(&stage, compound)
+            .map_err(|error| fail(format!("compound observation: {error}")))?;
+        if observation.total_length() != 4.0 {
+            return Err(fail("compound observation counted a pen-up gap"));
+        }
+        for captured in [false, true] {
+            let moving = parity_vmob(&mut stage, &[[0.0; 3]]);
+            let mut motion = if captured {
+                MoveAlongPath::from_observation(moving, observation.clone())
+            } else {
+                MoveAlongPath::new(moving, compound)
+            };
+            motion.state_mut().config.rate_func = RateFunc::linear();
+            motion
+                .begin(&mut stage)
+                .map_err(|error| fail(format!("compound motion begin: {error}")))?;
+            for (alpha, x) in [
+                (0.0, -3.0),
+                (0.125, -2.5),
+                (0.25, 1.0),
+                (0.5, 2.0),
+                (1.0, 4.0),
+            ] {
+                motion.interpolate(&mut stage, alpha);
+                if let Some(error) = motion.deferred_error() {
+                    return Err(fail(format!("compound motion: {error}")));
+                }
+                let point = stage
+                    .get_points(moving)
+                    .ok_or_else(|| fail("compound mover lost its point"))?[0];
+                if (point[0] - x).abs() > 1e-12 || point[1] != 0.0 || point[2] != 0.0 {
+                    return Err(fail(format!(
+                        "compound motion at alpha {alpha} (captured={captured}): {point:?}, want x={x}"
+                    )));
+                }
+                compound_samples += 1;
             }
-            let point = stage
-                .get_points(moving)
-                .ok_or_else(|| fail("compound mover lost its point"))?[0];
-            if (point[0] - x).abs() > 1e-12 || point[1] != 0.0 || point[2] != 0.0 {
-                return Err(fail(format!(
-                    "compound motion at alpha {alpha} (captured={captured}): {point:?}, want x={x}"
-                )));
-            }
-            compound_samples += 1;
         }
     }
     // A tangent at the internal boundary belongs to the next contour, and
@@ -17561,13 +17566,8 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
             [x, 6.0, 0.0],
         ]);
         for (alpha, direction) in [(0.49, RIGHT), (0.5, UP)] {
-            let tangent = fmn_library::line::tangent_line(
-                &source,
-                alpha,
-                2.0,
-                0.125,
-                Default::default(),
-            );
+            let tangent =
+                fmn_library::line::tangent_line(&source, alpha, 2.0, 0.125, Default::default());
             let actual = fmn_library::line::line_unit_vector(&tangent);
             let chord = fmn_library::line::line_vector(&tangent);
             let length = (chord[0] * chord[0] + chord[1] * chord[1]).sqrt();
@@ -23807,7 +23807,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("parity_arclength_animation_matches", 3),
-            counter_eq("parity_arclength_compound_samples", 10),
+            counter_eq("parity_arclength_compound_samples", 20),
             counter_eq("parity_arclength_compound_tangents", 6),
             counter_eq("parity_arclength_path_materializations", 1),
         ],
@@ -23816,7 +23816,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![
                 FieldPred::str_eq("equal_steps", "true"),
                 FieldPred::u64_eq("animation_matches", 3),
-                FieldPred::u64_eq("compound_samples", 10),
+                FieldPred::u64_eq("compound_samples", 20),
                 FieldPred::u64_eq("compound_tangents", 6),
                 FieldPred::u64_eq("path_materializations", 1),
             ],
