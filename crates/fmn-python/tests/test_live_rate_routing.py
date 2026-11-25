@@ -60,6 +60,18 @@ def protocol():
     class NativeOnly(Animation):
         _native_kind = "native_only"
 
+    class WiggleOutThenIn(Animation):
+        _native_kind = "wiggle_out_then_in"
+
+    class VShowPassingFlash(Animation):
+        _native_kind = "v_show_passing_flash"
+
+    class FlashAround(VShowPassingFlash):
+        pass
+
+    class FlashUnder(FlashAround):
+        pass
+
     class AnimationGroup(Animation):
         _native_kind = "animation_group"
 
@@ -93,6 +105,8 @@ def protocol():
         Animation=Animation, Transform=Transform, Fade=Fade, FadeIn=FadeIn, FadeOut=FadeOut,
         FadeInFromLarge=FadeInFromLarge, FadeInFromPoint=FadeInFromPoint,
         FadeOutToPoint=FadeOutToPoint, NativeOnly=NativeOnly, AnimationGroup=AnimationGroup,
+        WiggleOutThenIn=WiggleOutThenIn, VShowPassingFlash=VShowPassingFlash,
+        FlashAround=FlashAround, FlashUnder=FlashUnder,
         _AnimationBuilder=Builder, Scene=Scene, _RATE_FUNC_NAMES={linear: "linear"}, linear=linear,
         _requires_python_animation=lambda animation: getattr(animation, "authored", False),
         prepare_animation=lambda builder: builder.build(),
@@ -189,6 +203,46 @@ class FadeRateRouting(unittest.TestCase):
         play = self.native.Scene.play
         _adapter.install_live_rates(self.native)
         self.assertIs(self.native.Scene.play, play)
+
+
+class IndicationRateRouting(unittest.TestCase):
+    def setUp(self):
+        self.native = protocol()
+
+    def families(self):
+        return tuple(getattr(self.native, name) for name in (
+            "WiggleOutThenIn", "VShowPassingFlash", "FlashAround", "FlashUnder"))
+
+    def test_mixed_indication_transform_uses_the_original_live_curve(self):
+        for cls in self.families():
+            with self.subTest(kind=cls.__name__):
+                scene, rate = self.native.Scene(), Curve()
+                indication, transform = cls(), self.native.Transform()
+                scene.play(indication, transform, rate_func=rate)
+                self.assertEqual(scene.callbacks, (True, True))
+                self.assertIsNone(scene.received[1]["rate_func"])
+                self.assertIs(indication.rate_func, rate)
+                self.assertIs(transform.rate_func, rate)
+
+    def test_mixed_group_override_preserves_its_child_easing(self):
+        for cls in self.families():
+            with self.subTest(kind=cls.__name__):
+                child_rate, root_rate = Curve(), Curve()
+                child = self.native.Transform(child_rate)
+                group = self.native.AnimationGroup(child)
+                indication = cls()
+                scene = self.native.Scene()
+                scene.play(indication, group, rate_func=root_rate)
+                self.assertEqual(scene.callbacks, (True, True))
+                self.assertIs(group.rate_func, root_rate)
+                self.assertIs(child.rate_func, child_rate)
+                self.assertNotIn("_composition_scene", vars(group))
+
+    def test_stock_indications_keep_native_catalog_dispatch(self):
+        for cls in self.families():
+            for rate in (None, self.native.linear, "linear"):
+                with self.subTest(kind=cls.__name__, rate=rate):
+                    self.assertFalse(self.native._requires_python_animation(cls(rate)))
 
 
 class PlayRateRecovery(unittest.TestCase):

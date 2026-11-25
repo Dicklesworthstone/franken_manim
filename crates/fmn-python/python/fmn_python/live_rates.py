@@ -94,8 +94,12 @@ def install_live_rates(native: Any) -> None:
         # rather than storing a _target_attr. That native-lowering sentinel
         # must not hide their complete Transform callback implementation.
         # Admit the concrete families, not bare Fade (which has no target).
+        # Indication's classifier sees a stock catalog rate before a play-level
+        # override is installed. Admit its completed callback families here so
+        # a mixed wiggle/width-flash and Transform play never lowers the peer's
+        # authored easing to the bootstrap's interpolated 30-Hz table.
         for name in ("Rotating", "MoveAlongPath", "ShowPartial", "DrawBorderThenFill", "VFadeIn",
-                     "FadeIn", "FadeOut"):
+                     "FadeIn", "FadeOut", "WiggleOutThenIn", "VShowPassingFlash"):
             cls = g.get(name)
             if cls is not None and isinstance(animation, cls):
                 return True

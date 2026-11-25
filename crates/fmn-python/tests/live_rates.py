@@ -165,6 +165,58 @@ class ExactRateDispatch(unittest.TestCase):
                 expected = (np.arange(1, fps // 2 + 1) / (fps / 2))**2
                 np.testing.assert_allclose(observed, np.column_stack((expected, -3+expected)), atol=2e-6)
 
+    def test_mixed_indication_preserves_live_peer_easing_at_real_sample_times(self):
+        # At a half-second duration the old 30-Hz table samples k/15, exactly
+        # the zeros of this curve's sine term. Actual 24/60-fps captures see
+        # its intermediate motion. Stock indication instances are essential:
+        # an authored begin override would independently select callbacks and
+        # conceal the mixed-play admission failure this case witnesses.
+        for fps in (24, 60):
+            for factory in (m.WiggleOutThenIn, m.VShowPassingFlash):
+                for nested in (False, True):
+                    with self.subTest(fps=fps, kind=factory.__name__, nested=nested), tempfile.TemporaryDirectory() as tmp:
+                        scene = m.Scene()
+                        effect_shape = m.Square()
+                        moving = m.Square().shift(3 * m.LEFT)
+                        effect = factory(effect_shape)
+                        samples, observed = [], []
+
+                        class Curve:
+                            __hash__ = None
+
+                            def __bool__(self):
+                                return False
+
+                            def __eq__(self, other):
+                                raise AssertionError("easing admission must not compare callables")
+
+                            def __call__(self, alpha):
+                                samples.append((float(alpha), getattr(effect, "_movement_active", False)))
+                                return alpha + .02 * math.sin(15 * math.pi * alpha)
+
+                        curve = Curve()
+                        transform = m.Transform(moving, moving.copy().shift(m.RIGHT),
+                                                rate_func=(lambda t: t*t) if nested else m.linear)
+                        peer = (m.AnimationGroup(m.AnimationGroup(transform, rate_func=m.linear),
+                                                 rate_func=m.linear) if nested else transform)
+                        probe = m.Mobject()
+                        probe.add_updater(lambda obj, dt: observed.append(float(moving.get_center()[0]))
+                                          if dt > 0 else None)
+                        with render_session(scene, Path(tmp) / "indication.y4m", fps=fps,
+                                            resolution=(32, 18), threads=1) as output:
+                            scene.add(effect_shape, moving, probe)
+                            scene.play(effect, peer, run_time=.5, rate_func=curve)
+                        self.assertEqual(output.result.frame_count, fps // 2)
+                        self.assertEqual(len(observed), fps // 2)
+                        self.assertTrue(samples and samples[0][1], samples)
+                        self.assertTrue(all(active or t == 1.0 for t, active in samples), samples)
+                        raw = np.arange(1, fps // 2 + 1) / (fps / 2)
+                        rated = raw + .02 * np.sin(15 * np.pi * raw)
+                        # A root override is applied once; an independently
+                        # authored nested child's easing remains its own.
+                        expected = rated**2 if nested else rated
+                        np.testing.assert_allclose(observed, -3 + expected, atol=2e-6)
+
     def test_specialized_compositions_evaluate_custom_rate_during_begin(self):
         factories = (m.ShowCreationThenFadeOut, m.ShowCreationThenFadeAround,
                      m.ShowCreationThenDestructionAround)
@@ -206,7 +258,7 @@ class ExactRateDispatch(unittest.TestCase):
         # Negative control: adding live easing must not turn stock animations
         # into Python work merely because a callback implementation exists.
         for factory in (m.VFadeIn, m.VFadeOut, m.VFadeInThenOut,
-                        m.ShowCreationThenFadeOut):
+                        m.ShowCreationThenFadeOut, m.WiggleOutThenIn, m.VShowPassingFlash):
             with self.subTest(factory=factory.__name__):
                 animation = factory(m.Square(), rate_func=m.linear)
                 self.assertFalse(m._native._requires_python_animation(animation))
