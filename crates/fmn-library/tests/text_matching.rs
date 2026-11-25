@@ -3,15 +3,15 @@ use std::sync::Arc;
 
 use fmn_anim::pure_frame::{PureFrameRefusal, PureSegment};
 use fmn_anim::{
-    AnimError, Animation, RateFunc, RationalFrameClock, Transform, finish_open_play, open_play,
-    play_segment,
+    AnimError, Animation, RateFunc, RationalFrameClock, Transform, advance_play, continuation,
+    finish_open_play, open_play, play_segment,
 };
 use fmn_core::rng::RngRoot;
 use fmn_library::{
     FontBook, SpanKindU8, SpanMapData, SpanMapEntry, Tex, TexEngine, Text, TextMatchingConfig,
     TextMatchingError, TransformMatchingStrings, TransformMatchingTex,
 };
-use fmn_mobject::{Mob, Mobject, Stage, StageError};
+use fmn_mobject::{Mob, Mobject, Snapshot, Stage, StageError};
 
 fn fixture(stage: &mut Stage, text: &str, x: f64) -> (Mob, SpanMapData, Vec<Mob>) {
     let root = stage.add(Mobject::new());
@@ -51,6 +51,239 @@ fn names(animation: &TransformMatchingTex) -> Vec<&str> {
         .iter()
         .map(|a| a.state().config.name.as_str())
         .collect()
+}
+
+fn checkpoint_matching(strings: bool, native: bool) -> (Stage, Vec<Box<dyn Animation>>, Mob, Mob) {
+    let mut stage = Stage::new();
+    let (source, sm, _) = fixture(&mut stage, "abx", 0.0);
+    let (target, tm, _) = fixture(&mut stage, "zy", 5.0);
+    stage.add_to_scene(source).unwrap();
+    let config = TextMatchingConfig {
+        lag_ratio: 0.2,
+        rate_func: RateFunc::Catalog(fmn_core::rate::CatalogRate::ThereAndBack),
+        ..TextMatchingConfig::default()
+    };
+    let mut animation: Box<dyn Animation> = if strings {
+        let value = TransformMatchingStrings::with_key_map(
+            &mut stage,
+            source,
+            target,
+            &sm,
+            &tm,
+            &[("ab", "z")],
+            config,
+        )
+        .unwrap();
+        if native {
+            let before = stage.snapshot().to_bytes().unwrap();
+            let value = value.into_native(&stage).unwrap();
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+            Box::new(value)
+        } else {
+            Box::new(value)
+        }
+    } else {
+        let value = TransformMatchingTex::with_key_map(
+            &mut stage,
+            source,
+            target,
+            &sm,
+            &tm,
+            &[("ab", "z")],
+            config,
+        )
+        .unwrap();
+        if native {
+            let before = stage.snapshot().to_bytes().unwrap();
+            let value = value.into_native(&stage).unwrap();
+            assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+            Box::new(value)
+        } else {
+            Box::new(value)
+        }
+    };
+    animation.state_mut().config.run_time_frames = Some(13);
+    animation.state_mut().config.final_alpha_value = 0.35;
+    (stage, vec![animation], source, target)
+}
+
+#[test]
+fn lowered_text_matching_restores_every_remaining_frame_and_original_target() {
+    const MAX_BYTES: usize = 16 * 1024 * 1024;
+    let rng = RngRoot::from_seed(19);
+    for strings in [false, true] {
+        let (mut original, mut wrappers, _, _) = checkpoint_matching(strings, false);
+        let mut original_clock = RationalFrameClock::new(30).unwrap();
+        original_clock.advance_frames(5).unwrap();
+        original.set_time_from_clock(original_clock.now().to_f64());
+        let mut expected = Vec::new();
+        play_segment(
+            &mut original,
+            &mut original_clock,
+            &rng,
+            &mut wrappers,
+            false,
+            &mut |packet| expected.push((packet.metadata(), packet.state().to_bytes().unwrap())),
+        )
+        .unwrap();
+
+        for boundary in [0, 1, 6, 12, 13] {
+            let (mut stage, mut animations, source, target) = checkpoint_matching(strings, true);
+            let target_id = stage.snapshot_handle(target).unwrap();
+            let source_id = stage.snapshot_handle(source).unwrap();
+            let (declaration, count) = continuation::fresh_declaration(
+                &stage,
+                &animations,
+                continuation::DeclarationOverrides::default(),
+                30,
+                MAX_BYTES,
+            )
+            .unwrap()
+            .expect("resolved native text matching is a closed declaration");
+            assert_eq!(count, 13);
+            assert!(!declaration.is_empty());
+            assert_eq!(
+                animations[0].state().config.name,
+                if strings {
+                    "TransformMatchingStrings"
+                } else {
+                    "TransformMatchingTex"
+                },
+            );
+            let mut clock = RationalFrameClock::new(30).unwrap();
+            clock.advance_frames(5).unwrap();
+            stage.set_time_from_clock(clock.now().to_f64());
+            let mut open = open_play(&mut stage, &clock, &mut animations).unwrap();
+            let mut prefix = Vec::new();
+            advance_play(
+                &mut stage,
+                &mut clock,
+                &rng,
+                &mut animations,
+                &mut open,
+                boundary,
+                &mut |packet| prefix.push((packet.metadata(), packet.state().to_bytes().unwrap())),
+            )
+            .unwrap();
+            assert_eq!(prefix, expected[..boundary as usize]);
+            let checkpoint = continuation::capture(&stage, &clock, &animations, &open, MAX_BYTES)
+                .unwrap()
+                .expect("prepared native text matching is resumable");
+            let bytes = stage.snapshot().to_bytes().unwrap();
+            let mut resumed_stage = Stage::new();
+            let snapshot = Snapshot::from_bytes(&bytes, &resumed_stage).unwrap();
+            resumed_stage.restore(&snapshot.snapshot);
+            let mut resumed_clock = clock;
+            let (mut resumed, mut resumed_open) =
+                continuation::restore(&resumed_stage, &resumed_clock, &checkpoint).unwrap();
+            assert_eq!(resumed_stage.snapshot().to_bytes().unwrap(), bytes);
+            let mut remaining = Vec::new();
+            advance_play(
+                &mut resumed_stage,
+                &mut resumed_clock,
+                &rng,
+                &mut resumed,
+                &mut resumed_open,
+                13,
+                &mut |packet| {
+                    remaining.push((packet.metadata(), packet.state().to_bytes().unwrap()))
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                remaining,
+                expected[boundary as usize..],
+                "strings={strings}, frame={boundary}"
+            );
+            finish_open_play(&mut resumed_stage, &mut resumed, resumed_open).unwrap();
+            assert_eq!(
+                resumed_stage.snapshot().to_bytes().unwrap(),
+                original.snapshot().to_bytes().unwrap()
+            );
+            assert_eq!(resumed_clock.now(), original_clock.now());
+            let resumed_target = resumed_stage
+                .resolve_snapshot_handle(target_id.0, target_id.1)
+                .unwrap();
+            let resumed_source = resumed_stage
+                .resolve_snapshot_handle(source_id.0, source_id.1)
+                .unwrap();
+            assert_eq!(resumed_stage.roots(), &[resumed_target]);
+            assert!(!resumed_stage.roots().contains(&resumed_source));
+            // Release the original in-progress lifetime without completing or
+            // publishing it; the restored arena has independent ownership.
+            for animation in &mut animations {
+                animation.abort(&mut stage);
+            }
+        }
+    }
+}
+
+#[test]
+fn text_matching_native_conversion_refuses_stale_or_started_plans_without_mutation() {
+    for case in 0..5 {
+        let mut stage = Stage::new();
+        let (source, sm, source_parts) = fixture(&mut stage, "x", 0.0);
+        let (target, tm, _) = fixture(&mut stage, "y", 4.0);
+        let mut animation =
+            TransformMatchingTex::new(&mut stage, source, target, &sm, &tm).unwrap();
+        match case {
+            0 => {
+                let extra = stage.add(Mobject::new());
+                stage.attach(source, extra).unwrap();
+            }
+            1 => {
+                let extra = stage.add(Mobject::new());
+                stage.attach(source_parts[0], extra).unwrap();
+            }
+            2 => animation.prepare_timing(30).unwrap(),
+            3 => animation.begin(&mut stage).unwrap(),
+            _ => {
+                animation.begin(&mut stage).unwrap();
+                animation.abort(&mut stage);
+            }
+        }
+        let before = stage.snapshot().to_bytes().unwrap();
+        assert!(animation.into_native(&stage).is_err(), "case {case}");
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+    }
+}
+
+#[test]
+fn lowering_text_matching_does_not_authorize_unrecognized_rate_callbacks() {
+    fn authored_rate(alpha: f64) -> f64 {
+        0.7 * alpha
+    }
+    let mut stage = Stage::new();
+    let (source, sm, _) = fixture(&mut stage, "x", 0.0);
+    let (target, tm, _) = fixture(&mut stage, "y", 4.0);
+    let animation = TransformMatchingStrings::with_config(
+        &mut stage,
+        source,
+        target,
+        &sm,
+        &tm,
+        TextMatchingConfig {
+            rate_func: RateFunc::Base(authored_rate),
+            ..TextMatchingConfig::default()
+        },
+    )
+    .unwrap()
+    .into_native(&stage)
+    .unwrap();
+    let animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+    let before = stage.snapshot().to_bytes().unwrap();
+    assert!(
+        continuation::fresh_declaration(
+            &stage,
+            &animations,
+            continuation::DeclarationOverrides::default(),
+            30,
+            16 * 1024 * 1024,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
 }
 
 #[test]

@@ -19,6 +19,10 @@
 //! validation, begin, finish and replacement cleanup stay on the scene owner.
 //! A failed callback prevents replacement publication. Its first diagnostic
 //! remains attached to the failed run until a validated new begin.
+//! Before scheduling, [`TransformMatchingTex::into_native`] and
+//! [`TransformMatchingStrings::into_native`] move the resolved plan into
+//! Choreo's closed matching carrier for durable declarations and mid-play
+//! checkpoint restore. No source search or lifecycle callback is repeated.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
@@ -850,6 +854,72 @@ macro_rules! matching_animation {
             #[must_use]
             pub fn target(&self) -> Mob {
                 self.inner.target.root
+            }
+
+            /// Move the fresh resolved plan into Choreo's durable native carrier.
+            ///
+            /// Call this before timing preparation or begin when a native Studio
+            /// program needs to checkpoint and resume this matching animation.
+            /// The source-span search has already happened: this consumes the
+            /// existing child animations without rebuilding groups, changing the
+            /// Stage, evaluating rates or invoking callbacks. Names, timing,
+            /// explicit key mappings and original-target cleanup are preserved.
+            /// The resulting carrier also binds each family member's current
+            /// point-empty state until begin; a topology change needs a new plan.
+            ///
+            /// Arbitrary rate callbacks and custom animation children remain
+            /// subject to Choreo's existing closed-tree admission checks.
+            ///
+            /// ```
+            /// use fmn_anim::{Animation, continuation};
+            /// use fmn_library::{Tex, TexEngine, TransformMatchingTex};
+            /// use fmn_mobject::Stage;
+            /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+            /// let engine = TexEngine::new("fmd-math/pack/default", None)?;
+            /// let from = Tex::new("x+y").build(&engine)?;
+            /// let to = Tex::new("y+x").build(&engine)?;
+            /// let (from_spans, to_spans) = (from.span_map(), to.span_map());
+            /// let mut stage = Stage::new();
+            /// let source = stage.add(from.vmob);
+            /// let target = stage.add(to.vmob);
+            /// let matching = TransformMatchingTex::new(
+            ///     &mut stage, source, target, &from_spans, &to_spans,
+            /// )?.into_native(&stage)?;
+            /// let animations: Vec<Box<dyn Animation>> = vec![Box::new(matching)];
+            /// assert!(continuation::fresh_declaration(
+            ///     &stage, &animations, continuation::DeclarationOverrides::default(),
+            ///     30, 16 * 1024 * 1024,
+            /// )?.is_some());
+            /// # Ok(())
+            /// # }
+            /// ```
+            ///
+            /// # Errors
+            /// Refuses a started, finished, aborted or timing-prepared plan;
+            /// stale handles; changed source bindings; or shared operand families.
+            /// The Stage remains unchanged on success and on refusal.
+            pub fn into_native(
+                self,
+                stage: &Stage,
+            ) -> Result<fmn_anim::TransformMatchingParts, TextMatchingError> {
+                if let Some(error) = self.inner.error {
+                    return Err(error.into());
+                }
+                if self.inner.begun || self.inner.finished || self.inner.cleaned {
+                    return Err(AnimError::InvalidFramePhase(
+                        "text matching plans must be converted before timing preparation or begin",
+                    )
+                    .into());
+                }
+                self.inner.source.validate(stage)?;
+                self.inner.target.validate(stage)?;
+                fmn_anim::TransformMatchingParts::from_plan(
+                    stage,
+                    self.inner.source.root,
+                    self.inner.target.root,
+                    self.inner.group,
+                )
+                .map_err(TextMatchingError::from)
             }
         }
 

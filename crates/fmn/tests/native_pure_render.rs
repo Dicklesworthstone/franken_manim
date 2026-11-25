@@ -1,4 +1,8 @@
 //! Public scene-to-artifact integration, mixed with stateful segments.
+#[allow(dead_code)]
+#[path = "../examples/matching_text.rs"]
+mod matching_text;
+
 use fmn::prelude::*;
 use fmn::rendering::RenderError;
 use fmn_codec::{PngLimits, decode_png};
@@ -570,5 +574,42 @@ fn public_text_matching_pngs_match_serial_scribe_and_lumen_across_workers() {
         } else {
             previous = Some(bytes);
         }
+    }
+}
+
+#[test]
+fn public_durable_text_matching_preserves_native_rendered_frames() {
+    let original_fs = Arc::new(VirtualFs::new());
+    let original = render_with_fs(
+        &mut MatchingText,
+        options("/original-matching", 2, 4),
+        original_fs.clone(),
+    )
+    .unwrap();
+    let durable_fs = Arc::new(VirtualFs::new());
+    let durable = render_with_fs(
+        &mut matching_text::DurableMatchingText,
+        options("/durable-matching", 2, 4),
+        durable_fs.clone(),
+    )
+    .unwrap();
+    assert_eq!(original.artifact.frame_count, 8);
+    assert_eq!(durable.artifact.frame_count, original.artifact.frame_count);
+    let stats = durable.frame_pipeline.as_ref().unwrap();
+    assert_eq!(
+        (stats.submitted, stats.emitted, stats.outstanding_slots),
+        (8, 8, 0)
+    );
+    for index in 0..8 {
+        let name = format!("frame_{index:06}.png");
+        assert_eq!(
+            durable_fs
+                .read(&Path::new("/durable-matching").join(&name))
+                .unwrap(),
+            original_fs
+                .read(&Path::new("/original-matching").join(&name))
+                .unwrap(),
+            "durable conversion changed rendered frame {index}",
+        );
     }
 }

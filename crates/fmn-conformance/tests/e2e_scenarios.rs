@@ -2219,8 +2219,8 @@ fn native_succession_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, Scenari
         .with_counter("native_succession_rendered_frames", rendered_frames))
 }
 
-/// Native equation and reordered-string transitions cross the public facade,
-/// materialize on a worker, and retain both nominal sampling and owner cleanup.
+/// Resolved equation and string plans enter the durable native carrier, cross
+/// the public facade, and retain worker sampling and original-target cleanup.
 fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     struct Matching;
     impl fmn::SceneConstruct for Matching {
@@ -2248,7 +2248,8 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
                 &from_spans,
                 &to_spans,
                 timing.clone(),
-            )?;
+            )?
+            .into_native(stage.arena())?;
             stage.play_prepared(vec![Box::new(matching)])?;
             if stage.roots() != [target] {
                 return Err(fmn::scene::SceneError::InvalidLifecycle(
@@ -2279,7 +2280,8 @@ fn native_matching_workers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
                 &from_spans,
                 &to_spans,
                 timing,
-            )?;
+            )?
+            .into_native(stage.arena())?;
             stage.play_prepared(vec![Box::new(matching)])?;
             if stage.roots() != [target, text_target] {
                 return Err(fmn::scene::SceneError::InvalidLifecycle(

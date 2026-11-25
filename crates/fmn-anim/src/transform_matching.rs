@@ -185,6 +185,69 @@ pub struct TransformMatchingParts {
 pub type TransformMatchingShapes = TransformMatchingParts;
 
 impl TransformMatchingParts {
+    /// Adopt an already planned replacement without repeating its matching
+    /// search, allocating new mobjects or invoking any animation callbacks.
+    ///
+    /// Higher-level native matchers can resolve source spans into ordinary
+    /// Transform/fade children, then move their fresh composition into this
+    /// carrier. Its original source/target families remain guarded until begin,
+    /// and successful cleanup publishes the original target. Timing, names and
+    /// child order are preserved exactly.
+    ///
+    /// This constructor does not confer native execution authority on a custom
+    /// child. Durable declarations, continuations and worker preparation retain
+    /// their independent, recursive concrete-type checks.
+    ///
+    /// # Errors
+    /// Active groups, retained lifecycle or prepared timing state, stale
+    /// handles, shared operand families, or a group container inside an
+    /// operand family are refused.
+    /// Refusal leaves the Stage unchanged.
+    pub fn from_plan(
+        stage: &Stage,
+        source: Mob,
+        target: Mob,
+        group: AnimationGroup,
+    ) -> Result<Self, AnimError> {
+        let state = group.state();
+        if !group.declaration_is_fresh()
+            || state.prepared_duration().is_some()
+            || state.frame_units().is_some()
+            || state.starting_mobject().is_some()
+            || !state.families().is_empty()
+            || state.mobject_was_updating()
+            || stage.is_animating(state.mobject())
+        {
+            return Err(AnimError::InvalidFramePhase(
+                "matching plans must be converted before timing preparation or begin",
+            ));
+        }
+        let source = MatchingFamily::read(stage, source)?;
+        let target = MatchingFamily::read(stage, target)?;
+        let source_members: HashSet<_> = source.layout.iter().map(|(mob, _, _)| *mob).collect();
+        let group_root = state.mobject();
+        if !stage.contains(group_root) {
+            return Err(AnimError::StaleHandle(group_root));
+        }
+        if source_members.contains(&group_root)
+            || target
+                .layout
+                .iter()
+                .any(|(mob, _, _)| *mob == group_root || source_members.contains(mob))
+        {
+            return Err(AnimError::AliasedMatchingFamilies);
+        }
+        Ok(Self {
+            group,
+            source,
+            target,
+            begun: false,
+            finished: false,
+            cleaned: false,
+            error: None,
+        })
+    }
+
     /// Match both families with the default two-second simultaneous timing.
     ///
     /// # Errors
@@ -397,6 +460,19 @@ impl TransformMatchingParts {
         }
         members
     }
+
+    // The first callback failure belongs to this lifetime, even when its
+    // owner later acknowledges the Stage fault. Cleanup publishes a target;
+    // it must never turn a failed member cleanup into a successful replacement.
+    fn retain_error(&mut self, stage: &Stage) -> bool {
+        if self.error.is_none() {
+            self.error = self
+                .group
+                .deferred_error()
+                .or_else(|| stage.updater_error().cloned().map(AnimError::from));
+        }
+        self.error.is_some()
+    }
 }
 
 impl Animation for TransformMatchingParts {
@@ -440,16 +516,31 @@ impl Animation for TransformMatchingParts {
         self.finished = false;
         self.cleaned = false;
         self.error = None;
-        self.group.begin(stage)?;
+        if let Err(error) = self.group.begin(stage) {
+            self.error = Some(error.clone());
+            self.group.abort(stage);
+            return Err(error);
+        }
         self.begun = true;
+        if self.retain_error(stage) {
+            self.group.abort(stage);
+            self.begun = false;
+            return Err(self.error.clone().expect("retained matching failure"));
+        }
         Ok(())
     }
     fn interpolate_submobject(&mut self, _stage: &mut Stage, _mobs: &[Mob], _alpha: f64) {}
     fn interpolate(&mut self, stage: &mut Stage, alpha: f64) {
-        self.group.interpolate(stage, alpha);
+        if !self.retain_error(stage) {
+            self.group.interpolate(stage, alpha);
+            self.retain_error(stage);
+        }
     }
     fn interpolate_at_frame(&mut self, stage: &mut Stage, frame: f64, fps: u32) {
-        self.group.interpolate_at_frame(stage, frame, fps);
+        if !self.retain_error(stage) {
+            self.group.interpolate_at_frame(stage, frame, fps);
+            self.retain_error(stage);
+        }
     }
     fn interpolate_at_position(
         &mut self,
@@ -457,31 +548,50 @@ impl Animation for TransformMatchingParts {
         position: &crate::FramePosition,
         fps: u32,
     ) -> Result<(), AnimError> {
-        self.group.interpolate_at_position(stage, position, fps)
+        if !self.retain_error(stage) {
+            if let Err(error) = self.group.interpolate_at_position(stage, position, fps) {
+                self.error = Some(error);
+            }
+            self.retain_error(stage);
+        }
+        self.error.clone().map_or(Ok(()), Err)
     }
     fn interpolate_at_time(
         &mut self,
         stage: &mut Stage,
         time: crate::RationalTime,
     ) -> Result<(), AnimError> {
-        self.group.interpolate_at_time(stage, time)
+        self.interpolate_at_position(
+            stage,
+            &crate::FramePosition::from_frame(time.frames()),
+            time.fps(),
+        )
     }
     fn update_mobjects(&mut self, stage: &mut Stage, dt: f64) {
-        self.group.update_mobjects(stage, dt);
+        if !self.retain_error(stage) {
+            self.group.update_mobjects(stage, dt);
+            self.retain_error(stage);
+        }
     }
     fn finish(&mut self, stage: &mut Stage) {
         if self.begun && !self.finished {
+            if self.retain_error(stage) {
+                self.group.abort(stage);
+                return;
+            }
             self.group.finish(stage);
-            self.finished = true;
+            self.finished = !self.retain_error(stage);
         }
     }
     fn abort(&mut self, stage: &mut Stage) {
+        self.retain_error(stage);
         self.group.abort(stage);
+        self.retain_error(stage);
         self.begun = false;
         self.finished = false;
     }
     fn clean_up_from_scene(&mut self, stage: &mut Stage) {
-        if self.cleaned || self.deferred_error().is_some() {
+        if self.cleaned || self.retain_error(stage) {
             return;
         }
         if !self.finished {
@@ -495,6 +605,9 @@ impl Animation for TransformMatchingParts {
             return;
         }
         self.group.clean_up_from_scene(stage);
+        if self.retain_error(stage) {
+            return;
+        }
         stage.remove_many_from_scene(&[self.state().mobject(), self.source.root]);
         if let Err(error) = stage.add_to_scene(self.target.root) {
             self.error = Some(AnimError::Stage(error));

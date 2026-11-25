@@ -3,13 +3,16 @@
 //! fade-out/fade-in leftovers), and the null-piece guards — against
 //! transform_matching_parts.py at the pin.
 
+use std::cell::Cell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use fmn_anim::pure_frame::{PureFrameRefusal, PureSegment};
 use fmn_anim::{
-    AnimError, Animation, MatchingPartsConfig, RateFunc, RationalFrameClock,
-    TransformMatchingParts, TransformMatchingShapes, finish_open_play, has_same_shape_as,
-    open_play, play_segment, transform_matching_keys, transform_matching_parts,
+    AnimConfig, AnimError, AnimState, Animation, AnimationGroup, MatchingPartsConfig, RateFunc,
+    RationalFrameClock, TransformMatchingParts, TransformMatchingShapes, continuation,
+    finish_open_play, has_same_shape_as, open_play, play_segment, transform_matching_keys,
+    transform_matching_parts,
 };
 use fmn_core::rng::RngRoot;
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
@@ -288,6 +291,77 @@ fn native_matching_defaults_and_explicit_claims_preserve_the_raw_plan() {
 }
 
 #[test]
+fn adopting_a_plan_refuses_prepared_active_or_aliased_groups_without_mutation() {
+    for case in 0..4 {
+        let mut stage = Stage::new();
+        let source = stage.add(Mobject::new());
+        let mut target = stage.add(Mobject::new());
+        let mut group = AnimationGroup::new(&mut stage, Vec::new()).unwrap();
+        match case {
+            0 => group.prepare_timing(30).unwrap(),
+            1 => group.begin(&mut stage).unwrap(),
+            2 => target = source,
+            _ => stage.attach(source, group.group()).unwrap(),
+        }
+        let before = stage.snapshot().to_bytes().unwrap();
+        assert!(TransformMatchingParts::from_plan(&stage, source, target, group).is_err());
+        assert_eq!(stage.snapshot().to_bytes().unwrap(), before, "case {case}");
+    }
+}
+
+#[test]
+fn adopting_a_plan_does_not_authorize_or_inspect_custom_children() {
+    struct Authored {
+        state: AnimState,
+        guarded: Rc<Cell<bool>>,
+    }
+    impl Animation for Authored {
+        fn state(&self) -> &AnimState {
+            assert!(
+                !self.guarded.get(),
+                "unrecognized child state was inspected"
+            );
+            &self.state
+        }
+        fn state_mut(&mut self) -> &mut AnimState {
+            assert!(!self.guarded.get(), "unrecognized child state was modified");
+            &mut self.state
+        }
+        fn interpolate_submobject(&mut self, _: &mut Stage, _: &[Mob], _: f64) {
+            panic!("unrecognized child was sampled");
+        }
+    }
+    let mut stage = Stage::new();
+    let source = vee(&mut stage, 0.0);
+    let target = vee(&mut stage, 10.0);
+    let guarded = Rc::new(Cell::new(false));
+    let group = AnimationGroup::new(
+        &mut stage,
+        vec![Box::new(Authored {
+            state: AnimState::new(source, AnimConfig::default()),
+            guarded: Rc::clone(&guarded),
+        })],
+    )
+    .unwrap();
+    guarded.set(true);
+    let before = stage.snapshot().to_bytes().unwrap();
+    let animation = TransformMatchingParts::from_plan(&stage, source, target, group).unwrap();
+    let animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+    assert!(
+        continuation::fresh_declaration(
+            &stage,
+            &animations,
+            continuation::DeclarationOverrides::default(),
+            30,
+            16 * 1024 * 1024,
+        )
+        .unwrap()
+        .is_none()
+    );
+    assert_eq!(stage.snapshot().to_bytes().unwrap(), before);
+}
+
+#[test]
 fn native_matching_refuses_shared_families_before_mutating_the_stage() {
     for kind in 0..3 {
         let mut stage = Stage::new();
@@ -457,6 +531,77 @@ fn native_matching_does_not_publish_after_a_latched_lifecycle_error() {
     assert_eq!(stage.roots(), &[source]);
     assert!(!stage.roots().contains(&target));
     assert!(!stage.is_animating(animation.state().mobject()));
+}
+
+#[test]
+fn native_matching_keeps_callback_failure_sticky_before_replacement() {
+    for phase in 0..3 {
+        let mut stage = Stage::new();
+        let source = vee(&mut stage, 0.0);
+        let target = vee(&mut stage, 10.0);
+        stage.add_to_scene(source).unwrap();
+        let target_before = family_facts(&stage, target);
+        let trigger = stage.add(Mobject::new());
+        stage
+            .add_try_updater(
+                trigger,
+                |_, _| {
+                    Err(fmn_mobject::UpdaterError::callback(
+                        "matching callback",
+                        "preserve this first diagnostic",
+                    ))
+                },
+                false,
+            )
+            .unwrap();
+        let mut animation = TransformMatchingParts::new(&mut stage, source, target).unwrap();
+        animation.begin(&mut stage).unwrap();
+        if phase == 1 {
+            animation.finish(&mut stage);
+        }
+        stage.update_mobject(trigger, 0.1);
+        let expected = AnimError::from(stage.updater_error().unwrap().clone());
+        match phase {
+            0 => animation.finish(&mut stage),
+            1 => animation.clean_up_from_scene(&mut stage),
+            _ => animation.update_mobjects(&mut stage, 0.1),
+        }
+        assert_eq!(animation.deferred_error(), Some(expected.clone()));
+        assert_eq!(
+            stage.roots(),
+            &[source],
+            "failed phase {phase} published its target"
+        );
+        assert_eq!(family_facts(&stage, target), target_before);
+        assert!(animation.freeze_interpolation().is_none());
+        animation.finish(&mut stage);
+
+        // Acknowledging an updater error does not retry the failed animation.
+        stage.take_updater_error().unwrap().unwrap();
+        let source_before_retry = family_facts(&stage, source);
+        animation.interpolate(&mut stage, 0.75);
+        animation.update_mobjects(&mut stage, 0.1);
+        animation.finish(&mut stage);
+        animation.clean_up_from_scene(&mut stage);
+        animation.abort(&mut stage);
+        animation.clean_up_from_scene(&mut stage);
+        assert_eq!(animation.deferred_error(), Some(expected));
+        assert_eq!(stage.roots(), &[source]);
+        assert_eq!(family_facts(&stage, source), source_before_retry);
+        for member in stage.family(animation.state().mobject()) {
+            assert!(!stage.is_animating(member));
+            assert!(!stage.is_updating_suspended(member));
+        }
+
+        stage.clear_updaters(trigger, false);
+        animation.begin(&mut stage).unwrap();
+        assert!(animation.deferred_error().is_none());
+        animation.finish(&mut stage);
+        animation.clean_up_from_scene(&mut stage);
+        assert_eq!(stage.roots(), &[target]);
+        assert_eq!(family_facts(&stage, target), target_before);
+        assert!(animation.deferred_error().is_none());
+    }
 }
 
 #[test]
