@@ -49,6 +49,15 @@ arc-length fraction.
 overestimates curved paths (its outer polygon dominates). Dash counts and
 tip placements derived from it move accordingly — by design.
 
+Compound paths count only their drawn contours. A shared-anchor subpath
+break is a pen-up move with zero length, regardless of the distance between
+contours. Motion and dash placement jump across that gap without spending
+time or dash length on it. For a one-unit contour followed by a three-unit
+contour, the second contour starts at proportion 0.25 even when the contours
+are far apart. Interior boundaries select the next drawn contour; exact
+proportions 0 and 1 preserve the authored endpoints, including isolated
+endpoint contours. A path with no drawn length returns its first point.
+
 Points sampled with `point_from_proportion` move as well, and a decision
 taken on them can flip near its threshold. `_2021/bertrands_paradox.py`
 `CompareFirstTwoMethods` builds random chords from `circle.pfp(random())` and

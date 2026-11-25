@@ -272,3 +272,108 @@ fn degenerate_paths() {
     let mid = path.point_from_proportion(0.5).unwrap();
     assert!((mid[0] - 2.0).abs() < 1e-9);
 }
+
+#[test]
+fn compound_paths_measure_only_drawn_contours() {
+    let mut path = QuadPath::new();
+    path.start_new_path(p(0.0, 0.0));
+    path.add_line_to(p(1.0, 0.0), true).unwrap();
+    path.start_new_path(p(10.0, 0.0));
+    path.add_line_to(p(11.0, 0.0), true).unwrap();
+    let table = ArcLengthTable::for_path(&path);
+
+    // The nine-unit move between contours is a pen-up instruction, not a
+    // third line. Keeping its zero slot preserves the public curve indices.
+    assert_eq!(table.curve_lengths(), &[1.0, 0.0, 1.0]);
+    assert_eq!(table.total(), 2.0);
+    assert_eq!(path.get_arc_length(), 2.0);
+    for (alpha, expected) in [
+        (0.0, p(0.0, 0.0)),
+        (0.25, p(0.5, 0.0)),
+        (0.5, p(10.0, 0.0)),
+        (0.75, p(10.5, 0.0)),
+        (1.0, p(11.0, 0.0)),
+    ] {
+        assert_eq!(
+            path.point_from_proportion_with(&table, alpha),
+            Some(expected)
+        );
+    }
+    assert_eq!(table.curve_and_t_at(&path, 0.25), Some((0, 0.5)));
+    assert_eq!(table.curve_and_t_at(&path, 0.5), Some((2, 0.0)));
+    assert_eq!(table.curve_and_t_at(&path, 0.75), Some((2, 0.5)));
+}
+
+#[test]
+fn contour_gap_size_cannot_change_arc_length_or_pacing() {
+    for gap in [0.0, 0.25, 100.0, 1e6] {
+        let mut path = QuadPath::new();
+        path.start_new_path(p(0.0, 0.0));
+        path.add_line_to(p(2.0, 0.0), true).unwrap();
+        path.start_new_path(p(2.0 + gap, 0.0));
+        path.add_line_to(p(2.0 + gap, 6.0), true).unwrap();
+        let table = ArcLengthTable::for_path(&path);
+        assert_eq!(table.total(), 8.0, "gap {gap}");
+        for (alpha, expected) in [
+            (0.125, p(1.0, 0.0)),
+            (0.25, p(2.0 + gap, 0.0)),
+            (0.5, p(2.0 + gap, 2.0)),
+            (0.75, p(2.0 + gap, 4.0)),
+        ] {
+            let actual = path.point_from_proportion_with(&table, alpha).unwrap();
+            for (actual, expected) in actual.into_iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() <= 4.0 * f64::EPSILON * expected.abs().max(1.0),
+                    "gap {gap}, alpha {alpha}: {actual} versus {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn compound_path_endpoints_and_point_only_contours_are_defined() {
+    let mut path = QuadPath::new();
+    path.start_new_path(p(-5.0, 2.0));
+    path.start_new_path(p(0.0, 0.0));
+    path.add_line_to(p(0.0, 0.0), true).unwrap();
+    path.add_line_to(p(4.0, 0.0), true).unwrap();
+    path.start_new_path(p(9.0, 3.0));
+    let table = ArcLengthTable::for_path(&path);
+    assert_eq!(table.total(), 4.0);
+    for (alpha, expected) in [
+        (-1.0, p(-5.0, 2.0)),
+        (0.0, p(-5.0, 2.0)),
+        (0.5, p(2.0, 0.0)),
+        (1.0, p(9.0, 3.0)),
+        (2.0, p(9.0, 3.0)),
+    ] {
+        assert_eq!(
+            path.point_from_proportion_with(&table, alpha),
+            Some(expected)
+        );
+    }
+
+    let mut points_only = QuadPath::new();
+    points_only.start_new_path(p(1.0, 2.0));
+    points_only.start_new_path(p(7.0, 9.0));
+    points_only.start_new_path(p(-3.0, 4.0));
+    assert_eq!(points_only.get_arc_length(), 0.0);
+    // BN-07: a nonempty path of zero length always returns its start point.
+    for alpha in [0.0, 0.25, 0.5, 1.0] {
+        assert_eq!(points_only.point_from_proportion(alpha), Some(p(1.0, 2.0)));
+    }
+}
+
+#[test]
+fn stationary_handle_without_a_contour_break_keeps_its_length() {
+    // The topology law disambiguates very short stationary handles from
+    // contour breaks. Arc length must use that same law, not `anchor == handle`.
+    let path = QuadPath::from_points(vec![p(0.0, 0.0), p(0.0, 0.0), p(1e-5, 0.0)]).unwrap();
+    assert_eq!(path.subpath_end_indices(), vec![2]);
+    let table = ArcLengthTable::for_path(&path);
+    assert_eq!(table.curve_lengths(), &[1e-5]);
+    assert_eq!(table.total(), 1e-5);
+    let midpoint = path.point_from_proportion(0.5).unwrap();
+    assert!((midpoint[0] - 0.5e-5).abs() < 1e-18);
+}

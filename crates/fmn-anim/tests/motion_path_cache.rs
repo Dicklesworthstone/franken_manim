@@ -615,3 +615,58 @@ fn captured_path_motion_has_absolute_geometry_and_survives_source_removal() {
     animation.finish(&mut stage);
     assert_eq!(animation.deferred_error(), None);
 }
+
+#[test]
+fn compound_path_motion_spends_time_only_on_drawn_contours() {
+    let points = [
+        [-3.0, 0.0, 0.0],
+        [-2.5, 0.0, 0.0],
+        [-2.0, 0.0, 0.0],
+        [-2.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [2.5, 0.0, 0.0],
+        [4.0, 0.0, 0.0],
+    ];
+    // The one-unit and three-unit contours take 1/4 and 3/4 of the time;
+    // the three-unit pen-up gap consumes no frame or length.
+    let expected = [-2.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0];
+    for captured in [false, true] {
+        for skip in [false, true] {
+            let mut stage = Stage::new();
+            let path = stage.add(Mobject::from_points(&points));
+            let moving = stage.add(Mobject::from_points(&[[0.0; 3]]));
+            let mut animation = if captured {
+                let observation = PathSampler::default().observe(&stage, path).unwrap();
+                assert_eq!(observation.total_length(), 4.0);
+                stage.delete(path).unwrap();
+                MoveAlongPath::from_observation(moving, observation)
+            } else {
+                MoveAlongPath::new(moving, path)
+            };
+            animation.state_mut().config.rate_func = RateFunc::linear();
+            let mut animations: Vec<Box<dyn Animation>> = vec![Box::new(animation)];
+            let mut clock = RationalFrameClock::new(8).unwrap();
+            let rng = RngRoot::from_seed(123);
+            let mut visited = Vec::new();
+            let mut captures = 0;
+            play_segment_with_boundary(
+                &mut stage,
+                &mut clock,
+                &rng,
+                &mut animations,
+                skip,
+                &mut |stage, _| visited.push(stage.get_points(moving).unwrap()[0]),
+                &mut |_| captures += 1,
+            )
+            .unwrap();
+            assert_eq!(visited.len(), expected.len());
+            for (point, x) in visited.into_iter().zip(expected) {
+                assert!((point[0] - x).abs() < 1e-12, "{point:?} != {x}");
+                assert_eq!([point[1], point[2]], [0.0; 2]);
+            }
+            assert_eq!(captures, if skip { 0 } else { 8 });
+            assert_eq!(clock.now().frames(), 8);
+            assert_eq!(stage.get_points(moving).unwrap(), vec![[4.0, 0.0, 0.0]]);
+        }
+    }
+}

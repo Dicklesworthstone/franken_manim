@@ -17493,15 +17493,72 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
             "unchanged path rebuilt its world-space table {materializations} times"
         )));
     }
+    // Independent analytic compound-path oracle: the one-unit and three-unit
+    // drawn contours consume 1/4 and 3/4 of the motion; the pen-up gap is free.
+    let compound = parity_vmob(
+        &mut stage,
+        &[
+            [-3.0, 0.0, 0.0],
+            [-2.5, 0.0, 0.0],
+            [-2.0, 0.0, 0.0],
+            [-2.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.5, 0.0, 0.0],
+            [4.0, 0.0, 0.0],
+        ],
+    );
+    let observation = fmn_mobject::path_sampling::PathSampler::default()
+        .observe(&stage, compound)
+        .map_err(|error| fail(format!("compound observation: {error}")))?;
+    if observation.total_length() != 4.0 {
+        return Err(fail("compound observation counted a pen-up gap"));
+    }
+    let mut compound_samples = 0_u64;
+    for captured in [false, true] {
+        let moving = parity_vmob(&mut stage, &[[0.0; 3]]);
+        let mut motion = if captured {
+            MoveAlongPath::from_observation(moving, observation.clone())
+        } else {
+            MoveAlongPath::new(moving, compound)
+        };
+        motion.state_mut().config.rate_func = RateFunc::linear();
+        motion
+            .begin(&mut stage)
+            .map_err(|error| fail(format!("compound motion begin: {error}")))?;
+        for (alpha, x) in [
+            (0.0, -3.0),
+            (0.125, -2.5),
+            (0.25, 1.0),
+            (0.5, 2.0),
+            (1.0, 4.0),
+        ] {
+            motion.interpolate(&mut stage, alpha);
+            if let Some(error) = motion.deferred_error() {
+                return Err(fail(format!("compound motion: {error}")));
+            }
+            let point = stage
+                .get_points(moving)
+                .ok_or_else(|| fail("compound mover lost its point"))?[0];
+            if (point[0] - x).abs() > 1e-12 || point[1] != 0.0 || point[2] != 0.0 {
+                return Err(fail(format!(
+                    "compound motion at alpha {alpha} (captured={captured}): {point:?}, want x={x}"
+                )));
+            }
+            compound_samples += 1;
+        }
+    }
     ctx.event(
         LogEvent::new("e2e.parity.move_along_path_arclength")
             .field("equal_steps", truth(worst_deviation / mean_step <= 0.01))
             .field("animation_matches", animation_matches)
+            .field("compound_samples", compound_samples)
             .field("path_materializations", materializations),
     );
     ctx.counter("parity_arclength_animation_matches", animation_matches);
+    ctx.counter("parity_arclength_compound_samples", compound_samples);
     Ok(RunOutcome::ok()
         .with_counter("parity_arclength_animation_matches", animation_matches)
+        .with_counter("parity_arclength_compound_samples", compound_samples)
         .with_counter("parity_arclength_path_materializations", materializations))
 }
 
@@ -23716,6 +23773,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         vec![
             Assertion::ExitCode(0),
             counter_eq("parity_arclength_animation_matches", 3),
+            counter_eq("parity_arclength_compound_samples", 10),
             counter_eq("parity_arclength_path_materializations", 1),
         ],
         vec![LogExpect::span_present(
@@ -23723,6 +23781,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             vec![
                 FieldPred::str_eq("equal_steps", "true"),
                 FieldPred::u64_eq("animation_matches", 3),
+                FieldPred::u64_eq("compound_samples", 10),
                 FieldPred::u64_eq("path_materializations", 1),
             ],
         )],
@@ -26834,6 +26893,16 @@ fn native_persistent_yuv_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "parity.native_persistent_yuv.v1")
         .expect("native persistent YUV conversion scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn true_arclength_compound_motion_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "parity.move_along_path_true_arclength.v1")
+        .expect("true-arclength motion scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

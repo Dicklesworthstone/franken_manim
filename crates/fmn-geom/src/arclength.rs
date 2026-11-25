@@ -156,7 +156,9 @@ fn near_collinear_length(u: Vec3, v: Vec3, a: f64, b: f64) -> f64 {
 }
 
 /// Per-curve and cumulative true lengths of a path — the retained
-/// arc-length artifact (§10.8). Immutable once built; see
+/// arc-length artifact (§10.8). Subpath-break slots have length zero: their
+/// separated anchors encode a pen-up move, not a drawable quadratic. Slots
+/// retain the path's curve indices. Immutable once built; see
 /// [`CachedArcLength`] for the revision-keyed holder.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ArcLengthTable {
@@ -168,9 +170,22 @@ impl ArcLengthTable {
     /// Build for a path (exact per-curve closed forms; O(curves)).
     #[must_use]
     pub fn for_path(path: &QuadPath) -> Self {
+        // Consult the same topology law as rendering and reversal. Merely
+        // testing anchor == handle would also erase short stationary-handle
+        // curves that QuadPath deliberately distinguishes from contour breaks.
+        // The final end index names no curve, so it cannot erase a real one.
+        let mut ends = path.subpath_end_indices().into_iter().peekable();
         let curve_lengths: Vec<f64> = path
             .bezier_tuples()
-            .map(|[a0, h, a1]| quadratic_arc_length(a0, h, a1))
+            .enumerate()
+            .map(|(index, [a0, h, a1])| {
+                if ends.peek() == Some(&(2 * index)) {
+                    ends.next();
+                    0.0
+                } else {
+                    quadratic_arc_length(a0, h, a1)
+                }
+            })
             .collect();
         let mut cumulative = Vec::with_capacity(curve_lengths.len() + 1);
         let mut total = 0.0;
@@ -201,13 +216,26 @@ impl ArcLengthTable {
     /// reaches `alpha · total`. Newton on the exact partial-length closed
     /// form with a bisection safeguard, fixed iteration count
     /// (deterministic on every platform).
+    ///
+    /// Interior contour boundaries select the next drawable curve, skipping
+    /// pen-up moves without spending any length on them. For a positive-length
+    /// path, proportions zero and one retain the authored first and last
+    /// points, including isolated endpoint contours. A path with no drawn
+    /// length returns its first point at every proportion (BN-07).
     #[must_use]
     pub fn curve_and_t_at(&self, path: &QuadPath, alpha: f64) -> Option<(usize, f64)> {
         if self.curve_lengths.is_empty() {
             return None;
         }
         let alpha = alpha.clamp(0.0, 1.0);
-        let target = alpha * self.total();
+        let total = self.total();
+        if total == 0.0 || alpha == 0.0 {
+            return Some((0, 0.0));
+        }
+        if alpha == 1.0 {
+            return Some((self.curve_lengths.len() - 1, 1.0));
+        }
+        let target = alpha * total;
         let mut index = self
             .cumulative
             .partition_point(|&len| len <= target)

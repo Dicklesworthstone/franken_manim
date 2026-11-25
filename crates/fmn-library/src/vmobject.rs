@@ -1549,6 +1549,64 @@ mod tests {
     }
 
     #[test]
+    fn compound_dashes_keep_phase_without_drawing_pen_up_moves() {
+        for gap in [1.0, 8.0, 100.0] {
+            let x = 2.0 + gap;
+            let mut path = QuadPath::new();
+            path.start_new_path([0.0; 3]);
+            path.add_line_to([2.0, 0.0, 0.0], true).unwrap();
+            path.start_new_path([x, 0.0, 0.0]);
+            path.add_line_to([x, 6.0, 0.0], true).unwrap();
+            let source = VMobject::from_points(path.points().to_vec());
+
+            // Eight drawn units, two periods, 3/4 drawn: each dash covers
+            // three units. The first crosses the pen-up move after two units;
+            // the second starts at (4/7)*8, keeping the Reference's normalized
+            // start rule. Neither position nor length includes the gap.
+            let dashed = dashed_vmobject(&source, 2, 0.75, 0.0).unwrap();
+            assert_eq!(dashed.children().len(), 2);
+            let first = dashed.children()[0].path().unwrap();
+            let second = dashed.children()[1].path().unwrap();
+            let first_contours = first.subpaths();
+            assert_eq!(first_contours.len(), 2, "gap {gap}: keep the pen-up move");
+            assert_points_close(
+                first_contours[0],
+                &[[0.0; 3], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+                "first dash before the contour break",
+            );
+            assert_points_close(
+                first_contours[1],
+                &[[x, 0.0, 0.0], [x, 0.5, 0.0], [x, 1.0, 0.0]],
+                "first dash after the contour break",
+            );
+            assert_eq!(second.subpaths().len(), 1);
+            assert_points_close(
+                &second.points()[4..],
+                &[
+                    [x, 18.0 / 7.0, 0.0],
+                    [x, 57.0 / 14.0, 0.0],
+                    [x, 39.0 / 7.0, 0.0],
+                ],
+                "second dash keeps its phase after the contour break",
+            );
+            // Independently measure the straight pieces by their endpoint
+            // chords; a shared arclength bug cannot make this oracle pass.
+            for dash in [&first, &second] {
+                let drawn: f64 = dash
+                    .subpaths()
+                    .iter()
+                    .map(|contour| {
+                        let a = contour.first().unwrap();
+                        let b = contour.last().unwrap();
+                        ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt()
+                    })
+                    .sum();
+                assert!((drawn - 3.0).abs() < 1e-12, "gap {gap}: drawn {drawn}");
+            }
+        }
+    }
+
+    #[test]
     fn dash_intervals_keep_reference_start_normalization_in_length_space() {
         let source = VMobject::from_points(vec![[0.0, 0.0, 0.0], [0.5, 0.0, 0.0], [1.0, 0.0, 0.0]]);
         let intervals = dash_curve_intervals(&source, 4, 0.5, 0.0).expect("valid dash intervals");
