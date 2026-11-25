@@ -5,6 +5,7 @@ Line lifecycle and authored overrides instead of installing a replacement tree.
 """
 from __future__ import annotations
 
+import inspect
 import math
 import operator
 from itertools import islice
@@ -18,6 +19,12 @@ def install_derived_lines(native):
         return
     Dashed, Tangent, VMobject = (g[name] for name in ('DashedLine', 'TangentLine', 'VMobject'))
     original_count = Dashed.calculate_num_dashes
+    sample_protocol = {
+        name: inspect.getattr_static(VMobject, name, None)
+        for name in ('pfp', 'point_from_proportion', '_point_from_proportion',
+                     '_tangent_sample_points', 'has_points', '_has_points',
+                     '__getattribute__', '__getattr__')
+    }
 
     def dash_parameters(dash_length, ratio):
         dash_length, ratio = float(dash_length), float(ratio)
@@ -104,11 +111,22 @@ def install_derived_lines(native):
         if empty:
             start = end = g['_ORIGIN']
         else:
+            stock = all(inspect.getattr_static(vmob, name, None) is expected
+                        for name, expected in sample_protocol.items())
+            if stock:
+                # One native arclength table owns lookup and contour bounds.
+                # An internal move is never a tangent direction. Static
+                # inspection above neither runs nor bypasses authored hooks.
+                points = vmob._tangent_sample_points(alpha, d_alpha)
+            else:
+                # Public samplers keep the two authored sample positions and
+                # their call/exception ordering, including instance overrides.
+                points = (vmob.pfp(a) for a in (
+                    max(0.0, min(1.0, alpha - d_alpha)),
+                    max(0.0, min(1.0, alpha + d_alpha))))
             samples = []
-            for a in (max(0.0, min(1.0, alpha - d_alpha)),
-                      max(0.0, min(1.0, alpha + d_alpha))):
-                # Call the public sampler exactly at the two authored samples.
-                point = g['_vec3'](vmob.pfp(a))
+            for point in points:
+                point = g['_vec3'](point)
                 if not all(math.isfinite(value) for value in point):
                     raise ValueError('TangentLine samples must be finite')
                 samples.append(point)

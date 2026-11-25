@@ -4310,6 +4310,29 @@ impl BridgeMobject {
         with_stage(slf, |stage, mob| stage.point_from_proportion(mob, alpha))?.map_err(stage_error)
     }
 
+    /// Stock `TangentLine` samples remain inside the contour selected by
+    /// Chisel's true-arclength lookup, even when its finite difference spans
+    /// a non-drawing move. Authored Python samplers use their public protocol.
+    fn _tangent_sample_points(
+        slf: &Bound<'_, Self>,
+        alpha: f64,
+        d_alpha: f64,
+    ) -> PyResult<Option<([f64; 3], [f64; 3])>> {
+        if !alpha.is_finite() || !d_alpha.is_finite() {
+            return Err(PyValueError::new_err(
+                "tangent sample parameters must be finite",
+            ));
+        }
+        crossing::record(CrossingClass::Other);
+        with_stage(slf, |stage, mob| {
+            let points = stage.get_points(mob).unwrap_or_default();
+            fmn_library::VMobject::from_points(points)
+                .path()
+                .map(|path| fmn_library::line::tangent_sample_points(&path, alpha, d_alpha))
+        })?
+        .map_err(native_error)
+    }
+
     /// Reference `VMobject.pointwise_become_partial`, routed to the same
     /// Marionette operation Choreo's creation animations use. The source may
     /// be detached or scene-bound; an unrelated Stage contributes a temporary

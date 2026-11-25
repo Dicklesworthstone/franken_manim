@@ -58,6 +58,14 @@ are far apart. Interior boundaries select the next drawn contour; exact
 proportions 0 and 1 preserve the authored endpoints, including isolated
 endpoint contours. A path with no drawn length returns its first point.
 
+`TangentLine` takes its two true-length samples within the contour selected
+by `alpha`. A finite-difference window that crosses a pen-up move clamps
+to that contour's endpoint, so a tangent never points across empty space
+toward another contour. At an interior boundary it follows the next contour.
+Connected paths retain their existing finite-difference behavior. Python
+subclasses and instance overrides of the sampling methods retain their
+authored two-call protocol and exception order.
+
 Points sampled with `point_from_proportion` move as well, and a decision
 taken on them can flip near its threshold. `_2021/bertrands_paradox.py`
 `CompareFirstTwoMethods` builds random chords from `circle.pfp(random())` and

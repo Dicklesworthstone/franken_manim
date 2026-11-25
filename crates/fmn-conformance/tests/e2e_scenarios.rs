@@ -17547,11 +17547,44 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
             compound_samples += 1;
         }
     }
+    // A tangent at the internal boundary belongs to the next contour, and
+    // its finite-difference window cannot point across an unrelated gap.
+    let mut compound_tangents = 0_u64;
+    for x in [3.0, 10.0, 102.0] {
+        let source = VMobject::from_points(vec![
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [x, 5.0, 0.0],
+            [x, 5.5, 0.0],
+            [x, 6.0, 0.0],
+        ]);
+        for (alpha, direction) in [(0.49, RIGHT), (0.5, UP)] {
+            let tangent = fmn_library::line::tangent_line(
+                &source,
+                alpha,
+                2.0,
+                0.125,
+                Default::default(),
+            );
+            let actual = fmn_library::line::line_unit_vector(&tangent);
+            let chord = fmn_library::line::line_vector(&tangent);
+            let length = (chord[0] * chord[0] + chord[1] * chord[1]).sqrt();
+            if actual != direction || (length - 2.0).abs() > 1e-12 {
+                return Err(fail(format!(
+                    "compound tangent at alpha {alpha}, gap endpoint x={x}: {actual:?}, length={length}"
+                )));
+            }
+            compound_tangents += 1;
+        }
+    }
     ctx.event(
         LogEvent::new("e2e.parity.move_along_path_arclength")
             .field("equal_steps", truth(worst_deviation / mean_step <= 0.01))
             .field("animation_matches", animation_matches)
             .field("compound_samples", compound_samples)
+            .field("compound_tangents", compound_tangents)
             .field("path_materializations", materializations),
     );
     ctx.counter("parity_arclength_animation_matches", animation_matches);
@@ -17559,6 +17592,7 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
     Ok(RunOutcome::ok()
         .with_counter("parity_arclength_animation_matches", animation_matches)
         .with_counter("parity_arclength_compound_samples", compound_samples)
+        .with_counter("parity_arclength_compound_tangents", compound_tangents)
         .with_counter("parity_arclength_path_materializations", materializations))
 }
 
@@ -23774,6 +23808,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             Assertion::ExitCode(0),
             counter_eq("parity_arclength_animation_matches", 3),
             counter_eq("parity_arclength_compound_samples", 10),
+            counter_eq("parity_arclength_compound_tangents", 6),
             counter_eq("parity_arclength_path_materializations", 1),
         ],
         vec![LogExpect::span_present(
@@ -23782,6 +23817,7 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::str_eq("equal_steps", "true"),
                 FieldPred::u64_eq("animation_matches", 3),
                 FieldPred::u64_eq("compound_samples", 10),
+                FieldPred::u64_eq("compound_tangents", 6),
                 FieldPred::u64_eq("path_materializations", 1),
             ],
         )],

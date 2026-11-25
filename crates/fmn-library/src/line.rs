@@ -348,7 +348,8 @@ impl TryFrom<DashedLine> for Mobject {
 ///
 /// `alpha` is a **true-length** proportion (BN-03), so "tangent at the
 /// halfway point" means half way along the curve, not half way through its
-/// curve list.
+/// curve list. The finite difference stays in the contour containing that
+/// point, so a compound path never acquires a tangent across a contour gap.
 #[must_use]
 pub fn tangent_line(
     source: &VMobject,
@@ -360,12 +361,7 @@ pub fn tangent_line(
     let Ok(path) = source.path() else {
         return VMobject::new().with_style(style);
     };
-    let a1 = (alpha - d_alpha).clamp(0.0, 1.0);
-    let a2 = (alpha + d_alpha).clamp(0.0, 1.0);
-    let (Some(p1), Some(p2)) = (
-        path.point_from_proportion(a1),
-        path.point_from_proportion(a2),
-    ) else {
+    let Some((p1, p2)) = tangent_sample_points(&path, alpha, d_alpha) else {
         return VMobject::new().with_style(style);
     };
     let line = Line::new(p1, p2)
@@ -378,6 +374,50 @@ pub fn tangent_line(
     }
     let center = line.center_point();
     line.scaled_about(length / current, center)
+}
+
+/// The two true-arclength samples defining a [`tangent_line`].
+///
+/// Both samples belong to the contour selected at `alpha`. A finite
+/// difference that would cross a move clamps to that contour's endpoint,
+/// rather than measuring the unrelated displacement to the next contour.
+/// At an internal length boundary Chisel selects the following contour.
+/// Point-only contours yield two identical points and therefore no direction.
+///
+/// This is also the Python portal's stock-path authority. Authored Python
+/// sampling overrides retain their own two-call protocol.
+#[must_use]
+pub fn tangent_sample_points(path: &QuadPath, alpha: f64, d_alpha: f64) -> Option<(Vec3, Vec3)> {
+    let first = *path.points().first()?;
+    if path.num_curves() == 0 {
+        return Some((first, first));
+    }
+    let table = ArcLengthTable::for_path(path);
+    let (center_curve, center_t) = table.curve_and_t_at(path, alpha)?;
+    let center_index = 2 * center_curve + usize::from(center_t == 1.0) * 2;
+    let mut start = 0;
+    let end = path.subpath_end_indices().into_iter().find(|&end| {
+        if center_index <= end {
+            true
+        } else {
+            start = end + 2;
+            false
+        }
+    })?;
+    let sample = |proportion: f64| -> Option<Vec3> {
+        let (curve, t) = table.curve_and_t_at(path, proportion)?;
+        if 2 * curve < start {
+            Some(path.points()[start])
+        } else if 2 * curve >= end {
+            Some(path.points()[end])
+        } else {
+            path.nth_curve_point(curve, t)
+        }
+    };
+    Some((
+        sample((alpha - d_alpha).clamp(0.0, 1.0))?,
+        sample((alpha + d_alpha).clamp(0.0, 1.0))?,
+    ))
 }
 
 /// `Elbow(width, angle)`: the L-shaped corner mark.
@@ -1162,6 +1202,67 @@ mod tests {
         // *line* and not merely a parallel one.
         let offset = space_ops::get_norm(sub(line_projection(&tangent, touch), touch));
         assert!(offset < 1e-6, "touch point {offset} off the line");
+    }
+
+    #[test]
+    fn tangent_samples_never_join_disconnected_contours() {
+        let source = VMobject::from_points(vec![
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [10.0, 5.0, 0.0],
+            [10.0, 5.5, 0.0],
+            [10.0, 6.0, 0.0],
+        ]);
+        let path = source.path().unwrap();
+        assert_eq!(path.subpath_end_indices(), vec![2, 6]);
+        let (before, after) = tangent_sample_points(&path, 0.5, 0.125).unwrap();
+        assert_eq!(before, [10.0, 5.0, 0.0]);
+        assert!(close(after[0], 10.0, 1e-12));
+        assert!(close(after[1], 5.25, 1e-12));
+        let right = tangent_line(&source, 0.5, 2.0, 0.125, Style::default());
+        assert_eq!(line_unit_vector(&right), UP);
+        assert!(close(line_arc_length(&right), 2.0, 1e-12));
+
+        let left = tangent_line(&source, 0.49, 2.0, 0.125, Style::default());
+        assert_eq!(line_unit_vector(&left), RIGHT);
+        assert!(close(left.center_point()[1], 0.0, 1e-12));
+        let (a, b) = tangent_sample_points(&path, 0.5, 1.0).unwrap();
+        assert_eq!((a, b), ([10.0, 5.0, 0.0], [10.0, 6.0, 0.0]));
+        assert_eq!(tangent_sample_points(&path, 0.5, -1.0), Some((b, a)));
+    }
+
+    #[test]
+    fn tangent_samples_keep_connected_curvature_and_point_only_endpoints() {
+        let circle = crate::arc::Circle::new().radius(3.0).build();
+        let path = circle.path().unwrap();
+        let (a, b) = tangent_sample_points(&path, 0.3, 0.01).unwrap();
+        assert_eq!(a, path.point_from_proportion(0.3 - 0.01).unwrap());
+        assert_eq!(b, path.point_from_proportion(0.3 + 0.01).unwrap());
+
+        let points = vec![
+            [-4.0, -3.0, 0.0],
+            [-4.0, -3.0, 0.0],
+            [0.0, 0.0, 0.0],
+            [0.5, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [8.0, 9.0, 0.0],
+        ];
+        let path = QuadPath::from_points(points.clone()).unwrap();
+        for (alpha, point) in [(0.0, points[0]), (1.0, points[6])] {
+            assert_eq!(
+                tangent_sample_points(&path, alpha, 0.1),
+                Some((point, point))
+            );
+        }
+        let point = QuadPath::from_points(vec![[3.0, 2.0, 1.0]]).unwrap();
+        assert_eq!(
+            tangent_sample_points(&point, 0.5, 0.1),
+            Some(([3.0, 2.0, 1.0], [3.0, 2.0, 1.0]))
+        );
+        assert_eq!(tangent_sample_points(&QuadPath::new(), 0.5, 0.1), None);
     }
 
     #[test]

@@ -170,6 +170,69 @@ class DerivedLineLifecycleTests(unittest.TestCase):
         np.testing.assert_allclose(tangent.get_unit_vector(), m.UP)
         self.assertAlmostEqual(tangent.get_length(), 3)
 
+    def test_tangent_never_uses_a_contour_gap_as_its_direction(self):
+        for bound in (False, True):
+            path = m.VMobject().set_points([
+                [0, 0, 0], [.5, 0, 0], [1, 0, 0],
+                [1, 0, 0], [10, 5, 0], [10, 5.5, 0], [10, 6, 0],
+            ])
+            offset = np.array([3, -2, 0])
+            if bound:
+                scene = m.Scene()
+                scene.add(path)
+            path.shift(offset)
+            with self.subTest(bound=bound):
+                tangent = m.TangentLine(path, .5, length=2, d_alpha=.125)
+                np.testing.assert_allclose(tangent.get_unit_vector(), m.UP, atol=1e-6)
+                np.testing.assert_allclose(tangent.get_center(), [10, 5.125, 0] + offset,
+                                           atol=1e-6)
+                self.assertAlmostEqual(tangent.get_length(), 2)
+                before = m.TangentLine(path, .49, length=2, d_alpha=.125)
+                np.testing.assert_allclose(before.get_unit_vector(), m.RIGHT, atol=1e-6)
+                self.assertAlmostEqual(before.get_center()[1], offset[1])
+
+    def test_tangent_keeps_class_and_instance_sampling_overrides(self):
+        for name in ('pfp', 'point_from_proportion', '_point_from_proportion'):
+            for instance in (False, True):
+                calls = []
+                class Curve(m.VMobject):
+                    pass
+                source = Curve().set_points([
+                    [0, 0, 0], [.5, 0, 0], [1, 0, 0],
+                    [1, 0, 0], [10, 5, 0], [10, 5.5, 0], [10, 6, 0],
+                ])
+                def sample(self, alpha):
+                    calls.append(alpha)
+                    return [2 * alpha, 3, 0]
+                if instance:
+                    setattr(source, name, sample.__get__(source, Curve))
+                else:
+                    setattr(Curve, name, sample)
+                with self.subTest(name=name, instance=instance):
+                    tangent = m.TangentLine(source, .5, length=2, d_alpha=.125)
+                    self.assertEqual(calls, [.375, .625])
+                    np.testing.assert_allclose(tangent.get_unit_vector(), m.RIGHT, atol=1e-6)
+                    np.testing.assert_allclose(tangent.get_center(), [1, 3, 0], atol=1e-6)
+
+    def test_tangent_keeps_private_has_points_override_errors(self):
+        for instance in (False, True):
+            class Curve(m.VMobject):
+                pass
+            source = Curve()
+            def has_points(self):
+                return True
+            if instance:
+                source._has_points = has_points.__get__(source, Curve)
+            else:
+                Curve._has_points = has_points
+            with self.subTest(instance=instance):
+                with self.assertRaises(Exception) as expected:
+                    source.pfp(.375)
+                with self.assertRaises(type(expected.exception)) as actual:
+                    m.TangentLine(source, .5, d_alpha=.125)
+                self.assertIs(type(actual.exception), type(expected.exception))
+                self.assertEqual(str(actual.exception), str(expected.exception))
+
     def test_sampler_failure_is_original_and_precedes_tangent_hooks(self):
         failure, calls = RuntimeError('sampler'), []
         class Curve(m.Line):
