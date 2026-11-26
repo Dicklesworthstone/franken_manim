@@ -348,3 +348,103 @@ fn early_termination_keeps_completed_camera_frames() {
     assert_eq!(result.scene.time.frames(), 1);
     assert_eq!(result.bundle.frame_count, 1);
 }
+
+#[test]
+fn camera_export_freezes_only_the_picture_at_each_owner_boundary() {
+    struct Wait(CameraRig);
+    impl SceneConstruct for Wait {
+        fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+            stage.add(Cube::new(1.0))?;
+            let image = fmn::mobject::ImageResource::rgba8(
+                1,
+                1,
+                vec![255, 0, 255, 255],
+                fmn::mobject::ImageColorSpace::Srgb,
+                fmn::mobject::ImageSampler::default(),
+            )
+            .unwrap();
+            let hidden_pixels = image.shared_pixels();
+            stage
+                .arena_mut()
+                .add(Mobject::new().with_image_resource(image));
+            stage.wait_until_frames(4, |_| false)?;
+            assert_eq!(
+                Arc::strong_count(&hidden_pixels),
+                2,
+                "camera export must not freeze detached arena history"
+            );
+            // No further capture: these edits must not change recorded cameras.
+            stage
+                .arena_mut()
+                .set_tracker_value(self.0.center()[0], 100.0)?;
+            stage
+                .arena_mut()
+                .set_tracker_value(self.0.light()[0], -100.0)?;
+            Ok(())
+        }
+    }
+
+    for compact in [false, true] {
+        let count = Rc::new(Cell::new(0));
+        let seen = Rc::clone(&count);
+        let owner = std::thread::current().id();
+        let base = camera();
+        let mut options = options();
+        if compact {
+            options.storage = fmn::BundleStorage::Compact(Default::default());
+        }
+        let export = export_camera_bundle_bytes(
+            move |scene, base| {
+                let rig = CameraRig::new(scene, base)?;
+                scene.stage_mut().add_dt_updater(
+                    rig.root(),
+                    move |stage, _, dt| {
+                        assert_eq!(std::thread::current().id(), owner);
+                        if dt > 0.0 {
+                            seen.set(seen.get() + 1);
+                        }
+                        for (channel, speed) in [(rig.center()[0], 1.0), (rig.light()[0], 3.0)] {
+                            let value = stage.tracker_value(channel).unwrap();
+                            stage
+                                .set_tracker_value(channel, value + speed * dt)
+                                .unwrap();
+                        }
+                    },
+                    false,
+                )?;
+                Ok((Wait(rig), rig))
+            },
+            base.clone(),
+            options,
+        )
+        .unwrap();
+        assert_eq!(count.get(), 4);
+        assert_eq!(export.bundle.frame_count, 4);
+        assert_eq!(export.scene.time.frames(), 4);
+        let bundle = TimelineBundle::from_bytes(&export.bundle.bytes).unwrap();
+        for index in [3, 0, 2, 1] {
+            let (captured, camera) = bundle.stage_at_with_camera(index, (48, 32)).unwrap();
+            let dt = f64::from(index + 1) / 8.0;
+            let mut expected = base.clone();
+            let center = base.frame.center();
+            expected
+                .frame
+                .set_center([center[0] + dt, center[1], center[2]])
+                .unwrap();
+            expected.light_source_position[0] += 3.0 * dt;
+            expected
+                .frame
+                .resize_to_aspect_ratio(48.0 / 32.0, false)
+                .unwrap();
+            assert_eq!(
+                fmn_render::camera::CameraSample::capture(&camera.unwrap()).unwrap(),
+                fmn_render::camera::CameraSample::capture(
+                    &fmn_render::Camera::new(expected).unwrap()
+                )
+                .unwrap()
+            );
+            assert_eq!(captured.snapshot().image_resources().count(), 0);
+        }
+        assert_eq!(count.get(), 4, "replay must not invoke the camera updater");
+    }
+}

@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use fmn_anim::FramePacket;
+use fmn_anim::{FrameMetadata, FramePacket};
 use fmn_platform::fs::{FileSystem, StdFs};
 use fmn_render::{Camera, CameraConfig};
 use fmn_scene::recording::{RecordingError, SceneBundleRecorder};
@@ -33,8 +33,8 @@ fn recording_error(error: RecordingError) -> BundleExportError {
 /// The factory allocates a [`CameraRig`] in the actual Scene and returns its
 /// normal [`SceneConstruct`] program. It may create objects and updaters but
 /// cannot run playback before capture begins. The existing Scene lifecycle and
-/// rational clock own animation: the rig is sampled from the same immutable
-/// post-updater packet as geometry, never from a later live Stage.
+/// rational clock own animation: the rig and geometry are sampled at the same
+/// completed post-updater boundary and retained before the live Stage changes.
 ///
 /// The camera supplies capture dimensions/aspect, background and sampling
 /// policy; its FPS must match the effective Scene FPS in `options`. The program
@@ -220,6 +220,27 @@ impl SceneSink for RigRecorder {
         }
         match self.sample(&packet.materialize_stage()) {
             Ok(camera) => self.recorder.capture_with_camera(reason, packet, &camera),
+            Err(error) => {
+                let message = error.to_string();
+                self.failure = Some(error);
+                Err(IntegrationError::new("fmtl-camera", message))
+            }
+        }
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &fmn_mobject::Stage,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        if let Some(error) = &self.failure {
+            return Err(IntegrationError::new("fmtl-camera", error.to_string()));
+        }
+        match self.sample(stage) {
+            Ok(camera) => self
+                .recorder
+                .capture_stage_with_camera(reason, stage, metadata, &camera),
             Err(error) => {
                 let message = error.to_string();
                 self.failure = Some(error);

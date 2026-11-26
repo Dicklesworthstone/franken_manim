@@ -3,11 +3,15 @@
 //! neither a callback clock nor a geometry/serialization oracle is substituted.
 use std::cell::Cell;
 use std::rc::Rc;
+use std::sync::Arc;
 
-use fmn_anim::FramePacket;
+use fmn_anim::{FrameMetadata, FramePacket, RationalFrameClock};
 use fmn_core::color::Srgb;
+use fmn_core::rng::RngRoot;
 use fmn_hash::sha256;
-use fmn_mobject::{Mob, Mobject, RecordBuffer, RecordSchema, Stage};
+use fmn_mobject::{
+    ImageColorSpace, ImageResource, ImageSampler, Mob, Mobject, RecordBuffer, RecordSchema, Stage,
+};
 use fmn_render::{
     EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
     Tiling, Viewport,
@@ -133,6 +137,20 @@ impl SceneSink for Paired {
     ) -> Result<(), IntegrationError> {
         self.full.capture(reason, packet.clone())?;
         self.compact.capture(reason, packet.clone())?;
+        self.packets.push(packet);
+        Ok(())
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.compact.capture_stage(reason, stage, metadata)?;
+        // The independent full-packet path remains the pixel/serialization oracle.
+        let packet = FramePacket::freeze_metadata(stage, metadata);
+        self.full.capture(reason, packet.clone())?;
         self.packets.push(packet);
         Ok(())
     }
@@ -418,6 +436,18 @@ impl SceneSink for ObservedCompact {
         self.frames.push(packet.state().to_render_bytes().unwrap());
         self.recorder.capture(reason, packet)
     }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.recorder.capture_stage(reason, stage, metadata)?;
+        self.frames
+            .push(stage.snapshot().to_render_bytes().unwrap());
+        Ok(())
+    }
 }
 
 #[test]
@@ -627,4 +657,137 @@ fn compact_snapshot_work_retained_and_output_limits_are_independent_and_sticky()
         work.finish(),
         Err(RecordingError::SnapshotWorkLimit { limit, .. }) if limit == (2 * bytes - 1) as u64,
     ));
+}
+
+fn detached_image(stage: &mut Stage) -> (Mob, Arc<[u8]>) {
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![255, 0, 255, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let pixels = image.shared_pixels();
+    (stage.add(Mobject::new().with_image_resource(image)), pixels)
+}
+
+#[test]
+fn owner_picture_capture_avoids_detached_snapshots_and_isolates_live_view_edits() {
+    for compact in [false, true] {
+        for terminal in [false, true] {
+            let mut source = scene();
+            let visible = source
+                .add_mobject(Mobject::from_points(&[[1.0, 2.0, 3.0]]))
+                .unwrap();
+            let (hidden, hidden_pixels) = detached_image(source.stage_mut());
+            let view = source
+                .stage_mut()
+                .get_mut(visible)
+                .unwrap()
+                .buffer
+                .export_view(true);
+            let mut recorder = if compact {
+                SceneBundleRecorder::new_compact_render_only(8, Default::default()).unwrap()
+            } else {
+                SceneBundleRecorder::new_render_only(8, Default::default()).unwrap()
+            };
+            if terminal {
+                recorder.capture_terminal_still(source.stage()).unwrap();
+            } else {
+                source.show(&mut recorder).unwrap();
+                assert!(view.write(0, "point", &[4.0, 5.0, 6.0]));
+                source.wait_frames(2, &mut recorder).unwrap();
+            }
+            assert_eq!(
+                Arc::strong_count(&hidden_pixels),
+                2,
+                "picture capture must not create a hidden entry's snapshot cache"
+            );
+            assert!(source.stage().contains(hidden));
+            assert!(view.write(0, "point", &[7.0, 8.0, 9.0]));
+            let artifact = recorder.finish().unwrap();
+            assert_eq!(artifact.frame_count, if terminal { 1 } else { 3 });
+            let bundle = TimelineBundle::from_bytes(&artifact.bytes).unwrap();
+            for index in 0..artifact.frame_count {
+                let captured = bundle.stage_at(index).unwrap();
+                let expected = if index == 0 {
+                    [1.0, 2.0, 3.0]
+                } else {
+                    [4.0, 5.0, 6.0]
+                };
+                assert_eq!(
+                    captured.get_points(captured.roots()[0]).unwrap(),
+                    [expected]
+                );
+                assert_eq!(captured.snapshot().image_resources().count(), 0);
+            }
+            assert_eq!(
+                source.stage().get_points(visible).unwrap(),
+                [[7.0, 8.0, 9.0]]
+            );
+            assert_eq!(Arc::strong_count(&hidden_pixels), 2);
+        }
+    }
+}
+
+#[test]
+fn owner_full_state_recorders_keep_detached_history() {
+    for compact in [false, true] {
+        let mut source = scene();
+        source
+            .add_mobject(Mobject::from_points(&[[1.0, 2.0, 3.0]]))
+            .unwrap();
+        let (_, pixels) = detached_image(source.stage_mut());
+        let mut recorder = if compact {
+            SceneBundleRecorder::new_compact(8, Default::default()).unwrap()
+        } else {
+            SceneBundleRecorder::new(8, Default::default()).unwrap()
+        };
+        source.show(&mut recorder).unwrap();
+        assert!(Arc::strong_count(&pixels) > 2);
+        let artifact = recorder.finish().unwrap();
+        let captured = TimelineBundle::from_bytes(&artifact.bytes)
+            .unwrap()
+            .stage_at(0)
+            .unwrap();
+        assert_eq!(captured.snapshot().image_resources().count(), 1);
+        assert_eq!(
+            captured.snapshot().to_bytes().unwrap(),
+            source.stage().snapshot().to_bytes().unwrap()
+        );
+    }
+}
+
+#[test]
+fn owner_capture_refuses_metadata_and_frame_limits_before_freezing_history() {
+    let clock = RationalFrameClock::new(8).unwrap();
+    let rng = RngRoot::from_seed(19);
+    let metadata = FrameMetadata::capture_barrier(&clock, &rng);
+    for refusal in 0..3 {
+        let mut stage = Stage::new();
+        let (_, pixels) = detached_image(&mut stage);
+        let limits = BundleExportLimits {
+            max_frames: if refusal == 2 { 0 } else { 8 },
+            ..BundleExportLimits::default()
+        };
+        // Full-state mode still admits the capture before freezing the arena.
+        let mut recorder =
+            SceneBundleRecorder::new(if refusal == 0 { 30 } else { 8 }, limits).unwrap();
+        let reason = if refusal == 1 {
+            CaptureReason::Segment
+        } else {
+            CaptureReason::Show
+        };
+        let first = recorder
+            .capture_stage(reason, &stage, metadata)
+            .unwrap_err();
+        let repeated = recorder
+            .capture_stage(CaptureReason::Show, &stage, metadata)
+            .unwrap_err();
+        assert_eq!(first.to_string(), repeated.to_string());
+        assert_eq!(Arc::strong_count(&pixels), 2);
+        assert_eq!(recorder.frame_count(), 0);
+        assert!(recorder.finish().is_err());
+    }
 }

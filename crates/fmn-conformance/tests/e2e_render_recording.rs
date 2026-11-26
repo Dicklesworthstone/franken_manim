@@ -10,16 +10,17 @@ use fmn_conformance::golden::Mode;
 use fmn_core::color::Srgb;
 use fmn_core::constants::BLUE_C;
 use fmn_hash::sha256;
-use fmn_library::Circle;
 use fmn_library::style::Style;
-use fmn_mobject::{Mobject, Stage};
+use fmn_library::Circle;
+use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler, Mobject, Stage};
 use fmn_render::{
     Binning, FrameConfig, FrameJob, MonoTable, RenderPlan, ScreenMap, Tiling, Viewport,
 };
 use fmn_scene::journal::{CommandKind, CommandRecord, EffectClass, Entry};
 use fmn_scene::recording::SceneBundleRecorder;
-use fmn_scene::{BundleExportLimits, TimelineBundle};
+use fmn_scene::{BundleExportLimits, RuntimeConfig, Scene, TimelineBundle};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 fn error(value: impl std::fmt::Display) -> ScenarioError {
     ScenarioError::new(value.to_string())
@@ -62,10 +63,29 @@ fn invoke(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         include_bytes!("e2e_render_recording.rs"),
     );
     ctx.event(LogEvent::new(spans::PREFLIGHT).field("history", 128u64));
-    let mut stage = Stage::new();
-    for _ in 0..128 {
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 8,
+            ..RuntimeConfig::default()
+        },
+        19,
+    )
+    .map_err(error)?;
+    let stage = scene.stage_mut();
+    for _ in 0..127 {
         stage.add(Mobject::from_points(&[[42.0, 42.0, 0.0]]));
     }
+    let hidden = stage.add(Mobject::from_points(&[[42.0, 42.0, 0.0]]));
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![1, 2, 3, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .map_err(error)?;
+    let hidden_pixels = image.shared_pixels();
+    stage.set_image_resource(hidden, Some(image)).map_err(error)?;
     let root = stage.add(
         Circle::new()
             .radius(0.6)
@@ -74,14 +94,22 @@ fn invoke(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     );
     stage.add_to_scene(root).map_err(error)?;
     ctx.event(LogEvent::new(spans::SCENE_CONSTRUCT).field("roots", stage.roots().len()));
-    let before = stage.snapshot().to_bytes().map_err(error)?;
     let limits = BundleExportLimits::default();
-    let mut full = SceneBundleRecorder::new(8, limits).map_err(error)?;
     let mut compact = SceneBundleRecorder::new_render_only(8, limits).map_err(error)?;
-    full.capture_terminal_still(&stage).map_err(error)?;
-    compact.capture_terminal_still(&stage).map_err(error)?;
-    let full = full.finish().map_err(error)?;
+    scene.show(&mut compact).map_err(error)?;
+    // A whole-arena snapshot would retain another image reference in the
+    // detached entry's cache, even if its packet were immediately discarded.
+    if Arc::strong_count(&hidden_pixels) != 2 {
+        return Err(ScenarioError::new(
+            "render-only owner capture copied detached arena history",
+        ));
+    }
     let compact = compact.finish().map_err(error)?;
+    let stage = scene.stage();
+    let before = stage.snapshot().to_bytes().map_err(error)?;
+    let mut full = SceneBundleRecorder::new(8, limits).map_err(error)?;
+    full.capture_terminal_still(stage).map_err(error)?;
+    let full = full.finish().map_err(error)?;
     if compact.frame_count != 1 || full.bytes.len() <= compact.bytes.len() {
         return Err(ScenarioError::new(
             "render projection did not remove captured arena history",
@@ -95,13 +123,14 @@ fn invoke(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     ctx.event(
         LogEvent::new("recording.projection")
             .field("mode", "render-only")
+            .field("owner_capture", true)
             .field("full_bytes", full.bytes.len())
             .field("render_bytes", compact.bytes.len())
             .field("sha256", compact.digest.to_hex()),
     );
     let ordinary = TimelineBundle::from_bytes(&full.bytes).map_err(error)?;
     let replay = TimelineBundle::from_bytes(&compact.bytes).map_err(error)?;
-    let expected = render(&stage)?;
+    let expected = render(stage)?;
     let ordinary_frame = render(&ordinary.stage_at(0).map_err(error)?)?;
     let replay_frame = render(&replay.stage_at(0).map_err(error)?)?;
     if expected != ordinary_frame || expected != replay_frame {
@@ -110,7 +139,7 @@ fn invoke(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
         ));
     }
     let mut repeat = SceneBundleRecorder::new_render_only(8, limits).map_err(error)?;
-    repeat.capture_terminal_still(&stage).map_err(error)?;
+    repeat.capture_terminal_still(stage).map_err(error)?;
     if repeat
         .finish_with_max_bytes(compact.bytes.len())
         .map_err(error)?
@@ -166,7 +195,10 @@ fn scenario() -> ScenarioSpec {
     .logs(vec![
         LogExpect::span_present(
             "recording.projection",
-            vec![FieldPred::str_eq("mode", "render-only")],
+            vec![
+                FieldPred::str_eq("mode", "render-only"),
+                FieldPred::bool_eq("owner_capture", true),
+            ],
         ),
         LogExpect::span_present(spans::RENDER_FRAME, vec![FieldPred::bool_eq("equal", true)]),
         LogExpect::event_order(spans::SCENE_CONSTRUCT, "recording.projection"),

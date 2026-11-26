@@ -15,7 +15,7 @@
 //! Audio is attached separately by composition roots after recording succeeds.
 
 use fmn_anim::timeline::{TIMELINE_SCHEMA, TimelineError, TimelinePlan};
-use fmn_anim::{FramePacket, RationalFrameClock, SegmentKind};
+use fmn_anim::{FrameMetadata, FramePacket, RationalFrameClock, SegmentKind};
 use fmn_hash::serial::{Limits, Writer};
 use fmn_hash::{Digest, SerialError, sha256};
 use fmn_mobject::{RenderSnapshotError, RenderSnapshotLimits, Snapshot, Stage};
@@ -259,7 +259,9 @@ impl SceneBundleRecorder {
     /// sticky failure/publication rules are unchanged. This mode must not be
     /// used to implement undo or reconstruct a live scene for further editing:
     /// handles are canonicalized and executable/restoration metadata is absent.
-    /// It does not reclaim the source arena or avoid the initial FramePacket.
+    /// Direct Scene captures encode the rooted live Stage before any full-arena
+    /// packet is frozen; existing packet callers retain their snapshot contract.
+    /// This does not reclaim or alter the source arena.
     ///
     /// # Errors
     /// As [`Self::new`]. Per-frame projection failures are reported by capture.
@@ -271,8 +273,8 @@ impl SceneBundleRecorder {
 
     /// Record render-only snapshots and their exact camera/light/background
     /// captures in FMTL/1 minor 1. Existing constructors still emit minor 0.
-    /// Every frame must use `capture_with_camera` (including a terminal still);
-    /// missing camera samples are sticky failures, never default-camera frames.
+    /// Every frame must use a camera-aware capture entry (including a terminal
+    /// still); missing samples are sticky failures, never default-camera frames.
     ///
     /// # Errors
     /// Refuses zero FPS; per-frame values and budgets are checked at capture.
@@ -402,18 +404,35 @@ impl SceneBundleRecorder {
                     RenderSnapshotLimits::DEFAULT,
                     self.encoding_limits(),
                 )
-                .map_err(|error| match error {
-                    RenderSnapshotError::Serial(error) if self.compact.is_some() => {
-                        self.encoding_error(error)
-                    }
-                    error => RecordingError::Projection(error),
-                })
+                .map_err(|error| self.projection_error(error))
         } else if self.compact.is_some() {
             snapshot
                 .to_bytes_with_limits(self.encoding_limits())
                 .map_err(|error| self.encoding_error(error))
         } else {
             snapshot.to_bytes().map_err(RecordingError::from)
+        }
+    }
+
+    fn projection_error(&self, error: RenderSnapshotError) -> RecordingError {
+        match error {
+            RenderSnapshotError::Serial(error) if self.compact.is_some() => {
+                self.encoding_error(error)
+            }
+            error => RecordingError::Projection(error),
+        }
+    }
+
+    fn encode_stage(&self, stage: &Stage) -> Result<Vec<u8>, RecordingError> {
+        if self.render_only {
+            stage
+                .to_render_bytes_with_encoding_limits(
+                    RenderSnapshotLimits::DEFAULT,
+                    self.encoding_limits(),
+                )
+                .map_err(|error| self.projection_error(error))
+        } else {
+            self.encode_snapshot(&stage.snapshot())
         }
     }
 
@@ -489,7 +508,7 @@ impl SceneBundleRecorder {
         } else {
             self.admit_frame().and_then(|()| {
                 let sample = self.camera_sample(camera)?;
-                let bytes = self.encode_snapshot(&stage.snapshot());
+                let bytes = self.encode_stage(stage);
                 self.capture_snapshot(bytes, sample)
             })
         };
@@ -872,6 +891,15 @@ impl SceneSink for SceneBundleRecorder {
     ) -> Result<(), IntegrationError> {
         self.capture_packet(reason, packet, None)
     }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        self.capture_stage_frame(reason, stage, metadata, None)
+    }
 }
 
 impl SceneBundleRecorder {
@@ -889,40 +917,92 @@ impl SceneBundleRecorder {
         self.capture_packet(reason, packet, Some(camera))
     }
 
+    /// Encode the Stage and camera at the same completed owner-thread boundary.
+    ///
+    /// Render-only modes visit only the rooted picture, without first freezing
+    /// detached arena history. All retained state is owned before this returns;
+    /// later live edits cannot change the recorded geometry or camera.
+    ///
+    /// # Errors
+    /// Preserves the packet path's sticky capture, clock, camera and budget
+    /// failures. The metadata must describe this Stage's current capture.
+    pub fn capture_stage_with_camera(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+        camera: &Camera,
+    ) -> Result<(), IntegrationError> {
+        self.capture_stage_frame(reason, stage, metadata, Some(camera))
+    }
+
+    fn validate_capture(
+        &self,
+        reason: CaptureReason,
+        metadata: FrameMetadata,
+    ) -> Result<(), RecordingError> {
+        self.admit_frame()?;
+        if metadata.time().fps() != self.fps {
+            return Err(RecordingError::Unsupported("capture frame rate changed"));
+        }
+        match (reason, &self.active) {
+            (CaptureReason::Segment, Some(active)) => {
+                let next = i64::try_from(active.recorded.frames.len())
+                    .ok()
+                    .and_then(|count| count.checked_add(1))
+                    .ok_or(RecordingError::Unsupported("frame count exceeds the clock"))?;
+                if metadata.segment_frame() != next
+                    || active.base_frame.checked_add(next) != Some(metadata.time().frames())
+                {
+                    return Err(RecordingError::Unsupported(
+                        "missing, duplicated or reordered segment capture",
+                    ));
+                }
+            }
+            (CaptureReason::Show, None) if metadata.segment_frame() == 0 => {}
+            _ => {
+                return Err(RecordingError::Unsupported(
+                    "capture requires an ordinary segment or explicit show",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn capture_packet(
         &mut self,
         reason: CaptureReason,
         packet: FramePacket,
         camera: Option<&Camera>,
     ) -> Result<(), IntegrationError> {
+        self.capture_frame(reason, packet.metadata(), camera, |recorder| {
+            recorder.encode_snapshot(packet.state())
+        })
+    }
+
+    fn capture_stage_frame(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+        camera: Option<&Camera>,
+    ) -> Result<(), IntegrationError> {
+        self.capture_frame(reason, metadata, camera, |recorder| {
+            recorder.encode_stage(stage)
+        })
+    }
+
+    fn capture_frame(
+        &mut self,
+        reason: CaptureReason,
+        metadata: FrameMetadata,
+        camera: Option<&Camera>,
+        encode: impl FnOnce(&Self) -> Result<Vec<u8>, RecordingError>,
+    ) -> Result<(), IntegrationError> {
         let result = (|| {
-            self.admit_frame()?;
-            if packet.time().fps() != self.fps {
-                return Err(RecordingError::Unsupported("capture frame rate changed"));
-            }
-            match (reason, &self.active) {
-                (CaptureReason::Segment, Some(active)) => {
-                    let next = i64::try_from(active.recorded.frames.len())
-                        .ok()
-                        .and_then(|count| count.checked_add(1))
-                        .ok_or(RecordingError::Unsupported("frame count exceeds the clock"))?;
-                    if packet.segment_frame() != next
-                        || active.base_frame.checked_add(next) != Some(packet.time().frames())
-                    {
-                        return Err(RecordingError::Unsupported(
-                            "missing, duplicated or reordered segment capture",
-                        ));
-                    }
-                }
-                (CaptureReason::Show, None) if packet.segment_frame() == 0 => {}
-                _ => {
-                    return Err(RecordingError::Unsupported(
-                        "capture requires an ordinary segment or explicit show",
-                    ));
-                }
-            }
+            self.validate_capture(reason, metadata)?;
             let sample = self.camera_sample(camera)?;
-            let bytes = self.encode_snapshot(packet.state());
+            let bytes = encode(self);
             self.capture_snapshot(bytes, sample)?;
             if reason == CaptureReason::Show {
                 self.saw_show = true;

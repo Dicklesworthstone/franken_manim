@@ -1,7 +1,8 @@
 //! Camera samples follow actual post-updater captures, not guessed rig handles.
 
-use fmn_anim::FramePacket;
+use fmn_anim::{FrameMetadata, FramePacket, RationalFrameClock};
 use fmn_core::constants::{BLUE, RED};
+use fmn_core::rng::RngRoot;
 use fmn_hash::serial::{Limits, Reader, UnknownPolicy};
 use fmn_hash::sha256;
 use fmn_mobject::{Mobject, Stage};
@@ -21,16 +22,8 @@ struct Capture {
     observed: Vec<(Vec<u8>, CameraSample)>,
 }
 
-impl SceneSink for Capture {
-    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
-        self.recorder.event(event)
-    }
-
-    fn capture(
-        &mut self,
-        reason: CaptureReason,
-        packet: FramePacket,
-    ) -> Result<(), IntegrationError> {
+impl Capture {
+    fn camera(&self) -> Camera {
         let n = self.observed.len() as f64;
         let mut config = CameraConfig {
             resolution: RESOLUTION,
@@ -47,12 +40,43 @@ impl SceneSink for Capture {
         config.frame.set_center([n / 4.0, -0.25, 0.0]).unwrap();
         config.frame.set_width(5.0 - n / 4.0).unwrap();
         config.frame.set_field_of_view(0.7 + n / 16.0).unwrap();
-        let camera = Camera::new(config).unwrap();
+        Camera::new(config).unwrap()
+    }
+}
+
+impl SceneSink for Capture {
+    fn event(&mut self, event: LifecycleEvent) -> Result<(), IntegrationError> {
+        self.recorder.event(event)
+    }
+
+    fn capture(
+        &mut self,
+        reason: CaptureReason,
+        packet: FramePacket,
+    ) -> Result<(), IntegrationError> {
+        let camera = self.camera();
         self.observed.push((
             packet.state().to_render_bytes().unwrap(),
             CameraSample::capture(&camera).unwrap(),
         ));
         self.recorder.capture_with_camera(reason, packet, &camera)
+    }
+
+    fn capture_stage(
+        &mut self,
+        reason: CaptureReason,
+        stage: &Stage,
+        metadata: FrameMetadata,
+    ) -> Result<(), IntegrationError> {
+        let camera = self.camera();
+        self.recorder
+            .capture_stage_with_camera(reason, stage, metadata, &camera)?;
+        // The preexisting full snapshot codec is the independent frame oracle.
+        self.observed.push((
+            stage.snapshot().to_render_bytes().unwrap(),
+            CameraSample::capture(&camera).unwrap(),
+        ));
+        Ok(())
     }
 }
 
@@ -324,4 +348,59 @@ fn terminal_stills_and_exact_output_caps_preserve_legacy_writers() {
         build(artifact.bytes.len() - 1),
         Err(RecordingError::OutputLimit { .. })
     ));
+}
+
+#[test]
+fn direct_camera_capture_matches_packet_admission_and_sticky_refusals() {
+    let stage = Stage::new();
+    let rng = RngRoot::from_seed(19);
+    for refusal in 0..5 {
+        let clock = RationalFrameClock::new(if refusal == 0 { 30 } else { 8 }).unwrap();
+        let metadata = FrameMetadata::capture_barrier(&clock, &rng);
+        let camera = Camera::new(CameraConfig {
+            fps: if refusal == 1 { 30 } else { 8 },
+            ..CameraConfig::default()
+        })
+        .unwrap();
+        let limits = BundleExportLimits {
+            max_frames: if refusal == 3 { 0 } else { 8 },
+            max_capture_bytes: if refusal == 4 {
+                0
+            } else {
+                BundleExportLimits::default().max_capture_bytes
+            },
+        };
+        let make = || {
+            if refusal == 2 {
+                SceneBundleRecorder::new_render_only(8, limits).unwrap()
+            } else {
+                SceneBundleRecorder::new_render_only_with_camera(8, limits).unwrap()
+            }
+        };
+        let mut packets = make();
+        let mut direct = make();
+        let old = packets
+            .capture_with_camera(
+                CaptureReason::Show,
+                FramePacket::freeze_metadata(&stage, metadata),
+                &camera,
+            )
+            .unwrap_err();
+        let new = direct
+            .capture_stage_with_camera(CaptureReason::Show, &stage, metadata, &camera)
+            .unwrap_err();
+        assert_eq!(new.to_string(), old.to_string());
+        assert_eq!(
+            direct
+                .capture_stage_with_camera(CaptureReason::Show, &stage, metadata, &camera)
+                .unwrap_err()
+                .to_string(),
+            old.to_string()
+        );
+        assert_eq!(direct.frame_count(), 0);
+        assert_eq!(
+            direct.finish().unwrap_err().to_string(),
+            packets.finish().unwrap_err().to_string()
+        );
+    }
 }
