@@ -279,6 +279,65 @@ fn affine_motion_has_an_independent_revision_and_object_space_buffer() {
 }
 
 #[test]
+fn finite_axis_scale_preserves_family_rotation_with_and_without_live_views() {
+    let points = [[2.0, 1.0, 0.5], [3.0, 1.0, 0.5], [4.0, 2.0, 0.5]];
+    // A quarter turn about (1,-1,0.5) sends (x,y,z) to (-y,x-2,z).
+    let expected = [[-1.0, 0.0, 0.5], [-1.0, 1.0, 0.5], [-2.0, 2.0, 0.5]];
+    for scale in [
+        f64::from_bits(1),
+        f64::MIN_POSITIVE,
+        1e-200,
+        1e-161,
+        1.0,
+        1e200,
+        f64::MAX,
+    ] {
+        for pinned in [false, true] {
+            let mut stage = Stage::new();
+            let root = stage.add(Mobject::new());
+            let child = stage.add(Mobject::from_points(&points));
+            stage.attach(root, child).unwrap();
+            let object_points = stage.get_object_points(child).unwrap();
+            let view = pinned.then(|| stage.get_mut(child).unwrap().buffer.export_view(false));
+
+            stage.rotate(
+                root,
+                std::f64::consts::FRAC_PI_2,
+                [0.0, 0.0, scale],
+                Some([1.0, -1.0, 0.5]),
+                None,
+            );
+
+            let actual = stage.get_points(child).unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (index, (actual, expected)) in actual.iter().zip(expected).enumerate() {
+                for axis in 0..3 {
+                    assert!(
+                        (actual[axis] - expected[axis]).abs() < 2e-7,
+                        "scale={scale:e}, pinned={pinned}, point={index}: {actual:?} != {expected:?}"
+                    );
+                }
+                if let Some(view) = &view {
+                    let seen = view.read(index, "point").unwrap();
+                    assert_eq!(seen.len(), 3);
+                    for axis in 0..3 {
+                        assert!(
+                            (f64::from(seen[axis]) - expected[axis]).abs() < 2e-7,
+                            "live view lost the rotated point at scale={scale:e}"
+                        );
+                    }
+                }
+            }
+            if pinned {
+                assert!(stage.placement(child).unwrap().is_identity());
+            } else {
+                assert_eq!(stage.get_object_points(child).unwrap(), object_points);
+            }
+        }
+    }
+}
+
+#[test]
 fn affine_motion_stays_visible_through_an_existing_zero_copy_view() {
     let mut stage = Stage::new();
     let mob = stage.add(Mobject::from_points(&[[1.0, 2.0, 0.0], [3.0, 4.0, 0.0]]));

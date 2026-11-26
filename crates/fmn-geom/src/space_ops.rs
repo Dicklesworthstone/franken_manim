@@ -271,8 +271,24 @@ pub fn quaternion_conjugate(q: Quat) -> Quat {
 }
 
 /// `space_ops.quaternion_from_angle_axis`.
+///
+/// A finite, nonzero axis names a direction regardless of its magnitude.
+/// Ordinary inputs retain the Reference's normalize-then-multiply arithmetic;
+/// extreme axis magnitudes and angles use the conditioned rotation kernel.
+/// A zero axis still gives the identity for a finite angle.
 #[must_use]
 pub fn quaternion_from_angle_axis(angle: f64, axis: Vec3) -> Quat {
+    if angle.is_finite()
+        && (!norm_squared(axis).is_normal() || !(angle * angle).is_finite())
+        && let Some(quat) = rotation::quat_from_axis_angle(angle, axis)
+    {
+        // Squaring a finite axis can lose its direction before normalize sees
+        // it. Reconstructing a huge angle from its rotation vector can also
+        // change its phase by an ulp. The existing checked kernel handles both
+        // without changing the established path's bits. A zero or non-finite
+        // axis keeps the infallible helper's historical behavior below.
+        return quat;
+    }
     rotation::quat_from_rotvec(vec::scale(normalize(axis), angle))
 }
 
@@ -653,6 +669,77 @@ mod tests {
     #[test]
     fn rotation_matrix_of_a_zero_axis_is_the_identity() {
         assert_eq!(rotation_matrix(1.2, [0.0; 3]), IDENTITY);
+    }
+
+    #[test]
+    fn public_rotations_keep_the_direction_of_every_finite_axis_scale() {
+        for scale in [
+            f64::from_bits(1),
+            f64::MIN_POSITIVE,
+            1e-200,
+            1e-161,
+            1e-155,
+            1.0,
+            1e200,
+            f64::MAX,
+        ] {
+            for sign in [-1.0, 1.0] {
+                let axis = [0.0, 0.0, sign * scale];
+                close(
+                    rotate_vector(RIGHT, PI / 2.0, axis),
+                    [0.0, sign, 0.0],
+                    2e-15,
+                );
+            }
+            // A 120-degree turn about (1,1,1) cycles the coordinate axes.
+            // This also exercises a direction whose true norm exceeds MAX.
+            for (point, expected) in [(RIGHT, UP), (UP, OUT), (OUT, RIGHT)] {
+                close(rotate_vector(point, TAU / 3.0, [scale; 3]), expected, 3e-15);
+            }
+        }
+    }
+
+    #[test]
+    fn public_axis_angle_keeps_the_authored_phase_of_huge_angles() {
+        for angle in [1e200, f64::MAX, -f64::MAX] {
+            let expected = rotation_about_z(angle);
+            for scale in [0.3, 1.0, 1e200, f64::MAX] {
+                let actual = rotation_matrix(angle, [0.0, 0.0, scale]);
+                for row in 0..3 {
+                    close(actual[row], expected[row], 3e-15);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn public_axis_angle_retains_zero_and_nonfinite_input_behavior() {
+        for angle in [0.0, 1.2, f64::MAX] {
+            assert_eq!(rotation_matrix(angle, [0.0; 3]), IDENTITY);
+        }
+        for angle in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for axis in [OUT, [0.0; 3]] {
+                assert!(
+                    quaternion_from_angle_axis(angle, axis)
+                        .into_iter()
+                        .all(f64::is_nan)
+                );
+            }
+        }
+        for infinite in [f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                quaternion_from_angle_axis(0.7, [infinite, 0.0, 0.0])
+                    .into_iter()
+                    .all(f64::is_nan)
+            );
+        }
+        // normalize's existing NaN-norm branch yields the zero vector. The
+        // checked kernel remains the API for callers which require refusal.
+        assert_eq!(
+            quaternion_from_angle_axis(0.7, [f64::NAN, 0.0, 0.0]),
+            rotation::IDENTITY_QUAT
+        );
+        assert!(rotation::quat_from_axis_angle(0.7, [f64::NAN, 0.0, 0.0]).is_none());
     }
 
     #[test]

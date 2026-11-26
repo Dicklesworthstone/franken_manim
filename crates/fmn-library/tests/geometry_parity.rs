@@ -17,12 +17,12 @@
 //! carries both component counts, and the density assertion is that ours
 //! is the documented BN-09 value **and** never coarser than the
 //! Reference's.
-
 use fmn_core::types::Vec3;
 use fmn_library::arc::{Arc, Circle, Dot, Ellipse};
 use fmn_library::line::{Elbow, Line};
 use fmn_library::poly::{CubicBezier, Polygon, Rectangle, RegularPolygon, Square};
 use fmn_library::vmobject::VMobject;
+use fmn_library::{NumberLine, SurfaceSpec};
 use std::collections::HashMap;
 
 const TOL: f64 = 1e-9;
@@ -266,6 +266,74 @@ fn the_arc_density_rule_is_ours_and_never_coarser() {
         checked += 1;
     }
     assert!(checked >= 6, "only {checked} arc cases");
+}
+
+#[test]
+fn detached_geometry_rotates_by_direction_independent_of_finite_axis_scale() {
+    fn quarter_turn(point: Vec3) -> Vec3 {
+        [-point[1], point[0], point[2]]
+    }
+
+    fn quarter_family(actual: &VMobject, source: &VMobject) {
+        let expected: Vec<_> = source.points().iter().copied().map(quarter_turn).collect();
+        assert_points(actual.points(), &expected, "quarter-turned native family");
+        assert_eq!(actual.children().len(), source.children().len());
+        for (actual, source) in actual.children().iter().zip(source.children()) {
+            quarter_family(actual, source);
+        }
+    }
+
+    let source = Rectangle::new()
+        .width(2.0)
+        .height(1.0)
+        .build()
+        .unwrap()
+        .shifted([1.5, 0.75, 0.25])
+        .with_child(Line::new([2.0, 1.0, 0.5], [3.0, 2.0, 0.5]).build().unwrap());
+    let line = NumberLine::new([-1.0, 2.0, 1.0])
+        .build()
+        .unwrap()
+        .shifted([1.0, -0.5, 0.0]);
+    let surface = SurfaceSpec {
+        resolution: (2, 2),
+        ..SurfaceSpec::default()
+    }
+    .sample(|u, v| [u + 0.5, v - 0.25, 0.25 * u]);
+
+    for scale in [f64::from_bits(1), 1e-200, 1e-161, 1.0, 1e200, f64::MAX] {
+        let axis = [0.0, 0.0, scale];
+        let angle = std::f64::consts::FRAC_PI_2;
+        let rotated = source.clone().rotated_about(angle, axis, [0.0; 3]);
+        quarter_family(&rotated, &source);
+
+        let rotated_line = line.clone().rotated_about(angle, axis, [0.0; 3]);
+        quarter_family(rotated_line.vmob(), line.vmob());
+        for number in [-1.0, 0.0, 0.5, 2.0] {
+            assert_points(
+                &[rotated_line.n2p(number)],
+                &[quarter_turn(line.n2p(number))],
+                "quarter-turned numeric coordinate map",
+            );
+        }
+
+        let rotated_surface = surface.clone().rotated(angle, axis);
+        let expected_points: Vec<_> = surface.points().iter().copied().map(quarter_turn).collect();
+        let expected_normals: Vec<_> = surface
+            .unit_normals()
+            .into_iter()
+            .map(quarter_turn)
+            .collect();
+        assert_points(
+            rotated_surface.points(),
+            &expected_points,
+            "quarter-turned surface points",
+        );
+        assert_points(
+            &rotated_surface.unit_normals(),
+            &expected_normals,
+            "quarter-turned surface normals",
+        );
+    }
 }
 
 #[test]

@@ -13243,6 +13243,76 @@ fn obj_smoothing_groups_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
         .with_counter("obj_smoothing_frames", witness.frames))
 }
 
+fn finite_axis_rotation_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_render::{RetainedFrameRenderer, RetainedFrameRendererConfig};
+
+    fn frame(
+        scale: f64,
+        angle: f64,
+        pinned: bool,
+        threads: usize,
+    ) -> Result<Vec<u8>, ScenarioError> {
+        let mut stage = Stage::new();
+        let shape = fmn_library::Rectangle::new()
+            .width(2.0)
+            .height(1.0)
+            .color(BLUE_C)
+            .build()
+            .map_err(|error| fail(format!("rotation fixture: {error}")))?
+            .shifted([1.5, 0.75, 0.0]);
+        let root = stage.add(shape);
+        stage
+            .add_to_scene(root)
+            .map_err(|error| fail(format!("rotation scene: {error}")))?;
+        let _view = pinned.then(|| stage.get_mut(root).unwrap().buffer.export_view(false));
+        stage.rotate(root, angle, [0.0, 0.0, scale], Some([0.0; 3]), None);
+        let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            frame: scene_goldens::frame_config(),
+            tiling: TILING,
+            engine: EngineIdentity::certified(),
+            threads,
+        })
+        .map_err(|error| fail(format!("rotation renderer: {error}")))?;
+        renderer
+            .render(&stage, 0)
+            .map_err(|error| fail(format!("rotate and render native geometry: {error}")))?;
+        encode_frame(renderer.frame())
+            .map_err(|error| fail(format!("encode rotated frame: {error}")))
+    }
+
+    let mut comparisons = 0_u64;
+    for pinned in [false, true] {
+        let reference = frame(1.0, std::f64::consts::FRAC_PI_2, pinned, 1)?;
+        let unchanged = frame(1.0, 0.0, pinned, 1)?;
+        if reference == unchanged {
+            return Err(fail(
+                "rotation witness cannot distinguish an unchanged shape",
+            ));
+        }
+        for threads in [1, 4] {
+            for scale in [f64::from_bits(1), 1e-200, 1e-161, 1e200, f64::MAX] {
+                let actual = frame(scale, std::f64::consts::FRAC_PI_2, pinned, threads)?;
+                if actual != reference {
+                    return Err(fail(format!(
+                        "axis magnitude changed certified pixels: scale={scale:e}, pinned={pinned}, threads={threads}"
+                    )));
+                }
+                comparisons += 1;
+            }
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.geometry.finite_axis_rotation")
+            .field("comparisons", comparisons)
+            .field("frames", 24_u64)
+            .field("unchanged_rejected", 2_u64),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("finite_axis_comparisons", comparisons)
+        .with_counter("finite_axis_frames", 24)
+        .with_counter("finite_axis_unchanged_rejected", 2))
+}
+
 fn obj_scale_invariance_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     let witness = obj_smoothing::verify_scale_invariance().map_err(fail)?;
     ctx.event(
@@ -21070,6 +21140,27 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "render_matrix.finite_axis_rotation.v1",
+        ScenarioClass::RenderMatrix,
+        Surface::RustApi,
+        Invocation::new(finite_axis_rotation_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("finite_axis_comparisons", 20),
+            counter_eq("finite_axis_frames", 24),
+            counter_eq("finite_axis_unchanged_rejected", 2),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.geometry.finite_axis_rotation",
+            vec![
+                FieldPred::u64_eq("comparisons", 20),
+                FieldPred::u64_eq("frames", 24),
+                FieldPred::u64_eq("unchanged_rejected", 2),
+            ],
+        )],
+    ));
+
+    specs.push(spec(
         "render_matrix.obj_scale_invariance.v1",
         ScenarioClass::RenderMatrix,
         Surface::RustApi,
@@ -25335,6 +25426,16 @@ fn piano_keyboard_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "drawings.piano_keyboard.v1")
         .expect("native piano keyboard scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn finite_axis_rotation_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "render_matrix.finite_axis_rotation.v1")
+        .expect("the finite-axis rotation scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
