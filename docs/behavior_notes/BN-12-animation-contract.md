@@ -311,6 +311,14 @@ style fields must remain able to change as a target updater runs. Existing
 explicit user locks remain respected, and static Transforms retain matching-data
 locking.
 
+Native Transform uses the same updater-aware locking rule. Its updater
+inventory includes the starting copy, authored target, and aligned target copy
+in that order, with repeated handles removed and the displayed source left to
+the scene updater step. Alignment or placement baking can create a distinct
+target copy; the original target still receives its updater tick. Interpolation
+continues to use only the source, starting copy, and aligned target copy.
+ApplyMethod and `.animate()` method animations preserve this updater inventory.
+
 **Migration:** no changes are required. Target-only Python callbacks now run
 during playback and their geometry and style changes reach interpolation.
 
@@ -321,3 +329,10 @@ style, starting-copy updaters, and explicit locks. The installed-extension
 `fmn-python/tests/live_rates.py` acceptance suite also covers exact frame samples
 at 24 and 60 FPS, nested compositions, failure cleanup, and a subsequent native
 retry.
+
+Native coverage in `fmn-anim/tests/transform.rs` exercises root and descendant
+updaters, initially equal points and fill color, both source suspension modes,
+distinct aligned or baked targets, self-target aliases, ApplyMethod, and method
+builders. The registered `lifecycle.transform_target_updaters.v1` scenario checks
+real Scene captures against independently positioned and styled geometry and
+certified rendered frames.

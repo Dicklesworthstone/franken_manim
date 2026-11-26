@@ -11717,6 +11717,144 @@ fn render_certified_doc_with_plan(stage: &Stage, plan: &mut RenderPlan) -> Vec<u
     encode_frame(&frame).expect("the frame encodes into its canonical document")
 }
 
+/// Initially equal Transform endpoints stay live through real Scene capture
+/// when only the target carries a geometry and opacity updater.
+fn lifecycle_transform_target_updaters_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    #[derive(Default)]
+    struct TargetUpdaterProgram {
+        source: Option<Mob>,
+        initial: Option<fmn_mobject::Snapshot>,
+        calls: Rc<Cell<u64>>,
+    }
+
+    impl SceneProgram for TargetUpdaterProgram {
+        fn name(&self) -> &str {
+            "transform_target_updaters"
+        }
+
+        #[allow(clippy::cast_possible_truncation)]
+        fn construct(
+            &mut self,
+            scene: &mut Scene,
+            sink: &mut dyn SceneSink,
+        ) -> Result<(), SceneError> {
+            let source = scene.add_mobject(fmn_library::Square::new())?;
+            scene
+                .stage_mut()
+                .set_fill(source, Some(BLUE_C), Some(0.25), None, true);
+            scene
+                .stage_mut()
+                .set_stroke(source, None, Some(0.0), Some(0.0), None, true);
+            self.source = Some(source);
+            self.initial = Some(scene.stage().snapshot());
+            let target = scene.stage_mut().copy_family(source)?;
+            let calls = Rc::clone(&self.calls);
+            scene.stage_mut().add_dt_updater(
+                target,
+                move |stage, mob, dt| {
+                    calls.set(calls.get() + 1);
+                    let buffer = &mut stage.get_mut(mob).expect("live target").buffer;
+                    let mut points = buffer.read_column("point").expect("square points");
+                    let mut fill = buffer.read_column("fill_rgba").expect("square fill");
+                    for point in points.chunks_exact_mut(3) {
+                        point[0] += dt as f32;
+                    }
+                    for color in fill.chunks_exact_mut(4) {
+                        color[3] += (dt / 2.0) as f32;
+                    }
+                    buffer.write_range("point", 0, &points);
+                    buffer.write_range("fill_rgba", 0, &fill);
+                },
+                false,
+            )?;
+            let animation =
+                fmn_anim::Transform::new(source, target).with_config(fmn_anim::AnimConfig {
+                    run_time: 1.0,
+                    rate_func: RateFunc::linear(),
+                    suspend_mobject_updating: true,
+                    ..fmn_anim::AnimConfig::default()
+                });
+            scene.play(vec![Box::new(animation)], PlayOverrides::default(), sink)?;
+            Ok(())
+        }
+    }
+
+    ctx.set_fps((4, 1));
+    let mut scene = Scene::new(
+        RuntimeConfig {
+            fps: 4,
+            ..RuntimeConfig::default()
+        },
+        ctx.seed,
+    )
+    .map_err(|error| fail(format!("target updater scene: {error}")))?;
+    let mut program = TargetUpdaterProgram::default();
+    let mut sink = PacketSink::default();
+    scene
+        .run(&mut program, &mut sink)
+        .map_err(|error| fail(format!("target updater playback: {error}")))?;
+    let source = program
+        .source
+        .ok_or_else(|| fail("source was not constructed"))?;
+    let initial = program
+        .initial
+        .ok_or_else(|| fail("initial snapshot was not retained"))?;
+    if sink.packets.len() != 4 || program.calls.get() != 4 {
+        return Err(fail(
+            "target updater playback must capture and tick exactly four times",
+        ));
+    }
+    let resumed = !scene.stage().is_updating_suspended(source);
+    if !resumed {
+        return Err(fail("target updater playback left its source suspended"));
+    }
+    let blank = render_certified_doc(&Stage::new());
+    for (frame, packet) in (1_u32..=4).zip(&sink.packets) {
+        // At n/4 seconds the target has moved n/4 and faded by n/8.
+        // Linear interpolation from the untouched source therefore gives
+        // x = n*n/16 and opacity = 1/4 + n*n/32. Build this independently
+        // from the pre-play snapshot, without running Transform or updaters.
+        let squared = f64::from(frame * frame);
+        let mut expected = initial.materialize();
+        expected.shift(source, [squared / 16.0, 0.0, 0.0]);
+        expected.set_fill(source, None, Some(0.25 + squared / 32.0), None, true);
+        let actual = packet.materialize_stage();
+        let fill = |stage: &Stage| {
+            stage
+                .get(source)
+                .and_then(|entry| entry.buffer.read_column("fill_rgba"))
+        };
+        if actual.get_points(source) != expected.get_points(source)
+            || fill(&actual) != fill(&expected)
+        {
+            return Err(fail(format!(
+                "target updater frame {frame} lost live geometry or style"
+            )));
+        }
+        let rendered = render_certified_doc(&actual);
+        if rendered == blank || rendered != render_certified_doc(&expected) {
+            return Err(fail(format!(
+                "target updater frame {frame} differs from its independent render"
+            )));
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.lifecycle.transform_target_updaters")
+            .field("frames", 4_u64)
+            .field("target_ticks", program.calls.get())
+            .field("render_matches", 4_u64)
+            .field("source_resumed", truth(resumed)),
+    );
+    Ok(RunOutcome::ok()
+        .with_counter("target_updater_frames", 4)
+        .with_counter("target_updater_ticks", program.calls.get())
+        .with_counter("target_updater_render_matches", 4)
+        .with_counter("target_updater_source_resumed", u64::from(resumed)))
+}
+
 /// Surface and vector geometry share the production camera-bound painter.
 /// Keep the same viewport, scene scale, and certified identity as the 2D rows.
 fn render_certified_camera_doc(stage: &Stage) -> Vec<u8> {
@@ -23498,6 +23636,28 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.transform_target_updaters.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(lifecycle_transform_target_updaters_run),
+        vec![
+            Assertion::ExitCode(0),
+            counter_eq("target_updater_frames", 4),
+            counter_eq("target_updater_ticks", 4),
+            counter_eq("target_updater_render_matches", 4),
+            counter_eq("target_updater_source_resumed", 1),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.lifecycle.transform_target_updaters",
+            vec![
+                FieldPred::u64_eq("frames", 4),
+                FieldPred::u64_eq("target_ticks", 4),
+                FieldPred::u64_eq("render_matches", 4),
+                FieldPred::str_eq("source_resumed", "true"),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.construct_snapshot_transform_snapshot.v1",
         ScenarioClass::LifecycleDrill,
         Surface::RustApi,
@@ -25000,6 +25160,16 @@ fn snapshot_handle_safety_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.snapshot_handle_safety.v1")
         .expect("snapshot handle safety scenario is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn transform_target_updaters_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.transform_target_updaters.v1")
+        .expect("target updater lifecycle scenario is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }

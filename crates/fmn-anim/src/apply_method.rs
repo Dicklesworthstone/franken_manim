@@ -223,6 +223,10 @@ impl Animation for ApplyMethod {
         self.transform.all_mobjects()
     }
 
+    fn mobjects_to_update(&self) -> Vec<Mob> {
+        self.transform.mobjects_to_update()
+    }
+
     fn preflight_mobjects(&self) -> Vec<Mob> {
         let mut members = vec![self.state().mobject()];
         for &member in &self.dependencies {

@@ -266,6 +266,10 @@ impl Animation for MethodAnimation {
         self.transform.all_mobjects()
     }
 
+    fn mobjects_to_update(&self) -> Vec<Mob> {
+        self.transform.mobjects_to_update()
+    }
+
     fn preflight_mobjects(&self) -> Vec<Mob> {
         self.transform.preflight_mobjects()
     }

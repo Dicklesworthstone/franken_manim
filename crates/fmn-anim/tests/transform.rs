@@ -3,8 +3,14 @@
 //! begin/lock/finish/unlock order from transform.py, and the first zoo
 //! parameterizations.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use fmn_anim::animation::Animation;
-use fmn_anim::{AnimConfig, AnimError, PathFunc, RateFunc, StartPrep, Transform, classify_play};
+use fmn_anim::{
+    AnimConfig, AnimError, ApplyMethod, MethodAnimation, PathFunc, RateFunc, StartPrep, Transform,
+    classify_play,
+};
 use fmn_mobject::record::{RecordBuffer, RecordSchema};
 use fmn_mobject::{Mob, Mobject, Stage};
 
@@ -327,6 +333,289 @@ fn updaters_disable_locking() {
         !stage.get(a).unwrap().buffer.is_locked("point"),
         "lock_matching_data no-ops with updaters (mobject.py:1852)"
     );
+}
+
+#[allow(clippy::cast_possible_truncation)]
+fn moving_target(stage: &mut Stage, target: Mob, calls: Rc<RefCell<Vec<(Mob, f64)>>>) {
+    stage
+        .add_dt_updater(
+            target,
+            move |stage, current, dt| {
+                calls.borrow_mut().push((current, dt));
+                let buffer = &mut stage.get_mut(current).unwrap().buffer;
+                let mut points = buffer.read_column("point").unwrap();
+                let mut fill = buffer.read_column("fill_rgba").unwrap();
+                for point in points.chunks_exact_mut(3) {
+                    point[0] += (2.0 * dt) as f32;
+                }
+                for color in fill.chunks_exact_mut(4) {
+                    color[0] -= dt as f32;
+                    color[1] += dt as f32;
+                }
+                buffer.write_range("point", 0, &points);
+                buffer.write_range("fill_rgba", 0, &fill);
+            },
+            false,
+        )
+        .unwrap();
+}
+
+#[test]
+fn target_only_updaters_keep_initially_equal_geometry_and_style_live() {
+    for descendant in [false, true] {
+        for suspend_mobject_updating in [false, true] {
+            let mut stage = Stage::new();
+            let points = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+            let source_member = vmob(&mut stage, &points, [1.0, 0.0, 0.0, 1.0]);
+            let target_member = vmob(&mut stage, &points, [1.0, 0.0, 0.0, 1.0]);
+            let (source, target) = if descendant {
+                let source = stage.add(Mobject::new());
+                let target = stage.add(Mobject::new());
+                stage.attach(source, source_member).unwrap();
+                stage.attach(target, target_member).unwrap();
+                (source, target)
+            } else {
+                (source_member, target_member)
+            };
+            let calls = Rc::new(RefCell::new(Vec::new()));
+            moving_target(&mut stage, target_member, Rc::clone(&calls));
+            let mut animation = Transform::new(source, target).with_config(AnimConfig {
+                rate_func: RateFunc::linear(),
+                suspend_mobject_updating,
+                ..AnimConfig::default()
+            });
+            animation.begin(&mut stage).unwrap();
+            assert_eq!(animation.target_copy(), Some(target));
+            let buffer = &stage.get(source_member).unwrap().buffer;
+            assert!(!buffer.is_locked("point"));
+            assert!(!buffer.is_locked("fill_rgba"));
+
+            animation.update_mobjects(&mut stage, 0.5);
+            animation.interpolate(&mut stage, 0.5);
+            assert_eq!(
+                points_of(&stage, source_member),
+                vec![0.5, 0.0, 0.0, 1.5, 0.0, 0.0, 2.5, 0.0, 0.0]
+            );
+            assert_eq!(
+                stage
+                    .get(source_member)
+                    .unwrap()
+                    .buffer
+                    .read_column("fill_rgba")
+                    .unwrap(),
+                [0.75, 0.25, 0.0, 1.0].repeat(3)
+            );
+            assert_eq!(*calls.borrow(), vec![(target_member, 0.5)]);
+
+            animation.update_mobjects(&mut stage, 0.5);
+            animation.interpolate(&mut stage, 1.0);
+            assert_eq!(
+                points_of(&stage, source_member),
+                vec![2.0, 0.0, 0.0, 3.0, 0.0, 0.0, 4.0, 0.0, 0.0]
+            );
+            assert_eq!(
+                stage
+                    .get(source_member)
+                    .unwrap()
+                    .buffer
+                    .read_column("fill_rgba")
+                    .unwrap(),
+                [0.0, 1.0, 0.0, 1.0].repeat(3)
+            );
+            assert_eq!(
+                *calls.borrow(),
+                vec![(target_member, 0.5), (target_member, 0.5)]
+            );
+            animation.finish(&mut stage);
+        }
+    }
+}
+
+#[test]
+fn distinct_original_and_aligned_targets_each_update_once_before_interpolation() {
+    for target_points in [
+        vec![[4.0, 0.0, 0.0], [5.0, 1.0, 0.0], [6.0, 0.0, 0.0]],
+        vec![
+            [4.0, 0.0, 0.0],
+            [5.0, 1.0, 0.0],
+            [6.0, 0.0, 0.0],
+            [7.0, 1.0, 0.0],
+            [8.0, 0.0, 0.0],
+        ],
+    ] {
+        let mut stage = Stage::new();
+        let source = vmob(
+            &mut stage,
+            &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+            [1.0, 0.0, 0.0, 1.0],
+        );
+        let target = vmob(&mut stage, &target_points, [1.0, 0.0, 0.0, 1.0]);
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        moving_target(&mut stage, target, Rc::clone(&calls));
+        let mut animation = Transform::new(source, target).with_config(AnimConfig {
+            rate_func: RateFunc::linear(),
+            ..AnimConfig::default()
+        });
+        animation.begin(&mut stage).unwrap();
+        let aligned = animation.target_copy().unwrap();
+        assert_ne!(target, aligned);
+
+        animation.update_mobjects(&mut stage, 0.5);
+        assert_eq!(*calls.borrow(), vec![(target, 0.5), (aligned, 0.5)]);
+        let expected: Vec<[f64; 3]> = target_points
+            .iter()
+            .map(|point| [point[0] + 1.0, point[1], point[2]])
+            .collect();
+        assert_eq!(stage.get_points(target).unwrap(), expected);
+        assert_eq!(stage.get_points(aligned).unwrap(), expected);
+        animation.interpolate(&mut stage, 1.0);
+        assert_eq!(stage.get_points(source).unwrap(), expected);
+        assert_eq!(
+            stage
+                .get(source)
+                .unwrap()
+                .buffer
+                .read_column("fill_rgba")
+                .unwrap(),
+            [0.5, 0.5, 0.0, 1.0].repeat(target_points.len())
+        );
+        animation.finish(&mut stage);
+    }
+}
+
+#[test]
+fn self_target_updaters_leave_the_source_for_the_scene_and_tick_copies_once() {
+    let mut stage = Stage::new();
+    let source = vmob(&mut stage, &[[0.0, 0.0, 0.0]], [1.0, 0.0, 0.0, 1.0]);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    moving_target(&mut stage, source, Rc::clone(&calls));
+    let mut animation = Transform::new(source, source).with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        suspend_mobject_updating: true,
+        ..AnimConfig::default()
+    });
+    animation.begin(&mut stage).unwrap();
+    let starting = animation.state().starting_mobject().unwrap();
+    let target_copy = animation.target_copy().unwrap();
+    assert_ne!(source, target_copy);
+    assert!(stage.is_updating_suspended(source));
+
+    animation.update_mobjects(&mut stage, 0.5);
+    assert_eq!(*calls.borrow(), vec![(starting, 0.5), (target_copy, 0.5)]);
+    assert_eq!(points_of(&stage, source), vec![0.0, 0.0, 0.0]);
+    animation.interpolate(&mut stage, 0.5);
+    assert_eq!(points_of(&stage, source), vec![1.0, 0.0, 0.0]);
+    assert_eq!(
+        stage
+            .get(source)
+            .unwrap()
+            .buffer
+            .read_column("fill_rgba")
+            .unwrap(),
+        vec![0.5, 0.5, 0.0, 1.0]
+    );
+    animation.finish(&mut stage);
+}
+
+#[test]
+fn apply_method_preserves_the_original_generated_targets_updater() {
+    let mut stage = Stage::new();
+    let source = vmob(
+        &mut stage,
+        &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        [1.0, 0.0, 0.0, 1.0],
+    );
+    let generated = Rc::new(Cell::new(None));
+    let captured_target = Rc::clone(&generated);
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    let target_calls = Rc::clone(&calls);
+    let mut animation = ApplyMethod::new(source, move |stage, target| {
+        captured_target.set(Some(target));
+        let buffer = &mut stage.get_mut(target).unwrap().buffer;
+        buffer.resize(5).unwrap();
+        buffer.write_range(
+            "point",
+            0,
+            &[
+                0.0, 0.0, 0.0, 1.0, 1.0, 0.0, 2.0, 0.0, 0.0, 3.0, 1.0, 0.0, 4.0, 0.0, 0.0,
+            ],
+        );
+        buffer.write_range("fill_rgba", 0, &[1.0, 0.0, 0.0, 1.0].repeat(5));
+        moving_target(stage, target, Rc::clone(&target_calls));
+        Ok(())
+    })
+    .with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        ..AnimConfig::default()
+    });
+    animation.begin(&mut stage).unwrap();
+    let target = generated.get().unwrap();
+    let aligned = animation.target_copy().unwrap();
+    assert_ne!(target, aligned);
+
+    animation.update_mobjects(&mut stage, 0.5);
+    assert_eq!(*calls.borrow(), vec![(target, 0.5), (aligned, 0.5)]);
+    assert_eq!(points_of(&stage, target)[0], 1.0);
+    animation.interpolate(&mut stage, 1.0);
+    assert_eq!(points_of(&stage, source), points_of(&stage, target));
+    assert_eq!(
+        stage
+            .get(source)
+            .unwrap()
+            .buffer
+            .read_column("fill_rgba")
+            .unwrap(),
+        [0.5, 0.5, 0.0, 1.0].repeat(5)
+    );
+    animation.finish(&mut stage);
+}
+
+#[test]
+fn method_animation_keeps_the_original_built_target_updating_after_geometry_bake() {
+    let mut stage = Stage::new();
+    let source = vmob(
+        &mut stage,
+        &[[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        [1.0, 0.0, 0.0, 1.0],
+    );
+    let built = source
+        .animate()
+        .shift([1.0, 0.0, 0.0])
+        .and_then(|builder| builder.build(&mut stage))
+        .unwrap();
+    let target = built.target;
+    stage.get_mut(target).unwrap().buffer.write_range(
+        "point",
+        0,
+        &[4.0, 0.0, 0.0, 5.0, 0.0, 0.0, 6.0, 0.0, 0.0],
+    );
+    let calls = Rc::new(RefCell::new(Vec::new()));
+    moving_target(&mut stage, target, Rc::clone(&calls));
+    let mut animation = MethodAnimation::new(built).unwrap();
+    animation.begin(&mut stage).unwrap();
+    let interpolation_mobjects = animation.all_mobjects();
+    assert_eq!(interpolation_mobjects.len(), 3);
+    let aligned = interpolation_mobjects[2];
+    assert_ne!(target, aligned);
+
+    animation.update_mobjects(&mut stage, 0.5);
+    assert_eq!(*calls.borrow(), vec![(target, 0.5), (aligned, 0.5)]);
+    animation.interpolate(&mut stage, 1.0);
+    assert_eq!(
+        points_of(&stage, source),
+        vec![6.0, 0.0, 0.0, 7.0, 0.0, 0.0, 8.0, 0.0, 0.0]
+    );
+    assert_eq!(points_of(&stage, source), points_of(&stage, target));
+    assert_eq!(
+        stage
+            .get(source)
+            .unwrap()
+            .buffer
+            .read_column("fill_rgba")
+            .unwrap(),
+        [0.5, 0.5, 0.0, 1.0].repeat(3)
+    );
+    animation.finish(&mut stage);
 }
 
 #[test]

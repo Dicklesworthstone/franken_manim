@@ -15,7 +15,7 @@
 //!   row-wise) and is deliberately not replicated.
 //! - [`Transform::setup`] aligns (`align_data_and_family`) before the
 //!   starting copy is taken; `after_begin` locks matching fields (skipped
-//!   when the family has updaters), `teardown` unlocks — the Reference's
+//!   when either endpoint family has updaters), `teardown` unlocks — the Reference's
 //!   begin/finish order, hook for hook.
 //!
 //! Zoo members here are parameterizations, never re-implementations:
@@ -314,10 +314,14 @@ pub(crate) fn interpolate_fields_with_scratch(
 
 /// Reference `lock_matching_data` (mobject.py:1871): over the zipped
 /// families, lock every record field whose columns are identical in the
-/// start and target — those never need interpolating. No-op when the
-/// animated family has updaters, exactly as the Reference.
+/// start and target. Equality at begin only stays constant when neither
+/// endpoint can change: starting/target updaters run before interpolation,
+/// even while the animated source is suspended. See BN-12.
 fn lock_matching_data(stage: &mut Stage, mobject: Mob, m1: Mob, m2: Mob) {
-    if stage.has_updaters_in_family(mobject) {
+    if [mobject, m1, m2]
+        .into_iter()
+        .any(|mob| stage.has_updaters_in_family(mob))
+    {
         return;
     }
     let family = stage.family(mobject);
@@ -693,6 +697,27 @@ impl Animation for Transform {
         }
         if let Some(target_copy) = self.target_copy {
             mobs.push(target_copy);
+        }
+        mobs
+    }
+
+    /// Updating has a broader inventory than interpolation's three columns.
+    /// Alignment or placement baking may copy the target, but its authored
+    /// original still participates in the lifecycle (transform.py:102).
+    fn mobjects_to_update(&self) -> Vec<Mob> {
+        let source = self.state.mobject();
+        let mut mobs = Vec::with_capacity(3);
+        for mob in [
+            self.state.starting_mobject(),
+            Some(self.target),
+            self.target_copy,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if mob != source && !mobs.contains(&mob) {
+                mobs.push(mob);
+            }
         }
         mobs
     }
