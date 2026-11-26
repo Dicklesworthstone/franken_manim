@@ -22,6 +22,18 @@ def protocol():
     def linear(t):
         return t
 
+    class Mobject:
+        def __init__(self, *children):
+            self.submobjects = list(children)
+            self.updaters = []
+
+        def get_family(self):
+            return [self, *(member for child in self.submobjects
+                            for member in child.get_family())]
+
+        def get_updaters(self):
+            return self.updaters
+
     class Animation:
         _native_kind = None
 
@@ -102,7 +114,7 @@ def protocol():
             return "played"
 
     native = SimpleNamespace(
-        Animation=Animation, Transform=Transform, Fade=Fade, FadeIn=FadeIn, FadeOut=FadeOut,
+        Mobject=Mobject, Animation=Animation, Transform=Transform, Fade=Fade, FadeIn=FadeIn, FadeOut=FadeOut,
         FadeInFromLarge=FadeInFromLarge, FadeInFromPoint=FadeInFromPoint,
         FadeOutToPoint=FadeOutToPoint, NativeOnly=NativeOnly, AnimationGroup=AnimationGroup,
         WiggleOutThenIn=WiggleOutThenIn, VShowPassingFlash=VShowPassingFlash,
@@ -203,6 +215,83 @@ class FadeRateRouting(unittest.TestCase):
         play = self.native.Scene.play
         _adapter.install_live_rates(self.native)
         self.assertIs(self.native.Scene.play, play)
+
+
+class TransformEndpointRouting(unittest.TestCase):
+    def setUp(self):
+        self.native = protocol()
+        self.animation = self.native.Transform()
+        self.animation.mobject = self.native.Mobject()
+        self.animation.target_mobject = self.native.Mobject()
+
+    def test_target_only_updater_selects_callback_without_running_it(self):
+        calls = []
+        self.animation.target_mobject.updaters.append(lambda mob, dt: calls.append(dt))
+        self.assertTrue(self.native._requires_python_animation(self.animation))
+        self.assertEqual(calls, [])
+
+    def test_current_target_family_is_checked_after_construction(self):
+        child = self.native.Mobject()
+        self.animation.target_mobject.submobjects.append(child)
+        self.assertFalse(self.native._requires_python_animation(self.animation))
+        child.updaters.append(lambda mob, dt: None)
+        self.assertTrue(self.native._requires_python_animation(self.animation))
+        # Runtime copies from a previous play are not the current endpoints.
+        self.animation.target_copy = self.animation.target_mobject
+        self.animation.starting_mobject = child
+        self.animation.target_mobject = self.native.Mobject()
+        self.assertFalse(self.native._requires_python_animation(self.animation))
+
+    def test_shared_source_target_family_is_accepted(self):
+        child = self.native.Mobject()
+        child.updaters.append(lambda mob, dt: None)
+        self.animation.mobject.submobjects.append(child)
+        self.animation.target_mobject.submobjects.append(child)
+        self.assertTrue(self.native._requires_python_animation(self.animation))
+
+    def test_authored_target_recipes_are_not_evaluated_during_admission(self):
+        def deferred():
+            raise AssertionError("target recipe ran during admission")
+        self.animation.create_target = deferred
+        self.animation._native_target = deferred
+        self.animation.authored = True
+        self.assertTrue(self.native._requires_python_animation(self.animation))
+
+    def test_target_descriptor_is_left_for_callback_lifecycle(self):
+        class Authored(self.native.Transform):
+            @property
+            def target_mobject(self):
+                raise AssertionError("target descriptor ran during admission")
+        animation = Authored()
+        animation.mobject = self.native.Mobject()
+        self.assertTrue(self.native._requires_python_animation(animation))
+
+    def test_previous_authored_admission_precedes_source_inspection(self):
+        class Authored(self.native.Transform):
+            @property
+            def mobject(self):
+                raise AssertionError("source descriptor ran during admission")
+        animation = Authored()
+        animation.authored = True
+        self.assertTrue(self.native._requires_python_animation(animation))
+
+    def test_synthesized_target_from_prior_play_is_not_inspected(self):
+        animation = self.native.FadeIn()
+        animation.mobject = self.animation.mobject
+        animation.target_mobject = self.animation.target_mobject
+        animation.target_mobject.updaters.append(lambda mob, dt: None)
+        self.assertFalse(self.native._requires_python_animation(animation))
+
+    def test_path_is_not_an_animation_helper_updater_target(self):
+        class MoveAlongPath(self.native.Animation):
+            _native_kind = "move_along_path"
+            _target_attr = "path"
+        self.native.MoveAlongPath = MoveAlongPath
+        animation = MoveAlongPath()
+        animation.mobject = self.animation.mobject
+        animation.path = self.animation.target_mobject
+        animation.path.updaters.append(lambda mob, dt: None)
+        self.assertFalse(self.native._requires_python_animation(animation))
 
 
 class IndicationRateRouting(unittest.TestCase):

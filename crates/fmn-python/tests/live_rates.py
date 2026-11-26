@@ -368,6 +368,89 @@ class UpdatersThroughTransformCopies(unittest.TestCase):
         group = m.VGroup(m.Square(), carried.copy())
         self.assertTrue(requires(m.FadeIn(group)))
 
+    def test_target_only_updater_drives_equal_geometry_and_style_each_frame(self):
+        # The target starts identical to the source. Locking initially equal
+        # data, or looking for updaters only on the source, freezes this motion.
+        # Cover a late-added descendant updater and mixed nested compositions
+        # without authored animation hooks that would independently force a callback.
+        for fps in (24, 60):
+            for descendant in (False, True):
+                for nested in (False, True):
+                    with self.subTest(fps=fps, descendant=descendant, nested=nested), tempfile.TemporaryDirectory() as tmp:
+                        scene, source = m.Scene(), m.Square(fill_opacity=1)
+                        if descendant:
+                            source = m.VGroup(source)
+                        target = source.copy()
+                        moving = source[0] if descendant else source
+                        endpoint = target[0] if descendant else target
+                        animation = m.Transform(source, target, run_time=.25,
+                                                rate_func=m.linear)
+                        calls, observed = [], []
+                        def update(mob, dt):
+                            mob.shift(dt * m.RIGHT)
+                            mob.set_fill(opacity=1 - float(mob.get_center()[0]))
+                            if dt > 0:
+                                calls.append(float(dt))
+                        endpoint.add_updater(update)
+                        self.assertTrue(m._native._requires_python_animation(animation))
+                        sibling = m.Square().shift(3 * m.LEFT)
+                        if nested:
+                            animation = m.AnimationGroup(
+                                m.AnimationGroup(animation, rate_func=m.linear),
+                                m.Transform(sibling, sibling.copy().shift(m.UP),
+                                            run_time=.25, rate_func=m.linear),
+                                rate_func=m.linear,
+                            )
+                        probe = m.Mobject()
+                        probe.add_updater(lambda mob, dt: observed.append(
+                            (float(moving.get_center()[0]), moving.get_fill_opacity()))
+                            if dt > 0 else None)
+                        destination = Path(tmp) / "target-updater.y4m"
+                        with render_session(scene, destination, resolution=(32, 18),
+                                            fps=fps, threads=1) as output:
+                            scene.add(source, sibling, probe)
+                            scene.play(animation)
+                        frames = fps // 4
+                        self.assertEqual(output.result.frame_count, frames)
+                        self.assertEqual(len(calls), frames)
+                        times = np.arange(1, frames + 1) / fps
+                        expected = times * times / .25
+                        np.testing.assert_allclose(observed,
+                            np.column_stack((expected, 1 - expected)), atol=2e-6)
+                        np.testing.assert_allclose(moving.get_center(), .25 * m.RIGHT, atol=2e-6)
+                        self.assertAlmostEqual(moving.get_fill_opacity(), .75, places=6)
+                        self.assertFalse(source._is_updating_suspended())
+                        if nested:
+                            self.assertAlmostEqual(sibling.get_center()[1], 1, places=6)
+                            self.assertIsNone(getattr(animation, "_composition_scene", None))
+
+    def test_target_updater_failure_releases_playback_for_native_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            scene, source = m.Scene(), m.Square()
+            target = source.copy()
+            failure = RuntimeError("target updater failed")
+            def update(mob, dt):
+                if dt > 0:
+                    raise failure
+            target.add_updater(update)
+            animation = m.Transform(source, target, run_time=.25, rate_func=m.linear,
+                                    suspend_mobject_updating=True)
+            destination = Path(tmp) / "target-retry.y4m"
+            with self.assertRaises(RuntimeError) as caught:
+                with render_session(scene, destination, resolution=(32, 18), fps=24, threads=1):
+                    scene.add(source)
+                    scene.play(animation)
+            self.assertIs(caught.exception, failure)
+            self.assertFalse(destination.exists())
+            self.assertFalse(source._is_updating_suspended())
+            target.clear_updaters()
+            target.shift(m.RIGHT)
+            self.assertFalse(m._native._requires_python_animation(animation))
+            with render_session(scene, destination, resolution=(32, 18), fps=24, threads=1) as output:
+                scene.play(animation)
+            self.assertEqual(output.result.frame_count, 6)
+            np.testing.assert_allclose(source.get_center(), m.RIGHT, atol=2e-6)
+
 
 _result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(
     unittest.defaultTestLoader.loadTestsFromTestCase(case)

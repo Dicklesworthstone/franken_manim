@@ -292,3 +292,32 @@ Evidence: actual production definitions and timing setters in
 exact frame counts, nested compositions, and lifecycle results in
 `fmn-python/tests/builder_playback.py`; native raster plans and pixels in
 `fmn-python/tests/raster_animation.py`.
+
+## Transform target updaters keep fields live
+
+Python Transform admission checks both the source family and the current
+explicit target family for Python updaters. A target-only updater requires the
+Python lifecycle even when the source has no updater or its updating is
+suspended. Updaters added after animation construction are included. Admission
+does not run deferred target recipes or authored endpoint descriptors, and it
+does not inspect helper copies left over from an earlier play. A path supplied
+to MoveAlongPath is not an animation-owned updater target.
+
+Automatic matching-data locks are safe only when the interpolation endpoints
+remain static. Transform therefore skips those locks when its source, starting
+copy, original target, or aligned target copy has updaters. This deliberately
+corrects the pinned Reference's source-only check: initially equal points or
+style fields must remain able to change as a target updater runs. Existing
+explicit user locks remain respected, and static Transforms retain matching-data
+locking.
+
+**Migration:** no changes are required. Target-only Python callbacks now run
+during playback and their geometry and style changes reach interpolation.
+
+Evidence: `fmn-python/tests/test_live_rate_routing.py` checks endpoint admission,
+late-added descendant updaters, and deferred/authored lifecycle boundaries;
+`scripts/test_python_transform_paths.py` checks initially equal geometry and
+style, starting-copy updaters, and explicit locks. The installed-extension
+`fmn-python/tests/live_rates.py` acceptance suite also covers exact frame samples
+at 24 and 60 FPS, nested compositions, failure cleanup, and a subsequent native
+retry.

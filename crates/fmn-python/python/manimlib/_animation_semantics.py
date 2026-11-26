@@ -711,7 +711,12 @@ def install(native, subsystems=True):
         # Explicit user locks remain respected by Mobject.interpolate.
         # Camera pose is not in the RecordBuffer: equal empty endpoint
         # arrays must not lock the animated center and dimensions.
-        if (not self.mobject.has_updaters() and not uses_python_path(self)
+        # Helper copies and explicit targets can change initially equal data
+        # during update_mobjects even when the displayed source has no updater.
+        # Only static endpoint families are safe for automatic matching locks.
+        if (not any(mobject.has_updaters() for mobject in (
+                self.mobject, self.starting_mobject, self.target_mobject, self.target_copy,
+            )) and not uses_python_path(self)
                 and not isinstance(self.mobject, g["CameraFrame"])):
             self.mobject.lock_matching_data(
                 self.starting_mobject,

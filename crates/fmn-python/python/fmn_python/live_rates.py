@@ -7,6 +7,7 @@ or a caller-selected frame rate. No sampling or frame clock is defined here.
 from __future__ import annotations
 
 from functools import wraps
+from inspect import getattr_static
 from typing import Any
 
 
@@ -114,13 +115,35 @@ def install_live_rates(native: Any) -> None:
         # a Transform-family animation. That holds with suspend_mobject_updating too: begin()
         # copies before it suspends the mobject (measured on 6199a00d). Only the callback
         # lifecycle runs Python updaters on those copies; the native one drops them.
-        mobject = getattr(animation, "mobject", None)
-        return mobject is not None and any(member.get_updaters() for member in mobject.get_family())
+        mobjects = [getattr(animation, "mobject", None)]
+        if isinstance(animation, Transform) and animation._target_attr == "target_mobject":
+            # Inspect the current explicit endpoint, including updaters added
+            # after construction. Do not build deferred targets, evaluate an
+            # authored descriptor, or reuse copies from an earlier play. A
+            # MoveAlongPath path is not an animation helper updater target.
+            target = getattr_static(animation, "target_mobject", None)
+            if target is not None and not isinstance(target, g.get("Mobject", ())):
+                return True
+            mobjects.append(target)
+        seen = set()
+        for mobject in mobjects:
+            if mobject is not None:
+                for member in mobject.get_family():
+                    if id(member) not in seen:
+                        seen.add(id(member))
+                        if member.get_updaters():
+                            return True
+        return False
 
     def requires(animation):
+        # Existing adapters admit deferred recipes and authored descriptors
+        # without evaluating them. Preserve that boundary before inspecting
+        # the stock protocol's current endpoint families.
+        if previous_requires(animation):
+            return True
         if supported(animation) and (custom(getattr(animation, "rate_func", None)) or updating(animation)):
             return True
-        return previous_requires(animation)
+        return False
 
     @wraps(previous_defaults)
     def defaults(self):

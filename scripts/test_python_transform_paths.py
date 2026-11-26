@@ -313,6 +313,49 @@ class TransformPathProtocolTests(unittest.TestCase):
         animation.finish()
         np.testing.assert_allclose(self.source.data["point"], [[0, 0, 0]])
 
+    def test_target_updater_keeps_initially_equal_geometry_and_style_live(self):
+        target = self.source.copy()
+        target.has_updaters = lambda: True
+        def update(dt):
+            target.data["point"][:, 0] += dt
+            target.data["rgba"][:, 3] += dt
+        target.update = update
+        animation = self.n.Transform(self.source, target, rate_func=lambda t: t)
+        animation.begin()
+        self.assertEqual(self.source.lock_calls, 0)
+        animation.update_mobjects(.5)
+        animation.interpolate(.5)
+        np.testing.assert_allclose(self.source.data["point"], [[.25, 0, 0]])
+        np.testing.assert_allclose(self.source.data["rgba"], [[0, 0, 0, .25]])
+
+    def test_authored_starting_copy_updater_prevents_matching_locks(self):
+        class Authored(self.n.Transform):
+            def create_starting_mobject(self):
+                start = super().create_starting_mobject()
+                start.has_updaters = lambda: True
+                def update(dt):
+                    start.data["point"][:, 0] += dt
+                start.update = update
+                return start
+        animation = Authored(self.source, self.source.copy(), rate_func=lambda t: t)
+        animation.begin()
+        self.assertEqual(self.source.lock_calls, 0)
+        animation.update_mobjects(.5)
+        animation.interpolate(.5)
+        np.testing.assert_allclose(self.source.data["point"], [[.25, 0, 0]])
+
+    def test_target_updater_does_not_clear_explicit_user_locks(self):
+        self.source.locked_data_keys.add("point")
+        target = self.source.copy()
+        target.has_updaters = lambda: True
+        animation = self.n.Transform(self.source, target, rate_func=lambda t: t)
+        animation.begin()
+        self.assertEqual(self.source.lock_calls, 0)
+        target.data["point"][:, 0] = 2
+        animation.interpolate(.5)
+        np.testing.assert_allclose(self.source.data["point"], [[0, 0, 0]])
+        self.assertIn("point", self.source.locked_data_keys)
+
     def test_explicit_user_lock_is_not_removed_at_begin(self):
         self.source.locked_data_keys.add("point")
         animation = self.n.Transform(self.source, self.target, path_func=excursion)
