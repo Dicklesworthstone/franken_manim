@@ -99,7 +99,7 @@ def environment():
     source = ROOT / "python/manimlib/_animation_semantics.py"
     tree = ast.parse(source.read_text())
     helpers = [node for node in tree.body if isinstance(node, (ast.ClassDef, ast.FunctionDef))
-               and node.name in {"_DefaultRunTime", "_validate_frame_count"}]
+               and node.name in {"_DefaultRunTime", "_validate_frame_count", "_abort_callback_leaf"}]
     g["_operator"] = operator
     # ubs:ignore -- only fixed repository helper definitions are executed.
     exec(compile(ast.Module(helpers, []), str(source), "exec"), g)
