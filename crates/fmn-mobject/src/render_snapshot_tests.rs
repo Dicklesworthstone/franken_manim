@@ -3,6 +3,7 @@ use crate::{ImageColorSpace, ImageResource, ImageSampler, Mobject, RecordBuffer,
 use crate::{RenderPrimitive, ShapeTag, Stage, UpdaterFn, UpdaterId, UpdaterSlot};
 use std::cell::RefCell;
 use std::rc::Rc;
+use std::sync::Arc;
 
 fn line(stage: &mut Stage, x: f64) -> Mob {
     stage.add(Mobject::vector_from_points(&[
@@ -45,6 +46,7 @@ fn snapshot_encoding_limits_bound_growth_without_changing_canonical_bytes() {
     let snapshot = stage.snapshot();
     let full = snapshot.to_bytes().unwrap();
     let render = snapshot.to_render_bytes().unwrap();
+    assert_eq!(stage.to_render_bytes().unwrap(), render);
     let cap = |max_total| Limits {
         max_total,
         ..Limits::DEFAULT
@@ -71,16 +73,34 @@ fn snapshot_encoding_limits_bound_growth_without_changing_canonical_bytes() {
         Err(RenderSnapshotError::Serial(SerialError::SizeLimit { limit, .. }))
             if limit == render.len() - 1
     ));
+    assert_eq!(
+        stage
+            .to_render_bytes_with_encoding_limits(RenderSnapshotLimits::DEFAULT, cap(render.len()))
+            .unwrap(),
+        render
+    );
+    assert!(matches!(
+        stage.to_render_bytes_with_encoding_limits(
+            RenderSnapshotLimits::DEFAULT,
+            cap(render.len() - 1),
+        ),
+        Err(RenderSnapshotError::Serial(SerialError::SizeLimit { limit, .. }))
+            if limit == render.len() - 1
+    ));
 }
 
 #[test]
 fn render_bytes_ignore_unrooted_history_and_allocation_order() {
-    let clean = picture(0, false).snapshot();
-    let noisy = picture(512, true).snapshot();
+    let clean_stage = picture(0, false);
+    let noisy_stage = picture(512, true);
+    let clean = clean_stage.snapshot();
+    let noisy = noisy_stage.snapshot();
     // Negative control: the ordinary undo format really retains that history.
     assert_ne!(clean.to_bytes().unwrap(), noisy.to_bytes().unwrap());
     let bytes = clean.to_render_bytes().unwrap();
     assert_eq!(bytes, noisy.to_render_bytes().unwrap());
+    assert_eq!(bytes, clean_stage.to_render_bytes().unwrap());
+    assert_eq!(bytes, noisy_stage.to_render_bytes().unwrap());
     assert!(noisy.to_bytes().unwrap().len() > 20 * bytes.len());
     assert_eq!(decode(&bytes).snapshot().slots.len(), 3);
 }
@@ -99,7 +119,9 @@ fn shared_children_keep_both_root_placements_and_painter_partitions() {
     stage.get_mut(own).unwrap().uniforms_mut().stroke_behind = true;
     stage.add_many_to_scene(&[right, left]).unwrap();
     let before = stage.draw_plan();
-    let restored = decode(&stage.snapshot().to_render_bytes().unwrap());
+    let bytes = stage.to_render_bytes().unwrap();
+    assert_eq!(bytes, stage.snapshot().to_render_bytes().unwrap());
+    let restored = decode(&bytes);
     let after = restored.draw_plan();
     assert_eq!(before.items().len(), 3);
     assert_eq!(before.items().len(), after.items().len());
@@ -126,6 +148,7 @@ fn ordinary_snapshot_and_live_handles_are_untouched() {
     let before = stage.snapshot().to_bytes().unwrap();
     let snapshot = stage.snapshot();
     let bytes = snapshot.to_render_bytes().unwrap();
+    assert_eq!(bytes, stage.to_render_bytes().unwrap());
     assert_eq!(before, snapshot.to_bytes().unwrap());
     assert_eq!(before, stage.snapshot().to_bytes().unwrap());
     stage.shift(root, [9.0, 0.0, 0.0]);
@@ -162,6 +185,7 @@ fn execution_metadata_is_omitted_without_running_or_removing_callbacks() {
     assert_ne!(full, clean.to_bytes().unwrap());
     let bytes = active.to_render_bytes().unwrap();
     assert_eq!(bytes, clean.to_render_bytes().unwrap());
+    assert_eq!(bytes, active.materialize().to_render_bytes().unwrap());
     assert_eq!(full, active.to_bytes().unwrap());
     let projected = decode(&bytes).snapshot();
     assert_eq!(projected.next_updater_id, 1);
@@ -220,6 +244,10 @@ fn custom_columns_placement_uniforms_and_shape_validity_survive() {
     assert!(b.shape.point_revision.is_none());
     let decoded = decode(&source.to_render_bytes().unwrap());
     assert_eq!(
+        source.to_render_bytes().unwrap(),
+        source.materialize().to_render_bytes().unwrap()
+    );
+    assert_eq!(
         decoded.get_points(decoded.roots()[0]),
         stage.get_points(mob)
     );
@@ -246,6 +274,10 @@ fn primary_and_dark_image_resources_and_primitive_are_preserved() {
     assert_eq!(entry.image.as_ref(), Some(&image));
     let decoded = decode(&source.to_render_bytes().unwrap()).snapshot();
     assert_eq!(
+        source.to_render_bytes().unwrap(),
+        source.materialize().to_render_bytes().unwrap()
+    );
+    assert_eq!(
         decoded.slots[0].1.as_ref().unwrap().image.as_ref(),
         Some(&image)
     );
@@ -260,6 +292,12 @@ fn empty_picture_drops_all_arena_history() {
         .snapshot()
         .to_render_bytes_with_limits(RenderSnapshotLimits { max_graph_bytes: 0 })
         .unwrap();
+    assert_eq!(
+        bytes,
+        stage
+            .to_render_bytes_with_limits(RenderSnapshotLimits { max_graph_bytes: 0 })
+            .unwrap()
+    );
     assert_eq!(bytes, Stage::new().snapshot().to_bytes().unwrap());
     assert!(decode(&bytes).snapshot().slots.is_empty());
     assert!(
@@ -275,6 +313,17 @@ fn graph_budget_and_overflow_refuse_before_reservation() {
         snapshot.to_render_bytes_with_limits(RenderSnapshotLimits { max_graph_bytes: 0 }),
         Err(RenderSnapshotError::GraphLimit { limit: 0, .. })
     ));
+    assert_eq!(
+        snapshot
+            .to_render_bytes_with_limits(RenderSnapshotLimits { max_graph_bytes: 0 })
+            .unwrap_err()
+            .to_string(),
+        snapshot
+            .materialize()
+            .to_render_bytes_with_limits(RenderSnapshotLimits { max_graph_bytes: 0 })
+            .unwrap_err()
+            .to_string()
+    );
     let mut budget = Budget {
         limit: usize::MAX,
         charged: 0,
@@ -302,10 +351,18 @@ fn stale_foreign_and_cyclic_rooted_edges_are_refused() {
         source.to_render_bytes(),
         Err(RenderSnapshotError::Graph(StageError::StaleHandle))
     ));
+    assert!(matches!(
+        source.materialize().to_render_bytes(),
+        Err(RenderSnapshotError::Graph(StageError::StaleHandle))
+    ));
     let mut other = Stage::new();
     source.roots[0] = line(&mut other, 0.0);
     assert!(matches!(
         source.to_render_bytes(),
+        Err(RenderSnapshotError::Graph(StageError::StaleHandle))
+    ));
+    assert!(matches!(
+        source.materialize().to_render_bytes(),
         Err(RenderSnapshotError::Graph(StageError::StaleHandle))
     ));
     source.roots[0] = root;
@@ -317,6 +374,10 @@ fn stale_foreign_and_cyclic_rooted_edges_are_refused() {
         .push(root);
     assert!(matches!(
         source.to_render_bytes(),
+        Err(RenderSnapshotError::Graph(StageError::CycleDetected))
+    ));
+    assert!(matches!(
+        source.materialize().to_render_bytes(),
         Err(RenderSnapshotError::Graph(StageError::CycleDetected))
     ));
 }
@@ -331,12 +392,20 @@ fn duplicate_roots_and_edges_are_not_silently_deduplicated() {
         source.to_render_bytes(),
         Err(RenderSnapshotError::InvalidGraph("duplicate scene root"))
     ));
+    assert!(matches!(
+        source.materialize().to_render_bytes(),
+        Err(RenderSnapshotError::InvalidGraph("duplicate scene root"))
+    ));
     source.roots.pop();
     let entry = source.slots[root.parts().0 as usize].1.as_mut().unwrap();
     let duplicate_child = entry.submobjects[0];
     entry.submobjects.push(duplicate_child);
     assert!(matches!(
         source.to_render_bytes(),
+        Err(RenderSnapshotError::InvalidGraph("duplicate child edge"))
+    ));
+    assert!(matches!(
+        source.materialize().to_render_bytes(),
         Err(RenderSnapshotError::InvalidGraph("duplicate child edge"))
     ));
 }
@@ -370,6 +439,7 @@ fn deeply_shared_dag_uses_objects_and_edges_not_expanded_paths() {
     );
     let bytes = source.to_render_bytes().unwrap();
     assert_eq!(bytes, source.to_render_bytes().unwrap());
+    assert_eq!(bytes, stage.to_render_bytes().unwrap());
     assert_eq!(decode(&bytes).snapshot().slots.len(), 65);
 }
 
@@ -395,6 +465,7 @@ fn handle_generations_and_unrooted_parents_do_not_leak_into_picture_identity() {
         *root = Mob::from_parts(snapshot.stage_id, root.parts().0, 7);
     }
     assert_eq!(clean, snapshot.to_render_bytes().unwrap());
+    assert_eq!(clean, snapshot.materialize().to_render_bytes().unwrap());
     let restored = decode(&clean);
     assert!(
         restored
@@ -420,6 +491,10 @@ fn a_live_shape_hint_is_preserved_and_an_invalidated_one_is_not_revived() {
     original.shape.point_revision = original.buffer.field_revision("point");
     let projected = project(&snapshot, RenderSnapshotLimits::DEFAULT).unwrap();
     // Canonical order is group, left, right, unlike this arena's slot order.
+    assert_eq!(
+        snapshot.to_render_bytes().unwrap(),
+        snapshot.materialize().to_render_bytes().unwrap()
+    );
     let projected_left = projected.slots[1].1.as_ref().unwrap();
     assert!(projected_left.shape.point_revision.is_some());
     assert_eq!(
@@ -442,4 +517,103 @@ fn a_live_shape_hint_is_preserved_and_an_invalidated_one_is_not_revived() {
             .point_revision
             .is_none()
     );
+    assert_eq!(
+        snapshot.to_render_bytes().unwrap(),
+        snapshot.materialize().to_render_bytes().unwrap()
+    );
+}
+
+#[test]
+fn direct_capture_never_snapshots_hidden_history_and_freezes_visible_views() {
+    let mut stage = picture(512, true);
+    let root = stage.roots()[0];
+    let visible = stage.get(root).unwrap().submobjects()[0];
+    let hidden = line(&mut stage, 100.0);
+    let image = ImageResource::rgba8(
+        1,
+        1,
+        vec![1, 2, 3, 255],
+        ImageColorSpace::Srgb,
+        ImageSampler::default(),
+    )
+    .unwrap();
+    let pixels = image.shared_pixels();
+    stage.set_image_resource(hidden, Some(image)).unwrap();
+    let view = stage.get_mut(visible).unwrap().buffer.export_view(true);
+    let original = stage.get_points(visible).unwrap();
+    let bytes = stage.to_render_bytes().unwrap();
+    assert_eq!(
+        Arc::strong_count(&pixels),
+        2,
+        "direct picture capture must not populate the hidden entry's snapshot cache"
+    );
+    assert!(stage.contains(hidden));
+
+    // The complete snapshot is the incumbent control, including its hidden
+    // metadata capture. Both paths must nevertheless encode the same picture.
+    let snapshot = stage.snapshot();
+    assert!(Arc::strong_count(&pixels) > 2);
+    assert_eq!(bytes, snapshot.to_render_bytes().unwrap());
+    assert!(view.write(0, "point", &[7.0, 8.0, 9.0]));
+    let restored = decode(&bytes);
+    let projected = restored.get(restored.roots()[0]).unwrap().submobjects()[0];
+    assert_eq!(restored.get_points(projected).unwrap(), original);
+    assert_eq!(bytes, snapshot.to_render_bytes().unwrap());
+    assert_ne!(bytes, stage.to_render_bytes().unwrap());
+}
+
+#[test]
+fn direct_and_snapshot_capture_agree_for_readonly_and_writable_views() {
+    for writable in [false, true] {
+        let mut stage = Stage::new();
+        let mob = line(&mut stage, -2.0);
+        stage.add_to_scene(mob).unwrap();
+        let entry = stage.get_mut(mob).unwrap();
+        entry.set_shape(ShapeSlot {
+            tag: ShapeTag::Line {
+                start: [-2.0, 0.0, 0.0],
+                end: [-1.0, 0.0, 0.0],
+                path_arc: 0.0,
+                buff: 0.0,
+            },
+            point_revision: entry.buffer.field_revision("point"),
+        });
+        let view = entry.buffer.export_view(writable);
+        let bytes = stage.to_render_bytes().unwrap();
+        let snapshot = stage.snapshot();
+        assert_eq!(bytes, snapshot.to_render_bytes().unwrap());
+        let restored = decode(&bytes);
+        assert_eq!(
+            restored
+                .get(restored.roots()[0])
+                .unwrap()
+                .shape()
+                .point_revision
+                .is_some(),
+            !writable,
+            "a writable view invalidates the hint before any foreign edit"
+        );
+
+        assert!(
+            stage
+                .get_mut(mob)
+                .unwrap()
+                .buffer
+                .write_range("point", 0, &[7.0, 8.0, 9.0])
+        );
+        assert_eq!(view.read(0, "point").unwrap(), vec![7.0, 8.0, 9.0]);
+        assert_eq!(bytes, snapshot.to_render_bytes().unwrap());
+        let changed = stage.to_render_bytes().unwrap();
+        assert_ne!(bytes, changed);
+        assert_eq!(changed, stage.snapshot().to_render_bytes().unwrap());
+        let restored = decode(&changed);
+        assert!(
+            restored
+                .get(restored.roots()[0])
+                .unwrap()
+                .shape()
+                .point_revision
+                .is_none()
+        );
+    }
 }

@@ -12,14 +12,18 @@
 //! placements must still composite a shared drawable once per root. The result
 //! is deliberately exposed only as durable bytes. It is NOT an undo state and
 //! must never replace the live arena behind existing handles or Python proxies.
+//!
+//! A live Stage uses the same bounded projection directly at the owner-thread
+//! capture boundary. It visits only rooted entries, without first snapshotting
+//! detached history or copying its writable views and callback registrations.
 
 use std::collections::HashMap;
 
 use fmn_hash::{Limits, SerialError};
 
-use crate::StageError;
 use crate::shape::ShapeSlot;
 use crate::stage::{Mob, Snapshot, SnapshotEntry, SnapshotEntryData};
+use crate::{ImageResource, Placement, RecordBuffer, RenderPrimitive, Stage, StageError, Uniforms};
 
 /// Graph workspace admitted while projecting a recorded frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -146,7 +150,7 @@ struct Visit {
     root_seen: bool,
 }
 
-fn entry(snapshot: &Snapshot, mob: Mob) -> Result<&SnapshotEntry, RenderSnapshotError> {
+fn snapshot_entry(snapshot: &Snapshot, mob: Mob) -> Result<&SnapshotEntry, RenderSnapshotError> {
     let (index, generation) = mob.parts();
     if mob != Mob::from_parts(snapshot.stage_id, index, generation) {
         return Err(RenderSnapshotError::Graph(StageError::StaleHandle));
@@ -159,15 +163,102 @@ fn entry(snapshot: &Snapshot, mob: Mob) -> Result<&SnapshotEntry, RenderSnapshot
         .ok_or(RenderSnapshotError::Graph(StageError::StaleHandle))
 }
 
+/// Borrow just the inputs to an observed picture. Neither source adapter
+/// clones records or executable metadata while traversing the family graph.
+struct RenderEntry<'a> {
+    buffer: &'a RecordBuffer,
+    submobjects: &'a [Mob],
+    placement: Placement,
+    uniforms: Uniforms,
+    z_index: i32,
+    shape: ShapeSlot,
+    render_primitive: RenderPrimitive,
+    image: Option<&'a ImageResource>,
+}
+
+#[derive(Clone, Copy)]
+enum Source<'a> {
+    Snapshot(&'a Snapshot),
+    Stage(&'a Stage),
+}
+
+impl<'a> From<&'a Snapshot> for Source<'a> {
+    fn from(snapshot: &'a Snapshot) -> Self {
+        Self::Snapshot(snapshot)
+    }
+}
+
+impl<'a> From<&'a Stage> for Source<'a> {
+    fn from(stage: &'a Stage) -> Self {
+        Self::Stage(stage)
+    }
+}
+
+impl<'a> Source<'a> {
+    fn roots(self) -> &'a [Mob] {
+        match self {
+            Self::Snapshot(snapshot) => &snapshot.roots,
+            Self::Stage(stage) => stage.roots(),
+        }
+    }
+
+    fn stage_id(self) -> u64 {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.stage_id,
+            Self::Stage(stage) => stage.stage_id(),
+        }
+    }
+
+    fn frame_shape(self) -> [f64; 2] {
+        match self {
+            Self::Snapshot(snapshot) => snapshot.frame_shape,
+            Self::Stage(stage) => stage.frame_shape(),
+        }
+    }
+
+    fn entry(self, mob: Mob) -> Result<RenderEntry<'a>, RenderSnapshotError> {
+        match self {
+            Self::Snapshot(snapshot) => {
+                let entry = snapshot_entry(snapshot, mob)?;
+                Ok(RenderEntry {
+                    buffer: &entry.buffer,
+                    submobjects: &entry.submobjects,
+                    placement: entry.placement,
+                    uniforms: entry.uniforms,
+                    z_index: entry.z_index,
+                    shape: entry.shape,
+                    render_primitive: entry.render_primitive,
+                    image: entry.image.as_ref(),
+                })
+            }
+            Self::Stage(stage) => {
+                let entry = stage
+                    .get(mob)
+                    .ok_or(RenderSnapshotError::Graph(StageError::StaleHandle))?;
+                Ok(RenderEntry {
+                    buffer: &entry.buffer,
+                    submobjects: entry.submobjects(),
+                    placement: entry.placement(),
+                    uniforms: *entry.uniforms(),
+                    z_index: stage.z_index(mob),
+                    shape: entry.shape(),
+                    render_primitive: entry.render_primitive(),
+                    image: entry.image_resource(),
+                })
+            }
+        }
+    }
+}
+
 fn discover(
-    snapshot: &Snapshot,
+    input: Source<'_>,
     mob: Mob,
     visits: &mut HashMap<Mob, Visit>,
     order: &mut Vec<Mob>,
     stack: &mut Vec<(Mob, usize)>,
     budget: &mut Budget,
 ) -> Result<(), RenderSnapshotError> {
-    entry(snapshot, mob)?;
+    input.entry(mob)?;
     let index = u32::try_from(order.len()).map_err(|_| RenderSnapshotError::GraphLimit {
         limit: budget.limit,
         needed: usize::MAX,
@@ -194,10 +285,11 @@ fn discover(
     Ok(())
 }
 
-fn project(
-    snapshot: &Snapshot,
+fn project<'a>(
+    source: impl Into<Source<'a>>,
     limits: RenderSnapshotLimits,
 ) -> Result<Snapshot, RenderSnapshotError> {
+    let input = source.into();
     let mut budget = Budget {
         limit: limits.max_graph_bytes,
         charged: 0,
@@ -208,7 +300,7 @@ fn project(
     // Iterative DFS uses stack space proportional to depth, not the number of
     // paths through a shared DAG. HashMap is used only for lookup; its random
     // iteration order cannot assign an identity or change serialized order.
-    for &root in &snapshot.roots {
+    for &root in input.roots() {
         if let Some(visit) = visits.get_mut(&root) {
             if visit.root_seen {
                 return Err(RenderSnapshotError::InvalidGraph("duplicate scene root"));
@@ -217,7 +309,7 @@ fn project(
             continue;
         }
         discover(
-            snapshot,
+            input,
             root,
             &mut visits,
             &mut order,
@@ -229,7 +321,7 @@ fn project(
             .ok_or(RenderSnapshotError::Graph(StageError::StaleHandle))?
             .root_seen = true;
         while let Some((mob, next)) = stack.last_mut() {
-            let source = entry(snapshot, *mob)?;
+            let source = input.entry(*mob)?;
             if let Some(&child) = source.submobjects.get(*next) {
                 *next += 1;
                 match visits.get(&child) {
@@ -238,7 +330,7 @@ fn project(
                     }
                     Some(_) => {}
                     None => discover(
-                        snapshot,
+                        input,
                         child,
                         &mut visits,
                         &mut order,
@@ -258,17 +350,17 @@ fn project(
     let remap = |mob: Mob| -> Result<Mob, RenderSnapshotError> {
         visits
             .get(&mob)
-            .map(|visit| Mob::from_parts(snapshot.stage_id, visit.index, 0))
+            .map(|visit| Mob::from_parts(input.stage_id(), visit.index, 0))
             .ok_or(RenderSnapshotError::Graph(StageError::StaleHandle))
     };
     let mut slots = Vec::new();
     budget.reserve(&mut slots, order.len(), "projected slots")?;
     budget.charge::<[u8; SnapshotEntry::ALLOCATION_BYTES]>(order.len(), "projected metadata")?;
     for &mob in &order {
-        let source = entry(snapshot, mob)?;
+        let source = input.entry(mob)?;
         let mut children = Vec::new();
         budget.reserve(&mut children, source.submobjects.len(), "child links")?;
-        for &child in &source.submobjects {
+        for &child in source.submobjects {
             children.push(remap(child)?);
         }
         let mut identities = Vec::new();
@@ -315,7 +407,7 @@ fn project(
                 z_index: source.z_index,
                 shape,
                 render_primitive: source.render_primitive,
-                image: source.image.clone(),
+                image: source.image.cloned(),
                 image_revision: u64::from(source.image.is_some()),
                 family_cache: None,
             })),
@@ -324,7 +416,7 @@ fn project(
     // Rebuild reciprocal parents in canonical source/child order. Filtering
     // the original parent list would leak unrooted owners and attachment order.
     for &parent in &order {
-        for &child in &entry(snapshot, parent)?.submobjects {
+        for &child in input.entry(parent)?.submobjects {
             let index = visits[&child].index as usize;
             let target = slots[index]
                 .1
@@ -335,18 +427,67 @@ fn project(
         }
     }
     let mut roots = Vec::new();
-    budget.reserve(&mut roots, snapshot.roots.len(), "scene roots")?;
-    for &root in &snapshot.roots {
+    budget.reserve(&mut roots, input.roots().len(), "scene roots")?;
+    for &root in input.roots() {
         roots.push(remap(root)?);
     }
     Ok(Snapshot {
-        stage_id: snapshot.stage_id,
+        stage_id: input.stage_id(),
         next_updater_id: 1,
-        frame_shape: snapshot.frame_shape,
+        frame_shape: input.frame_shape(),
         slots,
         free: crate::stage::ArcVec::new(),
         roots: roots.into(),
     })
+}
+
+impl Stage {
+    /// Canonical picture bytes captured directly from this owner arena.
+    ///
+    /// Produces the same bytes as `self.snapshot().to_render_bytes()` while
+    /// visiting only the rooted family DAG. Detached objects, their writable
+    /// record views and updater registrations are never captured. Retained
+    /// views use the ordinary snapshot isolation policy before encoding.
+    ///
+    /// This is a render-only artifact with remapped handles, not editable
+    /// scene state. Live objects and their handles remain unchanged; undo and
+    /// replay consumers must continue to use [`Stage::snapshot`]. No animation,
+    /// updater or clock transition runs during this observation.
+    ///
+    /// # Errors
+    /// As [`Snapshot::to_render_bytes`].
+    pub fn to_render_bytes(&self) -> Result<Vec<u8>, RenderSnapshotError> {
+        self.to_render_bytes_with_limits(RenderSnapshotLimits::DEFAULT)
+    }
+
+    /// Direct picture encoding with an explicit graph workspace budget.
+    ///
+    /// # Errors
+    /// As [`Self::to_render_bytes`].
+    pub fn to_render_bytes_with_limits(
+        &self,
+        limits: RenderSnapshotLimits,
+    ) -> Result<Vec<u8>, RenderSnapshotError> {
+        self.to_render_bytes_with_encoding_limits(limits, Limits::DEFAULT)
+    }
+
+    /// Direct picture encoding with independent graph and byte budgets.
+    ///
+    /// Shares the snapshot projector and canonical FMNA writer. Both limits
+    /// are enforced before the corresponding allocation, independent of the
+    /// live arena's allocation history and detached record sizes.
+    ///
+    /// # Errors
+    /// As [`Self::to_render_bytes`], including a narrowed encoding size limit.
+    pub fn to_render_bytes_with_encoding_limits(
+        &self,
+        graph_limits: RenderSnapshotLimits,
+        encoding_limits: Limits,
+    ) -> Result<Vec<u8>, RenderSnapshotError> {
+        project(self, graph_limits)?
+            .to_bytes_with_limits(encoding_limits)
+            .map_err(RenderSnapshotError::Serial)
+    }
 }
 
 impl Snapshot {
