@@ -336,3 +336,30 @@ distinct aligned or baked targets, self-target aliases, ApplyMethod, and method
 builders. The registered `lifecycle.transform_target_updaters.v1` scenario checks
 real Scene captures against independently positioned and styled geometry and
 certified rendered frames.
+
+## Callback failures do not skip playback cleanup
+
+Drawable and camera callback drivers release framework state even when an
+authored animation's `abort` hook raises. They independently attempt to clear
+animation status, unlock Transform data, and resume suspension acquired by the
+current playback. A failure in one release does not skip the remaining releases.
+Resuming during abort does not run a synthetic updater tick.
+
+The drivers record suspension before `begin` rather than trusting a flag left
+over from an earlier execution. An object already suspended before playback
+stays suspended, including when `begin` fails before initializing that flag.
+An authored abort hook runs at most once per execution, even when multiple
+nested owners unwind the same leaf. A successful later `begin` starts a fresh
+execution.
+
+Direct abort callers receive the first cleanup exception unchanged; a play
+already unwinding preserves its original playback exception. Additional cleanup
+failures can annotate that first exception without replacing it.
+
+**Migration:** custom abort hooks can still release their own resources. The
+framework now completes its independent cleanup afterward, so hooks need not
+duplicate the stock Transform cleanup to keep an object usable after failure.
+
+Evidence: `fmn-python/tests/test_camera_choreography_protocol.py` covers drawable
+and camera leaves, raising hooks and cleanup methods, pre-existing suspension,
+nested mixed playback, exception identity, repeated abort, and successful retry.

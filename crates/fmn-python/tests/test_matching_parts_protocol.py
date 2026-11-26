@@ -16,6 +16,7 @@ def environment():
         def __init__(self, *children, shape=None, center=0):
             self.children, self.shape, self.center = list(children), shape, center
             self._scene, self.animating = None, False
+            self.suspended = False
         def get_family(self):
             result = [self]
             for child in self.children:
@@ -33,8 +34,11 @@ def environment():
             return self._scene is not None
         def unlock_data(self):
             self.unlocked = True
+        def _is_updating_suspended(self):
+            return self.suspended
         def resume_updating(self):
             self.resumed = True
+            self.suspended = False
         def set_animating_status(self, value):
             self.animating = value
     class VMobject(Mobject):

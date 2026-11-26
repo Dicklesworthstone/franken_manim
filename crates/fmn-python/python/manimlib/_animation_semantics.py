@@ -21,6 +21,49 @@ def _validate_frame_count(value):
     return count
 
 
+def _abort_callback_leaf(animation, was_suspended, transform_type):
+    """Release framework state even when an authored abort or cleanup raises."""
+    first_error = None
+
+    def attempt(action):
+        nonlocal first_error
+        try:
+            action()
+        except BaseException as error:
+            if first_error is None:
+                first_error = error
+            else:
+                try:
+                    BaseException.add_note(first_error,
+                        "additional callback cleanup failed: " + type(error).__name__)
+                except BaseException:
+                    pass
+
+    def authored_abort():
+        callback = getattr(animation, "abort", None)
+        if callable(callback):
+            callback()
+
+    def resume_owned_suspension():
+        if (not was_suspended and animation.suspend_mobject_updating
+                and animation.mobject._is_updating_suspended()):
+            animation.mobject_was_updating = False
+            # A TypeError from an authored method body is still a cleanup
+            # failure, not a reason to call it again with updaters enabled.
+            animation.mobject.resume_updating(call_updater=False)
+
+    # An authored abort is an additional lifecycle hook. It cannot prevent
+    # release of animation state, matching locks, or our own suspension.
+    # Attempt every release independently and keep the first error unchanged.
+    attempt(authored_abort)
+    attempt(lambda: animation.mobject.set_animating_status(False))
+    if isinstance(animation, transform_type):
+        attempt(lambda: animation.mobject.unlock_data())
+    attempt(resume_owned_suspension)
+    if first_error is not None:
+        raise first_error
+
+
 def install(native, subsystems=True):
     """The shared protocol: the Animation/Transform core, then (unless
     subsystems is False) every subsystem protocol layered on it. The core
@@ -1080,11 +1123,13 @@ def _install_matching_parts(g):
             self.animation = animation
             self.begun = False
             self.finished = False
+            self.was_suspended = True
 
         def get_run_time(self):
             return self.animation.get_run_time()
 
         def begin(self):
+            self.was_suspended = self.animation.mobject._is_updating_suspended()
             self.begun, self.finished = True, False
             self.animation.begin()
 
@@ -1110,20 +1155,7 @@ def _install_matching_parts(g):
             # Several nested owners may unwind the same leaf. An authored
             # abort belongs to this execution once, even when it raises.
             self.finished = True
-            animation = self.animation
-            abort_animation = getattr(animation, "abort", None)
-            if callable(abort_animation):
-                abort_animation()
-            else:
-                animation.mobject.set_animating_status(False)
-                if isinstance(animation, Transform):
-                    animation.mobject.unlock_data()
-                if (animation.suspend_mobject_updating
-                        and getattr(animation, "mobject_was_updating", False)):
-                    try:
-                        animation.mobject.resume_updating(call_updater=False)
-                    except TypeError:
-                        animation.mobject.resume_updating()
+            _abort_callback_leaf(self.animation, self.was_suspended, Transform)
 
     def make_driver(scene, animation):
         if isinstance(animation.mobject, g["CameraFrame"]):
@@ -2128,8 +2160,8 @@ def _install_camera_choreography(g):
             return self.animation.get_run_time()
 
         def begin(self):
-            self.begun, self.finished = True, False
             self.was_suspended = self.animation.mobject._is_updating_suspended()
+            self.begun, self.finished = True, False
             self.animation.begin()
 
         def update_mobjects(self, dt):
@@ -2153,21 +2185,7 @@ def _install_camera_choreography(g):
             if not self.begun or self.finished:
                 return
             self.finished = True
-            animation = self.animation
-            custom = getattr(animation, "abort", None)
-            if callable(custom):
-                custom()
-            else:
-                animation.mobject.set_animating_status(False)
-                if isinstance(animation, Transform):
-                    animation.mobject.unlock_data()
-                if (not self.was_suspended and animation.suspend_mobject_updating
-                        and animation.mobject._is_updating_suspended()):
-                    animation.mobject_was_updating = False
-                    try:
-                        animation.mobject.resume_updating(call_updater=False)
-                    except TypeError:
-                        animation.mobject.resume_updating()
+            _abort_callback_leaf(self.animation, self.was_suspended, Transform)
 
     g["_fmn_make_camera_driver"] = CameraLeaf
 

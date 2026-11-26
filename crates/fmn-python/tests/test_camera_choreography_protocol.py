@@ -79,9 +79,10 @@ def environment():
             return self.suspended
         def suspend_updating(self):
             self.suspended = True
-        def resume_updating(self):
+        def resume_updating(self, call_updater=True):
             self.suspended = False
-            self.update(0.)
+            if call_updater:
+                self.update(0.)
         def update(self, dt):
             if not self.suspended:
                 for child in self.submobjects:
@@ -572,6 +573,158 @@ class CameraChoreographyTests(unittest.TestCase):
             self.scene.play(self.camera_move(4, path_func=path, suspend_mobject_updating=True))
         self.assertFalse(self.scene._fmn_camera_play_active)
         self.assertFalse(self.scene.frame.suspended)
+
+
+class CallbackAbortRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.g = environment()
+        self.scene = self.g["Scene"]()
+
+    def source(self, camera):
+        return self.scene.frame if camera else self.g["Mobject"]()
+
+    def test_raising_abort_releases_owned_state_once_and_can_rebegin(self):
+        for camera in (False, True):
+            with self.subTest(camera=camera):
+                source, calls, ticks = self.source(camera), [], []
+                failure = RuntimeError("authored abort failed")
+                class Broken(self.g["Transform"]):
+                    def create_starting_mobject(self):
+                        return super().create_starting_mobject()
+                    def abort(self):
+                        calls.append("abort")
+                        raise failure
+                animation = Broken(source, source.copy(), suspend_mobject_updating=True)
+                driver = self.g["_fmn_make_animation_driver"](self.scene, animation)
+                driver.begin()
+                source.locked_data_keys.add("point")
+                source.updaters.append(lambda mob, dt: ticks.append(dt))
+                with self.assertRaises(RuntimeError) as caught:
+                    driver.abort()
+                self.assertIs(caught.exception, failure)
+                self.assertFalse(source.animating)
+                self.assertFalse(source.suspended)
+                self.assertEqual(source.locked_data_keys, set())
+                self.assertEqual(ticks, [])
+                driver.abort()
+                self.assertEqual(calls, ["abort"])
+                driver.begin()
+                driver.finish()
+                driver.abort()
+                self.assertFalse(source.animating or source.suspended)
+                self.assertEqual(calls, ["abort"])
+
+    def test_failed_begin_cannot_resume_preexisting_suspension_from_stale_flag(self):
+        for camera in (False, True):
+            with self.subTest(camera=camera):
+                source = self.source(camera)
+                failure = RuntimeError("copy failed before suspension setup")
+                class BadCopy(self.g["Transform"]):
+                    def create_starting_mobject(self):
+                        raise failure
+                source.suspend_updating()
+                animation = BadCopy(source, source.copy(), suspend_mobject_updating=True)
+                animation.mobject_was_updating = True
+                driver = self.g["_fmn_make_animation_driver"](self.scene, animation)
+                with self.assertRaises(RuntimeError) as caught:
+                    driver.begin()
+                self.assertIs(caught.exception, failure)
+                driver.abort()
+                self.assertTrue(source.suspended)
+                self.assertFalse(source.animating)
+
+    def test_cleanup_continues_after_a_second_failure_without_masking_abort_error(self):
+        for camera in (False, True):
+            with self.subTest(camera=camera):
+                source = self.source(camera)
+                failure = RuntimeError("authored abort failed first")
+                class Broken(self.g["Transform"]):
+                    def create_starting_mobject(self):
+                        return super().create_starting_mobject()
+                    def abort(self):
+                        raise failure
+                driver = self.g["_fmn_make_animation_driver"](self.scene,
+                    Broken(source, source.copy(), suspend_mobject_updating=True))
+                driver.begin()
+                source.locked_data_keys.add("point")
+                def fail_release(value):
+                    raise ValueError("animation status cleanup failed second")
+                source.set_animating_status = fail_release
+                with self.assertRaises(RuntimeError) as caught:
+                    driver.abort()
+                self.assertIs(caught.exception, failure)
+                self.assertFalse(source.suspended)
+                self.assertEqual(source.locked_data_keys, set())
+
+    def test_failing_resume_is_not_retried_with_updaters_enabled(self):
+        for camera in (False, True):
+            with self.subTest(camera=camera):
+                source, resumes, ticks = self.source(camera), [], []
+                failure = TypeError("authored resume failed in its body")
+                class Authored(self.g["Transform"]):
+                    def create_starting_mobject(self):
+                        return super().create_starting_mobject()
+                driver = self.g["_fmn_make_animation_driver"](self.scene,
+                    Authored(source, source.copy(), suspend_mobject_updating=True))
+                driver.begin()
+                source.locked_data_keys.add("point")
+                source.updaters.append(lambda mob, dt: ticks.append(dt))
+                def resume(call_updater=True):
+                    resumes.append(call_updater)
+                    if not call_updater:
+                        raise failure
+                    source.suspended = False
+                    source.update(0.)
+                source.resume_updating = resume
+                with self.assertRaises(TypeError) as caught:
+                    driver.abort()
+                self.assertIs(caught.exception, failure)
+                self.assertEqual(resumes, [False])
+                self.assertEqual(ticks, [])
+                self.assertFalse(source.animating)
+                self.assertEqual(source.locked_data_keys, set())
+
+    def test_nested_play_preserves_primary_failure_and_allows_retry(self):
+        for camera in (False, True):
+            with self.subTest(camera=camera):
+                scene = self.g["Scene"]()
+                source = scene.frame if camera else self.g["Mobject"]()
+                primary, secondary = ValueError("interpolation failed"), RuntimeError("abort failed")
+                calls = []
+                class Broken(self.g["Transform"]):
+                    fail = True
+                    def create_starting_mobject(self):
+                        return super().create_starting_mobject()
+                    def interpolate(self, alpha):
+                        if alpha > 0 and self.fail:
+                            raise primary
+                        return super().interpolate(alpha)
+                    def abort(self):
+                        calls.append("abort")
+                        raise secondary
+                animation = Broken(source, source.copy(), suspend_mobject_updating=True,
+                                   rate_func=self.g["linear"])
+                sibling = self.g["Mobject"]()
+                native = self.g["Transform"](sibling, sibling.copy().shift((2, 0, 0)))
+                inner = self.g["AnimationGroup"](animation)
+                members = [inner, native]
+                if not camera:
+                    members.append(self.g["Transform"](scene.frame, scene.frame.copy()))
+                group = self.g["AnimationGroup"](*members)
+                with self.assertRaises(ValueError) as caught:
+                    scene.play(group)
+                self.assertIs(caught.exception, primary)
+                self.assertEqual(calls, ["abort"])
+                self.assertFalse(source.animating or source.suspended)
+                self.assertEqual(source.locked_data_keys, set())
+                self.assertTrue(scene.cores and all(core.finished for core in scene.cores))
+                self.assertFalse(scene._fmn_camera_play_active)
+                animation.fail = False
+                animation.target_mobject.shift((1, 0, 0))
+                scene.play(group)
+                np.testing.assert_allclose(source.get_center(), (1, 0, 0))
+                self.assertEqual(calls, ["abort"])
+                self.assertFalse(source.animating or source.suspended)
 
 
 if __name__ == "__main__":
