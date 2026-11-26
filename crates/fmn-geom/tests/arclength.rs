@@ -3,11 +3,214 @@
 //! geometry-revision-only cache invalidation.
 
 use fmn_core::constants::TAU;
-use fmn_geom::arclength::quadratic_arc_length;
+use fmn_geom::arclength::{quadratic_arc_length, t_at_arc_fraction};
 use fmn_geom::{ArcLengthTable, CachedArcLength, QuadPath};
 
 fn p(x: f64, y: f64) -> [f64; 3] {
     [x, y, 0.0]
+}
+
+// For controls (0,0), (s,0), (s,s), the exact length is
+// s * (1 + asinh(1) / sqrt(2)). These inverse parameters come from
+// independently inverting its analytic partial integral.
+const RIGHT_ANGLE_LENGTH: f64 = 1.623_225_240_140_230_5;
+const RIGHT_ANGLE_INVERSE: [(f64, f64); 5] = [
+    (0.015625, 0.012_762_538_576_773_48),
+    (0.25, 0.226_180_422_283_570_44),
+    (0.5, 0.5),
+    (0.75, 0.773_819_577_716_429_4),
+    (0.984375, 0.987_237_461_423_226_4),
+];
+
+fn extreme_scales() -> [f64; 10] {
+    [
+        f64::from_bits(1),
+        f64::from_bits(1 << 24),
+        f64::MIN_POSITIVE,
+        2.0f64.powi(-600),
+        2.0f64.powi(-300),
+        1.0,
+        2.0f64.powi(300),
+        2.0f64.powi(600),
+        2.0f64.powi(1000),
+        2.0f64.powi(1022),
+    ]
+}
+
+fn assert_positive_length(actual: f64, expected: f64) {
+    assert!(actual.is_finite() && actual > 0.0, "length {actual:e}");
+    // A relative tolerance alone is meaningless for subnormal lengths.
+    let tolerance = (8.0 * f64::EPSILON * expected).max(f64::from_bits(1));
+    assert!(
+        (actual - expected).abs() <= tolerance,
+        "length {actual:e} versus analytic {expected:e} (tolerance {tolerance:e})"
+    );
+}
+
+#[test]
+fn analytic_lengths_survive_the_finite_binary64_scale_range() {
+    for scale in extreme_scales() {
+        let a = p(0.0, 0.0);
+        let h = p(scale, 0.0);
+        let b = p(scale, scale);
+        let expected = RIGHT_ANGLE_LENGTH * scale;
+        assert_positive_length(quadratic_arc_length(a, h, b), expected);
+        assert_positive_length(quadratic_arc_length(b, h, a), expected);
+        assert_positive_length(quadratic_arc_length(a, h, a), scale);
+        assert_positive_length(quadratic_arc_length(a, h, p(2.0 * scale, 0.0)), 2.0 * scale);
+    }
+    assert_eq!(
+        quadratic_arc_length(
+            p(0.0, 0.0),
+            p(f64::from_bits(1), 0.0),
+            p(f64::from_bits(1), f64::from_bits(1))
+        ),
+        f64::from_bits(2),
+        "the smallest right-angle curve rounds to two subnormal units"
+    );
+}
+
+#[test]
+fn inverse_arc_fraction_is_independent_of_extreme_scale() {
+    for scale in extreme_scales() {
+        let a = p(0.0, 0.0);
+        let h = p(scale, 0.0);
+        let b = p(scale, scale);
+        for (fraction, expected) in RIGHT_ANGLE_INVERSE {
+            let t = t_at_arc_fraction(a, h, b, fraction);
+            let reversed = t_at_arc_fraction(b, h, a, 1.0 - fraction);
+            assert!(
+                (t - expected).abs() < 3e-13,
+                "scale {scale:e}, fraction {fraction}: t={t}, expected {expected}"
+            );
+            assert!((reversed - (1.0 - expected)).abs() < 3e-13);
+        }
+        assert_eq!(t_at_arc_fraction(a, h, b, -1.0), 0.0);
+        assert_eq!(t_at_arc_fraction(a, h, b, 2.0), 1.0);
+    }
+}
+
+#[test]
+fn huge_translation_preserves_the_represented_curve() {
+    let base = 2.0f64.powi(1023);
+    let delta = 2.0f64.powi(971); // One ULP at base, retained in all three points.
+    let a = p(base, base);
+    let h = p(base + delta, base);
+    let b = p(base + delta, base + delta);
+    assert_positive_length(quadratic_arc_length(a, h, b), RIGHT_ANGLE_LENGTH * delta);
+    for (fraction, expected) in RIGHT_ANGLE_INVERSE {
+        assert!((t_at_arc_fraction(a, h, b, fraction) - expected).abs() < 3e-13);
+    }
+    assert_eq!(
+        quadratic_arc_length([f64::MAX; 3], [f64::MAX; 3], [f64::MAX; 3]),
+        0.0
+    );
+    assert_eq!(
+        t_at_arc_fraction([f64::MAX; 3], [f64::MAX; 3], [f64::MAX; 3], 0.5),
+        0.0
+    );
+}
+
+#[test]
+fn an_overflowing_control_edge_can_have_finite_arc_length() {
+    // The derivative crosses zero at t=4/5. Integrating its absolute
+    // linear speed gives (17/5)q even though h-a overflows to infinity.
+    let q = 2.0f64.powi(1022);
+    let a = p(-3.0 * q, 0.0);
+    let h = p(q, 0.0);
+    let b = p(0.0, 0.0);
+    assert!((h[0] - a[0]).is_infinite());
+    assert_positive_length(quadratic_arc_length(a, h, b), (17.0 / 5.0) * q);
+    assert_positive_length(quadratic_arc_length(b, h, a), (17.0 / 5.0) * q);
+    let half_parameter = (4.0 - 7.5f64.sqrt()) / 5.0;
+    assert!((t_at_arc_fraction(a, h, b, 0.5) - half_parameter).abs() < 3e-13);
+}
+
+#[test]
+fn overflowing_physical_length_keeps_a_defined_arc_fraction() {
+    let a = p(-f64::MAX, 0.0);
+    let h = p(0.0, 0.0);
+    let b = p(f64::MAX, 0.0);
+    assert_eq!(quadratic_arc_length(a, h, b), f64::INFINITY);
+    for fraction in [0.0, 0.125, 0.25, 0.5, 0.75, 1.0] {
+        assert!((t_at_arc_fraction(a, h, b, fraction) - fraction).abs() < 3e-13);
+    }
+}
+
+#[test]
+fn retained_weights_preserve_unequal_curves_at_extreme_scales() {
+    for scale in extreme_scales() {
+        // Two right-angle curves with lengths in ratio 1:2. Rounded
+        // physical lengths have ratio 2:3 at the smallest subnormal scale,
+        // and their sum overflows at the largest scale in this test.
+        let path = QuadPath::from_points(vec![
+            p(0.0, 0.0),
+            p(scale, 0.0),
+            p(scale, scale),
+            p(scale, 3.0 * scale),
+            p(3.0 * scale, 3.0 * scale),
+        ])
+        .unwrap();
+        let table = ArcLengthTable::for_path(&path);
+        assert_eq!(table.curve_lengths().len(), 2);
+        assert_positive_length(table.curve_lengths()[0], RIGHT_ANGLE_LENGTH * scale);
+        assert_positive_length(table.curve_lengths()[1], (2.0 * RIGHT_ANGLE_LENGTH) * scale);
+        let expected_total = (3.0 * RIGHT_ANGLE_LENGTH) * scale;
+        if expected_total.is_infinite() {
+            assert_eq!(table.total(), f64::INFINITY);
+        } else {
+            assert_positive_length(table.total(), expected_total);
+        }
+        for (alpha, expected_index, expected_t) in [
+            (1.0 / 12.0, 0, RIGHT_ANGLE_INVERSE[1].1),
+            (1.0 / 6.0, 0, 0.5),
+            (0.25, 0, RIGHT_ANGLE_INVERSE[3].1),
+            (0.5, 1, RIGHT_ANGLE_INVERSE[1].1),
+            (2.0 / 3.0, 1, 0.5),
+            (5.0 / 6.0, 1, RIGHT_ANGLE_INVERSE[3].1),
+        ] {
+            let (index, t) = table.curve_and_t_at(&path, alpha).unwrap();
+            assert_eq!(index, expected_index, "scale {scale:e}, alpha {alpha}");
+            assert!(
+                (t - expected_t).abs() < 3e-13,
+                "scale {scale:e}, alpha {alpha}: t={t}, expected {expected_t}"
+            );
+        }
+    }
+}
+
+#[test]
+fn extreme_retained_tables_skip_pen_up_moves_and_keep_endpoint_contours() {
+    let scale = 2.0f64.powi(600);
+    let path = QuadPath::from_points(vec![
+        p(-scale, 0.0),
+        p(-scale, 0.0),
+        p(0.0, 0.0),
+        p(scale, 0.0),
+        p(scale, scale),
+        p(scale, scale),
+        p(8.0 * scale, 0.0),
+        p(8.0 * scale, scale),
+        p(9.0 * scale, scale),
+        p(9.0 * scale, scale),
+        p(10.0 * scale, 0.0),
+    ])
+    .unwrap();
+    let mut cache = CachedArcLength::new();
+    let table = cache.get(7, &path);
+    assert_eq!(table.curve_lengths().len(), 5);
+    assert_eq!(table.curve_lengths()[0], 0.0);
+    assert_eq!(table.curve_lengths()[2], 0.0);
+    assert_eq!(table.curve_lengths()[4], 0.0);
+    assert_positive_length(table.total(), (2.0 * RIGHT_ANGLE_LENGTH) * scale);
+    assert_eq!(table.curve_and_t_at(&path, 0.0), Some((0, 0.0)));
+    assert_eq!(table.curve_and_t_at(&path, 0.5), Some((3, 0.0)));
+    assert_eq!(table.curve_and_t_at(&path, 1.0), Some((4, 1.0)));
+    let (index, t) = table.curve_and_t_at(&path, 0.75).unwrap();
+    assert_eq!(index, 3);
+    assert!((t - 0.5).abs() < 3e-13);
+    let _ = cache.get(7, &path);
+    assert_eq!(cache.rebuilds(), 1);
 }
 
 /// Reference numeric integration: fine composite Simpson on |B'(t)| —

@@ -17561,6 +17561,110 @@ fn parity_frame_markers_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioErro
     Ok(RunOutcome::ok().with_counter("parity_frame_marker_placements", 5))
 }
 
+/// Public f64 path queries retain their pacing when physical lengths become
+/// subnormal or the total overflows. Keep these coordinates out of f32 records.
+fn parity_finite_scale_arclength() -> Result<(u64, u64), ScenarioError> {
+    // For B(t)=(2t-t²,t²), |B'(t)|=2*sqrt((1-t)²+t²), whose integral is
+    // 1 + asinh(1)/sqrt(2). Its primitive supplies alpha independently of
+    // Chisel's length/inversion implementation.
+    const RIGHT_ANGLE_LENGTH: f64 = 1.6232252401402305;
+    let primitive = |u: f64| u * (1.0 + u * u).sqrt() + u.asinh();
+    let endpoint = primitive(1.0);
+    let fraction = |t: f64| (primitive(2.0 * t - 1.0) + endpoint) / (2.0 * endpoint);
+    let mut cache = fmn_geom::CachedArcLength::new();
+    let mut samples = 0_u64;
+    let mut revision = 0_u64;
+    for scale in [
+        f64::from_bits(1_u64 << 40),
+        1e-200,
+        1e-90,
+        1.0,
+        1e90,
+        1e200,
+        f64::MAX,
+    ] {
+        revision += 1;
+        let half = 0.5 * scale;
+        // Traverse a right-angle quadratic and retrace it. Both curves have
+        // length 0.5*RIGHT_ANGLE_LENGTH*scale. Even 2*handle stays finite at
+        // MAX, while their combined true length legitimately overflows.
+        let path = fmn_geom::QuadPath::from_points(vec![
+            [0.0; 3],
+            [half, 0.0, 0.0],
+            [half, half, 0.0],
+            [half, 0.0, 0.0],
+            [0.0; 3],
+        ])
+        .map_err(|error| fail(format!("finite-scale path: {error}")))?;
+        let table = cache.get(revision, &path);
+        if table.curve_lengths().len() != 2
+            || table.curve_lengths().iter().any(|length| {
+                !length.is_finite() || (length / scale - 0.5 * RIGHT_ANGLE_LENGTH).abs() > 1e-10
+            })
+        {
+            return Err(fail(format!(
+                "finite-scale curve lengths changed at scale={scale:e}"
+            )));
+        }
+        let total = table.total();
+        let expected_total = RIGHT_ANGLE_LENGTH * scale;
+        let total_matches = if expected_total.is_infinite() {
+            total == f64::INFINITY
+        } else {
+            total.is_finite() && (total / scale - RIGHT_ANGLE_LENGTH).abs() <= 1e-10
+        };
+        if !total_matches {
+            return Err(fail(format!(
+                "finite-scale total length changed at scale={scale:e}: {total}"
+            )));
+        }
+
+        let mut check_sample = |alpha: f64, curve: usize, t: f64| {
+            let table = cache.get(revision, &path);
+            let (actual_curve, actual_t) = table
+                .curve_and_t_at(&path, alpha)
+                .ok_or_else(|| fail("finite-scale inversion lost its curve"))?;
+            if actual_curve != curve || !actual_t.is_finite() || (actual_t - t).abs() > 1e-10 {
+                return Err(fail(format!(
+                    "finite-scale inversion at scale={scale:e}, alpha={alpha}: \
+                     ({actual_curve}, {actual_t}) != ({curve}, {t})"
+                )));
+            }
+            let point = path
+                .point_from_proportion_with(table, alpha)
+                .ok_or_else(|| fail("finite-scale query lost its point"))?;
+            let expected = if curve == 0 {
+                [0.5 * (2.0 * t - t * t), 0.5 * t * t, 0.0]
+            } else {
+                [0.5 * (1.0 - t * t), 0.5 * (1.0 - t) * (1.0 - t), 0.0]
+            };
+            if point.into_iter().zip(expected).any(|(actual, expected)| {
+                !actual.is_finite() || (actual / scale - expected).abs() > 1e-10
+            }) {
+                return Err(fail(format!(
+                    "finite-scale sample at scale={scale:e}, alpha={alpha}: {point:?}"
+                )));
+            }
+            samples += 1;
+            Ok(())
+        };
+        for t in [0.25, 0.5, 0.75] {
+            let local_fraction = fraction(t);
+            check_sample(0.5 * local_fraction, 0, t)?;
+            check_sample(0.5 + 0.5 * local_fraction, 1, t)?;
+        }
+        check_sample(0.0, 0, 0.0)?;
+        check_sample(0.5, 1, 0.0)?;
+        check_sample(1.0, 1, 1.0)?;
+        if cache.rebuilds() != revision {
+            return Err(fail(
+                "finite-scale queries lost geometry-revision cache reuse",
+            ));
+        }
+    }
+    Ok((samples, cache.rebuilds()))
+}
+
 /// BN-03 — `point_from_proportion`/`MoveAlongPath` place by TRUE arc
 /// length. Metamorphic: uniform α steps visit equal arc-length increments
 /// on an uneven curved path (built corner-free, so equal chords are a
@@ -17789,13 +17893,16 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
             compound_tangents += 1;
         }
     }
+    let (finite_scale_samples, finite_scale_rebuilds) = parity_finite_scale_arclength()?;
     ctx.event(
         LogEvent::new("e2e.parity.move_along_path_arclength")
             .field("equal_steps", truth(worst_deviation / mean_step <= 0.01))
             .field("animation_matches", animation_matches)
             .field("compound_samples", compound_samples)
             .field("compound_tangents", compound_tangents)
-            .field("path_materializations", materializations),
+            .field("path_materializations", materializations)
+            .field("finite_scale_samples", finite_scale_samples)
+            .field("finite_scale_cache_rebuilds", finite_scale_rebuilds),
     );
     ctx.counter("parity_arclength_animation_matches", animation_matches);
     ctx.counter("parity_arclength_compound_samples", compound_samples);
@@ -17803,7 +17910,15 @@ fn parity_move_along_path_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioEr
         .with_counter("parity_arclength_animation_matches", animation_matches)
         .with_counter("parity_arclength_compound_samples", compound_samples)
         .with_counter("parity_arclength_compound_tangents", compound_tangents)
-        .with_counter("parity_arclength_path_materializations", materializations))
+        .with_counter("parity_arclength_path_materializations", materializations)
+        .with_counter(
+            "parity_arclength_finite_scale_samples",
+            finite_scale_samples,
+        )
+        .with_counter(
+            "parity_arclength_finite_scale_cache_rebuilds",
+            finite_scale_rebuilds,
+        ))
 }
 
 /// A real Scene updater removes an active motion path after the first frame.
@@ -24063,6 +24178,8 @@ pub fn catalog() -> Vec<ScenarioSpec> {
             counter_eq("parity_arclength_compound_samples", 20),
             counter_eq("parity_arclength_compound_tangents", 6),
             counter_eq("parity_arclength_path_materializations", 1),
+            counter_eq("parity_arclength_finite_scale_samples", 63),
+            counter_eq("parity_arclength_finite_scale_cache_rebuilds", 7),
         ],
         vec![LogExpect::span_present(
             "e2e.parity.move_along_path_arclength",
@@ -24072,6 +24189,8 @@ pub fn catalog() -> Vec<ScenarioSpec> {
                 FieldPred::u64_eq("compound_samples", 20),
                 FieldPred::u64_eq("compound_tangents", 6),
                 FieldPred::u64_eq("path_materializations", 1),
+                FieldPred::u64_eq("finite_scale_samples", 63),
+                FieldPred::u64_eq("finite_scale_cache_rebuilds", 7),
             ],
         )],
     ));

@@ -51,8 +51,96 @@ fn derivative(a0: Vec3, h: Vec3, a1: Vec3, t: f64) -> Vec3 {
 ///   `F(t) = (2at+b)S(t)/(4a) + (4ac−b²)/(8a^{3/2})·ln(2√a·S(t)+2at+b)`.
 #[must_use]
 pub fn quadratic_arc_length(a0: Vec3, h: Vec3, a1: Vec3) -> f64 {
+    let (length, scale) = curve_length_units(a0, h, a1);
+    length * scale
+}
+
+// Fourth-degree terms (the discriminant and squared cross product) need a
+// narrower exponent range than a simple norm. Ordinary curves retain the
+// established arithmetic, including the entire f32 record range.
+const LENGTH_LOW: f64 = f64::from_bits(823_u64 << 52); // 2^-200
+const LENGTH_HIGH: f64 = f64::from_bits(1223_u64 << 52); // 2^200
+
+fn curve_length_units(a0: Vec3, h: Vec3, a1: Vec3) -> (f64, f64) {
     let v = vec::scale(vec::sub(h, a0), 2.0);
     let u = vec::scale(vec::add(vec::sub(a0, vec::scale(h, 2.0)), a1), 2.0);
+    if let Some(([_, h, a1], scale)) = conditioned_curve(a0, h, a1, u, v) {
+        let v = vec::scale(h, 2.0);
+        let u = vec::scale(vec::sub(a1, vec::scale(h, 2.0)), 2.0);
+        return (integrate_derivative(u, v), scale);
+    }
+    (integrate_derivative(u, v), 1.0)
+}
+
+// Translate and scale exceptional curves before forming squared coefficients.
+// Power-of-two division preserves the represented geometry and avoids an
+// overflowing reciprocal when the coordinates are subnormal.
+fn conditioned_curve(a0: Vec3, h: Vec3, a1: Vec3, u: Vec3, v: Vec3) -> Option<([Vec3; 3], f64)> {
+    let magnitude = u.into_iter().chain(v).map(f64::abs).fold(0.0, f64::max);
+    if u.into_iter().chain(v).all(f64::is_finite)
+        && (magnitude == 0.0 || (LENGTH_LOW..=LENGTH_HIGH).contains(&magnitude))
+        && a0
+            .into_iter()
+            .chain(h)
+            .chain(a1)
+            .all(|x| x.abs() <= LENGTH_HIGH)
+    {
+        return None;
+    }
+    if !a0.into_iter().chain(h).chain(a1).all(f64::is_finite) {
+        return None;
+    }
+    let handle = vec::sub(h, a0);
+    let end = vec::sub(a1, a0);
+    if handle.into_iter().chain(end).all(f64::is_finite) {
+        let magnitude = handle
+            .into_iter()
+            .chain(end)
+            .map(f64::abs)
+            .fold(0.0, f64::max);
+        let scale = length_scale(magnitude);
+        return Some((
+            [[0.0; 3], handle.map(|x| x / scale), end.map(|x| x / scale)],
+            scale,
+        ));
+    }
+    // A control-polygon edge can overflow even when a retracing curve's
+    // length is representable. Scale finite coordinates before subtracting
+    // in that case; an overflowing edge is not proof of infinite arc length.
+    let magnitude = a0
+        .into_iter()
+        .chain(h)
+        .chain(a1)
+        .map(f64::abs)
+        .fold(0.0, f64::max);
+    let scale = length_scale(magnitude);
+    let origin = a0.map(|x| x / scale);
+    Some((
+        [
+            [0.0; 3],
+            vec::sub(h.map(|x| x / scale), origin),
+            vec::sub(a1.map(|x| x / scale), origin),
+        ],
+        scale,
+    ))
+}
+
+fn length_scale(magnitude: f64) -> f64 {
+    if magnitude == 0.0 {
+        return 1.0;
+    }
+    let bits = magnitude.to_bits();
+    let exponent = bits & (0x7ff_u64 << 52);
+    if exponent != 0 {
+        f64::from_bits(exponent)
+    } else {
+        // A subnormal's leading significand bit is also an exact power of
+        // two. Divide by it directly; its reciprocal need not be finite.
+        f64::from_bits(1_u64 << (63 - bits.leading_zeros()))
+    }
+}
+
+fn integrate_derivative(u: Vec3, v: Vec3) -> f64 {
     let a = space_ops::dot(u, u);
     let b = 2.0 * space_ops::dot(u, v);
     let c = space_ops::dot(v, v);
@@ -164,6 +252,11 @@ fn near_collinear_length(u: Vec3, v: Vec3, a: f64, b: f64) -> f64 {
 pub struct ArcLengthTable {
     curve_lengths: Vec<f64>,
     cumulative: Vec<f64>,
+    // Ordinary paths keep the original physical cumulative arithmetic.
+    // Extreme paths retain dimensionless weights for inversion, so neither
+    // subnormal target rounding nor an overflowing total destroys pacing.
+    inverse_lengths: Option<Vec<f64>>,
+    length_scale: f64,
 }
 
 impl ArcLengthTable {
@@ -194,16 +287,63 @@ impl ArcLengthTable {
             total += len;
             cumulative.push(total);
         }
+        let mut inverse_lengths = None;
+        let mut length_scale = 1.0;
+        if total > 0.0
+            && !(LENGTH_LOW..=LENGTH_HIGH).contains(&total)
+            && path
+                .points()
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite())
+        {
+            let units: Vec<_> = path
+                .bezier_tuples()
+                .zip(&curve_lengths)
+                .map(|([a0, h, a1], &length)| {
+                    if length == 0.0 {
+                        (0.0, 1.0) // Preserve pen-up and degenerate slots.
+                    } else {
+                        curve_length_units(a0, h, a1)
+                    }
+                })
+                .collect();
+            length_scale = units
+                .iter()
+                .filter(|(length, _)| *length > 0.0)
+                .map(|(_, scale)| *scale)
+                .fold(0.0, f64::max);
+            let weights: Vec<_> = units
+                .into_iter()
+                .map(|(length, scale)| {
+                    if length == 0.0 {
+                        0.0
+                    } else {
+                        length * (scale / length_scale)
+                    }
+                })
+                .collect();
+            cumulative.clear();
+            cumulative.push(0.0);
+            let mut sum = 0.0;
+            for &weight in &weights {
+                sum += weight;
+                cumulative.push(sum);
+            }
+            inverse_lengths = Some(weights);
+        }
         Self {
             curve_lengths,
             cumulative,
+            inverse_lengths,
+            length_scale,
         }
     }
 
     /// The path's total arc length.
     #[must_use]
     pub fn total(&self) -> f64 {
-        *self.cumulative.last().unwrap_or(&0.0)
+        *self.cumulative.last().unwrap_or(&0.0) * self.length_scale
     }
 
     /// Per-curve true lengths, in curve order.
@@ -228,7 +368,11 @@ impl ArcLengthTable {
             return None;
         }
         let alpha = alpha.clamp(0.0, 1.0);
-        let total = self.total();
+        let lengths = self
+            .inverse_lengths
+            .as_deref()
+            .unwrap_or(&self.curve_lengths);
+        let total = *self.cumulative.last().unwrap_or(&0.0);
         if total == 0.0 || alpha == 0.0 {
             return Some((0, 0.0));
         }
@@ -242,19 +386,21 @@ impl ArcLengthTable {
             .saturating_sub(1);
         index = index.min(self.curve_lengths.len() - 1);
         // Zero-length curves cannot host an interior parameter.
-        while index + 1 < self.curve_lengths.len() && self.curve_lengths[index] == 0.0 {
+        while index + 1 < lengths.len() && lengths[index] == 0.0 {
             index += 1;
         }
-        let curve_len = self.curve_lengths[index];
+        let curve_len = lengths[index];
         if curve_len == 0.0 {
             return Some((index, 0.0));
         }
         let local_target = target - self.cumulative[index];
         let [a0, h, a1] = path.nth_curve_points(index)?;
-        Some((
-            index,
-            t_at_partial_length(a0, h, a1, local_target, curve_len),
-        ))
+        let t = if self.inverse_lengths.is_some() {
+            t_at_arc_fraction(a0, h, a1, local_target / curve_len)
+        } else {
+            t_at_partial_length(a0, h, a1, local_target, curve_len)
+        };
+        Some((index, t))
     }
 }
 
@@ -269,16 +415,36 @@ impl ArcLengthTable {
 /// inverting arc length by a second rule (D4: geometry lives here).
 #[must_use]
 pub fn t_at_arc_fraction(a0: Vec3, h: Vec3, a1: Vec3, frac: f64) -> f64 {
-    let total = quadratic_arc_length(a0, h, a1);
+    let v = vec::scale(vec::sub(h, a0), 2.0);
+    let u = vec::scale(vec::add(vec::sub(a0, vec::scale(h, 2.0)), a1), 2.0);
+    if let Some(([a0, h, a1], _)) = conditioned_curve(a0, h, a1, u, v) {
+        // Normalize before frac * total: subnormal targets can round to zero,
+        // and a legitimate overflowing physical length would yield inf/inf.
+        let total = quadratic_arc_length(a0, h, a1);
+        if total <= 0.0 {
+            return 0.0;
+        }
+        return solve_partial_length(a0, h, a1, frac.clamp(0.0, 1.0) * total, total);
+    }
+    let total = integrate_derivative(u, v);
     if total <= 0.0 {
         return 0.0;
     }
-    t_at_partial_length(a0, h, a1, frac.clamp(0.0, 1.0) * total, total)
+    solve_partial_length(a0, h, a1, frac.clamp(0.0, 1.0) * total, total)
 }
 
 /// Newton on the exact partial-length closed form with a bisection safeguard,
 /// fixed iteration count (deterministic on every platform).
 fn t_at_partial_length(a0: Vec3, h: Vec3, a1: Vec3, local_target: f64, curve_len: f64) -> f64 {
+    let v = vec::scale(vec::sub(h, a0), 2.0);
+    let u = vec::scale(vec::add(vec::sub(a0, vec::scale(h, 2.0)), a1), 2.0);
+    if let Some(([a0, h, a1], scale)) = conditioned_curve(a0, h, a1, u, v) {
+        return solve_partial_length(a0, h, a1, local_target / scale, curve_len / scale);
+    }
+    solve_partial_length(a0, h, a1, local_target, curve_len)
+}
+
+fn solve_partial_length(a0: Vec3, h: Vec3, a1: Vec3, local_target: f64, curve_len: f64) -> f64 {
     let partial = |t: f64| -> f64 {
         if t <= 0.0 {
             return 0.0;
