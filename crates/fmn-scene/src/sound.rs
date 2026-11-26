@@ -5,12 +5,17 @@
 //! native WAV, so all front doors use Reel's existing decoder and mixer.
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use fmn_codec::{SampleFormat, WavAudio, WavError, WavLimits, decode_wav, encode_wav_with_layout};
-use fmn_hash::{Digest, sha256};
+use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Writer, sha256};
+
+use crate::{SoundRequest, SoundTime};
+use fmn_anim::RationalTime;
 
 /// Source of a scene sound cue. Memory data is never interpreted as a path.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -322,6 +327,521 @@ impl SoundData {
     }
 }
 
+/// Canonical companion to SceneState for insertion-ordered sound history.
+pub const SOUND_STATE_SCHEMA: Schema = Schema::new(*b"FMSS", 1, 1, 0);
+
+/// Compact audio identity for verified replay; it deliberately cannot restore PCM.
+pub const SOUND_STATE_IDENTITY_SCHEMA: Schema = Schema::new(*b"FMSI", 1, 1, 0);
+
+/// Independent count ceiling for sound checkpoints, including zero-length cues.
+pub const MAX_SOUND_STATE_REQUESTS: usize = 65_536;
+
+/// A refused sound checkpoint never changes the installed scene queue.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SoundStateError {
+    /// Framing, checksum, finite-number, or byte-budget failure.
+    Serialization(SerialError),
+    /// Invalid or over-budget embedded PCM.
+    Source(SoundDataError),
+    /// Invalid cue metadata or a noncanonical source table.
+    Invalid(&'static str),
+    /// A count or decoded-allocation budget was exceeded.
+    LimitExceeded {
+        /// The resource whose admission failed.
+        resource: &'static str,
+        /// The receiving limit.
+        limit: usize,
+    },
+    /// A bounded allocation could not be reserved.
+    Allocation,
+}
+
+impl fmt::Display for SoundStateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Serialization(error) => write!(f, "sound checkpoint: {error}"),
+            Self::Source(error) => write!(f, "sound checkpoint source: {error}"),
+            Self::Invalid(message) => write!(f, "invalid sound checkpoint: {message}"),
+            Self::LimitExceeded { resource, limit } => {
+                write!(f, "sound checkpoint exceeds {resource} budget of {limit}")
+            }
+            Self::Allocation => f.write_str("sound checkpoint allocation failed"),
+        }
+    }
+}
+
+impl std::error::Error for SoundStateError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Serialization(error) => Some(error),
+            Self::Source(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl From<SerialError> for SoundStateError {
+    fn from(error: SerialError) -> Self {
+        Self::Serialization(error)
+    }
+}
+
+impl From<SoundDataError> for SoundStateError {
+    fn from(error: SoundDataError) -> Self {
+        Self::Source(error)
+    }
+}
+
+/// Validated audio history, separate from Marionette's visual SceneState.
+///
+/// Sources are stored once in first-use order. Memory sources share immutable
+/// canonical WAV bytes after restore; file paths remain lazy authoring data.
+/// Capture and restore perform no filesystem access or media decoding through
+/// an external tool. File contents remain part of the host's input closure.
+/// UTF-8 paths are portable; non-UTF-8 Unix and Windows paths use explicit
+/// platform tags and are refused on an incompatible receiving platform.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SoundState {
+    requests: Vec<SoundRequest>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum StateSourceKey<'a> {
+    // OsStr preserves the authored spelling. Path equality would collapse
+    // components such as `a/./b`, which are not identical authoring records.
+    File(&'a OsStr),
+    Memory(Digest),
+}
+
+fn state_source_key(source: &SoundSource) -> StateSourceKey<'_> {
+    match source {
+        SoundSource::File(path) => StateSourceKey::File(path.as_os_str()),
+        SoundSource::Memory(data) => StateSourceKey::Memory(data.digest()),
+    }
+}
+
+fn charge_sound_paths(
+    source: &SoundSource,
+    total: &mut usize,
+    max_bytes: usize,
+) -> Result<(), SoundStateError> {
+    if let SoundSource::File(path) = source {
+        *total =
+            total
+                .checked_add(path.as_os_str().len())
+                .ok_or(SoundStateError::LimitExceeded {
+                    resource: "decoded file path bytes",
+                    limit: max_bytes,
+                })?;
+        if *total > max_bytes {
+            return Err(SoundStateError::LimitExceeded {
+                resource: "decoded file path bytes",
+                limit: max_bytes,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn put_sound_path(
+    writer: &mut Writer,
+    path: &Path,
+    max_bytes: usize,
+) -> Result<(), SoundStateError> {
+    if let Some(text) = path.to_str() {
+        writer.put_u8(0).put_str(text);
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let _ = max_bytes;
+        writer.put_u8(1).put_bytes(path.as_os_str().as_bytes());
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        let units = path.as_os_str().encode_wide().count();
+        let count = units.checked_mul(2).filter(|&n| n <= max_bytes).ok_or(
+            SoundStateError::LimitExceeded {
+                resource: "path bytes",
+                limit: max_bytes,
+            },
+        )?;
+        let mut bytes = Vec::new();
+        bytes
+            .try_reserve_exact(count)
+            .map_err(|_| SoundStateError::Allocation)?;
+        for unit in path.as_os_str().encode_wide() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        writer.put_u8(2).put_bytes(&bytes);
+        Ok(())
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (writer, max_bytes);
+        Err(SoundStateError::Invalid("unsupported native path encoding"))
+    }
+}
+
+fn get_sound_path(reader: &mut Reader<'_>) -> Result<PathBuf, SoundStateError> {
+    let tag = reader.get_u8()?;
+    let bytes = reader.get_bytes()?;
+    if tag == 0 {
+        let text = std::str::from_utf8(bytes)
+            .map_err(|_| SoundStateError::Invalid("file path is not UTF-8"))?;
+        let mut path = OsString::new();
+        path.try_reserve_exact(text.len())
+            .map_err(|_| SoundStateError::Allocation)?;
+        path.push(text);
+        return Ok(PathBuf::from(path));
+    }
+    #[cfg(unix)]
+    if tag == 1 {
+        use std::os::unix::ffi::OsStringExt;
+        if std::str::from_utf8(bytes).is_ok() {
+            return Err(SoundStateError::Invalid("noncanonical Unix path tag"));
+        }
+        let mut owned = Vec::new();
+        owned
+            .try_reserve_exact(bytes.len())
+            .map_err(|_| SoundStateError::Allocation)?;
+        owned.extend_from_slice(bytes);
+        return Ok(PathBuf::from(OsString::from_vec(owned)));
+    }
+    #[cfg(windows)]
+    if tag == 2 {
+        use std::os::windows::ffi::OsStringExt;
+        if !bytes.len().is_multiple_of(2) {
+            return Err(SoundStateError::Invalid(
+                "incomplete Windows path code unit",
+            ));
+        }
+        let mut units = Vec::new();
+        units
+            .try_reserve_exact(bytes.len() / 2)
+            .map_err(|_| SoundStateError::Allocation)?;
+        units.extend(
+            bytes
+                .chunks_exact(2)
+                .map(|pair| u16::from_le_bytes([pair[0], pair[1]])),
+        );
+        let path = PathBuf::from(OsString::from_wide(&units));
+        if path.to_str().is_some() {
+            return Err(SoundStateError::Invalid("noncanonical Windows path tag"));
+        }
+        return Ok(path);
+    }
+    Err(SoundStateError::Invalid("unsupported native path encoding"))
+}
+
+fn copy_sound_source(source: &SoundSource) -> Result<SoundSource, SoundStateError> {
+    Ok(match source {
+        SoundSource::Memory(data) => SoundSource::Memory(data.clone()),
+        SoundSource::File(path) => {
+            let mut owned = OsString::new();
+            owned
+                .try_reserve_exact(path.as_os_str().len())
+                .map_err(|_| SoundStateError::Allocation)?;
+            owned.push(path.as_os_str());
+            SoundSource::File(PathBuf::from(owned))
+        }
+    })
+}
+
+fn get_sound_time(reader: &mut Reader<'_>) -> Result<RationalTime, SoundStateError> {
+    let frames = reader.get_i64()?;
+    let fps = reader.get_u32()?;
+    if fps == 0 {
+        return Err(SoundStateError::Invalid(
+            "rational time rate must be positive",
+        ));
+    }
+    Ok(RationalTime::zero(fps) + frames)
+}
+
+fn put_sound_gain(writer: &mut Writer, gain: Option<f64>) {
+    writer.put_bool(gain.is_some());
+    if let Some(gain) = gain {
+        writer.put_finite_f64(gain);
+    }
+}
+
+fn get_sound_gain(reader: &mut Reader<'_>) -> Result<Option<f64>, SoundStateError> {
+    Ok(if reader.get_bool()? {
+        Some(reader.get_finite_f64()?)
+    } else {
+        None
+    })
+}
+
+impl SoundState {
+    /// The original cue order and exact frame/sample grids.
+    #[must_use]
+    pub fn requests(&self) -> &[SoundRequest] {
+        &self.requests
+    }
+
+    /// Whether the saved scene had no authored cues.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.requests.is_empty()
+    }
+
+    /// Encode this validated queue within the receiving document budget.
+    /// Finite floating values use the ordinary canonical signed-zero policy.
+    ///
+    /// # Errors
+    /// A byte/count/allocation budget failure.
+    pub fn to_bytes(&self, max_bytes: usize) -> Result<Vec<u8>, SoundStateError> {
+        Self::encode_requests(&self.requests, max_bytes)
+    }
+
+    /// Encode the exact authored audio identity without embedding PCM again.
+    ///
+    /// Memory sources contribute their canonical content digest and metadata;
+    /// file paths, cue order, timing grids, and gains remain exact. This is a
+    /// comparison document for verified replay, not a restorable SoundState.
+    /// Its size depends on source/cue metadata rather than soundtrack duration.
+    ///
+    /// # Errors
+    /// A metadata byte/count/allocation budget failure.
+    pub fn identity_bytes(&self, max_bytes: usize) -> Result<Vec<u8>, SoundStateError> {
+        Self::encode_identity_requests(&self.requests, max_bytes)
+    }
+
+    pub(crate) fn into_requests(self) -> Vec<SoundRequest> {
+        self.requests
+    }
+
+    pub(crate) fn encode_requests(
+        requests: &[SoundRequest],
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, SoundStateError> {
+        Self::encode(requests, max_bytes, true)
+    }
+
+    pub(crate) fn encode_identity_requests(
+        requests: &[SoundRequest],
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, SoundStateError> {
+        Self::encode(requests, max_bytes, false)
+    }
+
+    fn encode(
+        requests: &[SoundRequest],
+        max_bytes: usize,
+        include_pcm: bool,
+    ) -> Result<Vec<u8>, SoundStateError> {
+        // 56 framing bytes, two u32 counts, and at least 27 bytes per cue.
+        // Refuse an impossible request count before reserving any table.
+        if requests.len() > MAX_SOUND_STATE_REQUESTS
+            || requests.len() > max_bytes.saturating_sub(64) / 27
+        {
+            return Err(SoundStateError::LimitExceeded {
+                resource: "cue count",
+                limit: MAX_SOUND_STATE_REQUESTS.min(max_bytes.saturating_sub(64) / 27),
+            });
+        }
+        let mut sources = Vec::new();
+        let mut indices = Vec::new();
+        sources
+            .try_reserve_exact(requests.len())
+            .map_err(|_| SoundStateError::Allocation)?;
+        indices
+            .try_reserve_exact(requests.len())
+            .map_err(|_| SoundStateError::Allocation)?;
+        let mut keys = BTreeMap::new();
+        let mut path_bytes = 0;
+        for request in requests {
+            if request.time.fps() == 0
+                || matches!(request.absolute_time, Some(SoundTime::Rational(time)) if time.fps() == 0)
+            {
+                return Err(SoundStateError::Invalid(
+                    "rational time rate must be positive",
+                ));
+            }
+            charge_sound_paths(&request.source, &mut path_bytes, max_bytes)?;
+            let next = sources.len() as u32;
+            let index = *keys
+                .entry(state_source_key(&request.source))
+                .or_insert_with(|| {
+                    sources.push(&request.source);
+                    next
+                });
+            indices.push(index);
+        }
+        let mut writer = Writer::with_limits(
+            if include_pcm {
+                SOUND_STATE_SCHEMA
+            } else {
+                SOUND_STATE_IDENTITY_SCHEMA
+            },
+            Limits {
+                max_total: max_bytes,
+                max_field: max_bytes,
+            },
+        );
+        writer.put_u32(sources.len() as u32);
+        for source in sources {
+            match source {
+                SoundSource::File(path) => {
+                    writer.put_u8(0);
+                    put_sound_path(&mut writer, path, max_bytes)?;
+                }
+                SoundSource::Memory(data) => {
+                    writer.put_u8(1).put_digest(&data.digest());
+                    if include_pcm {
+                        writer.put_bytes(data.bytes());
+                    } else {
+                        writer
+                            .put_u16(data.channels())
+                            .put_u32(data.sample_rate())
+                            .put_u64(data.sample_frames() as u64)
+                            .put_bool(data.channel_mask().is_some());
+                        if let Some(mask) = data.channel_mask() {
+                            writer.put_u32(mask);
+                        }
+                    }
+                }
+            }
+        }
+        writer.put_u32(requests.len() as u32);
+        for (request, index) in requests.iter().zip(indices) {
+            writer
+                .put_u32(index)
+                .put_i64(request.time.frames())
+                .put_u32(request.time.fps())
+                .put_finite_f64(request.time_offset);
+            match request.absolute_time {
+                None => {
+                    writer.put_u8(0);
+                }
+                Some(SoundTime::Seconds(time)) => {
+                    writer.put_u8(1).put_finite_f64(time);
+                }
+                Some(SoundTime::Rational(time)) => {
+                    writer.put_u8(2).put_i64(time.frames()).put_u32(time.fps());
+                }
+            }
+            put_sound_gain(&mut writer, request.gain);
+            put_sound_gain(&mut writer, request.gain_to_background);
+        }
+        Ok(writer.finish()?)
+    }
+
+    /// Decode a complete sound checkpoint before any Scene mutation.
+    ///
+    /// `max_bytes` bounds the document, embedded WAV expansion, and aggregate
+    /// copied file-path bytes. Cue/source counts have an independent ceiling;
+    /// duplicate, unused and non-first-use source rows are noncanonical.
+    ///
+    /// # Errors
+    /// Bad framing/checksum, invalid metadata or source indices, incompatible
+    /// native path encoding, noncanonical/invalid PCM, or a resource refusal.
+    pub fn from_bytes(bytes: &[u8], max_bytes: usize) -> Result<Self, SoundStateError> {
+        let mut reader = Reader::open(
+            bytes,
+            SOUND_STATE_SCHEMA,
+            Limits {
+                max_total: max_bytes,
+                max_field: max_bytes,
+            },
+            UnknownPolicy::Strict,
+        )?;
+        let count = reader.get_u32()? as usize;
+        if count > MAX_SOUND_STATE_REQUESTS || count > reader.remaining().saturating_sub(4) / 10 {
+            return Err(SoundStateError::Invalid(
+                "source count exceeds bounded payload",
+            ));
+        }
+        let mut sources = Vec::new();
+        sources
+            .try_reserve_exact(count)
+            .map_err(|_| SoundStateError::Allocation)?;
+        for _ in 0..count {
+            let source = match reader.get_u8()? {
+                0 => SoundSource::File(get_sound_path(&mut reader)?),
+                1 => {
+                    let digest = reader.get_digest()?;
+                    let wav = reader.get_bytes()?;
+                    if sha256(wav) != digest {
+                        return Err(SoundStateError::Invalid("memory source digest mismatch"));
+                    }
+                    let data = SoundData::from_wav_bytes(
+                        wav,
+                        SoundDataLimits {
+                            max_bytes,
+                            max_samples: max_bytes.saturating_sub(44) / 4,
+                        },
+                    )?;
+                    if data.bytes().as_ref() != wav {
+                        return Err(SoundStateError::Invalid(
+                            "memory source is not canonical PCM",
+                        ));
+                    }
+                    SoundSource::Memory(data)
+                }
+                _ => return Err(SoundStateError::Invalid("sound source tag")),
+            };
+            sources.push(source);
+        }
+        let mut keys = BTreeSet::new();
+        for source in &sources {
+            if !keys.insert(state_source_key(source)) {
+                return Err(SoundStateError::Invalid("duplicate sound source"));
+            }
+        }
+        let count = reader.get_u32()? as usize;
+        if count > MAX_SOUND_STATE_REQUESTS || count > reader.remaining() / 27 {
+            return Err(SoundStateError::Invalid(
+                "cue count exceeds bounded payload",
+            ));
+        }
+        let mut requests = Vec::new();
+        requests
+            .try_reserve_exact(count)
+            .map_err(|_| SoundStateError::Allocation)?;
+        let mut used_sources = 0;
+        let mut path_bytes = 0;
+        for _ in 0..count {
+            let index = reader.get_u32()? as usize;
+            if index > used_sources || index >= sources.len() {
+                return Err(SoundStateError::Invalid("source index or first-use order"));
+            }
+            if index == used_sources {
+                used_sources += 1;
+            }
+            let time = get_sound_time(&mut reader)?;
+            let time_offset = reader.get_finite_f64()?;
+            let absolute_time = match reader.get_u8()? {
+                0 => None,
+                1 => Some(SoundTime::Seconds(reader.get_finite_f64()?)),
+                2 => Some(SoundTime::Rational(get_sound_time(&mut reader)?)),
+                _ => return Err(SoundStateError::Invalid("sound placement tag")),
+            };
+            let gain = get_sound_gain(&mut reader)?;
+            let gain_to_background = get_sound_gain(&mut reader)?;
+            charge_sound_paths(&sources[index], &mut path_bytes, max_bytes)?;
+            requests.push(SoundRequest {
+                source: copy_sound_source(&sources[index])?,
+                time,
+                time_offset,
+                absolute_time,
+                gain,
+                gain_to_background,
+            });
+        }
+        if used_sources != sources.len() {
+            return Err(SoundStateError::Invalid("unused sound source"));
+        }
+        reader.finish()?;
+        Ok(Self { requests })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -335,6 +855,314 @@ mod tests {
             format: SampleFormat::F32,
             samples: vec![0.0, -0.0, 0.25, -0.5],
         }
+    }
+
+    fn checkpoint_cue(source: SoundSource, frame: i64) -> SoundRequest {
+        SoundRequest {
+            source,
+            time: RationalTime::zero(60) + frame,
+            time_offset: -0.125,
+            absolute_time: None,
+            gain: Some(-3.0),
+            gain_to_background: None,
+        }
+    }
+
+    fn sound_writer() -> Writer {
+        Writer::with_limits(
+            SOUND_STATE_SCHEMA,
+            Limits {
+                max_total: 8192,
+                max_field: 8192,
+            },
+        )
+    }
+
+    fn put_minimal_cue(writer: &mut Writer, index: u32) {
+        writer
+            .put_u32(index)
+            .put_i64(3)
+            .put_u32(60)
+            .put_finite_f64(0.0)
+            .put_u8(0)
+            .put_bool(false)
+            .put_bool(false);
+    }
+
+    #[test]
+    fn sound_identity_is_compact_but_still_binds_pcm_metadata_and_exact_cue_grids() {
+        let mut audio = WavAudio {
+            channels: 1,
+            channel_mask: None,
+            sample_rate: 48_000,
+            format: SampleFormat::F32,
+            samples: vec![0.125; 4096],
+        };
+        let data = SoundData::from_audio(&audio, SoundDataLimits::default()).unwrap();
+        let cue = checkpoint_cue(SoundSource::Memory(data), 1);
+        let identity =
+            SoundState::encode_identity_requests(std::slice::from_ref(&cue), 512).unwrap();
+        assert!(identity.len() < 512);
+        assert!(identity.starts_with(b"FMSI"));
+        assert!(SoundState::encode_requests(std::slice::from_ref(&cue), 512).is_err());
+        assert!(SoundState::from_bytes(&identity, 512).is_err());
+        let full = SoundState::encode_requests(std::slice::from_ref(&cue), 65_536).unwrap();
+        assert_eq!(
+            SoundState::from_bytes(&full, 65_536)
+                .unwrap()
+                .identity_bytes(512)
+                .unwrap(),
+            identity,
+        );
+
+        let mut changed = cue.clone();
+        changed.time = RationalTime::zero(120) + 2;
+        assert_eq!(changed.time, cue.time);
+        assert_ne!(
+            SoundState::encode_identity_requests(&[changed], 512).unwrap(),
+            identity,
+            "equal rational values must retain their original authoring grids",
+        );
+        let mut changed = cue.clone();
+        changed.gain_to_background = Some(-6.0);
+        assert_ne!(
+            SoundState::encode_identity_requests(&[changed], 512).unwrap(),
+            identity,
+        );
+        audio.samples[4095] = -0.25;
+        let changed = checkpoint_cue(
+            SoundSource::Memory(SoundData::from_audio(&audio, SoundDataLimits::default()).unwrap()),
+            1,
+        );
+        assert_ne!(
+            SoundState::encode_identity_requests(&[changed], 512).unwrap(),
+            identity,
+            "compact replay identity must authenticate the actual PCM",
+        );
+        audio.samples[4095] = 0.125;
+        audio.sample_rate = 44_100;
+        let changed = checkpoint_cue(
+            SoundSource::Memory(SoundData::from_audio(&audio, SoundDataLimits::default()).unwrap()),
+            1,
+        );
+        assert_ne!(
+            SoundState::encode_identity_requests(&[changed], 512).unwrap(),
+            identity,
+        );
+    }
+
+    #[test]
+    fn sound_state_preserves_source_spelling_exact_grids_and_shared_pcm() {
+        let data = SoundData::from_audio(&pcm(), SoundDataLimits::default()).unwrap();
+        let mut requests = vec![
+            checkpoint_cue(SoundSource::File("missing/narration.wav".into()), 3),
+            checkpoint_cue(SoundSource::Memory(data.clone()), 4),
+            checkpoint_cue(SoundSource::Memory(data), 7),
+            checkpoint_cue(SoundSource::File("missing/./narration.wav".into()), 9),
+        ];
+        requests[1].absolute_time = Some(SoundTime::Rational(RationalTime::zero(48_000) + 1729));
+        requests[1].time_offset = -0.0;
+        requests[1].gain_to_background = Some(-6.0);
+        requests[2].absolute_time = Some(SoundTime::Seconds(2.125));
+        requests[2].gain = None;
+        let bytes = SoundState::encode_requests(&requests, 8192).unwrap();
+        let decoded = SoundState::from_bytes(&bytes, 8192).unwrap();
+        assert_eq!(decoded.requests(), requests);
+        for (actual, expected) in decoded.requests().iter().zip(&requests) {
+            assert_eq!(
+                (actual.time.frames(), actual.time.fps()),
+                (expected.time.frames(), expected.time.fps()),
+            );
+            if let (SoundSource::File(actual), SoundSource::File(expected)) =
+                (&actual.source, &expected.source)
+            {
+                assert_eq!(actual.as_os_str(), expected.as_os_str());
+            }
+        }
+        let Some(SoundTime::Rational(time)) = decoded.requests()[1].absolute_time else {
+            panic!("absolute placement lost its rational sample grid");
+        };
+        assert_eq!((time.frames(), time.fps()), (1729, 48_000));
+        assert_eq!(decoded.requests()[1].time_offset.to_bits(), 0);
+        let (SoundSource::Memory(first), SoundSource::Memory(second)) =
+            (&decoded.requests()[1].source, &decoded.requests()[2].source)
+        else {
+            panic!("memory cues became file paths");
+        };
+        assert!(Arc::ptr_eq(first.bytes(), second.bytes()));
+        let mut reader = Reader::open(
+            &bytes,
+            SOUND_STATE_SCHEMA,
+            Limits::default(),
+            UnknownPolicy::Strict,
+        )
+        .unwrap();
+        assert_eq!(reader.get_u32().unwrap(), 3);
+        assert_eq!(decoded.to_bytes(8192).unwrap(), bytes);
+    }
+
+    #[test]
+    fn sound_restore_is_atomic_preserves_the_scene_clock_and_can_clear_history() {
+        let mut scene = crate::Scene::new(
+            crate::RuntimeConfig {
+                fps: 60,
+                ..crate::RuntimeConfig::default()
+            },
+            7,
+        )
+        .unwrap();
+        scene.wait_frames(16, &mut crate::NullSceneSink).unwrap();
+        scene.add_sound("old.wav", 0.0, None, None).unwrap();
+        let before = scene.sound_state_bytes(8192).unwrap();
+        let clock = (scene.time().frames(), scene.time().fps());
+        let cue = checkpoint_cue(SoundSource::File("missing/new.wav".into()), 4);
+        let bytes = SoundState::encode_requests(std::slice::from_ref(&cue), 8192).unwrap();
+        for length in 0..bytes.len() {
+            assert!(
+                scene
+                    .restore_sound_state_bytes(&bytes[..length], 8192)
+                    .is_err(),
+                "truncated state length={length}",
+            );
+            assert_eq!(scene.sound_state_bytes(8192).unwrap(), before);
+        }
+        assert!(
+            scene
+                .restore_sound_state_bytes(&bytes, bytes.len() - 1)
+                .is_err()
+        );
+        assert_eq!(scene.sound_state_bytes(8192).unwrap(), before);
+        scene.restore_sound_state_bytes(&bytes, 8192).unwrap();
+        assert_eq!(scene.sound_requests(), &[cue]);
+        assert_eq!((scene.time().frames(), scene.time().fps()), clock);
+        assert!(!scene.can_resume_wait_checkpoint());
+        assert!(scene.can_resume_wait_checkpoint_with_sound_state());
+        scene.restore_sound_state(SoundState::default());
+        assert!(scene.sound_requests().is_empty());
+        assert!(scene.can_resume_wait_checkpoint());
+        assert_eq!((scene.time().frames(), scene.time().fps()), clock);
+        let inbox = scene.event_inbox();
+        assert!(!scene.can_resume_wait_checkpoint_with_sound_state());
+        drop(inbox);
+        assert!(scene.can_resume_wait_checkpoint_with_sound_state());
+    }
+
+    #[test]
+    fn sound_state_refuses_invalid_metadata_inside_valid_checksummed_envelopes() {
+        for (index, fps, offset, placement, gain, background) in [
+            (1, 60, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0),
+            (0, 60, f64::NAN.to_bits(), 0, 0, 0),
+            (0, 60, f64::INFINITY.to_bits(), 0, 0, 0),
+            (0, 60, (-0.0_f64).to_bits(), 0, 0, 0),
+            (0, 60, 0, 3, 0, 0),
+            (0, 60, 0, 0, 2, 0),
+            (0, 60, 0, 0, 0, 2),
+        ] {
+            let mut writer = sound_writer();
+            writer
+                .put_u32(1)
+                .put_u8(0)
+                .put_u8(0)
+                .put_str("x")
+                .put_u32(1)
+                .put_u32(index)
+                .put_i64(3)
+                .put_u32(fps)
+                // Write the raw bits so the reader sees noncanonical/nonfinite
+                // floats under a valid outer checksum.
+                .put_u64(offset)
+                .put_u8(placement)
+                .put_u8(gain)
+                .put_u8(background);
+            assert!(SoundState::from_bytes(&writer.finish().unwrap(), 8192).is_err());
+        }
+
+        for (paths, indices) in [
+            (["x", "x"], vec![0, 1]),
+            (["x", "y"], vec![0]),
+            (["x", "y"], vec![1, 0]),
+        ] {
+            let mut writer = sound_writer();
+            writer.put_u32(2);
+            for path in paths {
+                writer.put_u8(0).put_u8(0).put_str(path);
+            }
+            writer.put_u32(indices.len() as u32);
+            for index in indices {
+                put_minimal_cue(&mut writer, index);
+            }
+            assert!(SoundState::from_bytes(&writer.finish().unwrap(), 8192).is_err());
+        }
+        let empty = SoundState::default().to_bytes(64).unwrap();
+        assert_eq!(empty.len(), 64);
+        assert!(SoundState::from_bytes(&empty, 64).unwrap().is_empty());
+        assert!(SoundState::default().to_bytes(63).is_err());
+    }
+
+    #[test]
+    fn sound_state_verifies_embedded_digest_and_canonical_finite_pcm() {
+        let data = SoundData::from_audio(&pcm(), SoundDataLimits::default()).unwrap();
+        let compact = encode_wav(2, 44_100, SampleFormat::S16, &pcm().samples);
+        let mut nonfinite = data.bytes().to_vec();
+        nonfinite[44..48].copy_from_slice(&f32::NAN.to_bits().to_le_bytes());
+        for (wav, digest) in [
+            (data.bytes().as_ref(), sha256(b"wrong source identity")),
+            (compact.as_slice(), sha256(&compact)),
+            (nonfinite.as_slice(), sha256(&nonfinite)),
+        ] {
+            let mut writer = sound_writer();
+            writer
+                .put_u32(1)
+                .put_u8(1)
+                .put_digest(&digest)
+                .put_bytes(wav)
+                .put_u32(1);
+            put_minimal_cue(&mut writer, 0);
+            assert!(SoundState::from_bytes(&writer.finish().unwrap(), 8192).is_err());
+        }
+    }
+
+    #[test]
+    fn sound_state_bounds_path_expansion_even_when_the_wire_source_is_shared() {
+        let cue = checkpoint_cue(SoundSource::File("a".repeat(128).into()), 0);
+        let requests = vec![cue; 32];
+        let bytes = SoundState::encode_requests(&requests, 8192).unwrap();
+        assert!(bytes.len() < 2048);
+        for result in [
+            SoundState::encode_requests(&requests, 2048).map(|_| ()),
+            SoundState::from_bytes(&bytes, 2048).map(|_| ()),
+        ] {
+            assert!(matches!(
+                result,
+                Err(SoundStateError::LimitExceeded {
+                    resource: "decoded file path bytes",
+                    limit: 2048,
+                })
+            ));
+        }
+        assert_eq!(
+            SoundState::from_bytes(&bytes, 8192).unwrap().requests(),
+            requests,
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sound_state_preserves_non_utf8_unix_paths_without_opening_them() {
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+        let spelling = b"missing/voice-\xff.wav";
+        let path = PathBuf::from(OsString::from_vec(spelling.to_vec()));
+        let bytes =
+            SoundState::encode_requests(&[checkpoint_cue(SoundSource::File(path), 0)], 8192)
+                .unwrap();
+        let decoded = SoundState::from_bytes(&bytes, 8192).unwrap();
+        let SoundSource::File(path) = &decoded.requests()[0].source else {
+            panic!("a native path became a memory source");
+        };
+        assert_eq!(path.as_os_str().as_bytes(), spelling);
+        assert_eq!(decoded.to_bytes(8192).unwrap(), bytes);
     }
 
     #[test]

@@ -1086,6 +1086,17 @@ impl Scene {
     /// such as its alignment frame, which durable SceneState omits.
     #[must_use]
     pub fn can_resume_wait_checkpoint(&self) -> bool {
+        self.sound_requests.is_empty() && self.can_resume_wait_checkpoint_with_sound_state()
+    }
+
+    /// Admission for a checkpoint which also captures and restores SoundState.
+    ///
+    /// This retains every input, presenter and callback restriction of
+    /// [`Self::can_resume_wait_checkpoint`]. The owner must additionally store
+    /// [`Self::sound_state_bytes`] and restore that exact queue, including an
+    /// empty queue, before resuming. Serialization may still refuse its budget.
+    #[must_use]
+    pub fn can_resume_wait_checkpoint_with_sound_state(&self) -> bool {
         !self.config.skip_animations
             && self.config.start_at_play.is_none()
             && self.config.end_at_play.is_none()
@@ -1098,7 +1109,6 @@ impl Scene {
             && !self.has_external_event_ingress()
             && self.recorded_events.is_empty()
             && self.next_event_sequence == Some(0)
-            && self.sound_requests.is_empty()
     }
 
     /// Queue one already-available live event for the next serial boundary.
@@ -1297,6 +1307,49 @@ impl Scene {
     #[must_use]
     pub fn sound_requests(&self) -> &[SoundRequest] {
         &self.sound_requests
+    }
+
+    /// Capture canonical sound history independently of visual SceneState.
+    /// Sources remain lazy file paths or frozen PCM; no external I/O occurs.
+    ///
+    /// # Errors
+    /// The sound carrier's byte/count/source limits or allocation failure.
+    pub fn sound_state_bytes(&self, max_bytes: usize) -> Result<Vec<u8>, crate::SoundStateError> {
+        crate::SoundState::encode_requests(&self.sound_requests, max_bytes)
+    }
+
+    /// Capture audio identity for verified replay without copying embedded PCM.
+    /// The identity still binds every cue and each immutable source's content.
+    /// It is not a replacement for SoundState when restoring without replay.
+    ///
+    /// # Errors
+    /// The sound carrier's metadata byte/count limits or allocation failure.
+    pub fn sound_state_identity_bytes(
+        &self,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, crate::SoundStateError> {
+        crate::SoundState::encode_identity_requests(&self.sound_requests, max_bytes)
+    }
+
+    /// Replace audio history with a completely validated checkpoint queue.
+    /// This neither replays add_sound nor changes the current scene clock, so
+    /// every cue retains its original authoring time and exact placement grid.
+    pub fn restore_sound_state(&mut self, state: crate::SoundState) -> &mut Self {
+        self.sound_requests = state.into_requests();
+        self
+    }
+
+    /// Decode and replace audio history atomically, without reading file assets.
+    ///
+    /// # Errors
+    /// Invalid or over-budget input leaves the existing queue untouched.
+    pub fn restore_sound_state_bytes(
+        &mut self,
+        bytes: &[u8],
+        max_bytes: usize,
+    ) -> Result<&mut Self, crate::SoundStateError> {
+        let state = crate::SoundState::from_bytes(bytes, max_bytes)?;
+        Ok(self.restore_sound_state(state))
     }
 
     /// Queue a sound with the Reference's four arguments.

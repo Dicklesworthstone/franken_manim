@@ -66,7 +66,10 @@ pub use runtime::{
     SceneSelectionError, SceneSink, SceneStateRestore, SoundRequest, SoundTime, SteppedHold,
     SteppedPlay, SteppedWait, ThreeDAddOptions, ThreeDScene,
 };
-pub use sound::{SoundData, SoundDataError, SoundDataLimits, SoundSource, SoundSourceKey};
+pub use sound::{
+    MAX_SOUND_STATE_REQUESTS, SOUND_STATE_IDENTITY_SCHEMA, SOUND_STATE_SCHEMA, SoundData,
+    SoundDataError, SoundDataLimits, SoundSource, SoundSourceKey, SoundState, SoundStateError,
+};
 pub use timeline_bundle::{
     BundleError, BundleExportLimits, BundleReadError, BundleSegmentKind,
     COMPACT_TIMELINE_BUNDLE_SCHEMA, DEFAULT_MAX_BUNDLE_BYTES, DEFAULT_MAX_BUNDLE_EXPORT_FRAMES,
