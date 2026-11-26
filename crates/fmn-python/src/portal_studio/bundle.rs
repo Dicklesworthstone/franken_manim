@@ -1,7 +1,8 @@
 //! Python-to-FMTL composition over the shared SceneBundleRecorder.
 //!
 //! The existing host segment observer supplies begin/end boundaries; the
-//! existing native capture sink supplies the actual post-updater FramePackets.
+//! existing native capture sink supplies the actual post-updater Stage and frame
+//! metadata without snapshotting detached authoring history.
 //! No callback, animation law, serializer, or frame clock is reimplemented.
 
 use super::*;
@@ -114,26 +115,27 @@ impl BundleCapture {
         Ok(())
     }
 
-    pub(super) fn capture(
+    pub(super) fn capture_stage(
         &mut self,
-        packet: fmn_anim::FramePacket,
         stage: &Stage,
+        metadata: fmn_anim::FrameMetadata,
         camera: &Camera,
     ) -> PyResult<()> {
         self.validate_camera(camera)?;
         if !self.camera_track {
             Self::validate_stage(stage)?;
         }
-        let reason = if packet.segment_frame() == 0 {
+        let reason = if metadata.segment_frame() == 0 {
             self.saw_show = true;
             CaptureReason::Show
         } else {
             CaptureReason::Segment
         };
         if self.camera_track {
-            self.recorder.capture_with_camera(reason, packet, camera)
+            self.recorder
+                .capture_stage_with_camera(reason, stage, metadata, camera)
         } else {
-            self.recorder.capture(reason, packet)
+            self.recorder.capture_stage(reason, stage, metadata)
         }
         .map_err(native_error)
     }
@@ -665,6 +667,189 @@ pub fn run_portal_gauntlet_bundle_audio() -> Result<(u64, u64), String> {
 #[cfg(any(test, feature = "gauntlet"))]
 mod tests {
     use super::*;
+
+    #[cfg(test)]
+    fn bundle_owner(
+        compact: bool,
+        camera_track: bool,
+        light: Mob,
+        stage: &Stage,
+    ) -> PortalRenderSession {
+        let identity = protocol_digest(&[]);
+        let (mut capture, _) = Capture::new(
+            "bundle-owner-test".to_owned(),
+            identity,
+            identity,
+            24,
+            16,
+            8,
+            1,
+            1,
+            1,
+            fmn_config::Config::resolve(&[], None).unwrap().config,
+        )
+        .unwrap();
+        capture.light = Some(light);
+        capture
+            .camera
+            .set_light_source_position(stage.get_center(light))
+            .unwrap();
+        let recorder = match (compact, camera_track) {
+            (false, false) => {
+                SceneBundleRecorder::new_render_only(8, BundleExportLimits::default())
+            }
+            (false, true) => {
+                SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default())
+            }
+            (true, false) => {
+                SceneBundleRecorder::new_compact_render_only(8, CompactRecordingLimits::default())
+            }
+            (true, true) => {
+                SceneBundleRecorder::new_compact_with_camera(8, CompactRecordingLimits::default())
+            }
+        }
+        .unwrap();
+        capture.bundle = Some(BundleCapture {
+            recorder,
+            destination: PathBuf::new(),
+            max_output_bytes: fmn_hash::serial::Limits::DEFAULT.max_total,
+            expected_camera: capture.camera.clone(),
+            camera_track,
+            audio: None,
+            saw_show: false,
+            active: None,
+            failure: None,
+        });
+        PortalRenderSession::Preview(Box::new(capture))
+    }
+
+    #[test]
+    fn bundle_owner_capture_omits_hidden_snapshots_and_preserves_samples() {
+        use fmn_anim::{FrameMetadata, FramePacket, RationalFrameClock};
+        use fmn_core::rng::RngRoot;
+        use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler};
+        use std::{cell::RefCell, rc::Rc, sync::Arc};
+
+        for compact in [false, true] {
+            for camera_track in [false, true] {
+                for with_readback in [false, true] {
+                    let mut outcomes = Vec::new();
+                    for direct in [true, false] {
+                        let mut scene = Scene::new(
+                            RuntimeConfig {
+                                fps: 8,
+                                ..RuntimeConfig::default()
+                            },
+                            19,
+                        )
+                        .unwrap();
+                        let visible = scene
+                            .add_mobject(Mobject::from_points(&[[0.0; 3]]))
+                            .unwrap();
+                        let light = scene
+                            .stage_mut()
+                            .add(Mobject::from_points(&[[2.0, 3.0, 4.0]]));
+                        let hidden = scene.stage_mut().add(Mobject::from_points(&[[10.0; 3]]));
+                        let image = ImageResource::rgba8(
+                            1,
+                            1,
+                            vec![1, 2, 3, 255],
+                            ImageColorSpace::Srgb,
+                            ImageSampler::default(),
+                        )
+                        .unwrap();
+                        let hidden_pixels = image.shared_pixels();
+                        scene
+                            .stage_mut()
+                            .set_image_resource(hidden, Some(image))
+                            .unwrap();
+                        let view = scene
+                            .stage_mut()
+                            .get_mut(visible)
+                            .unwrap()
+                            .buffer
+                            .export_view(true);
+                        let mut owner = bundle_owner(compact, camera_track, light, scene.stage());
+                        let PortalRenderSession::Preview(capture) = &owner else {
+                            unreachable!()
+                        };
+                        let readback = portal_readback::SceneReadback {
+                            target: with_readback.then(|| portal_readback::SceneCapture {
+                                slot: Rc::new(RefCell::new(None)),
+                                camera: capture.camera.clone(),
+                                frame_points: None,
+                                light_mob: Some(light),
+                                threads: 1,
+                            }),
+                        };
+                        let mut clock = RationalFrameClock::new(8).unwrap();
+                        let rng = RngRoot::from_seed(19);
+                        let mut pictures = Vec::new();
+                        for index in 1..=2 {
+                            clock.advance_frames(1).unwrap();
+                            scene.stage_mut().set_time_from_clock(clock.now().to_f64());
+                            assert!(view.write(0, "point", &[f64::from(index), 0.0, 0.0]));
+                            if camera_track {
+                                scene.stage_mut().shift(light, [0.0, 0.25, 0.0]);
+                            }
+                            let metadata = FrameMetadata::capture_barrier(&clock, &rng);
+                            let picture = if direct {
+                                owner
+                                    .capture_stage(scene.stage(), metadata, readback.dependencies())
+                                    .unwrap()
+                            } else {
+                                let packet = FramePacket::freeze_metadata(scene.stage(), metadata);
+                                let picture = readback
+                                    .dependencies()
+                                    .map(|readback| readback.freeze_packet(packet.clone()));
+                                owner.capture(packet).unwrap();
+                                picture
+                            };
+                            // Snapshotting detached history populates its entry cache even
+                            // when the packet is immediately projected and discarded.
+                            if direct {
+                                assert_eq!(Arc::strong_count(&hidden_pixels), 2);
+                            } else {
+                                assert!(Arc::strong_count(&hidden_pixels) > 2);
+                            }
+                            if let Some(picture) = picture {
+                                assert_eq!(picture.retained_object_count(), 2);
+                                pictures.push(picture);
+                            }
+                        }
+                        assert!(view.write(0, "point", &[99.0, 0.0, 0.0]));
+                        let observed = pictures
+                            .into_iter()
+                            .enumerate()
+                            .map(|(index, picture)| {
+                                let stage = picture.materialize();
+                                assert!(!stage.contains(hidden));
+                                assert_eq!(
+                                    stage.get_center(visible),
+                                    [f64::from(u32::try_from(index).unwrap()) + 1.0, 0.0, 0.0]
+                                );
+                                (stage.get_center(visible), stage.get_center(light))
+                            })
+                            .collect::<Vec<_>>();
+                        assert_eq!(observed.len(), if with_readback { 2 } else { 0 });
+                        let PortalRenderSession::Preview(mut capture) = owner else {
+                            unreachable!()
+                        };
+                        assert_eq!(capture.recorded.frame_count(), 0);
+                        let bundle = capture.bundle.take().unwrap();
+                        assert!(bundle.saw_show);
+                        let artifact = bundle.recorder.finish().unwrap();
+                        assert_eq!(artifact.frame_count, 2);
+                        outcomes.push((artifact.bytes, observed));
+                    }
+                    assert_eq!(
+                        outcomes[0], outcomes[1],
+                        "compact={compact}, camera={camera_track}, readback={with_readback}"
+                    );
+                }
+            }
+        }
+    }
 
     #[pyfunction]
     fn _test_bundle_frames(

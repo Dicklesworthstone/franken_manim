@@ -10,8 +10,8 @@ use fmn_conformance::golden::Mode;
 use fmn_core::color::Srgb;
 use fmn_core::constants::BLUE_C;
 use fmn_hash::sha256;
-use fmn_library::style::Style;
 use fmn_library::Circle;
+use fmn_library::style::Style;
 use fmn_mobject::{ImageColorSpace, ImageResource, ImageSampler, Mobject, Stage};
 use fmn_render::{
     Binning, FrameConfig, FrameJob, MonoTable, RenderPlan, ScreenMap, Tiling, Viewport,
@@ -85,7 +85,9 @@ fn invoke(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
     )
     .map_err(error)?;
     let hidden_pixels = image.shared_pixels();
-    stage.set_image_resource(hidden, Some(image)).map_err(error)?;
+    stage
+        .set_image_resource(hidden, Some(image))
+        .map_err(error)?;
     let root = stage.add(
         Circle::new()
             .radius(0.6)

@@ -198,9 +198,43 @@ impl Capture {
         Ok(())
     }
 
+    /// Bundle export consumes the current picture on its owner thread. Only
+    /// Studio history needs a complete immutable packet; lazy camera readback
+    /// freezes its own visible family and camera dependencies.
+    pub(super) fn capture_owner_stage(
+        &mut self,
+        stage: &Stage,
+        metadata: fmn_scene::studio_bridge::FrameMetadata,
+        readback: Option<portal_readback::ReadbackDependencies>,
+    ) -> Result<Option<fmn_mobject::FrozenRenderState>, fmn_scene::IntegrationError> {
+        if self.bundle.is_none() {
+            let packet = fmn_scene::studio_bridge::FramePacket::freeze_metadata(stage, metadata);
+            let captured = readback.map(|readback| readback.freeze_packet(packet.clone()));
+            self.capture(packet)?;
+            return Ok(captured);
+        }
+        let captured = readback.map(|readback| readback.freeze_stage(stage));
+        self.capture_with(|capture| {
+            capture.sample_light(stage)?;
+            capture
+                .bundle
+                .as_mut()
+                .expect("bundle capture owner was checked")
+                .capture_stage(stage, metadata, &capture.camera)
+        })?;
+        Ok(captured)
+    }
+
     pub(super) fn capture(
         &mut self,
         packet: fmn_scene::studio_bridge::FramePacket,
+    ) -> Result<(), fmn_scene::IntegrationError> {
+        self.capture_with(|capture| capture.capture_inner(packet))
+    }
+
+    fn capture_with(
+        &mut self,
+        capture: impl FnOnce(&mut Self) -> PyResult<()>,
     ) -> Result<(), fmn_scene::IntegrationError> {
         // Live input is a paused edit boundary. play/wait still execute their
         // ordinary samples and updaters, but only the completed callback's
@@ -221,7 +255,7 @@ impl Capture {
                 error.clone(),
             ));
         }
-        if let Err(error) = self.capture_inner(packet) {
+        if let Err(error) = capture(self) {
             let message = error.to_string();
             self.failure = Some(message.clone());
             return Err(fmn_scene::IntegrationError::new("python-studio", message));
@@ -229,8 +263,7 @@ impl Capture {
         Ok(())
     }
 
-    fn capture_inner(&mut self, packet: fmn_scene::studio_bridge::FramePacket) -> PyResult<()> {
-        let stage = packet.materialize_stage();
+    fn sample_light(&mut self, stage: &Stage) -> PyResult<()> {
         if let Some(light) = self.light {
             if stage.get(light).is_none() {
                 return Err(PyRuntimeError::new_err("Studio camera light is stale"));
@@ -239,8 +272,14 @@ impl Capture {
                 .set_light_source_position(stage.get_center(light))
                 .map_err(camera_error)?;
         }
+        Ok(())
+    }
+
+    fn capture_inner(&mut self, packet: fmn_scene::studio_bridge::FramePacket) -> PyResult<()> {
+        let stage = packet.materialize_stage();
+        self.sample_light(&stage)?;
         if let Some(bundle) = &mut self.bundle {
-            return bundle.capture(packet, &stage, &self.camera);
+            return bundle.capture_stage(&stage, packet.metadata(), &self.camera);
         }
         self.renderer
             .render_with_camera(&stage, &self.camera)

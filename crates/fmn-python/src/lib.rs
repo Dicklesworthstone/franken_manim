@@ -391,13 +391,7 @@ impl PortalRenderSession {
     ) -> Result<Option<fmn_mobject::FrozenRenderState>, fmn_scene::IntegrationError> {
         match self {
             Self::Frames(session) => session.capture_owner_stage(stage, readback),
-            Self::Preview(session) => {
-                let packet =
-                    fmn_scene::studio_bridge::FramePacket::freeze_metadata(stage, metadata);
-                let captured = readback.map(|readback| readback.freeze_packet(packet.clone()));
-                session.capture(packet)?;
-                Ok(captured)
-            }
+            Self::Preview(session) => session.capture_owner_stage(stage, metadata, readback),
             Self::Soundtrack { .. } | Self::Vector(_) => {
                 Ok(readback.map(|readback| readback.freeze_stage(stage)))
             }
