@@ -11,7 +11,7 @@ use fmn_scene::studio_bridge::{
 use fmn_scene::{
     CameraRig, CaptureReason, EffectClass, EventPayload, EventType, ImpureEffectTag,
     IntegrationError, InteractiveScene, NullSceneSink, PlayOverrides, Scene, SceneError, SceneSink,
-    SteppedPlay, SteppedWait,
+    SoundState, SteppedPlay, SteppedWait,
 };
 
 use crate::{
@@ -19,6 +19,7 @@ use crate::{
     WorkerErrorCode, protocol_digest,
 };
 
+use super::edits::CapturedSceneState;
 use super::{NativeBuild, NativeBuildContext, NativeUpdaterRegistry};
 
 /// Maximum cumulative segments admitted by one native program, including
@@ -47,7 +48,7 @@ pub enum NativeCheckpointFallback {
     UnsupportedSchedule,
     /// A live callback is not an unchanged function registered for restoration.
     UnregisteredUpdater,
-    /// Editor input, event history, native attributes or sound need reconstruction.
+    /// Editor input, event history or native attributes need reconstruction.
     TransientSceneState,
     /// Committed input must reconstruct editor selection and undo history.
     EditedInput,
@@ -749,6 +750,18 @@ impl NativeSceneProgram {
             .map_err(execution_error)
     }
 
+    /// Capture visual/runtime data and compact audio identity before choosing
+    /// a warm or cold envelope. PCM is embedded only in a warm continuation.
+    /// Public SceneState remains visual/runtime data; every native journal
+    /// state additionally binds the ordered audio requests when present.
+    pub(super) fn checkpoint_state(
+        &mut self,
+        max_bytes: usize,
+    ) -> Result<CapturedSceneState, ServiceError> {
+        let state = self.state_bytes()?;
+        CapturedSceneState::new(state, self.preview.scene(), max_bytes)
+    }
+
     /// Bind actual factory data and declarations, including the original seed,
     /// without evaluating a frame or a wait prologue. Addresses never enter it.
     pub(super) fn factory_fingerprint(
@@ -766,7 +779,7 @@ impl NativeSceneProgram {
         // itself refuse before the durable data can be installed.
         self.factory_checkpoint_fallback = self.checkpoint_state_fallback();
         self.terminal_play_declaration = None;
-        let state = self.state_bytes()?;
+        let state = self.checkpoint_state(max_bytes)?.into_bytes(max_bytes)?;
         let mut writer = Writer::with_limits(
             Schema::new(*b"FNCF", 1, 0, 0),
             Limits {
@@ -1245,7 +1258,10 @@ impl NativeSceneProgram {
                 .wait_tail
                 .as_ref()
                 .is_some_and(|tail| !tail.factory_listeners_safe)
-            || !self.preview.scene().can_resume_wait_checkpoint()
+            || !self
+                .preview
+                .scene()
+                .can_resume_wait_checkpoint_with_sound_state()
             || stage.has_native_updater_state()
             || stage.has_rollback_identity_history()
         {
@@ -1422,6 +1438,7 @@ impl NativeSceneProgram {
         &mut self,
         bytes: &[u8],
         checkpoint: &NativeProgramCheckpoint,
+        sound: SoundState,
     ) -> Result<(), ServiceError> {
         self.require_healthy()?;
         if self.frame != 0 || self.started_segments != 0 || self.active.is_some() {
@@ -1473,6 +1490,19 @@ impl NativeSceneProgram {
         self.failed = true;
         let scene = self.preview.scene_mut();
         let decoded = scene.restore_state_bytes(bytes).map_err(execution_error)?;
+        // SoundState validates the data carrier independently. A native
+        // checkpoint also binds every cue's authoring clock to this Scene;
+        // an absolute scheduled position may legitimately be in its future.
+        if sound.requests().iter().any(|request| {
+            request.time.fps() != scene.fps()
+                || request.time.frames() < 0
+                || request.time.frames() > scene.time().frames()
+        }) {
+            return Err(invalid(
+                "native checkpoint sound call site is outside its scene clock",
+            ));
+        }
+        scene.restore_sound_state(sound);
         scene
             .stage_mut()
             .set_frame_shape(checkpoint.frame_shape.map(f64::from_bits))
@@ -1480,7 +1510,7 @@ impl NativeSceneProgram {
         self.checkpoint_registry.rebind(scene, &decoded.updaters)?;
         if scene.time().frames().cast_unsigned() != checkpoint.frame
             || scene.play_count() != completed_plays
-            || !scene.can_resume_wait_checkpoint()
+            || !scene.can_resume_wait_checkpoint_with_sound_state()
             || !self
                 .checkpoint_registry
                 .supports(scene.stage(), &decoded.updaters)
@@ -1928,7 +1958,9 @@ mod tests {
         cursor.effects = 0;
         let bytes = original.state_bytes().unwrap();
         let mut restored = factory();
-        let error = restored.restore_checkpoint(&bytes, &cursor).unwrap_err();
+        let error = restored
+            .restore_checkpoint(&bytes, &cursor, SoundState::default())
+            .unwrap_err();
         assert!(error.message.contains("active continuation effects"));
         assert!(restored.next_frame().is_err());
     }
@@ -1959,7 +1991,9 @@ mod tests {
             let (mut restored, _) = declared_plays();
             let before = restored.state_bytes().unwrap();
             assert!(
-                restored.restore_checkpoint(&bytes, &forged).is_err(),
+                restored
+                    .restore_checkpoint(&bytes, &forged, SoundState::default())
+                    .is_err(),
                 "fault={fault}"
             );
             assert_eq!(restored.state_bytes().unwrap(), before, "fault={fault}");
@@ -1982,7 +2016,9 @@ mod tests {
             .unwrap();
         let bytes = original.state_bytes().unwrap();
         let (mut restored, _) = declared_plays();
-        let error = restored.restore_checkpoint(&bytes, &cursor).unwrap_err();
+        let error = restored
+            .restore_checkpoint(&bytes, &cursor, SoundState::default())
+            .unwrap_err();
         assert!(error.to_string().contains("future native declarations"));
     }
 
@@ -2013,7 +2049,9 @@ mod tests {
         };
         let bytes = uninterrupted.state_bytes().unwrap();
         let mut resumed = static_waits();
-        resumed.restore_checkpoint(&bytes, &cursor).unwrap();
+        resumed
+            .restore_checkpoint(&bytes, &cursor, SoundState::default())
+            .unwrap();
         let work = resumed.advance_to_with_work(120_000).unwrap();
         assert_eq!(work.frames_advanced, 119_993);
         assert_eq!(work.frames_evaluated, 1);

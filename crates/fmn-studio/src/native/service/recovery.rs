@@ -8,7 +8,7 @@
 use fmn_scene::Journal;
 use fmn_scene::studio_bridge::SceneState;
 
-use super::super::edits::{EditTrack, decode_state, encode_state};
+use super::super::edits::{EditTrack, captured_scene_bytes, decode_state, encode_state};
 use super::{
     CheckpointAdmission, NativeCheckpointFallback, NativeRestoreMode, NativeRestoreReport,
     NativeSceneWorker, execution_error, refuse_owned,
@@ -288,7 +288,10 @@ impl NativeSceneWorker {
                 "edited checkpoint requires native committed input support",
             ));
         }
-        let (frames_elapsed, fps) = SceneState::frame_clock_from_bytes(restored.state)
+        let scene_bytes =
+            captured_scene_bytes(restored.state, self.config.limits.max_checkpoint_bytes)
+                .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
+        let (frames_elapsed, fps) = SceneState::frame_clock_from_bytes(scene_bytes)
             .map_err(|error| refuse_owned(WorkerErrorCode::CheckpointRejected, error))?;
         let frame = self
             .target(frames_elapsed)
@@ -311,7 +314,9 @@ impl NativeSceneWorker {
             next,
             &self.reads,
             &restored.edits,
-            program.state_bytes()?,
+            program
+                .checkpoint_state(self.config.limits.max_checkpoint_bytes)?
+                .into_bytes(self.config.limits.max_checkpoint_bytes)?,
             self.config.limits.max_checkpoint_bytes,
         )?;
         if state != checkpoint.state {

@@ -43,7 +43,12 @@ pub enum NativeReplayPolicy {
     /// listeners, whose captures could have been changed by the prefix.
     /// Function-pointer updaters must be explicitly registered and keep all
     /// mutable state in durable Stage records. Other programs retain verified
-    /// cold reconstruction. The supervisor's journal authenticates the expected
+    /// cold reconstruction. Authored sound queues retain exact callsite and
+    /// scheduled clocks, gains, file identities and immutable PCM through both
+    /// recovery paths; restoring them never opens or decodes external files.
+    /// PCM that exceeds the warm checkpoint budget uses cold reconstruction
+    /// with a compact sound identity, subject to the ordinary replay limits.
+    /// The supervisor's journal authenticates the expected
     /// state hash; this mode checks the input closure and continuation identity
     /// without independently re-executing the historical prefix.
     Checkpointed,
@@ -52,7 +57,7 @@ pub enum NativeReplayPolicy {
 /// Mechanism used by the most recent successful checkpoint restoration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeRestoreMode {
-    /// Scene data, exact wait/play cursor and registered callbacks were restored.
+    /// Scene/audio data, exact wait/play cursor and registered callbacks restored.
     Checkpoint,
     /// The independent factory re-executed and verified the scene state.
     ColdVerified,
@@ -206,7 +211,8 @@ impl NativeWorkerConfig {
 /// by the journal revision. Input in the past abandons the later input branch.
 /// Every event uses the ordinary native editor/application dispatcher. Neither
 /// closures nor editor history are deserialized: checkpoints include their
-/// canonical input transcript and actual SceneState, then verify reconstruction.
+/// canonical input transcript, actual SceneState and authored sound queue, then
+/// verify reconstruction.
 /// Native callbacks still run only in the disposable worker, not the UI host.
 pub struct NativeSceneWorker {
     config: NativeWorkerConfig,
@@ -427,27 +433,30 @@ impl NativeSceneWorker {
         edits: &EditTrack,
         position: u64,
     ) -> Result<Vec<u8>, ServiceError> {
+        let state = program.checkpoint_state(self.config.limits.max_checkpoint_bytes)?;
         if let Some(factory) = self.resume_factory
             && edits.is_empty()
             && let CheckpointAdmission::Resume(cursor) =
                 program.checkpoint_admission(self.config.limits.max_checkpoint_bytes)?
-        {
-            return encode_resume_state(
+            && let Some(bytes) = encode_resume_state(
                 &self.config.scene,
                 position,
                 &self.reads,
                 factory,
                 &cursor,
-                &program.state_bytes()?,
+                &state,
+                program.preview().scene(),
                 self.config.limits.max_checkpoint_bytes,
-            );
+            )?
+        {
+            return Ok(bytes);
         }
         encode_state(
             &self.config.scene,
             position,
             &self.reads,
             edits,
-            program.state_bytes()?,
+            state.into_bytes(self.config.limits.max_checkpoint_bytes)?,
             self.config.limits.max_checkpoint_bytes,
         )
     }
@@ -470,16 +479,20 @@ impl NativeSceneWorker {
         else {
             return Ok(None);
         };
-        let state = program.state_bytes()?;
-        let bytes = encode_resume_state(
+        let state = program.checkpoint_state(self.config.limits.max_checkpoint_bytes)?;
+        let Some(bytes) = encode_resume_state(
             &self.config.scene,
             self.position,
             &self.reads,
             factory,
             &cursor,
             &state,
+            program.preview().scene(),
             self.config.limits.max_checkpoint_bytes,
-        )?;
+        )?
+        else {
+            return Ok(None);
+        };
         if committed && self.last_hash != Some(protocol_digest(&bytes)) {
             return Ok(None);
         }
@@ -507,7 +520,7 @@ impl NativeSceneWorker {
         let frame = i64::try_from(restored.cursor.frame).map_err(execution_error)?;
         self.target(frame)?;
         let mut program = self.fresh_program()?;
-        program.restore_checkpoint(restored.state, &restored.cursor)?;
+        program.restore_checkpoint(restored.state, &restored.cursor, restored.sound)?;
         if self.state_bytes(&mut program, &EditTrack::default(), position)? != bytes {
             return Err(invalid(
                 "native continuation is not a canonical resumable capture",

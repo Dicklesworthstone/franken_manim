@@ -1,8 +1,8 @@
 //! Canonical, bounded input tracks. Executable/editor state is reconstructed,
 //! never deserialized as closures or replaced with a second editing engine.
 
-use fmn_hash::{Digest, Limits, Reader, Schema, UnknownPolicy, Writer};
-use fmn_scene::{AssetRead, CommandKind, CommandRecord};
+use fmn_hash::{Digest, Limits, Reader, Schema, SerialError, UnknownPolicy, Writer};
+use fmn_scene::{AssetRead, CommandKind, CommandRecord, Scene, SoundState, SoundStateError};
 
 use crate::protocol::{StudioInput, studio_input_payload};
 use crate::{ProtocolDigest, ServiceError};
@@ -24,8 +24,90 @@ const PLAY_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 3, 0, 0);
 // Fully declared native schedules bind their complete declaration separately;
 // legacy terminal-play and wait carriers retain their exact bytes.
 const SCHEDULE_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 4, 0, 0);
+// Audio-bearing continuations wrap exactly one earlier continuation and its
+// separately validated sound queue. Silent FMNR1..4 records stay byte-exact.
+const SOUND_RESUME_STATE_SCHEMA: Schema = Schema::new(*b"FMNR", 5, 0, 0);
+// Cold/edited captures bind audio identity without embedding PCM that their
+// independent factory execution reconstructs. SceneState itself stays unchanged.
+const COMPLETE_SCENE_STATE_SCHEMA: Schema = Schema::new(*b"FMNC", 1, 0, 0);
 /// Hard ceiling independent of caller policy; each label is separately bounded.
 pub(super) const MAX_RECORDED_INPUTS: usize = 65_536;
+
+/// The independent scene and compact sound identity of one native capture.
+/// Sound identity is absent only for an empty queue, preserving silent records.
+pub(super) struct CapturedSceneState {
+    scene: Vec<u8>,
+    sound_identity: Option<Vec<u8>>,
+}
+
+impl CapturedSceneState {
+    pub fn new(scene: Vec<u8>, owner: &Scene, max_bytes: usize) -> Result<Self, ServiceError> {
+        if scene.len() > max_bytes {
+            return Err(invalid("native SceneState exceeds the checkpoint budget"));
+        }
+        let sound_identity = if owner.sound_requests().is_empty() {
+            None
+        } else {
+            Some(
+                owner
+                    .sound_state_identity_bytes(max_bytes)
+                    .map_err(execution_error)?,
+            )
+        };
+        Ok(Self {
+            scene,
+            sound_identity,
+        })
+    }
+
+    pub fn into_bytes(self, max_bytes: usize) -> Result<Vec<u8>, ServiceError> {
+        let Some(sound_identity) = self.sound_identity else {
+            return Ok(self.scene);
+        };
+        let mut writer = Writer::with_limits(
+            COMPLETE_SCENE_STATE_SCHEMA,
+            Limits {
+                max_total: max_bytes,
+                max_field: max_bytes,
+            },
+        );
+        writer.put_bytes(&self.scene).put_bytes(&sound_identity);
+        writer.finish().map_err(execution_error)
+    }
+}
+
+/// Check the complete cold-capture envelope before using its visual clock to
+/// plan execution. No audio is installed: independent reconstruction must
+/// subsequently reproduce the sound identity and the entire outer record.
+pub(super) fn captured_scene_bytes(bytes: &[u8], max_bytes: usize) -> Result<&[u8], ServiceError> {
+    if bytes.len() > max_bytes {
+        return Err(invalid(
+            "native scene capture exceeds the checkpoint budget",
+        ));
+    }
+    if !bytes.starts_with(b"FMNC") {
+        return Ok(bytes);
+    }
+    let mut reader = Reader::open(
+        bytes,
+        COMPLETE_SCENE_STATE_SCHEMA,
+        Limits {
+            max_total: max_bytes,
+            max_field: max_bytes,
+        },
+        UnknownPolicy::Strict,
+    )
+    .map_err(execution_error)?;
+    let scene = reader.get_bytes().map_err(execution_error)?;
+    let sound_identity = reader.get_bytes().map_err(execution_error)?;
+    reader.finish().map_err(execution_error)?;
+    if sound_identity.is_empty() {
+        return Err(invalid(
+            "complete native sound capture cannot contain an empty identity",
+        ));
+    }
+    Ok(scene)
+}
 
 struct InputRow {
     command: CommandRecord,
@@ -163,9 +245,10 @@ impl EditTrack {
     }
 }
 
-/// Empty tracks keep the original SceneState wire format. An edited checkpoint
-/// owns its full branch (including inputs after a backward scrub), the actual
-/// SceneState at its capture, the input closure, and its exact journal position.
+/// Empty input tracks keep the direct native capture (the original SceneState
+/// for silent scenes). An edited checkpoint owns its full branch, including
+/// inputs after a backward scrub, the visual/audio capture, the input closure,
+/// and its exact journal position.
 pub(super) fn encode_state(
     scene: &str,
     position: u64,
@@ -308,7 +391,61 @@ pub(super) fn decode_state<'a>(
 /// An admitted continuation binds executable declarations separately from the
 /// scene snapshot. The supervisor owns the expected digest; the envelope binds
 /// that state to this exact build, input closure, factory and journal position.
+/// A valid payload that exceeds the warm carrier budget falls back to an
+/// independently verified cold capture; malformed metadata remains an error.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn encode_resume_state(
+    scene: &str,
+    position: u64,
+    reads: &[AssetRead],
+    factory: ProtocolDigest,
+    cursor: &NativeProgramCheckpoint,
+    state: &CapturedSceneState,
+    owner: &Scene,
+    max_bytes: usize,
+) -> Result<Option<Vec<u8>>, ServiceError> {
+    let Some(continuation) = encode_legacy_resume_state(
+        scene,
+        position,
+        reads,
+        factory,
+        cursor,
+        &state.scene,
+        max_bytes,
+    )?
+    else {
+        return Ok(None);
+    };
+    if state.sound_identity.is_none() {
+        return Ok(Some(continuation));
+    }
+    let sound = match owner.sound_state_bytes(max_bytes) {
+        Ok(sound) => sound,
+        Err(SoundStateError::Serialization(SerialError::SizeLimit { .. })) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(execution_error(error)),
+    };
+    let mut writer = Writer::with_limits(
+        SOUND_RESUME_STATE_SCHEMA,
+        Limits {
+            max_total: max_bytes,
+            max_field: max_bytes,
+        },
+    );
+    writer.put_bytes(&continuation).put_bytes(&sound);
+    finish_continuation(writer)
+}
+
+fn finish_continuation(writer: Writer) -> Result<Option<Vec<u8>>, ServiceError> {
+    match writer.finish() {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(SerialError::SizeLimit { .. }) => Ok(None),
+        Err(error) => Err(execution_error(error)),
+    }
+}
+
+fn encode_legacy_resume_state(
     scene: &str,
     position: u64,
     reads: &[AssetRead],
@@ -316,7 +453,7 @@ pub(super) fn encode_resume_state(
     cursor: &NativeProgramCheckpoint,
     state: &[u8],
     max_bytes: usize,
-) -> Result<Vec<u8>, ServiceError> {
+) -> Result<Option<Vec<u8>>, ServiceError> {
     if cursor.schedule.is_some()
         && (cursor.play.is_some() || cursor.active.is_some() || cursor.tail.is_some())
     {
@@ -372,7 +509,7 @@ pub(super) fn encode_resume_state(
             writer.put_bytes(bytes);
         }
         writer.put_bytes(state);
-        return writer.finish().map_err(execution_error);
+        return finish_continuation(writer);
     }
     if let Some(play) = &cursor.play {
         writer
@@ -382,7 +519,7 @@ pub(super) fn encode_resume_state(
             .put_bytes(play.declaration.as_bytes())
             .put_bytes(&play.continuation)
             .put_bytes(state);
-        return writer.finish().map_err(execution_error);
+        return finish_continuation(writer);
     }
     if let Some(tail) = &cursor.tail {
         writer
@@ -399,15 +536,52 @@ pub(super) fn encode_resume_state(
             .put_u8(wait.purity);
     }
     writer.put_bytes(state);
-    writer.finish().map_err(execution_error)
+    finish_continuation(writer)
 }
 
 pub(super) struct RestoredContinuation<'a> {
     pub cursor: NativeProgramCheckpoint,
     pub state: &'a [u8],
+    pub sound: SoundState,
 }
 
 pub(super) fn decode_resume_state<'a>(
+    bytes: &'a [u8],
+    scene: &str,
+    position: u64,
+    reads: &[AssetRead],
+    factory: ProtocolDigest,
+    max_bytes: usize,
+) -> Result<RestoredContinuation<'a>, ServiceError> {
+    if bytes.get(4..8) == Some(SOUND_RESUME_STATE_SCHEMA.id.to_le_bytes().as_slice()) {
+        let mut reader = Reader::open(
+            bytes,
+            SOUND_RESUME_STATE_SCHEMA,
+            Limits {
+                max_total: max_bytes,
+                max_field: max_bytes,
+            },
+            UnknownPolicy::Strict,
+        )
+        .map_err(execution_error)?;
+        let continuation = reader.get_bytes().map_err(execution_error)?;
+        let sound_bytes = reader.get_bytes().map_err(execution_error)?;
+        reader.finish().map_err(execution_error)?;
+        // Only the legacy reader is called here: a nested FMNR5 cannot recurse
+        // or hide a second queue, even if all outer checksums were recomputed.
+        let mut restored =
+            decode_legacy_resume_state(continuation, scene, position, reads, factory, max_bytes)?;
+        let sound = SoundState::from_bytes(sound_bytes, max_bytes).map_err(execution_error)?;
+        if sound.is_empty() {
+            return Err(invalid("sound continuation cannot contain an empty queue"));
+        }
+        restored.sound = sound;
+        return Ok(restored);
+    }
+    decode_legacy_resume_state(bytes, scene, position, reads, factory, max_bytes)
+}
+
+fn decode_legacy_resume_state<'a>(
     bytes: &'a [u8],
     scene: &str,
     position: u64,
@@ -514,6 +688,7 @@ pub(super) fn decode_resume_state<'a>(
                 })),
             },
             state,
+            sound: SoundState::default(),
         });
     }
     if is_play {
@@ -554,6 +729,7 @@ pub(super) fn decode_resume_state<'a>(
                 schedule: None,
             },
             state,
+            sound: SoundState::default(),
         });
     }
     let tail = if is_tail {
@@ -591,5 +767,6 @@ pub(super) fn decode_resume_state<'a>(
             schedule: None,
         },
         state,
+        sound: SoundState::default(),
     })
 }

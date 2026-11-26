@@ -437,7 +437,6 @@ fn pending_executable_work_and_transient_prefix_bindings_keep_verified_cold_rest
         (0, 7, NativeCheckpointFallback::UnsupportedSchedule),
         (1, 8, NativeCheckpointFallback::TransientSceneState),
         (2, 8, NativeCheckpointFallback::TransientSceneState),
-        (3, 8, NativeCheckpointFallback::TransientSceneState),
         (4, 8, NativeCheckpointFallback::UnregisteredUpdater),
         // Removing an opaque factory callback does not make its initial
         // factory state admissible for registered continuation restoration.
@@ -461,6 +460,715 @@ fn pending_executable_work_and_transient_prefix_bindings_keep_verified_cold_rest
             png(&seek(&mut original, frame + 1))
         );
     }
+}
+
+#[test]
+fn narrated_checkpoint_restores_deferred_cues_without_reexecuting_the_prefix() {
+    let mut original = wait_tail_worker(3);
+    let first = commit(&mut original, 600);
+    let saved = checkpoint(&first, 0);
+    assert_eq!(&saved.state[..8], b"FMNR\x05\0\0\0");
+    let expected_queue = original
+        .program()
+        .unwrap()
+        .preview()
+        .scene()
+        .sound_requests()
+        .to_vec();
+    assert_eq!(expected_queue.len(), 1);
+    assert_eq!(expected_queue[0].time.frames(), 3);
+    let at_checkpoint = checkpoint_observation(&original);
+    let expected_png = seek(&mut original, 601);
+    let second = commit(&mut original, 601);
+    let expected = checkpoint_observation(&original);
+
+    let mut policy = wait_tail_config(3);
+    policy.max_replay_frames = 1;
+    let mut restored = NativeSceneWorker::new(policy, || wait_tail_program(3, 10.01)).unwrap();
+    TAIL_PREFIX_CALLS.with(|calls| calls.set((0, 0, 0)));
+    REGISTERED_CALLS.with(|calls| calls.set((0, 0)));
+    restored
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap();
+    assert_eq!(
+        restored.last_restore().unwrap().mode,
+        NativeRestoreMode::Checkpoint
+    );
+    assert_eq!(restored.last_restore().unwrap().fallback, None);
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (0, 0));
+    assert_eq!(checkpoint_observation(&restored), at_checkpoint);
+    assert_eq!(
+        restored
+            .program()
+            .unwrap()
+            .preview()
+            .scene()
+            .sound_requests(),
+        expected_queue,
+    );
+    let continued = commit(&mut restored, 601);
+    assert_eq!(continued.state_hash, second.state_hash);
+    assert_eq!(continued.checkpoint, second.checkpoint);
+    assert_eq!(checkpoint_observation(&restored), expected);
+    assert_eq!(png(&seek(&mut restored, 601)), png(&expected_png));
+    assert_eq!(TAIL_PREFIX_CALLS.with(Cell::get), (0, 0, 0));
+    assert_eq!(REGISTERED_CALLS.with(Cell::get), (1, 0));
+}
+
+fn narration_program(kind: u8, sample: f32) -> Result<NativeSceneProgram, ServiceError> {
+    use fmn_codec::{SampleFormat, WavAudio};
+    use fmn_scene::{SoundData, SoundDataLimits, SoundSource};
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+    let root = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [-0.7, -0.4, 0.0],
+        [-0.2, 0.3, 0.0],
+        [0.6, 0.5, 0.0],
+        [0.9, -0.1, 0.0],
+        [-0.7, -0.4, 0.0],
+    ]));
+    scene.add(&[root]).unwrap();
+    let data = SoundData::from_audio(
+        &WavAudio {
+            channels: 2,
+            channel_mask: None,
+            sample_rate: 48_000,
+            format: SampleFormat::F32,
+            samples: vec![sample, -0.25, 0.125, -0.5, 0.0, 0.25, -0.125, 0.5],
+        },
+        SoundDataLimits::default(),
+    )
+    .unwrap();
+    scene
+        .add_sound_data(data.clone(), -0.125, Some(-3.0), Some(-12.0))
+        .unwrap();
+    scene
+        .add_sound_source_at(SoundSource::Memory(data.clone()), 12.25, None, None)
+        .unwrap();
+    scene
+        .add_sound_source_at_rational(
+            SoundSource::Memory(data),
+            fmn_anim::RationalTime::zero(48_000) + 600_001,
+            Some(-6.0),
+            None,
+        )
+        .unwrap();
+    // The file deliberately need not exist. Checkpointing retains authored
+    // requests and must never acquire a filesystem or media decoder capability.
+    scene
+        .add_sound("unopened-studio-narration.wav", 0.25, None, Some(-9.0))
+        .unwrap();
+    let rotation = |angle, frames| NativeSegment::Play {
+        animations: vec![Box::new(
+            fmn_anim::Rotating::new(root)
+                .with_angle(angle)
+                .with_about_point([0.2, -0.1, 0.0])
+                .with_config(fmn_anim::AnimConfig {
+                    final_alpha_value: 0.4,
+                    ..fmn_anim::AnimConfig::default()
+                }),
+        )],
+        overrides: fmn_scene::PlayOverrides {
+            run_time_frames: Some(frames),
+            ..fmn_scene::PlayOverrides::default()
+        },
+    };
+    let segments = match kind {
+        0 => vec![
+            NativeSegment::WaitFrames { frames: 8 },
+            NativeSegment::WaitFrames { frames: 10 },
+        ],
+        1 => vec![
+            NativeSegment::WaitFrames { frames: 2 },
+            rotation(1.2, 13),
+            NativeSegment::WaitFrames { frames: 3 },
+        ],
+        2 => vec![
+            rotation(1.2, 6),
+            NativeSegment::WaitFrames { frames: 2 },
+            rotation(-0.8, 7),
+            NativeSegment::WaitFrames { frames: 3 },
+        ],
+        _ => unreachable!(),
+    };
+    NativeSceneProgram::new(scene, segments, 18)
+}
+
+fn narration_config(replay: NativeReplayPolicy, budget: u64) -> NativeWorkerConfig {
+    let mut policy = config();
+    policy.frame_count = 19;
+    policy.checkpoint_frames = 1;
+    policy.source_digest = protocol_digest(b"narrated-native-fixture-v1");
+    policy.replay = replay;
+    policy.max_replay_frames = budget;
+    policy
+}
+
+fn large_narration_program(
+    deferred: bool,
+    sample: f32,
+) -> Result<NativeSceneProgram, ServiceError> {
+    use fmn_codec::{SampleFormat, WavAudio};
+    use fmn_scene::{SoundData, SoundDataLimits, SoundSource};
+
+    let mut scene = Scene::new(RuntimeConfig::default(), 71).unwrap();
+    let root = scene.stage_mut().add(Mobject::vector_from_points(&[
+        [-0.5, -0.5, 0.0],
+        [0.0, 0.5, 0.0],
+        [0.5, -0.5, 0.0],
+    ]));
+    scene.add(&[root]).unwrap();
+    let data = SoundData::from_audio(
+        &WavAudio {
+            channels: 1,
+            channel_mask: None,
+            sample_rate: 48_000,
+            format: SampleFormat::F32,
+            samples: vec![sample; 32_768],
+        },
+        SoundDataLimits::default(),
+    )
+    .unwrap();
+    let segments = if deferred {
+        vec![
+            NativeSegment::WaitFrames { frames: 1 },
+            NativeSegment::defer(move |context| {
+                context.add_sound_source(
+                    SoundSource::Memory(data),
+                    -0.125,
+                    Some(-3.0),
+                    Some(-12.0),
+                )?;
+                Ok(Vec::new())
+            }),
+            NativeSegment::WaitFrames { frames: 9 },
+        ]
+    } else {
+        scene
+            .add_sound_data(data, -0.125, Some(-3.0), Some(-12.0))
+            .unwrap();
+        vec![NativeSegment::WaitFrames { frames: 10 }]
+    };
+    NativeSceneProgram::new(scene, segments, 10)
+}
+
+#[test]
+fn large_pcm_uses_compact_identity_for_factory_cold_and_edited_checkpoints() {
+    use fmn_hash::{Limits, Reader, Schema, SerialError, UnknownPolicy};
+    use fmn_scene::SoundStateError;
+    use fmn_studio::protocol::StudioInput;
+
+    for replay in [
+        NativeReplayPolicy::Disabled,
+        NativeReplayPolicy::ColdVerified,
+        NativeReplayPolicy::Checkpointed,
+    ] {
+        for deferred in [false, true] {
+            let mut policy = narration_config(replay, 100);
+            policy.frame_count = 11;
+            policy.limits.max_checkpoint_bytes = 8_192;
+            let make = |sample| {
+                NativeSceneWorker::new(policy.clone(), move || {
+                    large_narration_program(deferred, sample)
+                })
+                .unwrap()
+            };
+            // Initial PCM must not prevent factory fingerprinting; deferred
+            // PCM must not turn a successful preview into a failing commit.
+            let mut original = make(0.25);
+            let _ = seek(&mut original, 5);
+            let scene = original.program().unwrap().preview().scene();
+            assert!(matches!(
+                scene.sound_state_bytes(policy.limits.max_checkpoint_bytes),
+                Err(SoundStateError::Serialization(
+                    SerialError::SizeLimit { .. }
+                ))
+            ));
+            let identity = scene
+                .sound_state_identity_bytes(policy.limits.max_checkpoint_bytes)
+                .unwrap();
+            assert!(identity.len() < policy.limits.max_checkpoint_bytes);
+            let expected_sound = scene.sound_requests().to_vec();
+            let first = commit(&mut original, 5);
+            let saved = checkpoint(&first, 0);
+            let mut capture = Reader::open(
+                &saved.state,
+                Schema::new(*b"FMNC", 1, 0, 0),
+                Limits::DEFAULT,
+                UnknownPolicy::Strict,
+            )
+            .unwrap();
+            assert!(capture.get_bytes().unwrap().starts_with(b"FMNA"));
+            assert_eq!(capture.get_bytes().unwrap(), identity);
+            capture.finish().unwrap();
+            assert!(saved.state.len() <= policy.limits.max_checkpoint_bytes);
+            let at_checkpoint = checkpoint_observation(&original);
+            let second = commit(&mut original, 7);
+            let expected_pixels = seek(&mut original, 7);
+            if replay == NativeReplayPolicy::Disabled {
+                continue;
+            }
+
+            let mut restored = make(0.25);
+            restored
+                .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+                .unwrap();
+            assert_eq!(
+                restored.last_restore().unwrap().mode,
+                NativeRestoreMode::ColdVerified
+            );
+            assert_eq!(checkpoint_observation(&restored), at_checkpoint);
+            assert_eq!(
+                restored
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .sound_requests(),
+                expected_sound
+            );
+            let continued = commit(&mut restored, 7);
+            assert_eq!(continued.state_hash, second.state_hash);
+            assert_eq!(continued.checkpoint, second.checkpoint);
+            assert_eq!(png(&seek(&mut restored, 7)), png(&expected_pixels));
+
+            let mut changed = make(0.5);
+            let before = checkpoint_observation(&changed);
+            assert_eq!(
+                changed
+                    .handle(SupervisorRequest::RestoreCheckpoint(saved))
+                    .unwrap_err()
+                    .code,
+                WorkerErrorCode::CheckpointRejected
+            );
+            assert_eq!(checkpoint_observation(&changed), before);
+            assert_eq!(changed.journal_position(), 0);
+
+            let WorkerResponse::JournalSegment { journal, .. } = original
+                .commit_input(StudioInput {
+                    frame: 8,
+                    revision: 2,
+                    target: None,
+                    event: EventPayload::KeyPress {
+                        key: Key::ArrowUp,
+                        modifiers: Modifiers::NONE,
+                    },
+                })
+                .unwrap()
+            else {
+                panic!("edited large audio must commit a journal segment")
+            };
+            let journal = Journal::from_bytes(&journal).unwrap();
+            let edited = checkpoint(&journal.entries()[0], 2);
+            assert!(edited.state.starts_with(b"FMEI"));
+            let mut edited_restored = make(0.25);
+            edited_restored
+                .handle(SupervisorRequest::RestoreCheckpoint(edited.clone()))
+                .unwrap();
+            assert_eq!(
+                checkpoint_observation(&edited_restored),
+                checkpoint_observation(&original)
+            );
+            assert_eq!(
+                edited_restored
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .sound_requests(),
+                expected_sound
+            );
+            assert_eq!(
+                changed
+                    .handle(SupervisorRequest::RestoreCheckpoint(edited))
+                    .unwrap_err()
+                    .code,
+                WorkerErrorCode::CheckpointRejected
+            );
+            assert_eq!(changed.journal_position(), 0);
+        }
+    }
+}
+
+#[test]
+fn narrated_warm_capacity_includes_the_outer_continuation_framing() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy};
+
+    let mut policy = narration_config(NativeReplayPolicy::Checkpointed, 100);
+    policy.frame_count = 11;
+    let mut roomy =
+        NativeSceneWorker::new(policy.clone(), || large_narration_program(false, 0.25)).unwrap();
+    let warm = checkpoint(&commit(&mut roomy, 5), 0);
+    let mut wrapper = Reader::open(
+        &warm.state,
+        Schema::new(*b"FMNR", 5, 0, 0),
+        Limits::DEFAULT,
+        UnknownPolicy::Strict,
+    )
+    .unwrap();
+    let continuation_len = wrapper.get_bytes().unwrap().len();
+    let sound_len = wrapper.get_bytes().unwrap().len();
+    wrapper.finish().unwrap();
+    policy.limits.max_checkpoint_bytes = warm.state.len() - 1;
+    assert!(continuation_len < policy.limits.max_checkpoint_bytes);
+    assert!(sound_len < policy.limits.max_checkpoint_bytes);
+    let mut original =
+        NativeSceneWorker::new(policy.clone(), || large_narration_program(false, 0.25)).unwrap();
+    assert!(
+        original
+            .program()
+            .unwrap()
+            .preview()
+            .scene()
+            .sound_state_bytes(policy.limits.max_checkpoint_bytes)
+            .is_ok()
+    );
+    let first = commit(&mut original, 5);
+    let cold = checkpoint(&first, 0);
+    assert!(cold.state.starts_with(b"FMNC"));
+    assert!(cold.state.len() < policy.limits.max_checkpoint_bytes);
+    let second = commit(&mut original, 7);
+    let expected = seek(&mut original, 7);
+    let mut restored =
+        NativeSceneWorker::new(policy, || large_narration_program(false, 0.25)).unwrap();
+    restored
+        .handle(SupervisorRequest::RestoreCheckpoint(cold))
+        .unwrap();
+    assert_eq!(
+        restored.last_restore().unwrap().mode,
+        NativeRestoreMode::ColdVerified
+    );
+    let continued = commit(&mut restored, 7);
+    assert_eq!(continued.state_hash, second.state_hash);
+    assert_eq!(continued.checkpoint, second.checkpoint);
+    assert_eq!(png(&seek(&mut restored, 7)), png(&expected));
+}
+
+#[test]
+fn narrated_wait_and_play_continuations_preserve_pcm_clocks_gains_and_pending_cleanup() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy};
+
+    for (kind, inner_record) in [(0, 1), (1, 3), (2, 4)] {
+        let make = |budget| {
+            NativeSceneWorker::new(
+                narration_config(NativeReplayPolicy::Checkpointed, budget),
+                move || narration_program(kind, 0.25),
+            )
+            .unwrap()
+        };
+        let mut original = make(100);
+        let first = commit(&mut original, 5);
+        let saved = checkpoint(&first, 0);
+        let mut wrapper = Reader::open(
+            &saved.state,
+            Schema::new(*b"FMNR", 5, 0, 0),
+            Limits::DEFAULT,
+            UnknownPolicy::Strict,
+        )
+        .unwrap();
+        let inner = wrapper.get_bytes().unwrap();
+        assert_eq!(
+            u32::from_le_bytes(inner[4..8].try_into().unwrap()),
+            inner_record
+        );
+        let sound = wrapper.get_bytes().unwrap().to_vec();
+        wrapper.finish().unwrap();
+        let at_checkpoint = checkpoint_observation(&original);
+        let mut expected = Vec::new();
+        for frame in 6..=18 {
+            let capture = seek(&mut original, frame);
+            expected.push((frame, capture, checkpoint_observation(&original)));
+        }
+        let final_entry = commit(&mut original, 18);
+
+        let mut restored = make(1);
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(saved))
+            .unwrap();
+        assert_eq!(
+            restored.last_restore().unwrap().mode,
+            NativeRestoreMode::Checkpoint
+        );
+        assert_eq!(checkpoint_observation(&restored), at_checkpoint);
+        for (frame, capture, observation) in expected {
+            assert_eq!(
+                png(&seek(&mut restored, frame)),
+                png(&capture),
+                "kind {kind}, frame {frame}"
+            );
+            assert_eq!(checkpoint_observation(&restored), observation);
+            assert_eq!(
+                restored
+                    .program()
+                    .unwrap()
+                    .preview()
+                    .scene()
+                    .sound_state_bytes(ProtocolLimits::default().max_checkpoint_bytes)
+                    .unwrap(),
+                sound,
+            );
+        }
+        let continued = commit(&mut restored, 18);
+        assert_eq!(continued.state_hash, final_entry.state_hash);
+        assert_eq!(continued.checkpoint, final_entry.checkpoint);
+    }
+}
+
+#[test]
+fn narrated_factory_identity_binds_initial_pcm_without_changing_visual_state() {
+    let policy = narration_config(NativeReplayPolicy::Checkpointed, 100);
+    let mut original =
+        NativeSceneWorker::new(policy.clone(), || narration_program(0, 0.25)).unwrap();
+    let saved = checkpoint(&commit(&mut original, 5), 0);
+    let mut changed = NativeSceneWorker::new(policy, || narration_program(0, 0.5)).unwrap();
+    let before = checkpoint_observation(&changed);
+    let before_sound = changed
+        .program()
+        .unwrap()
+        .preview()
+        .scene()
+        .sound_requests()
+        .to_vec();
+    let error = changed
+        .handle(SupervisorRequest::RestoreCheckpoint(saved))
+        .unwrap_err();
+    assert_eq!(error.code, WorkerErrorCode::CheckpointRejected);
+    assert!(error.message.contains("factory identity"), "{error}");
+    assert_eq!(checkpoint_observation(&changed), before);
+    assert_eq!(
+        changed
+            .program()
+            .unwrap()
+            .preview()
+            .scene()
+            .sound_requests(),
+        before_sound
+    );
+    assert_eq!(changed.journal_position(), 0);
+    assert_eq!(changed.last_restore(), None);
+}
+
+#[test]
+fn narrated_cold_and_edited_replay_hashes_include_the_actual_soundtrack() {
+    use fmn_studio::protocol::StudioInput;
+
+    for edited in [false, true] {
+        let make = |sample| {
+            NativeSceneWorker::new(
+                narration_config(NativeReplayPolicy::ColdVerified, 100),
+                move || narration_program(0, sample),
+            )
+            .unwrap()
+        };
+        let mut original = make(0.25);
+        let entry = if edited {
+            let WorkerResponse::JournalSegment { journal, .. } = original
+                .commit_input(StudioInput {
+                    frame: 5,
+                    revision: 0,
+                    target: None,
+                    event: EventPayload::KeyPress {
+                        key: Key::ArrowUp,
+                        modifiers: Modifiers::NONE,
+                    },
+                })
+                .unwrap()
+            else {
+                panic!("input must commit a journal segment")
+            };
+            Journal::from_bytes(&journal).unwrap().entries()[0].clone()
+        } else {
+            commit(&mut original, 5)
+        };
+        let saved = checkpoint(&entry, 0);
+        assert!(
+            saved
+                .state
+                .starts_with(if edited { b"FMEI" } else { b"FMNC" })
+        );
+        let expected = checkpoint_observation(&original);
+        let expected_sound = original
+            .program()
+            .unwrap()
+            .preview()
+            .scene()
+            .sound_requests()
+            .to_vec();
+        let mut restored = make(0.25);
+        restored
+            .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+            .unwrap();
+        assert_eq!(
+            restored.last_restore().unwrap().mode,
+            NativeRestoreMode::ColdVerified
+        );
+        assert_eq!(checkpoint_observation(&restored), expected);
+        assert_eq!(
+            restored
+                .program()
+                .unwrap()
+                .preview()
+                .scene()
+                .sound_requests(),
+            expected_sound
+        );
+
+        let mut changed = make(0.5);
+        let before = checkpoint_observation(&changed);
+        let before_sound = changed
+            .program()
+            .unwrap()
+            .preview()
+            .scene()
+            .sound_requests()
+            .to_vec();
+        assert_eq!(
+            changed
+                .handle(SupervisorRequest::RestoreCheckpoint(saved))
+                .unwrap_err()
+                .code,
+            WorkerErrorCode::CheckpointRejected
+        );
+        let mut journal = Journal::new();
+        journal.record(entry).unwrap();
+        assert_eq!(
+            changed
+                .handle(SupervisorRequest::ReplayJournal(JournalReplay {
+                    scene: NAME.into(),
+                    from_entry: 0,
+                    through_entry: 1,
+                    journal: journal.to_bytes().unwrap(),
+                }))
+                .unwrap_err()
+                .code,
+            WorkerErrorCode::ReplayFailed
+        );
+        assert_eq!(checkpoint_observation(&changed), before);
+        assert_eq!(
+            changed
+                .program()
+                .unwrap()
+                .preview()
+                .scene()
+                .sound_requests(),
+            before_sound
+        );
+        assert_eq!(changed.journal_position(), 0);
+        assert_eq!(changed.last_state_hash(), None);
+    }
+}
+
+#[test]
+fn malformed_narrated_continuations_preserve_the_installed_owner_and_audio() {
+    use fmn_hash::{Limits, Reader, Schema, UnknownPolicy, Writer};
+    use fmn_scene::SoundState;
+
+    let schema = Schema::new(*b"FMNR", 5, 0, 0);
+    let max_bytes = ProtocolLimits::default().max_checkpoint_bytes;
+    let mut original = wait_tail_worker(3);
+    let saved = checkpoint(&commit(&mut original, 600), 0);
+    let mut reader =
+        Reader::open(&saved.state, schema, Limits::DEFAULT, UnknownPolicy::Strict).unwrap();
+    let continuation = reader.get_bytes().unwrap();
+    let sound = reader.get_bytes().unwrap();
+    reader.finish().unwrap();
+    let empty = SoundState::default().to_bytes(max_bytes).unwrap();
+    let mut wrong_rate = Scene::new(
+        RuntimeConfig {
+            fps: 24,
+            ..RuntimeConfig::default()
+        },
+        0,
+    )
+    .unwrap();
+    wrong_rate.add_sound("cue.wav", 0.0, None, None).unwrap();
+    let wrong_rate = wrong_rate.sound_state_bytes(max_bytes).unwrap();
+    let mut future_callsite = Scene::default();
+    future_callsite
+        .wait_frames(601, &mut fmn_scene::NullSceneSink)
+        .unwrap();
+    future_callsite
+        .add_sound("cue.wav", 0.0, None, None)
+        .unwrap();
+    let future_callsite = future_callsite.sound_state_bytes(max_bytes).unwrap();
+    let mut recovered = wait_tail_worker(3);
+    recovered
+        .handle(SupervisorRequest::RestoreCheckpoint(saved.clone()))
+        .unwrap();
+    let before = checkpoint_observation(&recovered);
+    let before_sound = recovered
+        .program()
+        .unwrap()
+        .preview()
+        .scene()
+        .sound_requests()
+        .to_vec();
+    let report = recovered.last_restore();
+    for (case, inner, queue) in [
+        ("nested continuation", saved.state.as_slice(), sound),
+        ("empty queue", continuation, empty.as_slice()),
+        ("truncated queue", continuation, &sound[..sound.len() - 1]),
+        (
+            "different callsite grid",
+            continuation,
+            wrong_rate.as_slice(),
+        ),
+        (
+            "callsite after checkpoint",
+            continuation,
+            future_callsite.as_slice(),
+        ),
+    ] {
+        let mut writer = Writer::new(schema);
+        writer.put_bytes(inner).put_bytes(queue);
+        let state = writer.finish().unwrap();
+        let error = recovered
+            .handle(SupervisorRequest::RestoreCheckpoint(Checkpoint {
+                scene: NAME.into(),
+                after_entry: 0,
+                state_hash: protocol_digest(&state),
+                state,
+            }))
+            .unwrap_err();
+        assert_eq!(error.code, WorkerErrorCode::CheckpointRejected, "{case}");
+        assert_eq!(checkpoint_observation(&recovered), before, "{case}");
+        assert_eq!(
+            recovered
+                .program()
+                .unwrap()
+                .preview()
+                .scene()
+                .sound_requests(),
+            before_sound,
+            "{case}"
+        );
+        assert_eq!(recovered.journal_position(), 1);
+        assert_eq!(recovered.last_state_hash(), Some(saved.state_hash));
+        assert_eq!(recovered.last_restore(), report);
+    }
+
+    let mut policy = wait_tail_config(3);
+    policy.limits.max_checkpoint_bytes = saved.state.len() - 1;
+    let mut bounded = NativeSceneWorker::new(policy, || wait_tail_program(3, 10.01)).unwrap();
+    let before = checkpoint_observation(&bounded);
+    assert_eq!(
+        bounded
+            .handle(SupervisorRequest::RestoreCheckpoint(saved))
+            .unwrap_err()
+            .code,
+        WorkerErrorCode::CheckpointRejected
+    );
+    assert_eq!(checkpoint_observation(&bounded), before);
+    assert!(
+        bounded
+            .program()
+            .unwrap()
+            .preview()
+            .scene()
+            .sound_requests()
+            .is_empty()
+    );
 }
 
 #[test]
