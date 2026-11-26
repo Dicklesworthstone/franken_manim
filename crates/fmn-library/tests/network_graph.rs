@@ -637,6 +637,399 @@ fn live_binding_keeps_labels_and_replays_layout_after_snapshot_restore() {
 }
 
 #[test]
+fn live_edges_follow_native_vertex_animation_before_every_capture() {
+    use fmn_anim::{RationalFrameClock, play_segment, prepare_animation};
+    use fmn_core::rng::RngRoot;
+    use fmn_mobject::animate::AnimateArgs;
+
+    let network = NetworkGraph::new(sample_graph())
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    let mut stage = Stage::new();
+    let graph = network.add_live_to(&mut stage).unwrap();
+    assert!(stage.roots().is_empty());
+    stage.add_to_scene(graph.mobject()).unwrap();
+    let node = graph.node("b").unwrap();
+    let initial = stage.get_center(node);
+    let edge = graph.edge("a", "b").unwrap();
+    let start = stage.get_center(graph.node("a").unwrap());
+    let subdivided: Vec<Vec3> = (0..9)
+        .map(|index| {
+            let alpha = f64::from(index) / 8.0;
+            std::array::from_fn(|axis| (1.0 - alpha) * start[axis] + alpha * initial[axis])
+        })
+        .collect();
+    stage.set_points(edge, &subdivided).unwrap();
+    let widths = vec![1.0, 2.0, 3.0, 4.0, 5.0, 4.0, 3.0, 2.0, 1.0];
+    assert!(
+        stage
+            .get_mut(edge)
+            .unwrap()
+            .buffer
+            .write_range("stroke_width", 0, &widths)
+    );
+    let view = stage.get_mut(edge).unwrap().buffer.export_view(false);
+    let handles = stage.get(graph.mobject()).unwrap().submobjects().to_vec();
+    let builder = node
+        .animate()
+        .set_anim_args(AnimateArgs {
+            run_time: Some(1.0),
+            rate_func: Some(fmn_core::rate::linear),
+            ..AnimateArgs::default()
+        })
+        .unwrap()
+        .shift([0.0, 2.0, 0.0])
+        .unwrap();
+    let animation = prepare_animation(builder, &mut stage).unwrap();
+    let mut clock = RationalFrameClock::new(8).unwrap();
+    let mut samples = Vec::new();
+    let report = play_segment(
+        &mut stage,
+        &mut clock,
+        &RngRoot::from_seed(73),
+        &mut [animation],
+        false,
+        &mut |packet| {
+            let captured = packet.materialize_stage();
+            assert_edges_connected(&captured, &network, &graph);
+            assert_point_close(
+                captured.get_center(node),
+                [initial[0], initial[1] + 2.0 * packet.alpha(), initial[2]],
+            );
+            let buffer = &captured.get(edge).unwrap().buffer;
+            assert_eq!(buffer.len(), 9);
+            assert_eq!(buffer.read_column("stroke_width"), Some(widths.clone()));
+            assert_eq!(
+                captured.get(graph.mobject()).unwrap().submobjects(),
+                &handles
+            );
+            samples.push(captured.get_center(node));
+        },
+    )
+    .unwrap();
+    assert!(!report.purity.is_pure());
+    assert_eq!(samples.len(), 8);
+    assert!(samples.last().unwrap()[1] > initial[1] + 1.0);
+    assert_edges_connected(&stage, &network, &graph);
+    assert_eq!(view.len(), 9);
+    let visible_end: [f32; 3] = view.read(8, "point").unwrap().try_into().unwrap();
+    assert_point_close(visible_end.map(f64::from), stage.get_center(node));
+    let revision = stage.get(edge).unwrap().buffer.field_revision("point");
+    stage.update(0.0);
+    assert_eq!(
+        stage.get(edge).unwrap().buffer.field_revision("point"),
+        revision
+    );
+}
+
+#[test]
+fn live_edges_run_after_vertex_updaters_and_static_graphs_remain_explicit() {
+    let network = NetworkGraph::new(sample_graph())
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    let mut stage = Stage::new();
+    let graph = network.add_live_to(&mut stage).unwrap();
+    stage.add_to_scene(graph.mobject()).unwrap();
+    let node = graph.node("c").unwrap();
+    let initial = stage.get_center(node);
+    stage
+        .add_dt_updater(
+            node,
+            |stage, receiver, dt| {
+                stage.shift(receiver, [2.0 * dt, -dt, 0.0]);
+            },
+            false,
+        )
+        .unwrap();
+    for step in 1..=4 {
+        stage.update(0.25);
+        assert!(stage.updater_error().is_none());
+        assert_point_close(
+            stage.get_center(node),
+            [
+                initial[0] + 0.5 * f64::from(step),
+                initial[1] - 0.25 * f64::from(step),
+                initial[2],
+            ],
+        );
+        assert_edges_connected(&stage, &network, &graph);
+    }
+    stage.shift(node, [0.0, 1.0, 0.0]);
+    stage.update(0.0);
+    assert_edges_connected(&stage, &network, &graph);
+
+    let static_graph = network.add_to(&mut stage).unwrap();
+    let static_edge = static_graph.edge("a", "b").unwrap();
+    let before = stage.get_points(static_edge).unwrap();
+    stage.shift(static_graph.node("b").unwrap(), [2.0, 0.0, 0.0]);
+    stage.update_mobject(static_graph.mobject(), 0.0);
+    assert_eq!(stage.get_points(static_edge).unwrap(), before);
+    static_graph.refresh_edges(&mut stage).unwrap();
+    assert_edges_connected(&stage, &network, &static_graph);
+}
+
+#[test]
+fn live_self_loops_follow_transformed_vertices_without_moving_twice() {
+    use fmn_mobject::Placement;
+
+    let network = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "a"), ("a", "b")])
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    for pinned in [false, true] {
+        let mut stage = Stage::new();
+        let graph = network.add_live_to(&mut stage).unwrap();
+        stage.add_to_scene(graph.mobject()).unwrap();
+        let node = graph.node("a").unwrap();
+        let edge = graph.edge("a", "a").unwrap();
+        let path = fmn_geom::QuadPath::from_points(stage.get_points(edge).unwrap()).unwrap();
+        let subdivided =
+            fmn_geom::QuadPath::insert_n_curves_to_point_list(3, path.points(), 1e-6).unwrap();
+        stage.set_points(edge, &subdivided).unwrap();
+        let original = stage.get_points(edge).unwrap();
+        let colors = stage
+            .get(edge)
+            .unwrap()
+            .buffer
+            .read_column("stroke_rgba")
+            .unwrap();
+        let view = pinned.then(|| stage.get_mut(edge).unwrap().buffer.export_view(false));
+        // Rotation, unequal scaling, and shear are all present in this map.
+        let affine = Placement::new(
+            [[0.0, -1.5, 0.0], [0.75, 0.25, 0.0], [0.0, 0.0, 1.0]],
+            [2.0, -1.0, 0.5],
+        );
+        stage.apply_affine(graph.mobject(), affine);
+        stage.update(0.0);
+        assert!(stage.updater_error().is_none());
+        let transformed = stage.get_points(edge).unwrap();
+        for (&actual, &before) in transformed.iter().zip(&original) {
+            assert_point_close(actual, affine.apply_point(before));
+        }
+        let delta = [1.25, -0.5, 0.25];
+        stage.shift(node, delta);
+        stage.update(0.0);
+        let followed = stage.get_points(edge).unwrap();
+        assert_eq!(followed.len(), original.len());
+        for (&actual, &before) in followed.iter().zip(&transformed) {
+            assert_point_close(
+                actual,
+                std::array::from_fn(|axis| before[axis] + delta[axis]),
+            );
+        }
+        let ordinary = stage.get_points(graph.edge("a", "b").unwrap()).unwrap();
+        assert_point_close(ordinary[0], stage.get_center(node));
+        assert_point_close(
+            *ordinary.last().unwrap(),
+            stage.get_center(graph.node("b").unwrap()),
+        );
+        assert_eq!(
+            stage.get(edge).unwrap().buffer.read_column("stroke_rgba"),
+            Some(colors)
+        );
+        if let Some(view) = view {
+            assert_eq!(view.len(), followed.len());
+            for (index, point) in followed.iter().enumerate() {
+                let seen: [f32; 3] = view.read(index, "point").unwrap().try_into().unwrap();
+                assert_point_close(seen.map(f64::from), *point);
+            }
+        }
+        let before = family_bytes(&stage, graph.mobject());
+        stage.update(0.0);
+        assert_eq!(family_bytes(&stage, graph.mobject()), before);
+    }
+}
+
+#[test]
+fn live_graph_copies_follow_only_their_own_vertices_and_snapshot_state() {
+    use fmn_mobject::Mobject;
+
+    let network = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "a"), ("a", "b")])
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    let mut stage = Stage::new();
+    let graph = network.add_live_to(&mut stage).unwrap();
+    let wrapper = stage.add(Mobject::new());
+    stage.attach(wrapper, graph.mobject()).unwrap();
+    let original = family_bytes(&stage, graph.mobject());
+    let copied_map = stage.copy_family_mapped(wrapper).unwrap();
+    let mut copied = graph.clone();
+    copied.remap_handles(&copied_map);
+    assert_ne!(copied.mobject(), graph.mobject());
+    assert_eq!(copied.node("a"), copied_map.get(graph.node("a").unwrap()));
+    let loop_before = stage.get_points(copied.edge("a", "a").unwrap()).unwrap();
+    let copied_node = copied.node("a").unwrap();
+    stage.shift(copied_node, [0.5, 1.0, 0.0]);
+    stage.update_mobject(copied_map.root(), 0.0);
+    assert!(stage.updater_error().is_none());
+    assert_eq!(family_bytes(&stage, graph.mobject()), original);
+    assert_point_close(
+        stage.get_start(copied.edge("a", "b").unwrap()).unwrap(),
+        stage.get_center(copied_node),
+    );
+    for (actual, before) in stage
+        .get_points(copied.edge("a", "a").unwrap())
+        .unwrap()
+        .iter()
+        .zip(&loop_before)
+    {
+        assert_point_close(*actual, [before[0] + 0.5, before[1] + 1.0, before[2]]);
+    }
+
+    let copied_bytes = family_bytes(&stage, copied.mobject());
+    let snapshot = stage.snapshot();
+    let mut replay = snapshot.materialize();
+    replay.shift(copied_node, [-1.0, 0.25, 0.0]);
+    replay.update_mobject(copied.mobject(), 0.0);
+    assert!(replay.updater_error().is_none());
+    assert_point_close(
+        replay.get_start(copied.edge("a", "b").unwrap()).unwrap(),
+        replay.get_center(copied_node),
+    );
+    assert_eq!(family_bytes(&stage, copied.mobject()), copied_bytes);
+
+    let mut destination = Stage::new();
+    let imported_root = stage.copy_into(copied.mobject(), &mut destination).unwrap();
+    let imported = copied.rebind(&destination, imported_root).unwrap();
+    let node = imported.node("b").unwrap();
+    destination.shift(node, [0.0, -2.0, 0.0]);
+    destination.update_mobject(imported_root, 0.0);
+    assert!(destination.updater_error().is_none());
+    assert_point_close(
+        destination
+            .get_end(imported.edge("a", "b").unwrap())
+            .unwrap(),
+        destination.get_center(node),
+    );
+    assert_eq!(family_bytes(&stage, copied.mobject()), copied_bytes);
+}
+
+#[test]
+fn live_edge_failures_preserve_all_previous_edge_geometry() {
+    let network = NetworkGraph::new(sample_graph())
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    let mut stage = Stage::new();
+    let graph = network.add_live_to(&mut stage).unwrap();
+    stage.shift(graph.node("a").unwrap(), [1.0, 0.0, 0.0]);
+    stage.detach(graph.mobject(), graph.node("e").unwrap());
+    let before = family_bytes(&stage, graph.mobject());
+    assert!(matches!(
+        graph.refresh_edges(&mut stage),
+        Err(GraphAnimationError::Animation(AnimError::Stage(
+            StageError::FamilyShapeMismatch
+        )))
+    ));
+    assert_eq!(family_bytes(&stage, graph.mobject()), before);
+    stage.update_mobject(graph.mobject(), 0.0);
+    let failure = stage.updater_error().unwrap();
+    assert_eq!(failure.mobject, graph.mobject());
+    assert_eq!(family_bytes(&stage, graph.mobject()), before);
+
+    // This remains a valid quadratic point run, but its two-lane joint field
+    // cannot receive Stage::set_points' one-angle-per-record writes. Refuse
+    // the entire update before an earlier edge's planned movement publishes.
+    let mut stage = Stage::new();
+    let graph = network.add_live_to(&mut stage).unwrap();
+    let malformed_edge = graph.edge("b", "c").unwrap();
+    let source = &stage.get(malformed_edge).unwrap().buffer;
+    let points = source.read_column("point").unwrap();
+    let schema =
+        fmn_mobject::RecordSchema::new(&[("point", 3), ("joint_angle", 2)], &["point"], &["point"])
+            .unwrap();
+    let mut malformed = fmn_mobject::RecordBuffer::new(schema, source.len()).unwrap();
+    assert!(malformed.write_range("point", 0, &points));
+    stage.get_mut(malformed_edge).unwrap().buffer = malformed;
+    stage.shift(graph.node("a").unwrap(), [1.0, 0.5, 0.0]);
+    let before = family_bytes(&stage, graph.mobject());
+    assert!(matches!(
+        graph.refresh_edges(&mut stage),
+        Err(GraphAnimationError::Animation(AnimError::Stage(
+            StageError::SchemaMismatch
+        )))
+    ));
+    assert_eq!(family_bytes(&stage, graph.mobject()), before);
+    stage.update_mobject(graph.mobject(), 0.0);
+    assert_eq!(stage.updater_error().unwrap().mobject, graph.mobject());
+    assert_eq!(family_bytes(&stage, graph.mobject()), before);
+
+    // The ordinary edge is visited before the unsupported static self-loop.
+    // Its prepared movement must not publish when the later attachment fails.
+    let mut stage = Stage::new();
+    let graph = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "b"), ("b", "b")])
+        .laid_out(&GraphLayout::Circular)
+        .unwrap()
+        .add_to(&mut stage)
+        .unwrap();
+    stage.shift(graph.node("b").unwrap(), [1.0, 2.0, 0.0]);
+    let before = family_bytes(&stage, graph.mobject());
+    assert!(matches!(
+        graph.refresh_edges(&mut stage),
+        Err(GraphAnimationError::Animation(AnimError::Stage(
+            StageError::SchemaMismatch
+        )))
+    ));
+    assert_eq!(family_bytes(&stage, graph.mobject()), before);
+}
+
+#[test]
+fn live_loop_following_resumes_after_layout_transition() {
+    let network = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "a"), ("a", "b")])
+        .laid_out(&GraphLayout::Circular)
+        .unwrap();
+    let mut stage = Stage::new();
+    let graph = network.add_live_to(&mut stage).unwrap();
+    stage.add_to_scene(graph.mobject()).unwrap();
+    let node = graph.node("a").unwrap();
+    let start_center = stage.get_center(node);
+    let loop_edge = graph.edge("a", "a").unwrap();
+    let start_loop = stage.get_points(loop_edge).unwrap();
+    let mut transition = LayoutTransition::new(
+        &stage,
+        &graph,
+        &GraphLayout::BreadthFirst { root: "a".into() },
+    )
+    .unwrap()
+    .with_config(AnimConfig {
+        rate_func: RateFunc::linear(),
+        suspend_mobject_updating: true,
+        ..AnimConfig::default()
+    });
+    transition.begin(&mut stage).unwrap();
+    assert!(stage.is_updating_suspended(graph.mobject()));
+    transition.interpolate(&mut stage, 0.5);
+    let midpoint = family_bytes(&stage, graph.mobject());
+    stage.update(0.25);
+    assert_eq!(family_bytes(&stage, graph.mobject()), midpoint);
+    transition.finish(&mut stage);
+    transition.clean_up_from_scene(&mut stage);
+    assert!(!stage.is_updating_suspended(graph.mobject()));
+    assert!(stage.updater_error().is_none());
+    let end_center = stage.get_center(node);
+    assert!((end_center[0] - start_center[0]).abs() > 0.5);
+    let before = stage.get_points(loop_edge).unwrap();
+    for (point, original) in before.iter().zip(&start_loop) {
+        assert_point_close(
+            *point,
+            std::array::from_fn(|axis| original[axis] + end_center[axis] - start_center[axis]),
+        );
+    }
+    let delta = [0.5, -0.75, 0.0];
+    stage.shift(node, delta);
+    stage.update(0.0);
+    assert!(stage.updater_error().is_none());
+    for (point, original) in stage.get_points(loop_edge).unwrap().iter().zip(&before) {
+        assert_point_close(
+            *point,
+            std::array::from_fn(|axis| original[axis] + delta[axis]),
+        );
+    }
+    assert_point_close(
+        stage.get_start(graph.edge("a", "b").unwrap()).unwrap(),
+        stage.get_center(graph.node("a").unwrap()),
+    );
+}
+
+#[test]
 fn graph_animation_rejects_changed_topology_and_invalid_layout_without_mutation() {
     let mut stage = Stage::new();
     let graph = NetworkGraph::new(sample_graph())

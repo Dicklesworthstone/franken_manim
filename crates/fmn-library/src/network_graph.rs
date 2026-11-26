@@ -3,6 +3,33 @@
 //! string-labeled vertices, undirected edges — as a detached [`VMobject`]
 //! family laid out by one of four **fmn-owned deterministic kernels**.
 //!
+//! ## Live vertex motion
+//!
+//! [`NetworkGraph::add_live_to`] keeps edges attached while individual
+//! vertices move through native `.animate` calls or dt updaters. One updater
+//! on the graph root follows the vertices in the same frame. Self-loops
+//! preserve their shape, and copying the family retargets the follower to the
+//! copied vertices. [`NetworkGraph::add_to`] remains the static builder for
+//! scenes driven entirely by explicit [`LayoutTransition`] animations.
+//!
+//! ```
+//! use fmn_library::{GraphLayout, NetworkGraph};
+//! use fmn_mobject::Stage;
+//!
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let network = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "a"), ("a", "b")])
+//!     .laid_out(&GraphLayout::Circular)?;
+//! let mut stage = Stage::new();
+//! let graph = network.add_live_to(&mut stage)?;
+//! stage.add_to_scene(graph.mobject())?;
+//! stage.shift(graph.node("a").unwrap(), [0.0, 1.0, 0.0]);
+//! // Scene animation/update passes do this automatically. Direct arena edits
+//! // can synchronize immediately, before the next pass:
+//! graph.refresh_edges(&mut stage)?;
+//! # Ok(())
+//! # }
+//! ```
+//!
 //! ## OQ-5 outcome (the layout-kernel audit, recorded here by fm-n64)
 //!
 //! franken_networkx at its SUITE.lock pin (`9d710b1c3`) ships **no native

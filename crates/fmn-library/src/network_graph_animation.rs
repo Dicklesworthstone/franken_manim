@@ -15,10 +15,17 @@ use fmn_core::color::Srgb;
 use fmn_core::constants::YELLOW;
 use fmn_core::rate::CatalogRate;
 use fmn_core::types::Vec3;
-use fmn_mobject::{Mob, Stage, StageError};
+use fmn_mobject::{
+    CopyMap, Mob, Mobject, RecordBuffer, RecordSchema, Stage, StageError, UpdaterError,
+};
 
 use super::{GraphLayout, NetworkGraph, NetworkGraphError};
 use crate::VMobject;
+
+// A self-loop has no distinct endpoint pair. Its attachment travels with the
+// geometry through Marionette's ordinary placement, point-map, copy, and
+// interpolation machinery, including writes through an exported record view.
+const LOOP_ANCHOR: &str = "network_anchor";
 
 /// A graph animation could not be constructed from the requested inputs.
 #[derive(Clone, Debug, PartialEq)]
@@ -27,6 +34,8 @@ pub enum GraphAnimationError {
     Graph(NetworkGraphError),
     /// A Choreo or arena operation failed.
     Animation(AnimError),
+    /// Installing or running the live edge follower failed.
+    Updater(UpdaterError),
     /// A numeric control is non-finite or outside its documented domain.
     InvalidControl(&'static str),
     /// A flow step names an edge the undirected graph does not contain.
@@ -45,6 +54,7 @@ impl std::fmt::Display for GraphAnimationError {
         match self {
             Self::Graph(error) => error.fmt(f),
             Self::Animation(error) => error.fmt(f),
+            Self::Updater(error) => error.fmt(f),
             Self::InvalidControl(name) => write!(f, "invalid graph animation control: {name}"),
             Self::MissingEdge { from, to } => {
                 write!(f, "graph flow names missing edge {from:?} -> {to:?}")
@@ -74,10 +84,18 @@ impl From<StageError> for GraphAnimationError {
     }
 }
 
+impl From<UpdaterError> for GraphAnimationError {
+    fn from(error: UpdaterError) -> Self {
+        Self::Updater(error)
+    }
+}
+
 /// An arena-backed graph with stable handles for its labeled vertices and edges.
 ///
-/// Construct with [`NetworkGraph::add_to`], then add [`Self::mobject`] to the
-/// scene. Moving, scaling, or restyling the family preserves the binding.
+/// Construct with [`NetworkGraph::add_to`] for explicit layout animations, or
+/// [`NetworkGraph::add_live_to`] to keep edges attached while ordinary vertex
+/// animations and updaters run. Then add [`Self::mobject`] to the scene.
+/// Moving, scaling, or restyling the family preserves the binding.
 /// Reordering, replacing, or attaching children invalidates it and is refused
 /// before an animation begins. Removing it from the scene does not delete it.
 ///
@@ -208,6 +226,73 @@ impl NetworkGraph {
     /// As [`Self::build`].
     pub fn add_to(&self, stage: &mut Stage) -> Result<NetworkGraphMobject, NetworkGraphError> {
         let root = stage.add(self.build()?);
+        Ok(self.bind_family(stage, root))
+    }
+
+    /// Build a graph whose edges follow its current vertex centers.
+    ///
+    /// One root updater runs after the vertices' updaters and after animation
+    /// interpolation, so `graph.node("a").unwrap().animate().shift(...)` and
+    /// ordinary node dt updaters keep the edges connected in the same frame.
+    /// The family is allocated but not added to the scene's draw list.
+    ///
+    /// Straight edges retain their record counts and paint. Self-loops retain
+    /// their authored shape and translate with their vertex; a pointlike
+    /// attachment field makes whole-family transforms and live record views
+    /// work without applying a movement twice. Copying the family remaps the
+    /// follower's owned handles to the copied vertices and edges.
+    ///
+    /// This is an ordinary stateful updater. Use [`Self::add_to`] when only
+    /// explicit graph layout animations are needed and pure frame scheduling
+    /// is desired. In-memory snapshots retain the follower; durable snapshots
+    /// require the host's normal native-updater rebinding protocol.
+    ///
+    /// # Errors
+    /// Invalid graph geometry, a pending updater failure, or a refused updater
+    /// registration. No callbacks run during construction.
+    pub fn add_live_to(
+        &self,
+        stage: &mut Stage,
+    ) -> Result<NetworkGraphMobject, GraphAnimationError> {
+        if let Some(error) = stage.updater_error() {
+            return Err(AnimError::Updater(error.clone()).into());
+        }
+        let mut object: Mobject = self.build()?.into();
+        for ((from, to, _), edge) in self
+            .graph
+            .edges_ordered_borrowed()
+            .into_iter()
+            .zip(&mut object.submobjects)
+        {
+            if from == to {
+                add_loop_anchor(edge, self.index[from])?;
+            }
+        }
+        let root = stage.add(object);
+        let graph = self.bind_family(stage, root);
+        graph.refresh_edges(stage)?;
+        stage.add_try_dt_updater_with_state(
+            root,
+            graph.clone(),
+            NetworkGraphMobject::remap_handles,
+            |stage, receiver, id, _dt| {
+                let binding = stage
+                    .updater_state::<NetworkGraphMobject>(receiver, id)
+                    .ok_or_else(|| {
+                        UpdaterError::callback("network graph edges", "missing native binding")
+                    })?;
+                let updates = binding
+                    .prepare_edge_updates(stage)
+                    .map_err(|error| UpdaterError::callback("network graph edges", error))?;
+                apply_edge_updates(stage, updates)
+                    .map_err(|error| UpdaterError::callback("network graph edges", error))
+            },
+            false,
+        )?;
+        Ok(graph)
+    }
+
+    fn bind_family(&self, stage: &Stage, root: Mob) -> NetworkGraphMobject {
         let children = stage
             .get(root)
             .expect("a freshly built graph is live")
@@ -226,13 +311,13 @@ impl NetworkGraph {
             .cloned()
             .zip(children[edges.len()..].iter().copied())
             .collect();
-        Ok(NetworkGraphMobject {
+        NetworkGraphMobject {
             network: self.clone(),
             root,
             children,
             nodes,
             edges,
-        })
+        }
     }
 }
 
@@ -259,6 +344,123 @@ impl NetworkGraphMobject {
     #[must_use]
     pub fn nodes(&self) -> &[String] {
         self.network.nodes()
+    }
+
+    /// Synchronize edges immediately after direct arena edits.
+    ///
+    /// [`NetworkGraph::add_live_to`] calls this automatically on each family
+    /// update, including a zero-dt pass. This method also supports straight
+    /// edges from [`NetworkGraph::add_to`]; self-loops require the attachment
+    /// fields installed by `add_live_to`. All bindings and planned geometry
+    /// are checked before the first edge is changed.
+    ///
+    /// # Errors
+    /// A stale/restructured family, missing self-loop attachment data, invalid
+    /// geometry, or endpoints that cannot fit finite native records.
+    pub fn refresh_edges(&self, stage: &mut Stage) -> Result<(), GraphAnimationError> {
+        let updates = self.prepare_edge_updates(stage)?;
+        apply_edge_updates(stage, updates)?;
+        Ok(())
+    }
+
+    /// Retarget this label binding using a complete family copy's handle map.
+    ///
+    /// The live follower uses this automatically for its owned state. A copy
+    /// of only one vertex leaves an external graph binding unchanged.
+    pub fn remap_handles(&mut self, map: &CopyMap) {
+        let Some(root) = map.get(self.root) else {
+            return;
+        };
+        self.root = root;
+        for mob in &mut self.children {
+            *mob = map.get(*mob).unwrap_or(*mob);
+        }
+        for mob in self.nodes.values_mut() {
+            *mob = map.get(*mob).unwrap_or(*mob);
+        }
+        for (_, _, mob) in &mut self.edges {
+            *mob = map.get(*mob).unwrap_or(*mob);
+        }
+    }
+
+    /// Bind the same labels to a copied graph root, including `Stage::copy_into`.
+    ///
+    /// This does not install another follower: copying the live graph already
+    /// carries its updater and remapped state. Child order must remain the
+    /// original edge-first/vertex-last order.
+    ///
+    /// # Errors
+    /// A stale root or a family whose structure or geometry no longer matches.
+    pub fn rebind(&self, stage: &Stage, root: Mob) -> Result<Self, GraphAnimationError> {
+        let children = stage
+            .get(root)
+            .ok_or(AnimError::StaleHandle(root))?
+            .submobjects();
+        if children.len() != self.children.len() {
+            return Err(StageError::FamilyShapeMismatch.into());
+        }
+        let rebound = self.network.bind_family(stage, root);
+        rebound.validate(stage)?;
+        Ok(rebound)
+    }
+
+    fn prepare_edge_updates(&self, stage: &Stage) -> Result<Vec<EdgeUpdate>, GraphAnimationError> {
+        self.validate(stage)?;
+        let mut updates = Vec::with_capacity(self.edges.len());
+        for (from, to, edge) in &self.edges {
+            let start = stage.get_center(self.nodes[from]);
+            let current = stage.get_points(*edge).ok_or(AnimError::EmptyMobject)?;
+            if from == to {
+                let entry = stage.get(*edge).ok_or(AnimError::StaleHandle(*edge))?;
+                let schema = entry.buffer.schema();
+                if schema.field_width(LOOP_ANCHOR) != Some(3)
+                    || !schema.pointlike_keys().iter().any(|key| key == LOOP_ANCHOR)
+                {
+                    return Err(StageError::SchemaMismatch.into());
+                }
+                let anchor = entry
+                    .buffer
+                    .read(0, LOOP_ANCHOR)
+                    .ok_or(StageError::SchemaMismatch)?;
+                let anchor = entry.placement().apply_point([
+                    f64::from(anchor[0]),
+                    f64::from(anchor[1]),
+                    f64::from(anchor[2]),
+                ]);
+                let delta = std::array::from_fn(|axis| start[axis] - anchor[axis]);
+                if anchor.iter().chain(&start).any(|value| !value.is_finite()) {
+                    return Err(GraphAnimationError::InvalidControl(
+                        "self-loop attachment must be finite",
+                    ));
+                }
+                for point in &current {
+                    finite_record_point(std::array::from_fn(|axis| point[axis] + delta[axis]))?;
+                }
+                if !same_record_point(anchor, start) {
+                    updates.push(EdgeUpdate::Shift(*edge, delta));
+                }
+                continue;
+            }
+            let end = stage.get_center(self.nodes[to]);
+            finite_record_point(start)?;
+            finite_record_point(end)?;
+            let count = current.len().max(3);
+            let points: Vec<_> = (0..count)
+                .map(|index| {
+                    let alpha = index as f64 / (count - 1) as f64;
+                    std::array::from_fn(|axis| (1.0 - alpha) * start[axis] + alpha * end[axis])
+                })
+                .collect();
+            if current.len() != count
+                || !current
+                    .iter()
+                    .zip(&points)
+                    .all(|(&actual, &expected)| same_record_point(actual, expected))
+            {
+                updates.push(EdgeUpdate::Points(*edge, points));
+            }
+        }
+        Ok(updates)
     }
 
     fn oriented_edge(&self, from: &str, to: &str) -> Option<(Mob, bool)> {
@@ -288,7 +490,9 @@ impl NetworkGraphMobject {
             if !entry.submobjects().is_empty() {
                 return Err(AnimError::Stage(StageError::FamilyShapeMismatch));
             }
-            if entry.buffer.schema().offset("joint_angle").is_none() {
+            if entry.buffer.schema().field_width("point") != Some(3)
+                || entry.buffer.schema().field_width("joint_angle") != Some(1)
+            {
                 return Err(AnimError::Stage(StageError::SchemaMismatch));
             }
             if entry.buffer.is_empty() {
@@ -304,6 +508,73 @@ impl NetworkGraphMobject {
         }
         Ok(())
     }
+}
+
+enum EdgeUpdate {
+    Points(Mob, Vec<Vec3>),
+    Shift(Mob, Vec3),
+}
+
+fn apply_edge_updates(stage: &mut Stage, updates: Vec<EdgeUpdate>) -> Result<(), StageError> {
+    for update in updates {
+        match update {
+            EdgeUpdate::Points(edge, points) => stage.set_points(edge, &points)?,
+            EdgeUpdate::Shift(edge, delta) => {
+                stage.shift(edge, delta);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn finite_record_point(point: Vec3) -> Result<(), GraphAnimationError> {
+    if point
+        .iter()
+        .any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX))
+    {
+        return Err(GraphAnimationError::InvalidControl(
+            "live edge coordinates must fit finite records",
+        ));
+    }
+    Ok(())
+}
+
+fn same_record_point(left: Vec3, right: Vec3) -> bool {
+    left.map(|value| value as f32) == right.map(|value| value as f32)
+}
+
+fn add_loop_anchor(edge: &mut Mobject, point: Vec3) -> Result<(), GraphAnimationError> {
+    finite_record_point(point)?;
+    let schema = edge.buffer.schema();
+    let mut fields: Vec<_> = schema
+        .fields()
+        .iter()
+        .map(|field| (field.name.as_str(), field.width))
+        .collect();
+    fields.push((LOOP_ANCHOR, 3));
+    let mut aligned: Vec<_> = schema.aligned_keys().iter().map(String::as_str).collect();
+    aligned.push(LOOP_ANCHOR);
+    let mut pointlike: Vec<_> = schema.pointlike_keys().iter().map(String::as_str).collect();
+    pointlike.push(LOOP_ANCHOR);
+    let schema = RecordSchema::new(&fields, &aligned, &pointlike).map_err(StageError::Record)?;
+    let mut buffer = RecordBuffer::new(schema, edge.buffer.len()).map_err(StageError::Record)?;
+    for field in edge.buffer.schema().fields() {
+        let values = edge
+            .buffer
+            .read_column(&field.name)
+            .ok_or(StageError::SchemaMismatch)?;
+        if !buffer.write_range(&field.name, 0, &values) {
+            return Err(StageError::SchemaMismatch.into());
+        }
+    }
+    let anchors: Vec<_> = (0..buffer.len())
+        .flat_map(|_| point.map(|value| value as f32))
+        .collect();
+    if !buffer.write_range(LOOP_ANCHOR, 0, &anchors) {
+        return Err(StageError::SchemaMismatch.into());
+    }
+    edge.buffer = buffer;
+    Ok(())
 }
 
 fn positive(value: f64, name: &'static str) -> Result<(), GraphAnimationError> {

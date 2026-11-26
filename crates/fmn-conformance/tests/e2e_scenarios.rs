@@ -15706,6 +15706,268 @@ fn drawings_asset_refusals_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioE
     Ok(RunOutcome::ok().with_counter("asset_refusals_named", named))
 }
 
+fn network_graph_live_edges_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use fmn_anim::pure_frame::{PlayCapture, PureSegment, play_segment_with_pure_dispatch};
+    use fmn_anim::{FramePacket, RationalFrameClock, prepare_animation};
+    use fmn_core::color::LinearRgba;
+    use fmn_core::rng::RngRoot;
+    use fmn_library::network_graph::{GraphLayout, NetworkGraph};
+    use fmn_mobject::Stage;
+    use fmn_mobject::animate::AnimateArgs;
+    use fmn_render::{
+        EngineIdentity, FrameConfig, RetainedFrameRenderer, RetainedFrameRendererConfig, ScreenMap,
+        Tiling, Viewport,
+    };
+
+    #[derive(Default)]
+    struct Captures {
+        packets: Vec<FramePacket>,
+        pure_programs: u64,
+    }
+    impl PlayCapture for Captures {
+        fn capture(&mut self, packet: FramePacket) {
+            self.packets.push(packet);
+        }
+        fn accepts_pure_segments(&self) -> bool {
+            true
+        }
+        fn capture_pure_segment(&mut self, _: &PureSegment) -> bool {
+            self.pure_programs += 1;
+            false
+        }
+    }
+    fn near(left: [f64; 3], right: [f64; 3]) -> bool {
+        left.into_iter()
+            .zip(right)
+            .all(|(a, b)| (a - b).abs() <= 2.0e-6)
+    }
+    let network = NetworkGraph::from_edge_list(&["a", "b"], &[("a", "a"), ("a", "b")])
+        .laid_out(&GraphLayout::BreadthFirst { root: "a".into() })
+        .map_err(|error| fail(format!("live graph layout: {error}")))?;
+    let renderer = |threads| {
+        RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            frame: FrameConfig::new(
+                Viewport {
+                    width: 256,
+                    height: 192,
+                },
+                ScreenMap {
+                    scale: 40.0,
+                    origin: [128.0, 144.0],
+                    y_up: true,
+                },
+                LinearRgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
+            tiling: Tiling {
+                macro_tile: 32,
+                fine_tile: 8,
+            },
+            engine: EngineIdentity::certified(),
+            threads,
+        })
+        .map_err(|error| fail(format!("live graph renderer: {error}")))
+    };
+    let mut matching_frames = 0_u64;
+    let mut stateful_segments = 0_u64;
+    let mut stale_witnesses = 0_u64;
+    let mut worker_matches = 0_u64;
+    let mut first_worker_frames = Vec::new();
+    let mut final_live = Vec::new();
+    let mut final_stale = Vec::new();
+    for threads in [1, 4] {
+        let mut stage = Stage::new();
+        let live = network
+            .add_live_to(&mut stage)
+            .map_err(|error| fail(format!("live graph construction: {error}")))?;
+        stage
+            .add_to_scene(live.mobject())
+            .map_err(|error| fail(format!("live graph root: {error}")))?;
+        let a = live
+            .node("a")
+            .ok_or_else(|| fail("live graph node a is absent"))?;
+        let b = live
+            .node("b")
+            .ok_or_else(|| fail("live graph node b is absent"))?;
+        let loop_mob = live
+            .edge("a", "a")
+            .ok_or_else(|| fail("live graph loop is absent"))?;
+        let initial_a = stage.get_center(a);
+        let initial_b = stage.get_center(b);
+        let initial_loop = stage
+            .get_points(loop_mob)
+            .ok_or_else(|| fail("live graph loop points are absent"))?;
+        let builder = a
+            .animate()
+            .set_anim_args(AnimateArgs {
+                run_time: Some(1.0),
+                rate_func: Some(fmn_core::rate::linear),
+                ..AnimateArgs::default()
+            })
+            .map_err(|error| fail(format!("live graph animation arguments: {error}")))?
+            .shift([0.0, 1.5, 0.0])
+            .map_err(|error| fail(format!("live graph node translation: {error}")))?;
+        let animation = prepare_animation(builder, &mut stage)
+            .map_err(|error| fail(format!("live graph animation: {error}")))?;
+        let mut clock = RationalFrameClock::new(8)
+            .map_err(|error| fail(format!("live graph clock: {error}")))?;
+        let mut captures = Captures::default();
+        let report = play_segment_with_pure_dispatch(
+            &mut stage,
+            &mut clock,
+            &RngRoot::from_seed(73),
+            &mut [animation],
+            false,
+            true,
+            &mut |_, _| {},
+            &mut captures,
+        )
+        .map_err(|error| fail(format!("live graph play: {error}")))?;
+        if report.purity.is_pure() || captures.pure_programs != 0 || captures.packets.len() != 8 {
+            return Err(fail(
+                "live graph updater was skipped by pure dispatch or lost captures",
+            ));
+        }
+        stateful_segments += 1;
+        let mut live_renderer = renderer(threads)?;
+        let mut witness_renderer = renderer(threads)?;
+        let mut final_delta = [0.0; 3];
+        for (index, packet) in captures.packets.iter().enumerate() {
+            let delta = [0.0, 1.5 * packet.alpha(), 0.0];
+            final_delta = delta;
+            let frame = packet.materialize_stage();
+            let line = live
+                .edge("a", "b")
+                .ok_or_else(|| fail("captured graph line is absent"))?;
+            let loop_mob = live
+                .edge("a", "a")
+                .ok_or_else(|| fail("captured graph loop is absent"))?;
+            let expected_a = std::array::from_fn(|axis| initial_a[axis] + delta[axis]);
+            let start = frame
+                .get_start(line)
+                .ok_or_else(|| fail("captured line start is absent"))?;
+            let end = frame
+                .get_end(line)
+                .ok_or_else(|| fail("captured line end is absent"))?;
+            let points = frame
+                .get_points(loop_mob)
+                .ok_or_else(|| fail("captured loop points are absent"))?;
+            if !near(start, expected_a)
+                || !near(end, initial_b)
+                || points.len() != initial_loop.len()
+                || points.iter().zip(&initial_loop).any(|(point, original)| {
+                    !near(
+                        *point,
+                        std::array::from_fn(|axis| original[axis] + delta[axis]),
+                    )
+                })
+            {
+                return Err(fail(format!(
+                    "live graph attachment diverged at alpha {}",
+                    packet.alpha()
+                )));
+            }
+
+            // Independent ordinary geometry: no live updater or refresh_edges.
+            let mut witness = Stage::new();
+            let static_graph = network
+                .add_to(&mut witness)
+                .map_err(|error| fail(format!("static graph witness: {error}")))?;
+            witness
+                .add_to_scene(static_graph.mobject())
+                .map_err(|error| fail(format!("static graph witness root: {error}")))?;
+            let static_a = static_graph
+                .node("a")
+                .ok_or_else(|| fail("static node a is absent"))?;
+            let static_b = static_graph
+                .node("b")
+                .ok_or_else(|| fail("static node b is absent"))?;
+            let static_loop = static_graph
+                .edge("a", "a")
+                .ok_or_else(|| fail("static loop is absent"))?;
+            let static_line = static_graph
+                .edge("a", "b")
+                .ok_or_else(|| fail("static line is absent"))?;
+            witness.shift(static_a, delta);
+            witness.shift(static_loop, delta);
+            let start = witness.get_center(static_a);
+            let end = witness.get_center(static_b);
+            let middle = std::array::from_fn(|axis| 0.5 * start[axis] + 0.5 * end[axis]);
+            witness
+                .set_points(static_line, &[start, middle, end])
+                .map_err(|error| fail(format!("static graph line placement: {error}")))?;
+            live_renderer
+                .render(&frame, 0)
+                .map_err(|error| fail(format!("live graph raster: {error}")))?;
+            witness_renderer
+                .render(&witness, 0)
+                .map_err(|error| fail(format!("static graph raster: {error}")))?;
+            let live_pixels = live_renderer.frame().plane(0).to_vec();
+            if live_pixels != witness_renderer.frame().plane(0) {
+                return Err(fail(format!(
+                    "live graph differs from independently positioned static witness at frame {index}"
+                )));
+            }
+            if threads == 1 {
+                first_worker_frames.push(live_pixels.clone());
+            } else {
+                if first_worker_frames.get(index) != Some(&live_pixels) {
+                    return Err(fail("live graph raster depends on worker count"));
+                }
+                worker_matches += 1;
+            }
+            matching_frames += 1;
+            final_live = live_pixels;
+        }
+
+        // The previous static behavior leaves both edges at their old positions.
+        let mut stale = Stage::new();
+        let stale_graph = network
+            .add_to(&mut stale)
+            .map_err(|error| fail(format!("stale graph witness: {error}")))?;
+        stale
+            .add_to_scene(stale_graph.mobject())
+            .map_err(|error| fail(format!("stale graph root: {error}")))?;
+        let node = stale_graph
+            .node("a")
+            .ok_or_else(|| fail("stale node a is absent"))?;
+        stale.shift(node, final_delta);
+        let mut stale_renderer = renderer(threads)?;
+        stale_renderer
+            .render(&stale, 0)
+            .map_err(|error| fail(format!("stale graph raster: {error}")))?;
+        let stale_pixels = stale_renderer.frame().plane(0).to_vec();
+        if stale_pixels == final_live || final_delta[1] <= 0.0 {
+            return Err(fail("live graph witness did not expose disconnected edges"));
+        }
+        stale_witnesses += 1;
+        final_stale = stale_pixels;
+    }
+    ctx.event(
+        LogEvent::new("e2e.network_graph.live_edges")
+            .field("matching_frames", matching_frames)
+            .field("stateful_segments", stateful_segments)
+            .field("stale_witnesses", stale_witnesses)
+            .field("worker_matches", worker_matches)
+            .field("threads", "1,4"),
+    );
+    ctx.counter("network_graph_live_frames", matching_frames);
+    ctx.counter("network_graph_live_stateful_segments", stateful_segments);
+    ctx.counter("network_graph_live_stale_witnesses", stale_witnesses);
+    ctx.counter("network_graph_live_worker_matches", worker_matches);
+    Ok(RunOutcome::ok()
+        .with_artifact("network_graph_live_frame.bin", final_live)
+        .with_artifact("network_graph_stale_frame.bin", final_stale)
+        .with_counter("network_graph_live_frames", matching_frames)
+        .with_counter("network_graph_live_stateful_segments", stateful_segments)
+        .with_counter("network_graph_live_stale_witnesses", stale_witnesses)
+        .with_counter("network_graph_live_worker_matches", worker_matches))
+}
+
 /// NetworkGraph determinism drill: the same graph + seed replays a
 /// bit-identical position digest twice, and a different seed diverges —
 /// the OQ-5 kernel rules exercised through the public surface.
@@ -15771,6 +16033,297 @@ fn network_graph_layout_determinism_run(ctx: &mut RunCtx) -> Result<RunOutcome, 
     Ok(RunOutcome::ok()
         .with_counter("spring_replay_equal", replay_equal)
         .with_counter("spring_seeds_diverge", seeds_diverge))
+}
+
+fn studio_narrated_checkpoint_run(ctx: &mut RunCtx) -> Result<RunOutcome, ScenarioError> {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    use fmn_codec::{SampleFormat, WavAudio};
+    use fmn_core::color::LinearRgba;
+    use fmn_mobject::{Mob, Mobject, Stage};
+    use fmn_render::{
+        EngineIdentity, FrameConfig, RetainedFrameRendererConfig, ScreenMap, Tiling, Viewport,
+    };
+    use fmn_scene::{
+        Journal, RuntimeConfig, Scene, SoundData, SoundDataLimits, SoundRequest, SoundSource,
+    };
+    use fmn_studio::native::{
+        NativeReplayPolicy, NativeRestoreMode, NativeSceneProgram, NativeSceneWorker,
+        NativeSegment, NativeUpdaterRegistry, NativeWorkerConfig,
+    };
+    use fmn_studio::protocol::studio_seek_command;
+    use fmn_studio::{
+        Checkpoint, FramePayload, ServiceError, SupervisorRequest, WorkerErrorCode, WorkerResponse,
+        WorkerService, protocol_digest,
+    };
+
+    const NAME: &str = "NarratedCheckpoint";
+    fn native_error(error: impl std::fmt::Display) -> ServiceError {
+        ServiceError::new(WorkerErrorCode::ExecutionFailed, error.to_string())
+    }
+    fn drift(stage: &mut Stage, mob: Mob, dt: f64) {
+        stage.shift(mob, [dt / 8.0, 0.0, 0.0]);
+    }
+    #[derive(PartialEq)]
+    struct Observation {
+        arena: Vec<u8>,
+        frame: i64,
+        play_count: u64,
+        queue: Vec<SoundRequest>,
+    }
+    fn observe(worker: &NativeSceneWorker) -> Result<Observation, ScenarioError> {
+        let program = worker
+            .program()
+            .ok_or_else(|| fail("native owner is absent"))?;
+        let scene = program.preview().scene();
+        Ok(Observation {
+            arena: scene
+                .stage()
+                .snapshot()
+                .to_bytes()
+                .map_err(|error| fail(format!("narrated arena: {error}")))?,
+            frame: scene.time().frames(),
+            play_count: scene.play_count(),
+            queue: scene.sound_requests().to_vec(),
+        })
+    }
+    fn capture(worker: &mut NativeSceneWorker, frame: i64) -> Result<Vec<u8>, ScenarioError> {
+        let response = worker
+            .handle(SupervisorRequest::Scrub {
+                scene: NAME.into(),
+                frame,
+            })
+            .map_err(|error| fail(format!("narrated frame {frame}: {error}")))?;
+        match response {
+            WorkerResponse::Frame(capture) if capture.frame_index == frame as u64 => {
+                match capture.payload {
+                    FramePayload::Pipe { bytes, .. } => Ok(bytes),
+                    _ => Err(fail("narrated scenario requires inline native PNG")),
+                }
+            }
+            _ => Err(fail("narrated seek returned no matching frame")),
+        }
+    }
+
+    let pcm = SoundData::from_audio(
+        &WavAudio {
+            channels: 2,
+            channel_mask: None,
+            sample_rate: 48_000,
+            format: SampleFormat::F32,
+            samples: vec![0.25, -0.5, 0.125, 0.75, -0.25, 0.0, 0.5, -0.125],
+        },
+        SoundDataLimits::default(),
+    )
+    .map_err(|error| fail(format!("narration fixture: {error}")))?;
+    let make = |threads: usize, budget: u64, prefix_calls: Rc<Cell<u64>>| {
+        let renderer = RetainedFrameRendererConfig {
+            frame: FrameConfig::new(
+                Viewport {
+                    width: 96,
+                    height: 64,
+                },
+                ScreenMap {
+                    scale: 8.0,
+                    origin: [32.0, 32.0],
+                    y_up: true,
+                },
+                LinearRgba {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 1.0,
+                },
+            ),
+            tiling: Tiling {
+                macro_tile: 32,
+                fine_tile: 8,
+            },
+            engine: EngineIdentity::certified(),
+            threads,
+        };
+        let mut config = NativeWorkerConfig::new(
+            NAME,
+            protocol_digest(b"e2e-narrated-native-build-v1"),
+            protocol_digest(b"e2e-narrated-native-inputs-v1"),
+            904,
+            30,
+            renderer,
+        );
+        config.replay = NativeReplayPolicy::Checkpointed;
+        config.checkpoint_frames = 1;
+        config.max_replay_frames = budget;
+        let pcm = pcm.clone();
+        NativeSceneWorker::new(config, move || {
+            let mut scene = Scene::new(RuntimeConfig::default(), 71).map_err(native_error)?;
+            let root = scene.stage_mut().add(Mobject::vector_from_points(&[
+                [-0.7, -0.4, 0.0],
+                [-0.2, 0.3, 0.0],
+                [0.6, 0.5, 0.0],
+                [0.9, -0.1, 0.0],
+                [-0.7, -0.4, 0.0],
+            ]));
+            scene.add(&[root]).map_err(native_error)?;
+            scene
+                .add_sound_source_at_rational(
+                    SoundSource::Memory(pcm.clone()),
+                    fmn_anim::RationalTime::zero(48_000) + 600_001,
+                    Some(-6.0),
+                    None,
+                )
+                .map_err(native_error)?;
+            let mut registry = NativeUpdaterRegistry::new();
+            registry.register_dt(
+                scene.stage_mut(),
+                root,
+                protocol_digest(b"e2e-narrated-drift-v1"),
+                drift,
+            )?;
+            let cue = pcm.clone();
+            let prefix_calls = Rc::clone(&prefix_calls);
+            NativeSceneProgram::new(
+                scene,
+                vec![
+                    NativeSegment::WaitFrames { frames: 3 },
+                    NativeSegment::edit(move |context| {
+                        // Write-only execution evidence; the model never reads this counter.
+                        prefix_calls.set(prefix_calls.get() + 1);
+                        context.stage_mut().shift(root, [0.25, 0.0, 0.0]);
+                        context.add_sound_source(
+                            SoundSource::Memory(cue),
+                            -0.125,
+                            Some(-3.0),
+                            Some(-12.0),
+                        )
+                    }),
+                    NativeSegment::WaitFrames { frames: 900 },
+                ],
+                903,
+            )?
+            .with_checkpoint_registry(registry)
+        })
+        .map_err(|error| fail(format!("narrated worker: {error}")))
+    };
+
+    let original_calls = Rc::new(Cell::new(0));
+    let mut original = make(1, 1_000, Rc::clone(&original_calls))?;
+    let command = studio_seek_command(NAME, 600)
+        .map_err(|error| fail(format!("narrated checkpoint command: {error}")))?;
+    let response = original
+        .handle(SupervisorRequest::Play {
+            scene: NAME.into(),
+            command,
+        })
+        .map_err(|error| fail(format!("narrated checkpoint: {error}")))?;
+    let WorkerResponse::JournalSegment { journal, .. } = response else {
+        return Err(fail("narrated commit did not produce a journal"));
+    };
+    let journal = Journal::from_bytes(&journal)
+        .map_err(|error| fail(format!("narrated journal: {error}")))?;
+    let entry = journal
+        .entries()
+        .last()
+        .ok_or_else(|| fail("narrated journal is empty"))?;
+    let checkpoint = Checkpoint {
+        scene: NAME.into(),
+        after_entry: 0,
+        state_hash: entry.state_hash,
+        state: entry
+            .checkpoint
+            .clone()
+            .ok_or_else(|| fail("narrated checkpoint is absent"))?,
+    };
+    let at_checkpoint = observe(&original)?;
+    if !checkpoint.state.starts_with(b"FMNR\x05\0\0\0")
+        || original_calls.get() != 1
+        || at_checkpoint.frame != 600
+        || at_checkpoint.queue.len() != 2
+        || at_checkpoint.queue[1].time.frames() != 3
+    {
+        return Err(fail(
+            "narrated checkpoint lost its deferred cue or warm carrier",
+        ));
+    }
+    let mut expected = Vec::new();
+    for frame in 601..=603 {
+        let png = capture(&mut original, frame)?;
+        expected.push((frame, png, observe(&original)?));
+    }
+    if expected
+        .last()
+        .is_none_or(|(_, _, state)| state.arena == at_checkpoint.arena)
+    {
+        return Err(fail(
+            "narrated reference did not execute its continuing drift updater",
+        ));
+    }
+
+    let mut restores = 0_u64;
+    let mut matching_frames = 0_u64;
+    let mut pcm_cues = 0_u64;
+    let mut last_png = Vec::new();
+    for threads in [1, 4] {
+        let prefix_calls = Rc::new(Cell::new(0));
+        let mut resumed = make(threads, 3, Rc::clone(&prefix_calls))?;
+        resumed
+            .handle(SupervisorRequest::RestoreCheckpoint(checkpoint.clone()))
+            .map_err(|error| fail(format!("narrated restore threads={threads}: {error}")))?;
+        if resumed
+            .last_restore()
+            .is_none_or(|report| report.mode != NativeRestoreMode::Checkpoint)
+            || prefix_calls.get() != 0
+            || observe(&resumed)? != at_checkpoint
+        {
+            return Err(fail(
+                "narrated restore reconstructed its prefix or lost scene/audio state",
+            ));
+        }
+        for request in &observe(&resumed)?.queue {
+            let SoundSource::Memory(data) = &request.source else {
+                return Err(fail("restored narration changed its source kind"));
+            };
+            if data.bytes().as_ref() != pcm.bytes().as_ref()
+                || data.sample_rate() != 48_000
+                || data.channels() != 2
+                || data.sample_frames() != 4
+            {
+                return Err(fail("restored narration changed the authored PCM"));
+            }
+            pcm_cues += 1;
+        }
+        restores += 1;
+        for (frame, png, state) in &expected {
+            let actual = capture(&mut resumed, *frame)?;
+            if actual != *png || observe(&resumed)? != *state {
+                return Err(fail(format!(
+                    "narrated continuation diverged at frame {frame}, threads={threads}"
+                )));
+            }
+            matching_frames += 1;
+            last_png = actual;
+        }
+        if prefix_calls.get() != 0 {
+            return Err(fail("narrated continuation reran completed authoring"));
+        }
+    }
+    ctx.event(
+        LogEvent::new("e2e.studio.narrated_checkpoint")
+            .field("checkpoint_restores", restores)
+            .field("matching_frames", matching_frames)
+            .field("pcm_cues", pcm_cues)
+            .field("threads", "1,4")
+            .field("prefix_replays", 0_u64),
+    );
+    ctx.counter("studio_narrated_checkpoint_restores", restores);
+    ctx.counter("studio_narrated_checkpoint_frames", matching_frames);
+    ctx.counter("studio_narrated_checkpoint_pcm_cues", pcm_cues);
+    Ok(RunOutcome::ok()
+        .with_artifact("native_narrated_checkpoint.bin", checkpoint.state)
+        .with_artifact("native_narrated_continued.png", last_png)
+        .with_counter("studio_narrated_checkpoint_restores", restores)
+        .with_counter("studio_narrated_checkpoint_frames", matching_frames)
+        .with_counter("studio_narrated_checkpoint_pcm_cues", pcm_cues))
 }
 
 /// A native method override reaches the actual scene owner once, reads its
@@ -21896,6 +22449,32 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )],
     ));
     specs.push(spec(
+        "lifecycle.studio_narrated_checkpoint.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::StudioInProcess,
+        Invocation::new(studio_narrated_checkpoint_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "native_narrated_checkpoint.bin".into(),
+                "native_narrated_continued.png".into(),
+            ]),
+            counter_eq("studio_narrated_checkpoint_restores", 2),
+            counter_eq("studio_narrated_checkpoint_frames", 6),
+            counter_eq("studio_narrated_checkpoint_pcm_cues", 4),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.studio.narrated_checkpoint",
+            vec![
+                FieldPred::u64_eq("checkpoint_restores", 2),
+                FieldPred::u64_eq("matching_frames", 6),
+                FieldPred::u64_eq("pcm_cues", 4),
+                FieldPred::str_eq("threads", "1,4"),
+                FieldPred::u64_eq("prefix_replays", 0),
+            ],
+        )],
+    ));
+    specs.push(spec(
         "lifecycle.studio_future_native_checkpoint.v1",
         ScenarioClass::LifecycleDrill,
         Surface::StudioInProcess,
@@ -24382,6 +24961,33 @@ pub fn catalog() -> Vec<ScenarioSpec> {
         )
         .tier(Tier::Fast),
     );
+    specs.push(spec(
+        "network_graph.live_edges.v1",
+        ScenarioClass::LifecycleDrill,
+        Surface::RustApi,
+        Invocation::new(network_graph_live_edges_run),
+        vec![
+            Assertion::ExitCode(0),
+            Assertion::FileInventory(vec![
+                "network_graph_live_frame.bin".into(),
+                "network_graph_stale_frame.bin".into(),
+            ]),
+            counter_eq("network_graph_live_frames", 16),
+            counter_eq("network_graph_live_stateful_segments", 2),
+            counter_eq("network_graph_live_stale_witnesses", 2),
+            counter_eq("network_graph_live_worker_matches", 8),
+        ],
+        vec![LogExpect::span_present(
+            "e2e.network_graph.live_edges",
+            vec![
+                FieldPred::u64_eq("matching_frames", 16),
+                FieldPred::u64_eq("stateful_segments", 2),
+                FieldPred::u64_eq("stale_witnesses", 2),
+                FieldPred::u64_eq("worker_matches", 8),
+                FieldPred::str_eq("threads", "1,4"),
+            ],
+        )],
+    ));
     specs.push(
         spec(
             "network_graph.spring_seed_determinism.v1",
@@ -26520,6 +27126,26 @@ fn studio_active_succession_checkpoint_scenario_passes() {
         .into_iter()
         .find(|scenario| scenario.name == "lifecycle.studio_active_succession_checkpoint.v1")
         .expect("active native Succession checkpoint lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn studio_narrated_checkpoint_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "lifecycle.studio_narrated_checkpoint.v1")
+        .expect("narrated native checkpoint lifecycle is registered");
+    let report = Runner::from_env().run(scenario);
+    assert!(report.is_pass(), "{}", report.summary());
+}
+
+#[test]
+fn network_graph_live_edges_scenario_passes() {
+    let scenario = catalog()
+        .into_iter()
+        .find(|scenario| scenario.name == "network_graph.live_edges.v1")
+        .expect("live graph edges lifecycle is registered");
     let report = Runner::from_env().run(scenario);
     assert!(report.is_pass(), "{}", report.summary());
 }
