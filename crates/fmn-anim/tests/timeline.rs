@@ -870,6 +870,62 @@ fn seek_lands_inside_a_wait_segment() {
 }
 
 #[test]
+fn seek_across_static_waits_preserves_the_exact_sample_and_global_clock() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    let original = point_bits(&stage, mob);
+    let mut timeline = Timeline::new(24).unwrap();
+    timeline.wait(0.0).unwrap();
+    timeline.wait_frames(65_536).unwrap();
+    timeline.wait(43.0 / 24.0).unwrap();
+    for (frame, segment_frame) in [(65_579, 43), (65_536, 65_536), (65_580, 44)] {
+        let packet = timeline.seek(&mut stage, &rng(), frame).unwrap();
+        assert_eq!(packet.frame_index(), frame);
+        assert_eq!(packet.segment_frame(), segment_frame);
+        assert_eq!(packet.alpha(), 1.0);
+        assert_eq!(packet.time().frames(), frame);
+        assert_eq!(point_bits(&stage, mob), original);
+        assert_eq!(
+            packet.rng_fork("wait").next_u64(),
+            rng()
+                .substream("wait")
+                .fork_frame(frame.cast_unsigned())
+                .next_u64()
+        );
+    }
+}
+
+#[test]
+fn seeking_across_stateful_waits_runs_every_updater_including_zero_dt() {
+    let mut stage = Stage::new();
+    let mob = square(&mut stage);
+    stage.add_to_scene(mob).unwrap();
+    stage
+        .add_dt_updater(
+            mob,
+            |stage, mob, dt| {
+                stage.shift(mob, [dt, 1.0, 0.0]);
+            },
+            false,
+        )
+        .unwrap();
+    let mut timeline = Timeline::new(FPS).unwrap();
+    timeline.wait_frames(3).unwrap();
+    timeline.wait(0.0).unwrap();
+    timeline.wait(0.5).unwrap();
+    let played = play_through(&mut timeline, &mut stage);
+    timeline.clear_checkpoints();
+    for frame in [6, 2, 4, 7] {
+        let packet = timeline.seek(&mut stage, &rng(), frame).unwrap();
+        assert_eq!(
+            frame_bits(&mut stage, &packet),
+            played[(frame - 1) as usize]
+        );
+    }
+}
+
+#[test]
 fn seek_replays_a_stateful_segment_frame_by_frame() {
     // A dt-updater demotes the segment (§9.5), so there is no snapshot
     // shortcut: the frames *are* the state, and seek must replay them. The

@@ -9,7 +9,7 @@
 //! the same [`FramePacket`]s and the same [`SegmentReport`]s. There is no
 //! timeline-specific interpolation path anywhere in this module; seek uses
 //! the drivers' partial forms ([`open_play`] / [`advance_play`] and
-//! [`wait_segment_upto`]) precisely so a sought frame and a played frame are
+//! [`open_wait`]) precisely so a sought frame and a played frame are
 //! the same frame by construction, not by agreement.
 //!
 //! **Three things a timeline adds over a straight-line scene.**
@@ -66,9 +66,10 @@ use fmn_mobject::{Snapshot, Stage};
 use crate::animation::{AnimError, Animation};
 use crate::clock::{ClockError, Duration, FrameDuration, RationalFrameClock};
 use crate::frame::{
-    FramePacket, advance_play, open_play, play_duration, play_segment, wait_segment,
-    wait_segment_upto,
+    BeginState, FramePacket, advance_play, complete_wait_frame, finish_open_wait, open_play,
+    open_wait, play_duration, play_segment, prepare_wait_frame, wait_segment,
 };
+use crate::pure_frame::PureWaitAdvance;
 use crate::purity::{SegmentKind, SegmentReport, reconstruct_pure_frame};
 
 /// The canonical container schema for a serialized [`TimelinePlan`].
@@ -710,6 +711,7 @@ impl Timeline {
                 stage,
                 &mut clock,
                 rng,
+                false,
                 emit,
             )?);
             self.checkpoints
@@ -763,7 +765,14 @@ impl Timeline {
         stage.set_time_from_clock(clock.now().to_f64());
         let mut discard = |_: FramePacket| {};
         while index < target {
-            run_step(&mut self.steps[index], stage, &mut clock, rng, &mut discard)?;
+            run_step(
+                &mut self.steps[index],
+                stage,
+                &mut clock,
+                rng,
+                true,
+                &mut discard,
+            )?;
             index += 1;
             self.checkpoints.insert(index, Rc::new(stage.snapshot()));
         }
@@ -809,21 +818,52 @@ fn run_step(
     stage: &mut Stage,
     clock: &mut RationalFrameClock,
     rng: &RngRoot,
+    skip: bool,
     emit: &mut dyn FnMut(FramePacket),
 ) -> Result<SegmentReport, AnimError> {
-    match step {
-        Step::Play(animations) => play_segment(stage, clock, rng, animations, false, emit),
-        Step::Wait(duration) => wait_segment(stage, clock, rng, *duration, None, false, emit),
-        Step::WaitFrames { frames, .. } => wait_segment(
-            stage,
-            clock,
-            rng,
-            Duration::Frames(*frames),
-            None,
-            false,
-            emit,
-        ),
+    let duration = match step {
+        Step::Play(animations) => return play_segment(stage, clock, rng, animations, skip, emit),
+        Step::Wait(duration) => Duration::Seconds(*duration),
+        Step::WaitFrames { frames, .. } => Duration::Frames(*frames),
+    };
+    if skip {
+        seek_wait(stage, clock, rng, duration, None, emit)
+    } else {
+        wait_segment(stage, clock, rng, duration, None, false, emit)
     }
+}
+
+/// Advance across an unobserved wait, or emit just its requested sample.
+/// Opening runs the normal zero-dt updater pass once. The owner-advance
+/// token checks both purity and live views before the direct clock jump.
+fn seek_wait(
+    stage: &mut Stage,
+    clock: &mut RationalFrameClock,
+    rng: &RngRoot,
+    duration: Duration,
+    requested: Option<i64>,
+    emit: &mut dyn FnMut(FramePacket),
+) -> Result<SegmentReport, AnimError> {
+    let mut open = open_wait(stage, clock, duration, BeginState::Omit)?;
+    let target = requested.unwrap_or(open.segment().n_frames());
+    if let Ok(advance) = PureWaitAdvance::admit(stage, clock, rng, &open)
+        && let Some(metadata) =
+            advance.try_advance(stage, clock, rng, &mut open, target.cast_unsigned())?
+    {
+        if requested.is_some() {
+            emit(FramePacket::freeze_metadata(stage, metadata));
+        }
+    } else {
+        while open.stepped() < target {
+            prepare_wait_frame(stage, clock, &mut open)?.ok_or(AnimError::SeekOutOfRange {
+                frame: target,
+                total: open.segment().n_frames(),
+            })?;
+            let capture = requested == Some(open.stepped() + 1);
+            complete_wait_frame(stage, clock, rng, &mut open, capture, &mut |_, _| {}, emit)?;
+        }
+    }
+    finish_open_wait(open)
 }
 
 /// Land on frame `offset` (1-based) inside `step`, whose start the caller
@@ -871,19 +911,26 @@ fn seek_within(
             })
         }
         Step::Wait(duration) => {
-            wait_segment_upto(stage, clock, rng, *duration, offset, &mut capture)?;
+            seek_wait(
+                stage,
+                clock,
+                rng,
+                Duration::Seconds(*duration),
+                Some(offset),
+                &mut capture,
+            )?;
             last.ok_or(AnimError::SeekOutOfRange {
                 frame: offset,
                 total: 0,
             })
         }
         Step::WaitFrames { frames, .. } => {
-            wait_segment_upto(
+            seek_wait(
                 stage,
                 clock,
                 rng,
                 Duration::Frames(*frames),
-                offset,
+                Some(offset),
                 &mut capture,
             )?;
             last.ok_or(AnimError::SeekOutOfRange {
