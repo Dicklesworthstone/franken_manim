@@ -1618,13 +1618,13 @@ pub(crate) enum ProjectedRows<T> {
     /// not one a dot.
     Block {
         rows: Arc<Vec<T>>,
-        start: u32,
-        end: u32,
+        start: u16,
+        end: u16,
     },
 }
 
 // A draw row is charged at its size, so a block's range must not make the
-// rows any larger than a Vec.
+// rows any larger than a Vec, including on 32-bit Wasm.
 const _: () = assert!(
     std::mem::size_of::<ProjectedRows<RasterTriangle>>()
         == std::mem::size_of::<Vec<RasterTriangle>>()
@@ -4280,7 +4280,7 @@ fn compile_dots_ahead<'a>(
     let mut block: Vec<RasterTriangle> = Vec::new();
     // Where each dot's rows end in the open block, from the first slot
     // since it was opened.
-    let mut ends: Vec<u32> = Vec::new();
+    let mut ends: Vec<u16> = Vec::new();
     let mut first = 0;
     let mut done = 0;
     while done < slots.len() {
@@ -4300,7 +4300,9 @@ fn compile_dots_ahead<'a>(
         }
         let start = block.len();
         let compiled = compile_dot_into(camera, projection, location, dot, &mut block, &mut budget);
-        match (compiled, u32::try_from(block.len())) {
+        // These offsets are local to a small worker block. If a dot ever
+        // outgrows the offset range, the caller compiles it on the serial path.
+        match (compiled, u16::try_from(block.len())) {
             (Ok(compiled), Ok(end)) => {
                 slots[done] = compiled;
                 ends.push(end);
@@ -4319,7 +4321,7 @@ fn compile_dots_ahead<'a>(
 /// Share `block` among `slots`, whose dots compiled their rows into it in
 /// order, ending at `ends`: each slot with rows gets its range of the block.
 /// An empty block is left as it is, and so are the slots, which hold none.
-fn seal_dot_block(block: &mut Vec<RasterTriangle>, ends: &[u32], slots: &mut [CompiledDraw<'_>]) {
+fn seal_dot_block(block: &mut Vec<RasterTriangle>, ends: &[u16], slots: &mut [CompiledDraw<'_>]) {
     if block.is_empty() {
         return;
     }
@@ -10305,7 +10307,7 @@ mod tests {
     /// [`DOT_BLOCK_ROWS`] rows, or grew for a dot that outgrew it.
     fn assert_dot_blocks(draws: &[CompiledDraw<'_>]) -> usize {
         let mut blocks = 0;
-        let mut open: Option<(&Arc<Vec<RasterTriangle>>, u32)> = None;
+        let mut open: Option<(&Arc<Vec<RasterTriangle>>, u16)> = None;
         for draw in draws {
             let ProjectedPrimitive::Triangles {
                 triangles: ProjectedRows::Block { rows, start, end },
