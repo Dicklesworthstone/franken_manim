@@ -3001,8 +3001,8 @@ fn compile_three_d_clouds(
 /// calling thread writes them all.
 const TRIANGLES_PER_FLATTEN_WORKER: usize = 4096;
 
-/// A tile-list worker takes draws of at least this many triangles; with
-/// fewer, the calling thread lists them all.
+/// The tile lists take a band, and a worker, for at least this many of the
+/// frame's triangles; with fewer, the calling thread lists them all.
 const TRIANGLES_PER_TILE_WORKER: usize = 4096;
 
 /// A finiteness check worker takes at least this many scalars.
@@ -3295,14 +3295,19 @@ fn three_d_tile_range(lo: f32, hi: f32, extent: u32, tile: u32) -> Option<(usize
 /// tile's draws are `tile_draws` unchanged, so every pixel sees the same
 /// sequence of triangles that can touch it as with whole draws.
 ///
-/// The lists are built on up to `threads` threads, each taking a run of
-/// whole draws ([`three_d_draw_runs`]). A command is one draw's, so its list
-/// is that draw's triangles in order whichever thread builds it. Each run's
-/// lists are counted; the calling thread then refuses as one thread would
-/// (the first refusal in draw order is the earliest run's) and checks every
-/// offset before any list is written; each run then writes its lists, which
-/// are copied to their commands' offsets. The arrays and every refusal do
-/// not depend on the threads.
+/// The lists are built on up to `threads` threads, each taking a band of
+/// whole tile rows ([`three_d_tile_bands`]). The commands are laid out tile
+/// by tile, so a band's commands, and their lists, are one run of each
+/// array. Each band visits the draws its tiles list in draw order and counts
+/// its lists; once every band's are counted and the total is checked, each
+/// writes its lists and offsets in place. A draw whose tiles lie in two
+/// bands is visited by both, each listing its triangles in its own tiles
+/// only. A command is one draw's, so its list is that draw's triangles in
+/// order whichever band builds it. The refusals are one thread's: a
+/// malformed tile command first, in tile order; then the first in draw order
+/// of a draw's refusals, which every band listing the draw meets alike; then
+/// an offset past `u32`. The arrays and every refusal do not depend on the
+/// threads.
 fn three_d_tile_triangles(
     triangles: &[f32],
     draw_u32: &[u32],
@@ -3314,115 +3319,109 @@ fn three_d_tile_triangles(
 ) -> Result<(Vec<u32>, Vec<u32>), MetalError> {
     let ranges = draw_u32.as_chunks::<THREE_D_DRAW_U32_STRIDE>().0;
     let tile_count = tile_offsets.len().saturating_sub(1);
-    // The (tile, command) pairs of each draw, in tile order, as one CSR:
-    // draw `d`'s pairs are `pairs[draw_starts[d]..draw_starts[d + 1]]`.
-    let mut draw_starts = vec![0_usize; ranges.len() + 1];
     for tile_index in 0..tile_count {
         for &draw in three_d_tile_commands(tile_offsets, tile_draws, tile_index)? {
             if draw as usize >= ranges.len() {
                 return Err(MetalError::Layout("3D tile command names no draw"));
             }
-            draw_starts[draw as usize + 1] += 1;
         }
     }
-    for draw in 0..ranges.len() {
-        draw_starts[draw + 1] += draw_starts[draw];
-    }
-    let mut cursors = draw_starts[..ranges.len()].to_vec();
-    let mut pairs = vec![(0_usize, 0_usize); draw_starts[ranges.len()]];
-    for tile_index in 0..tile_count {
-        let lo = tile_offsets[tile_index] as usize;
-        let commands = three_d_tile_commands(tile_offsets, tile_draws, tile_index)?;
-        for (offset, &draw) in commands.iter().enumerate() {
-            let cursor = &mut cursors[draw as usize];
-            pairs[*cursor] = (tile_index, lo + offset);
-            *cursor += 1;
-        }
-    }
-
-    // Count each command's triangles, then write them at the command's
-    // offset in the same order: no list per command.
-    let draws = ThreeDDrawPairs {
-        ranges,
-        starts: &draw_starts,
-        pairs: &pairs,
+    // Every tile's commands are in range, so the offsets never decrease.
+    let listed = match (tile_offsets.first(), tile_offsets.get(tile_count)) {
+        (Some(&first), Some(&end)) if tile_count > 0 => first as usize..end as usize,
+        _ => 0..0,
     };
-    let runs = three_d_draw_runs(ranges, threads);
-    // Each run's pair counts, in pair order.
-    let counted = on_host_workers(runs.len(), |index| {
-        let run = runs[index].clone();
-        let first = draw_starts[run.start];
-        let mut counts = vec![0_usize; draw_starts[run.end] - first];
-        visit_three_d_tile_triangles(
-            triangles,
-            &draws,
-            run,
-            tile_count,
-            dims,
-            bins,
-            |pair, span| {
-                let count = &mut counts[pair - first];
-                *count = count.saturating_add(span.len());
-            },
-        )?;
-        Ok(counts)
-    })
-    .into_iter()
-    .collect::<Result<Vec<_>, MetalError>>()?;
-    // The runs cover the draws in order, so their pairs are `pairs` in order.
-    let mut counts = vec![0_usize; tile_draws.len()];
-    for (&(_, command), &count) in pairs.iter().zip(counted.iter().flatten()) {
-        counts[command] = count;
-    }
-    let mut offsets = Vec::with_capacity(counts.len() + 1);
-    offsets.push(0);
-    let mut total = 0_usize;
-    for &count in &counts {
-        total = total.saturating_add(count);
-        offsets.push(
-            u32::try_from(total)
-                .map_err(|_| MetalError::SizeOverflow("3D tile triangle offset"))?,
-        );
-    }
-    // Each run's lists, one after another in pair order. A run's total is
-    // within the checked `total`.
-    let written = on_host_workers(runs.len(), |index| {
-        let run = runs[index].clone();
-        let first = draw_starts[run.start];
-        let mut cursors = Vec::with_capacity(counted[index].len());
-        let mut end = 0_usize;
-        for &count in &counted[index] {
-            cursors.push(end);
-            end = end.saturating_add(count);
+    let triangle_count = ranges
+        .iter()
+        .fold(0_usize, |sum, range| sum.saturating_add(range[1] as usize));
+    let workers = threads
+        .min(triangle_count / TRIANGLES_PER_TILE_WORKER)
+        .min(MAX_HOST_WORKERS);
+    let bands = three_d_tile_bands(tile_offsets, dims[0].div_ceil(dims[2]) as usize, workers);
+
+    // Each band's per-command counts and their total; a refusal with its
+    // draw. The first in draw order is the one refused.
+    type Counted = Result<(TileBand, Vec<usize>, usize), (usize, MetalError)>;
+    let counted = on_host_workers(bands.len(), |index| -> Counted {
+        let band = TileBand::new(tile_offsets, tile_draws, bands[index].clone());
+        let mut counts = vec![0_usize; band.commands.len()];
+        band.visit(triangles, ranges, dims, bins, |command, span| {
+            counts[command] = counts[command].saturating_add(span.len());
+        })?;
+        let total = counts
+            .iter()
+            .fold(0_usize, |sum, &count| sum.saturating_add(count));
+        Ok((band, counts, total))
+    });
+    let mut refused: Option<(usize, MetalError)> = None;
+    let mut counted_bands = Vec::with_capacity(counted.len());
+    for band in counted {
+        match band {
+            Ok(band) => counted_bands.push(band),
+            Err((draw, error)) => {
+                if refused.as_ref().is_none_or(|(first, _)| draw < *first) {
+                    refused = Some((draw, error));
+                }
+            }
         }
-        let mut list = vec![0_u32; end];
-        visit_three_d_tile_triangles(
-            triangles,
-            &draws,
-            run,
-            tile_count,
-            dims,
-            bins,
-            |pair, span| {
-                let cursor = &mut cursors[pair - first];
+    }
+    if let Some((_, error)) = refused {
+        return Err(error);
+    }
+    let total = counted_bands
+        .iter()
+        .fold(0_usize, |sum, band| sum.saturating_add(band.2));
+    let total_u32 =
+        u32::try_from(total).map_err(|_| MetalError::SizeOverflow("3D tile triangle offset"))?;
+
+    // Command `c`'s offsets are `offsets[c]` and `offsets[c + 1]`: the
+    // commands before the first tile's list nothing, so theirs are zero, and
+    // those after the last tile's are the total. Every band writes its own.
+    let mut offsets = vec![0_u32; tile_draws.len() + 1];
+    let mut flat = vec![0_u32; total];
+    {
+        let (_, mut offsets_left) = offsets.split_at_mut(listed.start + 1);
+        let mut flat_left = flat.as_mut_slice();
+        let mut slots = Vec::with_capacity(counted_bands.len());
+        let mut base = 0_usize;
+        for (band, _, band_total) in &counted_bands {
+            let (band_offsets, rest) =
+                std::mem::take(&mut offsets_left).split_at_mut(band.commands.len());
+            offsets_left = rest;
+            let (band_flat, rest) = std::mem::take(&mut flat_left).split_at_mut(*band_total);
+            flat_left = rest;
+            slots.push(std::sync::Mutex::new(Some((base, band_offsets, band_flat))));
+            base += band_total;
+        }
+        offsets_left.fill(total_u32);
+        // Within the checked total: no band refuses now.
+        on_host_workers(counted_bands.len(), |index| {
+            let (band, counts, _) = &counted_bands[index];
+            let taken = slots[index]
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            let Some((base, band_offsets, band_flat)) = taken else {
+                return Err(MetalError::Layout("3D tile band written twice"));
+            };
+            let mut cursors = Vec::with_capacity(counts.len());
+            let mut end = 0_usize;
+            for (offset, &count) in band_offsets.iter_mut().zip(counts) {
+                cursors.push(end);
+                end += count;
+                *offset = (base + end) as u32;
+            }
+            band.visit(triangles, ranges, dims, bins, |command, span| {
+                let cursor = &mut cursors[command];
                 for triangle in span {
-                    list[*cursor] = triangle;
+                    band_flat[*cursor] = triangle;
                     *cursor += 1;
                 }
-            },
-        )?;
-        Ok(list)
-    })
-    .into_iter()
-    .collect::<Result<Vec<_>, MetalError>>()?;
-    let mut flat = vec![0_u32; total];
-    for (run, list) in runs.iter().zip(&written) {
-        let mut read = 0_usize;
-        for &(_, command) in &pairs[draw_starts[run.start]..draw_starts[run.end]] {
-            let (lo, hi) = (offsets[command] as usize, offsets[command + 1] as usize);
-            flat[lo..hi].copy_from_slice(&list[read..read + (hi - lo)]);
-            read += hi - lo;
-        }
+            })
+            .map_err(|(_, error)| error)
+        })
+        .into_iter()
+        .collect::<Result<(), MetalError>>()?;
     }
     Ok((offsets, flat))
 }
@@ -3440,119 +3439,166 @@ fn three_d_tile_commands<'a>(
         .ok_or(MetalError::Layout("3D tile command range"))
 }
 
-/// Every draw's triangle range and its (tile, command) pairs in tile order.
-struct ThreeDDrawPairs<'a> {
-    ranges: &'a [[u32; THREE_D_DRAW_U32_STRIDE]],
-    starts: &'a [usize],
-    pairs: &'a [(usize, usize)],
+/// A band of whole tile rows ([`three_d_tile_triangles`]): its tiles, their
+/// commands, and the draws they list, in draw order.
+struct TileBand {
+    tiles: std::ops::Range<usize>,
+    commands: std::ops::Range<usize>,
+    /// Each command as `draw << 32 | command`, the command counted from
+    /// `commands.start`: in draw order, and a draw's in command order.
+    pairs: Vec<u64>,
+    /// Each command's tile, counted from `tiles.start`.
+    tile_of_command: Vec<usize>,
 }
 
-/// Visit the lists of the draws of `run` in list order: draw by draw, and
-/// within a draw triangle by triangle, the pairs of the tiles its f32 pixel
-/// span meets (`PerTile`), or the draw's whole range at each of its pairs
-/// (`Whole`). A pair is named by its index in `draws.pairs`; the first
-/// refusal in draw order is returned.
-fn visit_three_d_tile_triangles(
-    triangles: &[f32],
-    draws: &ThreeDDrawPairs<'_>,
-    run: std::ops::Range<usize>,
-    tile_count: usize,
-    [width, height, tile]: [u32; 3],
-    bins: TriangleBins,
-    mut visit: impl FnMut(usize, std::ops::Range<u32>),
-) -> Result<(), MetalError> {
-    let cols = width.div_ceil(tile) as usize;
-    // Each tile's pair in the current draw, `usize::MAX` for none.
-    let mut pair_of_tile = match bins {
-        TriangleBins::PerTile => vec![usize::MAX; tile_count],
-        TriangleBins::Whole => Vec::new(),
-    };
-    for (draw, &[first, count, ..]) in run.clone().zip(&draws.ranges[run]) {
-        let start = draws.starts[draw];
-        let pairs = &draws.pairs[start..draws.starts[draw + 1]];
-        if pairs.is_empty() {
-            continue;
-        }
-        let last = first
-            .checked_add(count)
-            .ok_or(MetalError::SizeOverflow("3D draw triangle range"))?;
-        if bins == TriangleBins::Whole {
-            for pair in start..start + pairs.len() {
-                visit(pair, first..last);
+impl TileBand {
+    /// The band of `tiles`, whose commands are in range.
+    fn new(tile_offsets: &[u32], tile_draws: &[u32], tiles: std::ops::Range<usize>) -> Self {
+        let commands = if tiles.is_empty() {
+            0..0
+        } else {
+            tile_offsets[tiles.start] as usize..tile_offsets[tiles.end] as usize
+        };
+        let mut pairs = Vec::with_capacity(commands.len());
+        let mut tile_of_command = Vec::with_capacity(commands.len());
+        for tile_index in tiles.clone() {
+            let lo = tile_offsets[tile_index] as usize;
+            let hi = tile_offsets[tile_index + 1] as usize;
+            for &draw in &tile_draws[lo..hi] {
+                // A command index is below `u32::MAX`: the offsets are `u32`.
+                pairs.push((u64::from(draw) << 32) | tile_of_command.len() as u64);
+                tile_of_command.push(tile_index - tiles.start);
             }
-            continue;
         }
-        for (pair, &(tile_index, _)) in (start..).zip(pairs) {
-            pair_of_tile[tile_index] = pair;
+        pairs.sort_unstable();
+        Self {
+            tiles,
+            commands,
+            pairs,
+            tile_of_command,
         }
-        for triangle in first..last {
-            let corner = |index: usize, axis: usize| -> Result<f32, MetalError> {
-                triangles
-                    .get(
-                        triangle as usize * THREE_D_TRIANGLE_STRIDE
-                            + index * THREE_D_VERTEX_STRIDE
-                            + axis,
-                    )
-                    .copied()
-                    .filter(|value| value.is_finite())
-                    .ok_or(MetalError::Layout("3D triangle corner"))
-            };
-            let (x_lo, x_hi) = three_d_pixel_span(corner(0, 0)?, corner(1, 0)?, corner(2, 0)?);
-            let (y_lo, y_hi) = three_d_pixel_span(corner(0, 1)?, corner(1, 1)?, corner(2, 1)?);
-            let (Some((col_lo, col_hi)), Some((row_lo, row_hi))) = (
-                three_d_tile_range(x_lo, x_hi, width, tile),
-                three_d_tile_range(y_lo, y_hi, height, tile),
-            ) else {
+    }
+
+    /// Visit its lists in list order: draw by draw, and within a draw
+    /// triangle by triangle, the commands of its tiles the triangle's f32
+    /// pixel span meets (`PerTile`), or the draw's whole range at each of
+    /// its commands (`Whole`). A command is named counting from
+    /// `commands.start`. A refusal names its draw, the first in draw order
+    /// the band lists; a draw refuses alike in every band.
+    fn visit(
+        &self,
+        triangles: &[f32],
+        ranges: &[[u32; THREE_D_DRAW_U32_STRIDE]],
+        [width, height, tile]: [u32; 3],
+        bins: TriangleBins,
+        mut visit: impl FnMut(usize, std::ops::Range<u32>),
+    ) -> Result<(), (usize, MetalError)> {
+        let cols = width.div_ceil(tile) as usize;
+        // Its rows; the band starts at a row's first tile.
+        let rows = self
+            .tiles
+            .start
+            .checked_div(cols)
+            .map_or(0..0, |first| first..self.tiles.end.div_ceil(cols));
+        // Each of its tiles' command in the current draw, `usize::MAX` for
+        // none. A draw listed twice in a tile lists in its last command, as
+        // the draw's pairs in tile order would.
+        let mut command_of_tile = match bins {
+            TriangleBins::PerTile => vec![usize::MAX; self.tiles.len()],
+            TriangleBins::Whole => Vec::new(),
+        };
+        let command = |pair: u64| (pair & u64::from(u32::MAX)) as usize;
+        for pairs in self.pairs.chunk_by(|a, b| a >> 32 == b >> 32) {
+            let draw = (pairs[0] >> 32) as usize;
+            let [first, count, ..] = ranges[draw];
+            let last = first
+                .checked_add(count)
+                .ok_or((draw, MetalError::SizeOverflow("3D draw triangle range")))?;
+            if bins == TriangleBins::Whole {
+                for &pair in pairs {
+                    visit(command(pair), first..last);
+                }
                 continue;
-            };
-            for row in row_lo..=row_hi {
-                for col in col_lo..=col_hi {
-                    let pair = pair_of_tile[row * cols + col];
-                    if pair != usize::MAX {
-                        visit(pair, triangle..triangle + 1);
+            }
+            for &pair in pairs {
+                command_of_tile[self.tile_of_command[command(pair)]] = command(pair);
+            }
+            for triangle in first..last {
+                let corner = |index: usize, axis: usize| -> Result<f32, (usize, MetalError)> {
+                    triangles
+                        .get(
+                            triangle as usize * THREE_D_TRIANGLE_STRIDE
+                                + index * THREE_D_VERTEX_STRIDE
+                                + axis,
+                        )
+                        .copied()
+                        .filter(|value| value.is_finite())
+                        .ok_or((draw, MetalError::Layout("3D triangle corner")))
+                };
+                let (x_lo, x_hi) = three_d_pixel_span(corner(0, 0)?, corner(1, 0)?, corner(2, 0)?);
+                let (y_lo, y_hi) = three_d_pixel_span(corner(0, 1)?, corner(1, 1)?, corner(2, 1)?);
+                let (Some((col_lo, col_hi)), Some((row_lo, row_hi))) = (
+                    three_d_tile_range(x_lo, x_hi, width, tile),
+                    three_d_tile_range(y_lo, y_hi, height, tile),
+                ) else {
+                    continue;
+                };
+                for row in row_lo.max(rows.start)..(row_hi + 1).min(rows.end) {
+                    let row_base = row * cols - self.tiles.start;
+                    for col in col_lo..=col_hi {
+                        let Some(&command) = command_of_tile.get(row_base + col) else {
+                            continue;
+                        };
+                        if command != usize::MAX {
+                            visit(command, triangle..triangle + 1);
+                        }
                     }
                 }
             }
+            for &pair in pairs {
+                command_of_tile[self.tile_of_command[command(pair)]] = usize::MAX;
+            }
         }
-        for &(tile_index, _) in pairs {
-            pair_of_tile[tile_index] = usize::MAX;
-        }
+        Ok(())
     }
-    Ok(())
 }
 
-/// The draws in runs of whole draws, one a tile-list worker: up to `threads`
-/// runs (and [`MAX_HOST_WORKERS`]) of about equal triangle counts, at least
-/// [`TRIANGLES_PER_TILE_WORKER`] each, in order and covering every draw. A
-/// draw larger than a run is one run's.
-fn three_d_draw_runs(
-    ranges: &[[u32; THREE_D_DRAW_U32_STRIDE]],
-    threads: usize,
+/// The tiles in bands of whole tile rows, one a tile-list worker: up to
+/// `workers` bands of about equal command counts, in order and covering
+/// every tile; one band of every tile when `workers` is under 2. The tiles'
+/// commands are in range.
+fn three_d_tile_bands(
+    tile_offsets: &[u32],
+    cols: usize,
+    workers: usize,
 ) -> Vec<std::ops::Range<usize>> {
-    let triangles = ranges
-        .iter()
-        .fold(0_usize, |sum, range| sum.saturating_add(range[1] as usize));
-    let workers = threads
-        .min(triangles / TRIANGLES_PER_TILE_WORKER)
-        .min(MAX_HOST_WORKERS);
+    let tile_count = tile_offsets.len().saturating_sub(1);
+    let rows = if cols == 0 {
+        0
+    } else {
+        tile_count.div_ceil(cols)
+    };
+    let workers = workers.min(rows);
     if workers < 2 {
-        // One run of every draw.
-        return std::iter::once(0..ranges.len()).collect();
+        // One band of every tile.
+        return std::iter::once(0..tile_count).collect();
     }
-    let per_worker = triangles.div_ceil(workers);
-    let mut runs = Vec::with_capacity(workers);
-    let (mut start, mut seen) = (0_usize, 0_usize);
-    for (draw, range) in ranges.iter().enumerate() {
-        seen = seen.saturating_add(range[1] as usize);
-        if runs.len() + 1 < workers && seen >= per_worker.saturating_mul(runs.len() + 1) {
-            runs.push(start..draw + 1);
-            start = draw + 1;
+    // The commands of the tiles before `tile_index`.
+    let before = |tile_index: usize| (tile_offsets[tile_index] - tile_offsets[0]) as usize;
+    let commands = before(tile_count);
+    let mut bands = Vec::with_capacity(workers);
+    let mut start = 0_usize;
+    for row in 1..rows {
+        let end = row * cols;
+        if bands.len() + 1 < workers
+            && before(end).saturating_mul(workers) >= commands.saturating_mul(bands.len() + 1)
+        {
+            bands.push(start..end);
+            start = end;
         }
     }
-    if start < ranges.len() {
-        runs.push(start..ranges.len());
-    }
-    runs
+    bands.push(start..tile_count);
+    bands
 }
 
 /// `work` for each of `runs` runs, in run order: the first on the calling
@@ -5487,13 +5533,16 @@ mod tests {
 
     #[test]
     fn tile_lists_built_on_threads_are_the_lists_of_one_thread() {
-        // About 36,000 triangles in runs of whole draws: a mesh larger than a
-        // run, then 14,000 dots of two triangles (every 97th behind the
-        // camera, listed nowhere). On any threads, also when workers cannot
-        // start, per tile and whole, the arrays are the per-command lists, and
-        // so is every refusal: a non-finite corner at each run's edges, a
-        // draw whose range overflows, and both at once in different runs,
-        // where the first in draw order is the one refused.
+        // About 36,000 triangles in bands of tile rows: a mesh listed in
+        // every band, then 14,000 dots of two triangles (every 97th behind
+        // the camera, listed nowhere), many in two bands. On any threads,
+        // also when workers cannot start, per tile and whole, the arrays are
+        // the per-command lists, and so is every refusal: a non-finite corner
+        // in each band's first and last listed dot, in the mesh's last
+        // triangle and in a dot of two bands, a draw whose range overflows,
+        // and both at once, in different bands or in one band with the lower
+        // dot in a later tile, where the first in draw order is the one
+        // refused.
         let camera = Camera::new(CameraConfig {
             resolution: (640, 360),
             samples: 2,
@@ -5544,12 +5593,36 @@ mod tests {
             let flat = FlatThreeDFrame::derive_with(&job, bins).expect("packet");
             let dims = [flat.params_u32[0], flat.params_u32[1], flat.params_u32[2]];
             let ranges = flat.draw_u32.as_chunks::<THREE_D_DRAW_U32_STRIDE>().0;
-            let runs = three_d_draw_runs(ranges, 8);
-            assert_eq!(runs.len(), 8, "{bins:?}");
-            assert_eq!(runs[0], 0..1, "the mesh is a run of its own");
-            assert!(ranges[0][1] as usize > 36_000 / 8, "{:?}", ranges[0]);
-            assert_eq!(runs.last().map(|run| run.end), Some(ranges.len()));
-            assert!(runs.windows(2).all(|pair| pair[0].end == pair[1].start));
+            let cols = dims[0].div_ceil(dims[2]) as usize;
+            let tile_count = flat.tile_offsets.len() - 1;
+            let bands = three_d_tile_bands(&flat.tile_offsets, cols, 8);
+            assert_eq!(bands.len(), 8, "{bins:?}");
+            assert_eq!(bands[0].start, 0);
+            assert_eq!(bands.last().map(|band| band.end), Some(tile_count));
+            assert!(
+                bands
+                    .windows(2)
+                    .all(|pair| pair[0].end == pair[1].start && pair[0].end % cols == 0),
+                "{bands:?}"
+            );
+            // The draws each band's tiles list, and the bands listing each draw.
+            let band_draws = |band: &std::ops::Range<usize>| {
+                let lo = flat.tile_offsets[band.start] as usize;
+                let hi = flat.tile_offsets[band.end] as usize;
+                flat.tile_draws[lo..hi].iter().map(|&draw| draw as usize)
+            };
+            let mut bands_of_draw = vec![Vec::new(); ranges.len()];
+            for (index, band) in bands.iter().enumerate() {
+                for draw in band_draws(band) {
+                    if bands_of_draw[draw].last() != Some(&index) {
+                        bands_of_draw[draw].push(index);
+                    }
+                }
+            }
+            assert_eq!(bands_of_draw[0].len(), 8, "the mesh is in every band");
+            let straddling = (1..ranges.len())
+                .find(|&draw| bands_of_draw[draw].len() == 2 && ranges[draw][1] > 0)
+                .expect("a dot in two bands");
             let lists = three_d_tile_triangles_by_lists(
                 &flat.triangles,
                 &flat.draw_u32,
@@ -5603,21 +5676,10 @@ mod tests {
                 }
             }
 
-            // A run's first listed draw, or its last.
-            let mut listed = vec![false; ranges.len()];
-            for &draw in &flat.tile_draws {
-                listed[draw as usize] = true;
-            }
-            let in_run = |run: &std::ops::Range<usize>, last: bool| {
-                let mut draws = run
-                    .clone()
-                    .filter(|&draw| listed[draw] && ranges[draw][1] > 0);
-                if last {
-                    draws.next_back()
-                } else {
-                    draws.next()
-                }
-                .expect("a listed draw")
+            // The first dot in draw order a band's tiles list, or its last.
+            let in_band = |band: &std::ops::Range<usize>, last: bool| {
+                let dots = band_draws(band).filter(|&draw| draw > 0 && ranges[draw][1] > 0);
+                if last { dots.max() } else { dots.min() }.expect("a listed dot")
             };
             // Its first triangle's first x, or its last triangle's.
             let poison = |triangles: &mut [f32], draw: usize, last: bool| {
@@ -5630,30 +5692,62 @@ mod tests {
             };
             let mut cases = Vec::new();
             if bins == TriangleBins::PerTile {
-                for run in &runs {
+                let mut poisoned = Vec::new();
+                for band in &bands {
                     for last in [false, true] {
-                        let mut triangles = flat.triangles.clone();
-                        poison(&mut triangles, in_run(run, last), last);
-                        cases.push((triangles, flat.draw_u32.clone(), "triangle corner"));
+                        poisoned.push((in_band(band, last), last));
                     }
+                }
+                poisoned.extend([(0, true), (straddling, true)]);
+                for (draw, last) in poisoned {
+                    let mut triangles = flat.triangles.clone();
+                    poison(&mut triangles, draw, last);
+                    cases.push((triangles, flat.draw_u32.clone(), "triangle corner"));
                 }
             }
             let mut draw_u32 = flat.draw_u32.clone();
-            overflow(&mut draw_u32, in_run(&runs[5], false));
+            overflow(&mut draw_u32, in_band(&bands[5], false));
             cases.push((flat.triangles.clone(), draw_u32, "triangle range"));
             for (poisoned, overflowed) in [(6, 2), (2, 6)] {
                 let mut triangles = flat.triangles.clone();
                 let mut draw_u32 = flat.draw_u32.clone();
-                poison(&mut triangles, in_run(&runs[poisoned], false), false);
-                overflow(&mut draw_u32, in_run(&runs[overflowed], true));
-                // Whole lists read no corner.
-                let first = if bins == TriangleBins::Whole || overflowed < poisoned {
+                let poisoned = in_band(&bands[poisoned], false);
+                let overflowed = in_band(&bands[overflowed], true);
+                poison(&mut triangles, poisoned, false);
+                overflow(&mut draw_u32, overflowed);
+                // Whole lists read no corner; a draw's range is read first.
+                let first = if bins == TriangleBins::Whole || overflowed <= poisoned {
                     "triangle range"
                 } else {
                     "triangle corner"
                 };
                 cases.push((triangles, draw_u32, first));
             }
+            // In one band, a dot listed in a later tile than a higher dot, and
+            // in no other band: the band refuses in draw order, not in tile
+            // order (no other band lists the lower dot to refuse it first).
+            let (lower, higher) = {
+                let mut highest = 0;
+                band_draws(&bands[3])
+                    .filter(|&draw| draw > 0 && ranges[draw][1] > 0)
+                    .find_map(|draw| {
+                        let only_here = bands_of_draw[draw] == [3];
+                        let inverted = (draw < highest && only_here).then_some((draw, highest));
+                        highest = highest.max(draw);
+                        inverted
+                    })
+                    .expect("a dot listed after a higher one")
+            };
+            let mut triangles = flat.triangles.clone();
+            let mut draw_u32 = flat.draw_u32.clone();
+            poison(&mut triangles, lower, false);
+            overflow(&mut draw_u32, higher);
+            let first = if bins == TriangleBins::Whole {
+                "triangle range"
+            } else {
+                "triangle corner"
+            };
+            cases.push((triangles, draw_u32, first));
             for (triangles, draw_u32, refusal) in &cases {
                 let expected = format!(
                     "{:?}",
@@ -5683,7 +5777,7 @@ mod tests {
                 }
             }
         }
-        assert_eq!(refusals, (8 * 2 + 3) * 5 + 3 * 5);
+        assert_eq!(refusals, (8 * 2 + 2 + 4) * 5 + 4 * 5);
     }
 
     #[test]
