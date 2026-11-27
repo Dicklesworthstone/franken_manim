@@ -3688,11 +3688,12 @@ fn on_host_workers_pulling<T: Send>(
 ///
 /// On up to `threads` threads (and [`MAX_BIN_WORKERS`]), each binning a run
 /// of whole draws, at least [`DRAWS_PER_BIN_WORKER`], into lists of its own.
-/// The calling thread lays the runs' lists out tile by tile in run order, so
-/// a tile's draws are in draw order whichever run binned them: the tables of
-/// one thread. The refusal is one thread's too: the first draw's whose bounds
-/// are refused, then an overflowing count, total or offset, then a draw index
-/// past `u32`.
+/// Bands of whole tile rows, as many as the runs ([`three_d_tile_bands`]),
+/// then lay the runs' lists out tile by tile in run order, each band into
+/// its own part of `tile_draws`, so a tile's draws are in draw order
+/// whichever run binned them: the tables of one thread. The refusal is one
+/// thread's too: the first draw's whose bounds are refused, then an
+/// overflowing count, total or offset, then a draw index past `u32`.
 fn stable_three_d_bins(
     bounds: &[Option<[f64; 4]>],
     width: u32,
@@ -3747,6 +3748,7 @@ fn stable_three_d_bins(
 
     // Each run's draws, tile by tile, each tile's in draw order. Its bounds
     // were binned above without a refusal, so binning them again makes none.
+    // With each tile's start in them.
     let binned = on_host_workers(runs, |run| {
         let counts = &counted[run];
         let mut cursors = Vec::with_capacity(tile_count);
@@ -3755,6 +3757,7 @@ fn stable_three_d_bins(
             cursors.push(end);
             end += count;
         }
+        let starts = cursors.clone();
         let mut draws = vec![0_u32; end];
         let first = run * per_worker;
         for (draw, &draw_bounds) in (first..).zip(&bounds[run_draws(run)]) {
@@ -3767,20 +3770,40 @@ fn stable_three_d_bins(
                 Ok(())
             })?;
         }
-        Ok(draws)
+        Ok((draws, starts))
     })
     .into_iter()
     .collect::<Result<Vec<_>, MetalError>>()?;
 
-    let mut tile_draws = Vec::with_capacity(total);
-    let mut read = vec![0_usize; runs];
-    for index in 0..tile_count {
-        for ((draws, counts), at) in binned.iter().zip(&counted).zip(&mut read) {
-            let count = counts[index];
-            tile_draws.extend_from_slice(&draws[*at..*at + count]);
-            *at += count;
-        }
+    // A band's tiles' draws are one run of `tile_draws`.
+    let mut tile_draws = vec![0_u32; total];
+    let bands = three_d_tile_bands(&tile_offsets, cols, runs);
+    let mut left = tile_draws.as_mut_slice();
+    let mut slots = Vec::with_capacity(bands.len());
+    for band in &bands {
+        let listed = (tile_offsets[band.end] - tile_offsets[band.start]) as usize;
+        let (mine, rest) = std::mem::take(&mut left).split_at_mut(listed);
+        left = rest;
+        slots.push(std::sync::Mutex::new(Some(mine)));
     }
+    on_host_workers(bands.len(), |index| {
+        let taken = slots[index]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(out) = taken else {
+            return;
+        };
+        let mut at = 0_usize;
+        for tile_index in bands[index].clone() {
+            for ((draws, starts), counts) in binned.iter().zip(&counted) {
+                let (start, count) = (starts[tile_index], counts[tile_index]);
+                out[at..at + count].copy_from_slice(&draws[start..start + count]);
+                at += count;
+            }
+        }
+    });
+    drop(slots);
     Ok((tile_offsets, tile_draws))
 }
 
@@ -5636,19 +5659,21 @@ mod tests {
             // The job's one thread offers no runs; a frame on 8 threads lists
             // on them, offering 7 runs to workers for the counts and 7 for
             // the lists, and its tables are the same. It also bins its draws
-            // in runs (counts, then lists) and checks its tile commands in
-            // runs.
+            // in runs (counts, then lists), lays the bins out in as many bands,
+            // and checks its tile commands in runs.
             assert_eq!(flat.threads, 1);
             HOST_RUNS_OFFERED.set(0);
             drop(FlatThreeDFrame::derive_with(&job, bins).expect("one thread"));
             assert_eq!(HOST_RUNS_OFFERED.get(), 0, "{bins:?}");
             let bin_runs = 8.min(ranges.len() / DRAWS_PER_BIN_WORKER);
+            let layout_bands = three_d_tile_bands(&flat.tile_offsets, cols, bin_runs).len();
             let check_runs = 8.min(flat.tile_draws.len() / COMMANDS_PER_CHECK_WORKER);
             assert!(bin_runs > 1 && check_runs > 1, "{bin_runs}, {check_runs}");
+            assert_eq!(layout_bands, bin_runs, "{bins:?}");
             let threaded = FlatThreeDFrame::derive_on(&job, bins, 8).expect("8 threads");
             assert_eq!(
                 HOST_RUNS_OFFERED.get(),
-                2 * 7 + 2 * (bin_runs - 1) + (check_runs - 1),
+                2 * 7 + 3 * (bin_runs - 1) + (check_runs - 1),
                 "{bins:?}"
             );
             assert!(frame_tables(&threaded) == frame_tables(&flat), "{bins:?}");
