@@ -819,6 +819,66 @@ fn doctor_reports_unknown_usage_for_foreign_cache_roots_without_claiming_them() 
 
 #[cfg(unix)]
 #[test]
+fn doctor_uses_the_stores_host_link_policy_for_cache_roots() {
+    use fmn_cache::{Store, StoreConfig};
+    use fmn_platform::clock::StdClock;
+    use fmn_platform::fs::StdFs;
+    use std::os::unix::fs::{MetadataExt as _, symlink};
+
+    let fixture = retained_root().expect("fresh retained fixture");
+    let cache = fixture.join("owned");
+    let store = Store::open(
+        Arc::new(StdFs),
+        Arc::new(StdClock::new()),
+        &cache,
+        StoreConfig::default(),
+    )
+    .expect("owned cache under canonical fixture");
+    assert_eq!(
+        doctor_cache_record(&fixture, store.root())["typeset_bytes"],
+        Value::Uint(0)
+    );
+
+    let alias = fixture.join("alias");
+    symlink(&fixture, &alias).expect("user-controlled alias for the same owned cache");
+    let refused = doctor_cache_record(&fixture, &alias.join("owned"));
+    assert_eq!(refused["typeset_bytes"], Value::Null);
+    assert!(
+        text(&refused, "warning")
+            .expect("link refusal")
+            .contains("Link")
+    );
+
+    // macOS /var and /tmp lead to the real fixture. On a merged-/usr Linux
+    // host /bin still exercises the same policy, with a missing cache leaf.
+    for system in ["/var", "/tmp", "/bin"].map(Path::new) {
+        if !std::fs::symlink_metadata(system)
+            .is_ok_and(|metadata| metadata.is_symlink() && metadata.uid() == 0)
+        {
+            continue;
+        }
+        let target = system.canonicalize().expect("system link resolves");
+        let candidate = match cache.strip_prefix(target) {
+            Ok(relative) => system.join(relative),
+            Err(_) => system.join(fixture.file_name().expect("unique fixture name")),
+        };
+        let observed = doctor_cache_record(&fixture, &candidate);
+        assert_eq!(observed["warning"], Value::Null, "{candidate:?}");
+        assert_eq!(observed["typeset_bytes"], Value::Uint(0));
+        assert_eq!(observed["exists"], Value::Bool(candidate.exists()));
+
+        let root_link = doctor_cache_record(&fixture, system);
+        assert_eq!(root_link["typeset_bytes"], Value::Null);
+        assert!(
+            text(&root_link, "warning")
+                .expect("link as cache root")
+                .contains("Link")
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn doctor_refuses_linked_object_trees_and_entries_without_following_them() {
     use fmn_cache::{Store, StoreConfig};
     use fmn_platform::clock::StdClock;

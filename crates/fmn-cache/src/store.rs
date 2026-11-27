@@ -1531,7 +1531,7 @@ fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
             // `/tmp`, through which every `$TMPDIR` runs) cannot be
             // redirected by anyone but root; the root itself never may be
             // a link.
-            Some(FsNodeKind::Link) if component != path && trusted_system_link(component) => {}
+            Some(FsNodeKind::Link) if is_trusted_host_cache_ancestor(path, component) => {}
             Some(FsNodeKind::Link) => {
                 return Err(root_refused(
                     path,
@@ -1544,6 +1544,14 @@ fn reject_symlink_components(path: &Path) -> Result<(), CacheError> {
         }
     }
     Ok(())
+}
+
+/// Whether host store validation accepts this link as a strict ancestor of
+/// `cache_root`. Read-only host diagnostics use the same decision as a live
+/// store. Injected filesystems must never infer link trust from host metadata.
+#[must_use]
+pub fn is_trusted_host_cache_ancestor(cache_root: &Path, component: &Path) -> bool {
+    component != cache_root && cache_root.starts_with(component) && trusted_system_link(component)
 }
 
 /// Whether a symlinked ancestor of a cache root is an operating-system link

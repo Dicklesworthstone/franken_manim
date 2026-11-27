@@ -2426,6 +2426,9 @@ fn inspect_cache(
     for component in components {
         match fs.node_kind_no_follow(component) {
             Ok(Some(FsNodeKind::Directory)) => {}
+            Ok(Some(FsNodeKind::Link))
+                if fs.grants_host_destructive_lifecycle()
+                    && fmn_cache::is_trusted_host_cache_ancestor(root, component) => {}
             Ok(Some(kind)) => {
                 return CacheReport::Configured {
                     root: root.to_path_buf(),
