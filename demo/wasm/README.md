@@ -146,17 +146,27 @@ tools are not on `PATH`.
 enforced budget (measured + 10% headroom); a host test in the crate
 (`size_budget_within_headroom`) fails if a rebuilt artifact exceeds it.
 
-### Browser-local text and math
+## Browser-local text and math
 
 The [typesetter](./scribe.html) accepts plain text, markup, and display TeX.
 Build its optional Wasm module alongside the standard player, serve the demo
 directory as above, and open `scribe.html`.
 
 ```sh
-wasm-pack build --target web --out-dir ../../demo/wasm/pkg-scribe crates/fmn-wasm -- --features scribe
+CARGO_TARGET_DIR="$PWD/target/wasm-scribe" wasm-pack build --target web \
+  --out-dir ../../demo/wasm/pkg-scribe crates/fmn-wasm -- --features scribe
 ```
 
 `FmnScribe.typeset(kind, source, fontSize)` uses the native builders and bundled
 faces. Keep the returned object to redraw at multiple resolutions with
-`render_into(width, height, rgba)`. Call `to_bundle()` to save the preview as a single-frame FMTL file for the
-standard player. Release the typeset object with `free()` after use.
+`render_into(width, height, rgba)`. Call `to_bundle()` to save the preview as a
+single-frame FMTL file for the standard player. Release the typeset object with `free()` after use.
+
+The optimized Scribe module measures 10,217,155 bytes (4,890,067 bytes with
+`gzip -n -9`). Its size budget, including 10% headroom, is 11,238,871 bytes.
+
+After building both web packages, run `node demo/wasm/scribe-package.mjs`
+from the repository root, or open the served demo and run
+`await import("./scribe-package.mjs")` in the browser console. The probe checks
+text, markup, and math against native RGBA digests and replays each exported
+bundle in the default player.

@@ -797,6 +797,11 @@ mod tests {
                 std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                     .join("../../demo/wasm/pkg/fmn_wasm_bg.wasm"),
             ),
+            (
+                "wasm-bindgen-web-scribe",
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../demo/wasm/pkg-scribe/fmn_wasm_bg.wasm"),
+            ),
         ];
         let mut checked = 0;
         for (artifact, path) in &candidates {
