@@ -971,7 +971,22 @@ impl ObjPlacement {
                 // whose unscaled midpoint is not representable.
                 let offset = Self::difference(vertex[axis], min[axis], divisor);
                 let span = Self::difference(max[axis], min[axis], divisor);
-                ((offset - span * 0.5) / extent) * height
+                if span.is_finite() {
+                    return ((offset - span * 0.5) / extent) * height;
+                }
+                // The aspect ratio can overflow even when the final scene is
+                // unit-sized. Center in source units, then scale the offset
+                // and midpoint residual independently of the full axis span.
+                let (center, twice_error) = Self::midpoint(min[axis], max[axis]);
+                let project = |delta: f64| {
+                    let ratio = delta / divisor;
+                    if ratio.is_finite() {
+                        (ratio / extent) * height
+                    } else {
+                        ((delta * height) / divisor) / extent
+                    }
+                };
+                project(vertex[axis] - center) - project(twice_error) * 0.5
             }),
         }
     }

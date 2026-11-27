@@ -308,6 +308,37 @@ fn tiny_requested_heights_preserve_geometry_across_source_units() {
 }
 
 #[test]
+fn shallow_source_with_overflowing_aspect_ratio_retains_its_xz_triangle() {
+    let radius = 3.0 * 2.0_f64.powi(1021);
+    let depth = 3.0 * 2.0_f64.powi(-52);
+    let height = f64::from_bits(1);
+    assert!(((2.0 * radius) / depth).is_infinite());
+    // radius * height / depth is exactly 1/2. The Y thickness rounds to
+    // zero in f32, but the XZ projection still has width and depth one.
+    let source = format!(
+        "v -{radius:e} 0 -{radius:e}\nv {radius:e} 0 -{radius:e}\nv 0 {depth:e} {radius:e}\nf 1 2 3\n"
+    );
+    let native: Mobject = fmn_library::ThreeDModel::from_obj(source.as_bytes())
+        .unwrap()
+        .with_height(height)
+        .into();
+    let document = ObjDocument::parse(source.as_bytes()).unwrap();
+    let material = document
+        .to_mobject(height, &BTreeMap::new(), &BTreeMap::new())
+        .expect("representable scene-space triangle");
+    for buffer in [&native.buffer, &material.submobjects[0].buffer] {
+        assert_eq!(
+            buffer.read_column("point").unwrap(),
+            vec![-0.5, 0.0, -0.5, 0.5, 0.0, -0.5, 0.0, 0.0, 0.5]
+        );
+        assert_eq!(
+            buffer.read_column("d_normal_point").unwrap(),
+            vec![-0.5, -1.0, -0.5, 0.5, -1.0, -0.5, 0.0, -1.0, 0.5]
+        );
+    }
+}
+
+#[test]
 fn translated_heightless_models_keep_their_center_and_unit_scale() {
     let materials = BTreeMap::from([("A".into(), material())]);
     for low in [1e16, -1e16] {
