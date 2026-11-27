@@ -196,12 +196,13 @@ impl Family {
 
 /// The book: families by canonical name, with the bundled set as the
 /// sovereign default.
+#[derive(Clone)]
 pub struct FontBook {
-    families: Vec<Family>,
+    families: Vec<Arc<Family>>,
     /// Bundled glyph-coverage faces that are deliberately not selectable by
     /// name (the mathematics symbol face); reachable only through
     /// [`FontBook::glyph_fallback`] and [`FontBook::resolve_face`].
-    coverage: Vec<Family>,
+    coverage: Vec<Arc<Family>>,
     /// Index of the default family.
     default_ix: usize,
     /// Index of the monospace family (`<tt>`).
@@ -326,8 +327,8 @@ impl FontBook {
             bold_italic: None,
         };
         Ok(Self {
-            families: vec![cm, tt, sans],
-            coverage: vec![math],
+            families: vec![Arc::new(cm), Arc::new(tt), Arc::new(sans)],
+            coverage: vec![Arc::new(math)],
             default_ix: 0,
             mono_ix: 1,
             sans_ix: 2,
@@ -360,14 +361,34 @@ impl FontBook {
             path: name.to_owned(),
             what: e.to_string(),
         })?;
-        self.families.push(Family {
+        self.families.push(Arc::new(Family {
             name: name.to_owned(),
             regular: Face::new(font),
             bold: None,
             italic: None,
             bold_italic: None,
-        });
+        }));
         Ok(())
+    }
+
+    /// Select the authored family name of a standalone OpenType face, preferring
+    /// its typographic family (ID 16) over its legacy family (ID 1).
+    #[must_use]
+    pub fn embedded_family_name(bytes: &[u8]) -> Option<String> {
+        [16, 1].into_iter().find_map(|id| {
+            let name = sfnt_name(bytes, id)?;
+            let name = name.trim();
+            (!normalize(name).is_empty() && !name.chars().any(char::is_control))
+                .then(|| name.to_owned())
+        })
+    }
+
+    /// Release a user family by its exact registered name. Bundled names and
+    /// aliases are never removable. Existing book snapshots retain their faces.
+    pub fn remove_user_family(&mut self, name: &str) {
+        self.families.retain(|family| {
+            family.name != name || SELECTABLE_BUNDLED_TEXT_FAMILIES.contains(&name)
+        });
     }
 
     /// The default family.
@@ -395,10 +416,11 @@ impl FontBook {
             .families
             .iter()
             .find(|family| matches_normalized_name(family, &want));
-        hit.ok_or_else(|| TextError::FontUnavailable {
-            family: name.to_owned(),
-            available: self.families.iter().map(|f| f.name.clone()).collect(),
-        })
+        hit.map(Arc::as_ref)
+            .ok_or_else(|| TextError::FontUnavailable {
+                family: name.to_owned(),
+                available: self.families.iter().map(|f| f.name.clone()).collect(),
+            })
     }
 
     /// The face a shaped glyph's [`FaceSel`](crate::shape::FaceSel) names:
@@ -445,6 +467,81 @@ impl FontBook {
     pub fn available(&self) -> Vec<String> {
         self.families.iter().map(|f| f.name.clone()).collect()
     }
+}
+
+/// Read an OpenType naming record without leaving the declared name table.
+/// Prefer Windows US English, Unicode, other Windows Unicode, then ASCII
+/// Macintosh Roman. An invalid or absent record has no usable name.
+#[must_use]
+pub fn sfnt_name(bytes: &[u8], id: u16) -> Option<String> {
+    fn word(data: &[u8], at: usize) -> Option<u16> {
+        Some(u16::from_be_bytes(data.get(at..at + 2)?.try_into().ok()?))
+    }
+    fn offset(data: &[u8], at: usize) -> Option<usize> {
+        usize::try_from(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?)).ok()
+    }
+
+    let tables = usize::from(word(bytes, 4)?);
+    let record = bytes
+        .get(12..12 + tables * 16)?
+        .chunks_exact(16)
+        .find(|record| &record[..4] == b"name")?;
+    let start = offset(record, 8)?;
+    let table = bytes.get(start..start.checked_add(offset(record, 12)?)?)?;
+    let count = usize::from(word(table, 2)?);
+    let string_start = usize::from(word(table, 4)?);
+    let records = table.get(6..6 + count * 12)?;
+    if string_start < 6 + records.len() || word(table, 0)? > 1 {
+        return None;
+    }
+    let strings = table.get(string_start..)?;
+    // Remember only slices while choosing; a large table of aliases does
+    // not cause repeated allocations or copies of the backing strings.
+    let mut best = None;
+    for record in records.chunks_exact(12) {
+        if word(record, 6)? != id {
+            continue;
+        }
+        let platform = word(record, 0)?;
+        let encoding = word(record, 2)?;
+        let rank = match (platform, encoding, word(record, 4)?) {
+            (3, 0 | 1 | 10, 0x0409) => 0,
+            (0, _, _) => 1,
+            (3, 0 | 1 | 10, _) => 2,
+            (1, 0, _) => 3,
+            _ => continue,
+        };
+        if best.is_some_and(|(prior, _)| prior <= rank) {
+            continue;
+        }
+        let at = usize::from(word(record, 10)?);
+        let len = usize::from(word(record, 8)?);
+        let Some(raw) = strings.get(at..at + len) else {
+            continue;
+        };
+        if raw.is_empty() || (rank < 3 && len % 2 != 0) {
+            continue;
+        }
+        best = Some((rank, raw));
+        if rank == 0 {
+            break;
+        }
+    }
+    let (rank, raw) = best?;
+    if rank == 3 {
+        return raw
+            .is_ascii()
+            .then(|| String::from_utf8_lossy(raw).into_owned());
+    }
+    char::decode_utf16(
+        raw.as_chunks::<2>()
+            .0
+            .iter()
+            .copied()
+            .map(u16::from_be_bytes),
+    )
+    .collect::<Result<String, _>>()
+    .ok()
 }
 
 fn normalize(name: &str) -> String {

@@ -19,6 +19,29 @@ body = Text(
 )
 ```
 
+## Register a project font
+
+Use the family name stored inside the font when constructing text. The path
+can be relative to the working directory, and its filename can differ from
+the family name.
+
+```python
+from manimlib import MarkupText, Text
+from manimlib.mobject.svg.text_mobject import register_font
+
+with register_font("assets/AcmeBook-Regular.ttf"):
+    title = Text("Opening credits", font="Acme Book")
+    label = MarkupText('<span font_family="Acme Book">Chapter one</span>')
+```
+
+The context makes one standalone face available to native text builders on
+the current thread. Built glyphs keep their outlines after the context exits.
+The same file can be registered in overlapping contexts. A different file
+claiming an active family, or a file using a bundled family name or alias,
+raises an error. Each registered family currently supplies a single face
+for all weights and slants. Certified renders record the font bytes as a
+file input and verify their digest before publication.
+
 ## Font and style contract
 
 The bundled text families are **Computer Modern**, **IBM Plex Sans**, and

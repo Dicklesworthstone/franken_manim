@@ -39,6 +39,7 @@
 //! manifest regeneration is a CI block by construction.
 
 use fmn_hash::sha256;
+use fmn_text::font::sfnt_name as ttf_name_string;
 use std::collections::BTreeMap;
 use std::fmt;
 
@@ -402,98 +403,6 @@ impl fmt::Display for FontBundleError {
 }
 
 impl std::error::Error for FontBundleError {}
-
-/// Reads one TTF `name`-table string (name IDs 1 = family, 5 = version).
-///
-/// Preference order: Windows platform English (3, *, 0x0409), then Unicode
-/// platform (0), then Macintosh (1), then any record. Returns `None` for a
-/// missing/malformed name table or a missing record — absence is
-/// representable, never an error (the symbol subset's table is empty by
-/// construction). Platform 0/3 strings decode UTF-16BE; platform 1 strings
-/// are taken as ASCII (every bundled face's records are).
-fn ttf_name_string(bytes: &[u8], want_name_id: u16) -> Option<String> {
-    let be_u16 = |at: usize| -> Option<u16> {
-        bytes
-            .get(at..at + 2)
-            .map(|w| u16::from_be_bytes([w[0], w[1]]))
-    };
-    let be_u32 = |at: usize| -> Option<u32> {
-        bytes
-            .get(at..at + 4)
-            .map(|w| u32::from_be_bytes([w[0], w[1], w[2], w[3]]))
-    };
-    let num_tables = usize::from(be_u16(4)?);
-    let mut name_range = None;
-    for i in 0..num_tables {
-        let rec = 12 + i * 16;
-        if bytes.get(rec..rec + 4)? == b"name" {
-            let off = usize::try_from(be_u32(rec + 8)?).ok()?;
-            let len = usize::try_from(be_u32(rec + 12)?).ok()?;
-            name_range = Some((off, off.checked_add(len)?));
-            break;
-        }
-    }
-    let (table_off, table_end) = name_range?;
-    let count = usize::from(be_u16(table_off + 2)?);
-    let string_off = table_off + usize::from(be_u16(table_off + 4)?);
-    // (rank, value); lower rank wins.
-    let mut best: Option<(u8, String)> = None;
-    for i in 0..count {
-        let rec = table_off + 6 + i * 12;
-        if rec + 12 > table_end {
-            break;
-        }
-        let (Some(platform), Some(name_id), Some(lang), Some(len), Some(off)) = (
-            be_u16(rec),
-            be_u16(rec + 6),
-            be_u16(rec + 4),
-            be_u16(rec + 8),
-            be_u16(rec + 10),
-        ) else {
-            continue;
-        };
-        if name_id != want_name_id {
-            continue;
-        }
-        let start = string_off.checked_add(usize::from(off))?;
-        let end = start.checked_add(usize::from(len))?;
-        let raw = bytes.get(start..end)?;
-        let (rank, text) = match platform {
-            3 | 0 => {
-                let rank = if platform == 3 && lang == 0x0409 {
-                    0
-                } else {
-                    1
-                };
-                let decoded: String = char::decode_utf16(
-                    raw.as_chunks::<2>()
-                        .0
-                        .iter()
-                        .map(|w| u16::from_be_bytes(*w)),
-                )
-                .map(|r| r.unwrap_or(char::REPLACEMENT_CHARACTER))
-                .collect();
-                (rank, decoded)
-            }
-            1 => (
-                2,
-                raw.iter()
-                    .filter(|b| b.is_ascii())
-                    .map(|b| char::from(*b))
-                    .collect(),
-            ),
-            _ => (3, String::from_utf8_lossy(raw).into_owned()),
-        };
-        let better = match &best {
-            Some((best_rank, _)) => rank < *best_rank,
-            None => true,
-        };
-        if better {
-            best = Some((rank, text));
-        }
-    }
-    best.map(|(_, text)| text)
-}
 
 /// Computes one face row from its policy and bundled bytes.
 #[must_use]

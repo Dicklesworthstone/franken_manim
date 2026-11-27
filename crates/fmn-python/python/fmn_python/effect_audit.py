@@ -53,6 +53,7 @@ _SHOWN_REFUSALS = 4
 _lock = threading.RLock()
 _local = threading.local()
 _active: list[EffectRecorder] = []
+_scoped_inputs: dict[object, tuple[str, str, int]] = {}
 _roots: tuple[str, ...] = ()
 _installed = False
 
@@ -176,6 +177,21 @@ def _refuse(effect: str) -> None:
 
 
 @contextlib.contextmanager
+def scoped_file_input(path: str, digest: str, size: int):
+    """Bind the bytes of a live native asset even when capture starts later."""
+    token = object()
+    with _lock:
+        _scoped_inputs[token] = (path, digest, size)
+        for recorder in _active:
+            recorder._record(path, digest, size)
+    try:
+        yield
+    finally:
+        with _lock:
+            _scoped_inputs.pop(token)
+
+
+@contextlib.contextmanager
 def paused():
     """Exempt the portal's own provenance reads on this thread."""
     previous = getattr(_local, "quiet", False)
@@ -273,6 +289,8 @@ def begin(*, invocation: bool = False) -> EffectRecorder:
                 recorder._refusals.update(outer._refusals)
                 recorder._refused += outer._refused
                 recorder._bytes += outer._bytes
+        for path, digest, size in _scoped_inputs.values():
+            recorder._record(path, digest, size)
         _active.append(recorder)
     return recorder
 

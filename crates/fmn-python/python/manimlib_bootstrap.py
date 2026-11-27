@@ -21685,7 +21685,10 @@ def _install_text_mobject_helpers():
 
     @_contextlib.contextmanager
     def register_font(font_file):
-        yield font_file
+        from fmn_python.registered_fonts import registered_font
+
+        with registered_font(font_file, _register_font_bytes) as registered:
+            yield registered
 
     mod = _ensure_module("manimlib.mobject.svg.text_mobject")
     setattr(mod, "manimpango", manimpango)

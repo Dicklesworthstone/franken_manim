@@ -55,7 +55,9 @@ mod portal_texture;
 #[cfg(feature = "gauntlet")]
 pub use portal_raster::{run_portal_gauntlet_asset_root, run_portal_gauntlet_image_inputs};
 use portal_texture::raster as portal_raster;
+mod portal_fonts;
 mod portal_typography;
+use portal_fonts::with_font_book;
 #[cfg(feature = "gauntlet")]
 pub use portal_typography::run_portal_gauntlet_text_configuration;
 mod portal_video;
@@ -12263,15 +12265,8 @@ impl PyGilProbe {
 // ONE implementation (D4); the bootstrap never re-derives point math.
 
 thread_local! {
-    /// The bundled typesetting handle numbered builders take, parsed once
-    /// per interpreter thread (the worker is single-threaded by design).
-    static FONT_BOOK: std::cell::OnceCell<fmn_library::FontBook> =
-        const { std::cell::OnceCell::new() };
-}
-
-thread_local! {
     /// The math-typesetting engine over the default fmd-math pack,
-    /// constructed once per interpreter thread like [`FONT_BOOK`].
+    /// constructed once per interpreter thread like the font catalog.
     static TEX_ENGINE: std::cell::OnceCell<fmn_library::TexEngine> =
         const { std::cell::OnceCell::new() };
 }
@@ -12303,18 +12298,6 @@ fn t2c_pairs(t2c: Option<&Bound<'_, PyDict>>) -> PyResult<Vec<(String, fmn_core:
         }
     }
     Ok(pairs)
-}
-
-fn with_font_book<T>(operation: impl FnOnce(&fmn_library::FontBook) -> PyResult<T>) -> PyResult<T> {
-    FONT_BOOK.with(|cell| {
-        if cell.get().is_none() {
-            let book = fmn_library::FontBook::bundled().map_err(|error| {
-                PyRuntimeError::new_err(format!("bundled FontBook unavailable: {error}"))
-            })?;
-            let _ = cell.set(book);
-        }
-        operation(cell.get().expect("set above"))
-    })
 }
 
 fn native_error(error: impl std::fmt::Display) -> PyErr {
@@ -14388,6 +14371,7 @@ fn populate_manimlib(py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<(
         "__thread_policy__",
         "scene and mobject proxies are confined to their creating scene-worker thread",
     )?;
+    portal_fonts::install(module)?;
     portal_typography::install(module)?;
     portal_network::install(module)?;
     portal_bar_chart::install(module)?;
