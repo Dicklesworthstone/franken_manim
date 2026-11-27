@@ -159,6 +159,41 @@ class FieldProtocolTests(unittest.TestCase):
         adapter.install_vector_fields(self.native)
         self.field = self.native.VectorField()
 
+    def test_coordinate_free_constructor_routes_world_samples_to_native_builder(self):
+        from fmn_python.vector_field_lifecycle import install_vector_field_lifecycle
+        native = self.native
+        native._BLUE = "#58C4DD"
+        native._preflight_vmobject_style_kwargs = lambda kwargs: None
+        original_init = native.VMobject.__init__
+        def initialize_records(field, **options):
+            original_init(field)
+            field.set_points(np.zeros((len(field.sample_points) * 8 - 1, 3)))
+        grid_calls = []
+        class Wave(native.VectorField):
+            def get_sample_points(self, *args):
+                grid_calls.append(args)
+                return [[0., 0., 3.], [0., 2., 1.]]
+            def set_stroke(self, **options):
+                pass
+        install_vector_field_lifecycle(native)
+        with patch.object(native.VMobject, "__init__", initialize_records):
+            field = Wave(lambda points: points, width=4., height=0., depth=2.,
+                         x_density=1., z_density=3.)
+        self.assertEqual(len(grid_calls), 1)
+        np.testing.assert_array_equal(grid_calls[0][0], [0., 0., 0.])
+        self.assertEqual(grid_calls[0][1:], (4., 0., 2., 1., 2., 3.))
+        self.assertEqual(field.max_vect_len, .5)
+        self.assertEqual(field.stroke_width, 2.)
+        np.testing.assert_array_equal(native.calls[-1]["bases"], [[0., 0., 3.], [0., 2., 1.]])
+        np.testing.assert_array_equal(native.calls[-1]["vectors"], native.calls[-1]["bases"])
+        field.sample_points = np.array([[.001, 0., 0.], [4., 0., 0.]])
+        field.norm_to_rgb_func = lambda norms: np.tile([.1, .2, .3], (len(norms), 1))
+        field.update_vectors()
+        np.testing.assert_array_equal(native.calls[-1]["vectors"], [[0., 0., 0.], [4., 0., 0.]])
+        np.testing.assert_array_equal(native.calls[-1]["norms"], [.001, 4.])
+        np.testing.assert_allclose(field.data["stroke_rgba"][0, :3], [.1, .2, .3])
+        self.assertEqual(len(grid_calls), 1)
+
     def test_idempotence_and_class_identity(self):
         cls, method = self.native.VectorField, self.native.VectorField.update_vectors
         adapter.install_vector_fields(self.native)

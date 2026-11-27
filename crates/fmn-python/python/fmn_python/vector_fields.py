@@ -48,6 +48,10 @@ def _representable(np, values, context):
     return values
 
 
+def _samples(field):
+    return field.sample_points if field.coordinate_system is None else field.sample_coords
+
+
 def _finite_nonnegative(value, name):
     value = float(value)
     if not math.isfinite(value) or value < 0:
@@ -132,22 +136,31 @@ def install_vector_fields(native: Any) -> None:
     def evaluate(self):
         if not callable(self.func):
             raise TypeError("VectorField func must be callable")
-        coordinates = _rows(np, self.sample_coords, "VectorField sample_coords")
+        coordinates = _rows(np, _samples(self), "VectorField samples")
         return _rows(np, self.func(coordinates), "VectorField callback output", count=len(coordinates))
 
     def update_sample_points(self):
-        coordinates = _rows(np, self.sample_coords, "VectorField sample_coords")
+        world = self.coordinate_system is None
+        coordinates = _rows(np, _samples(self), "VectorField samples", columns=3 if world else None)
         if len(coordinates) < 2:
             raise ValueError("VectorField needs at least two sample points")
-        if len(coordinates):
-            points = _rows(np, self.coordinate_system.c2p(*coordinates.T),
-                           "VectorField c2p output", columns=3, count=len(coordinates))
-        else:
-            points = np.empty((0, 3))
+        if world:
+            _representable(np, coordinates, "VectorField sample points")
+            return
+        points = _rows(np, self.coordinate_system.c2p(*coordinates.T),
+                       "VectorField c2p output", columns=3, count=len(coordinates))
         self.sample_points = _representable(np, points, "VectorField sample points")
 
     def geometry_inputs(self, outputs):
         outputs = _rows(np, outputs, "VectorField callback output", count=len(self.sample_points))
+        if self.coordinate_system is None:
+            if outputs.shape[1] != 3:
+                raise ValueError("world-space VectorField callbacks must return three components")
+            _representable(np, outputs, "VectorField scene vectors")
+            norms = np.linalg.norm(outputs, axis=1)
+            # Suppress tiny arrows, while still passing their original magnitudes to paint.
+            outputs[norms <= _finite_nonnegative(self.min_drawn_norm, "min_drawn_norm")] = 0.
+            return outputs, norms
         dimension = operator.index(getattr(self.coordinate_system, "dimension", 2))
         if not 1 <= dimension <= 3:
             raise ValueError("VectorField coordinate-system dimension must be in 1..3")
@@ -180,11 +193,20 @@ def install_vector_fields(native: Any) -> None:
     def set_sample_coords(self, sample_coords):
         if _FIELD_UPDATES.busy(self):
             raise RuntimeError("cannot resample during a vector-field update")
-        coordinates = _rows(np, sample_coords, "VectorField sample_coords")
+        world = self.coordinate_system is None
+        coordinates = _rows(np, sample_coords, "VectorField samples", columns=3 if world else None)
         if len(coordinates) < 2:
             raise ValueError("VectorField needs at least two sample points")
-        self.sample_coords = coordinates
+        if world:
+            self.sample_points = _representable(np, coordinates, "VectorField sample points")
+        else:
+            self.sample_coords = coordinates
         return self
+
+    def set_sample_points(self, sample_points):
+        if self.coordinate_system is not None:
+            raise ValueError("use set_sample_coords with a coordinate system")
+        return set_sample_coords(self, sample_points)
 
     def apply_callback_style(self, outputs):
         target = _STYLE_TARGETS.get(id(self), self)
@@ -194,16 +216,21 @@ def install_vector_fields(native: Any) -> None:
         if not np.isfinite(norms).all():
             raise ValueError("VectorField magnitudes must be finite")
         rgb, opacity = None, None
-        if self.color_map is not None:
-            if not callable(self.color_map):
-                raise TypeError("VectorField color_map must be callable")
+        if self.coordinate_system is None:
+            color_map, color_input = self.norm_to_rgb_func, norms.copy()
+        else:
+            color_map, color_input = self.color_map, None
+        if color_map is not None and color_input is None:
             low, high = (float(value) for value in self.magnitude_range)
             if not math.isfinite(low) or not math.isfinite(high) or high < low:
                 raise ValueError("VectorField magnitude_range must be finite and ordered")
             # Match Atlas's defined constant-range policy, including an all-zero
             # field. Never divide by zero and overwrite valid native color with NaN.
-            alphas = np.zeros(len(norms)) if high == low else (norms - low) / (high - low)
-            rgba = np.asarray(self.color_map(alphas))
+            color_input = np.zeros(len(norms)) if high == low else (norms - low) / (high - low)
+        if color_map is not None:
+            if not callable(color_map):
+                raise TypeError("VectorField color map must be callable")
+            rgba = np.asarray(color_map(color_input))
             if rgba.dtype.kind == "c":
                 raise TypeError("VectorField colors must be real")
             rgba = np.asarray(rgba, dtype=float)
@@ -237,7 +264,7 @@ def install_vector_fields(native: Any) -> None:
             family = tuple(id(member) for member in self.get_family())
             owner, bound = vars(self).get("_scene"), self._is_bound()
             pointlike = tuple(self.pointlike_data_keys)
-            coordinates = _rows(np, self.sample_coords, "VectorField sample_coords")
+            coordinates = _rows(np, _samples(self), "VectorField samples")
             chart = self.coordinate_system
             self.update_sample_points()
             outputs = self._evaluate_outputs() if prepared_outputs is None else prepared_outputs
@@ -273,7 +300,7 @@ def install_vector_fields(native: Any) -> None:
                     or tuple(id(member) for member in self.get_family()) != family
                     or tuple(self.pointlike_data_keys) != pointlike
                     or self.coordinate_system is not chart
-                    or not np.array_equal(self.sample_coords, coordinates)
+                    or not np.array_equal(_samples(self), coordinates)
                     or self.tip_width_ratio != ratio
                     or not np.array_equal(self.base_stroke_width_array, profile)
                     or not np.array_equal(self.data, before)):
@@ -294,6 +321,7 @@ def install_vector_fields(native: Any) -> None:
     for name, function in (
         ("_evaluate_outputs", evaluate), ("_geometry_inputs", geometry_inputs),
         ("update_sample_points", update_sample_points),
+        ("set_sample_points", set_sample_points),
         ("init_base_stroke_width_array", base_widths), ("set_sample_coords", set_sample_coords),
         ("_apply_callback_style", apply_callback_style), ("update_vectors", update_vectors),
     ):

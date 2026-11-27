@@ -24,6 +24,87 @@ def make(cls=m.VectorField, function=horizontal, chart=None, **options):
 
 
 class VectorFieldLifecycleTests(unittest.TestCase):
+    def test_world_grid_and_arrow_endpoints_use_scene_coordinates(self):
+        field = m.VectorField(lambda rows: np.tile([0., 0., 3.], (len(rows), 1)),
+                              center=(1., 2., 3.), width=2., height=2., depth=0.,
+                              x_density=1., y_density=1., max_vect_len=np.inf)
+        bases = np.array([[x, y, 3.] for x in (0., 1., 2.) for y in (1., 2., 3.)])
+        np.testing.assert_array_equal(field.get_points()[0::8], bases)
+        np.testing.assert_array_equal(field.get_points()[6::8], bases + [0., 0., 3.])
+        self.assertEqual(field.stroke_width, 2.)
+        np.testing.assert_allclose(field.data["stroke_rgba"][0, :3], m.color_to_rgb(m.BLUE))
+
+    def test_world_field_uses_authored_samples_and_observes_later_replacement(self):
+        calls = []
+        class SampledWave(m.VectorField):
+            def get_sample_points(self, *args):
+                calls.append("grid")
+                return [[1., -1., 0.], [2., 1., 0.]]
+        field = SampledWave(lambda points: np.tile([0., 1., 0.], (len(points), 1)),
+                            stroke_color=m.RED, max_vect_len=np.inf)
+        self.assertEqual(calls, ["grid"])
+        field.sample_points = np.array([[0., 0., -1.], [0., 0., 1.], [1., 2., 3.]])
+        field.update_vectors()
+        np.testing.assert_array_equal(field.get_points()[0::8], field.sample_points)
+        np.testing.assert_array_equal(field.get_points()[6::8], field.sample_points + m.UP)
+        self.assertEqual(calls, ["grid"])
+        clone = field.copy()
+        clone.set_sample_points([[4., 5., 6.], [7., 8., 9.]]).update_vectors()
+        self.assertEqual((field.get_num_points(), clone.get_num_points()), (23, 15))
+
+    def test_world_time_callbacks_follow_each_copy_and_raw_magnitudes_reach_paint(self):
+        samples = np.array([[1., 0., 0.], [2., 0., 0.]])
+        field = m.TimeVaryingVectorField(lambda points, t: points * t, sample_points=samples,
+                                         max_vect_len=np.inf, min_drawn_norm=.3,
+                                         norm_to_rgb_func=lambda norms: np.stack(
+                                             [norms, np.zeros_like(norms), np.zeros_like(norms)], axis=1))
+        clone = field.copy()
+        clone.update(.25)
+        self.assertEqual((field.time, clone.time), (0., .25))
+        np.testing.assert_array_equal(field.get_points()[6::8], samples)
+        np.testing.assert_array_equal(clone.get_points()[6::8], [[1., 0., 0.], [2.5, 0., 0.]])
+        np.testing.assert_array_equal(clone.data["stroke_rgba"][0::8, 0], [.25, .5])
+
+    def test_world_field_refuses_invalid_inputs_and_keeps_live_geometry(self):
+        for options in (dict(width=-1), dict(x_density=0), dict(sample_points=[[0., 1.], [2., 3.]]),
+                        dict(sample_coords=[[0., 0.], [1., 0.]]), dict(norm_to_rgb_func=5)):
+            with self.subTest(options=options), self.assertRaises((ValueError, TypeError)):
+                m.VectorField(lambda points: points, **options)
+        field = m.VectorField(lambda points: points, sample_points=[[0, 0, 0], [1, 2, 3]])
+        before = field.data.copy()
+        field.func = lambda points: points[:, :2]
+        with self.assertRaisesRegex(ValueError, "three components"):
+            field.update_vectors()
+        np.testing.assert_array_equal(field.data, before)
+
+    def test_world_wave_frames_match_chart_based_field(self):
+        def render(path, world, threads):
+            options = dict(color=m.WHITE, max_vect_len=np.inf, stroke_width=8.)
+            def wave(rows, time):
+                result = np.zeros_like(rows)
+                result[:, 0] = .5
+                result[:, 1] = time * (rows[:, 0] + 2.)
+                return result
+            if world:
+                field = m.TimeVaryingVectorField(wave, sample_points=[[-1, 0, 0], [1, 0, 0]],
+                                                 **options)
+            else:
+                field = m.TimeVaryingVectorField(wave, axes(), sample_coords=[[-1, 0], [1, 0]],
+                                                 **options)
+            scene = m.Scene()
+            with scene.render_session(path, format="png_sequence", resolution=(160, 90), fps=4,
+                                      threads=threads) as output:
+                scene.add(field)
+                scene.wait(.75)
+            self.assertEqual(output.result.frame_count, 3)
+            return [p.read_bytes() for p in sorted(path.glob("*.png"))]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            expected = render(root/"chart", False, 1)
+            self.assertEqual(len(set(expected)), 3)
+            for threads in (1, 4):
+                self.assertEqual(render(root/f"world-{threads}", True, threads), expected)
+
     def test_preparation_and_all_base_hooks_run_before_public_update(self):
         events = []
         class Authored(m.VectorField):

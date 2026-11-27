@@ -10983,7 +10983,7 @@ class VectorField(VMobject):
             [tuple(row) for row in self.sample_points],
             [tuple(row) for row in out_vects],
             [float(value) for value in output_norms],
-            self.max_displayed_vect_len,
+            self.max_vect_len if self.coordinate_system is None else self.max_displayed_vect_len,
             self.stroke_width,
             self.stroke_opacity,
             self.tip_width_ratio,
@@ -11012,7 +11012,7 @@ class VectorField(VMobject):
             )
 
     def init_points(self):
-        n_samples = len(self.sample_coords)
+        n_samples = len(self.sample_points if self.coordinate_system is None else self.sample_coords)
         self.set_points(_np.zeros((8 * n_samples - 1, 3)))
         self.set_joint_type("no_joint")
 
@@ -11071,7 +11071,7 @@ class VectorField(VMobject):
 
 
 class TimeVaryingVectorField(VectorField):
-    def __init__(self, time_func, coordinate_system, **kwargs):
+    def __init__(self, time_func, coordinate_system=None, **kwargs):
         self.time = 0.0
         self.time_func = time_func
         super().__init__(

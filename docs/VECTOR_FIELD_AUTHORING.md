@@ -8,6 +8,38 @@ Custom record fields, children and subclass identities survive construction,
 copying and live resampling. The exported classes and qualified aliases stay
 unchanged.
 
+### Fields authored in scene coordinates
+
+Omit `coordinate_system` to use the world-space callback used by older
+ManimGL optics scenes. The callback takes an array of XYZ sample positions
+and returns one XYZ displacement per row. For example:
+
+```python
+import numpy as np
+from manimlib import TimeVaryingVectorField
+
+wave = TimeVaryingVectorField(
+    lambda points, t: np.column_stack((
+        np.zeros(len(points)), np.sin(points[:, 0] - t), np.zeros(len(points)),
+    )),
+    width=8, height=0, x_density=4,
+)
+```
+
+The default grid spans 14 by 8 scene units, centered at the origin, with
+two samples per unit along each active axis. Set `depth` for a 3D grid.
+`sample_points` or an overridden `get_sample_points` supplies custom bases.
+`set_sample_points(points).update_vectors()` resamples a live field. The
+same update also picks up a newly assigned or edited `sample_points` array.
+Supply at least two positions within the shared 65,536-sample limit.
+
+`max_vect_len` is measured in scene units and defaults to the reciprocal
+of the mean density across active axes. Positive infinity draws full-length
+vectors. `min_drawn_norm` defaults to 0.01; smaller or equal magnitudes have
+no visible arrow. Both `norm_to_rgb_func` and `norm_to_opacity_func` receive
+the original magnitudes, repeated for the arrow's stroke records. Passing
+a coordinate system selects the chart-based API described below.
+
 ```python
 from manimlib import VectorField, UP
 
