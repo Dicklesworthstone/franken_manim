@@ -3285,6 +3285,84 @@ fn three_d_tile_range(lo: f32, hi: f32, extent: u32, tile: u32) -> Option<(usize
     Some(((first / tile) as usize, ((end - 1) / tile) as usize))
 }
 
+/// The tiles a triangle's f32 pixel span meets ([`three_d_triangle_tiles`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TriangleTiles {
+    /// It meets no pixel of the frame.
+    None,
+    /// Its first and last (inclusive) tile column, then row. Each is below
+    /// the frame's `u32` width or height.
+    Meets([u32; 4]),
+    /// A corner coordinate is missing from the rows or not finite.
+    Refused,
+}
+
+/// Triangle `triangle`'s tiles in a frame of `width` x `height` pixels in
+/// `tile`-pixel tiles, from its corners in `triangles`.
+fn three_d_tiles_of_triangle(
+    triangles: &[f32],
+    triangle: usize,
+    [width, height, tile]: [u32; 3],
+) -> TriangleTiles {
+    let corner = |index: usize, axis: usize| {
+        triangle
+            .checked_mul(THREE_D_TRIANGLE_STRIDE)
+            .and_then(|base| triangles.get(base + index * THREE_D_VERTEX_STRIDE + axis))
+            .copied()
+            .filter(|value| value.is_finite())
+    };
+    let (Some(x0), Some(x1), Some(x2), Some(y0), Some(y1), Some(y2)) = (
+        corner(0, 0),
+        corner(1, 0),
+        corner(2, 0),
+        corner(0, 1),
+        corner(1, 1),
+        corner(2, 1),
+    ) else {
+        return TriangleTiles::Refused;
+    };
+    let (x_lo, x_hi) = three_d_pixel_span(x0, x1, x2);
+    let (y_lo, y_hi) = three_d_pixel_span(y0, y1, y2);
+    match (
+        three_d_tile_range(x_lo, x_hi, width, tile),
+        three_d_tile_range(y_lo, y_hi, height, tile),
+    ) {
+        // A tile index is below its axis's `u32` pixel extent.
+        (Some((col_lo, col_hi)), Some((row_lo, row_hi))) => {
+            TriangleTiles::Meets([col_lo, col_hi, row_lo, row_hi].map(|index| index as u32))
+        }
+        _ => TriangleTiles::None,
+    }
+}
+
+/// Every triangle's tiles, by triangle index, for each triangle the rows
+/// hold a part of, on `workers` runs of about equal triangle counts. The
+/// tile lists read a triangle's tiles here at both of their passes, in each
+/// band that lists its draw, rather than its corners from its row each time.
+fn three_d_triangle_tiles(triangles: &[f32], dims: [u32; 3], workers: usize) -> Vec<TriangleTiles> {
+    let count = triangles.len().div_ceil(THREE_D_TRIANGLE_STRIDE);
+    let mut tiles = vec![TriangleTiles::None; count];
+    let per_run = count.div_ceil(workers.max(1)).max(1);
+    let slots = tiles
+        .chunks_mut(per_run)
+        .map(|run| std::sync::Mutex::new(Some(run)))
+        .collect::<Vec<_>>();
+    on_host_workers(slots.len(), |index| {
+        let taken = slots[index]
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let Some(run) = taken else {
+            return;
+        };
+        for (offset, entry) in run.iter_mut().enumerate() {
+            *entry = three_d_tiles_of_triangle(triangles, index * per_run + offset, dims);
+        }
+    });
+    drop(slots);
+    tiles
+}
+
 /// Each tile command's triangle list (see [`FlatThreeDFrame`]).
 ///
 /// The kernel runs both of its per-triangle tests (the supersampling boundary
@@ -3298,9 +3376,11 @@ fn three_d_tile_range(lo: f32, hi: f32, extent: u32, tile: u32) -> Option<(usize
 /// The lists are built on up to `threads` threads, each taking a band of
 /// whole tile rows ([`three_d_tile_bands`]). The commands are laid out tile
 /// by tile, so a band's commands, and their lists, are one run of each
-/// array. Each band visits the draws its tiles list in draw order and counts
-/// its lists; once every band's are counted and the total is checked, each
-/// writes its lists and offsets in place. A draw whose tiles lie in two
+/// array. Each triangle's tiles are found first, once, from its corners, on
+/// as many runs as there are bands ([`three_d_triangle_tiles`]). Each band
+/// visits the draws its tiles list in draw order and counts its lists; once
+/// every band's are counted and the total is checked, each writes its lists
+/// and offsets in place. A draw whose tiles lie in two
 /// bands is visited by both, each listing its triangles in its own tiles
 /// only. A command is one draw's, so its list is that draw's triangles in
 /// order whichever band builds it. The refusals are one thread's: a
@@ -3338,6 +3418,10 @@ fn three_d_tile_triangles(
         .min(triangle_count / TRIANGLES_PER_TILE_WORKER)
         .min(MAX_HOST_WORKERS);
     let bands = three_d_tile_bands(tile_offsets, dims[0].div_ceil(dims[2]) as usize, workers);
+    let tiles = match bins {
+        TriangleBins::PerTile => three_d_triangle_tiles(triangles, dims, workers),
+        TriangleBins::Whole => Vec::new(),
+    };
 
     // Each band's per-command counts and their total; a refusal with its
     // draw. The first in draw order is the one refused.
@@ -3345,7 +3429,7 @@ fn three_d_tile_triangles(
     let counted = on_host_workers(bands.len(), |index| -> Counted {
         let band = TileBand::new(tile_offsets, tile_draws, bands[index].clone());
         let mut counts = vec![0_usize; band.commands.len()];
-        band.visit(triangles, ranges, dims, bins, |command, span| {
+        band.visit(&tiles, ranges, dims, bins, |command, span| {
             counts[command] = counts[command].saturating_add(span.len());
         })?;
         let total = counts
@@ -3411,7 +3495,7 @@ fn three_d_tile_triangles(
                 end += count;
                 *offset = (base + end) as u32;
             }
-            band.visit(triangles, ranges, dims, bins, |command, span| {
+            band.visit(&tiles, ranges, dims, bins, |command, span| {
                 let cursor = &mut cursors[command];
                 for triangle in span {
                     band_flat[*cursor] = triangle;
@@ -3481,15 +3565,16 @@ impl TileBand {
 
     /// Visit its lists in list order: draw by draw, and within a draw
     /// triangle by triangle, the commands of its tiles the triangle's f32
-    /// pixel span meets (`PerTile`), or the draw's whole range at each of
-    /// its commands (`Whole`). A command is named counting from
+    /// pixel span meets (`PerTile`, each triangle's tiles in `tiles`, by
+    /// triangle index), or the draw's whole range at each of its commands
+    /// (`Whole`, `tiles` unread). A command is named counting from
     /// `commands.start`. A refusal names its draw, the first in draw order
     /// the band lists; a draw refuses alike in every band.
     fn visit(
         &self,
-        triangles: &[f32],
+        tiles: &[TriangleTiles],
         ranges: &[[u32; THREE_D_DRAW_U32_STRIDE]],
-        [width, height, tile]: [u32; 3],
+        [width, _, tile]: [u32; 3],
         bins: TriangleBins,
         mut visit: impl FnMut(usize, std::ops::Range<u32>),
     ) -> Result<(), (usize, MetalError)> {
@@ -3524,24 +3609,13 @@ impl TileBand {
                 command_of_tile[self.tile_of_command[command(pair)]] = command(pair);
             }
             for triangle in first..last {
-                let corner = |index: usize, axis: usize| -> Result<f32, (usize, MetalError)> {
-                    triangles
-                        .get(
-                            triangle as usize * THREE_D_TRIANGLE_STRIDE
-                                + index * THREE_D_VERTEX_STRIDE
-                                + axis,
-                        )
-                        .copied()
-                        .filter(|value| value.is_finite())
-                        .ok_or((draw, MetalError::Layout("3D triangle corner")))
-                };
-                let (x_lo, x_hi) = three_d_pixel_span(corner(0, 0)?, corner(1, 0)?, corner(2, 0)?);
-                let (y_lo, y_hi) = three_d_pixel_span(corner(0, 1)?, corner(1, 1)?, corner(2, 1)?);
-                let (Some((col_lo, col_hi)), Some((row_lo, row_hi))) = (
-                    three_d_tile_range(x_lo, x_hi, width, tile),
-                    three_d_tile_range(y_lo, y_hi, height, tile),
-                ) else {
-                    continue;
+                // A triangle past the rows has a corner missing from them.
+                let [col_lo, col_hi, row_lo, row_hi] = match tiles.get(triangle as usize) {
+                    Some(TriangleTiles::Meets(range)) => range.map(|index| index as usize),
+                    Some(TriangleTiles::None) => continue,
+                    Some(TriangleTiles::Refused) | None => {
+                        return Err((draw, MetalError::Layout("3D triangle corner")));
+                    }
                 };
                 for row in row_lo.max(rows.start)..(row_hi + 1).min(rows.end) {
                     let row_base = row * cols - self.tiles.start;
@@ -5471,7 +5545,9 @@ mod tests {
         let mut refused = 0;
         for packet in &packets {
             // A command naming a draw past the last, a reversed tile range
-            // and (per tile) a non-finite corner.
+            // and (per tile) a non-finite corner, rows that end inside the
+            // first listed triangle's last corner, and rows that end before
+            // that triangle.
             let mut draws = packet.tile_draws.clone();
             let mut offsets = packet.tile_offsets.clone();
             let mut triangles = packet.triangles.clone();
@@ -5484,10 +5560,19 @@ mod tests {
                 .expect("a non-empty tile");
             offsets[swap - 1] = offsets[swap] + 1;
             triangles[packet.first_listed * THREE_D_TRIANGLE_STRIDE + 1] = f32::NAN;
+            let short = &packet.triangles
+                [..packet.first_listed * THREE_D_TRIANGLE_STRIDE + 2 * THREE_D_VERTEX_STRIDE + 1];
+            let shorter = &packet.triangles[..packet.first_listed * THREE_D_TRIANGLE_STRIDE];
             for (triangles, offsets, draws) in [
-                (&packet.triangles, &packet.tile_offsets, &draws),
-                (&packet.triangles, &offsets, &packet.tile_draws),
-                (&triangles, &packet.tile_offsets, &packet.tile_draws),
+                (packet.triangles.as_slice(), &packet.tile_offsets, &draws),
+                (packet.triangles.as_slice(), &offsets, &packet.tile_draws),
+                (
+                    triangles.as_slice(),
+                    &packet.tile_offsets,
+                    &packet.tile_draws,
+                ),
+                (short, &packet.tile_offsets, &packet.tile_draws),
+                (shorter, &packet.tile_offsets, &packet.tile_draws),
             ] {
                 let (ours, lists) = both(
                     triangles,
@@ -5503,10 +5588,10 @@ mod tests {
                 }
             }
         }
-        // The corner is read per tile only; every other packet refuses.
+        // The corners are read per tile only; every other packet refuses.
         assert_eq!(
             refused,
-            packets.len() * 2 + packets.len() / 2,
+            packets.len() * 2 + 3 * (packets.len() / 2),
             "{refused} refusals"
         );
 
@@ -5658,7 +5743,8 @@ mod tests {
             assert!((&flat.command_triangles, &flat.tile_triangles) == (&lists.0, &lists.1));
             // The job's one thread offers no runs; a frame on 8 threads lists
             // on them, offering 7 runs to workers for the counts and 7 for
-            // the lists, and its tables are the same. It also bins its draws
+            // the lists, and 7 for the triangles' tiles when its lists are
+            // per tile, and its tables are the same. It also bins its draws
             // in runs (counts, then lists), lays the bins out in as many bands,
             // and checks its tile commands in runs.
             assert_eq!(flat.threads, 1);
@@ -5671,9 +5757,13 @@ mod tests {
             assert!(bin_runs > 1 && check_runs > 1, "{bin_runs}, {check_runs}");
             assert_eq!(layout_bands, bin_runs, "{bins:?}");
             let threaded = FlatThreeDFrame::derive_on(&job, bins, 8).expect("8 threads");
+            let tile_passes = match bins {
+                TriangleBins::PerTile => 3,
+                TriangleBins::Whole => 2,
+            };
             assert_eq!(
                 HOST_RUNS_OFFERED.get(),
-                2 * 7 + 3 * (bin_runs - 1) + (check_runs - 1),
+                tile_passes * 7 + 3 * (bin_runs - 1) + (check_runs - 1),
                 "{bins:?}"
             );
             assert!(frame_tables(&threaded) == frame_tables(&flat), "{bins:?}");
