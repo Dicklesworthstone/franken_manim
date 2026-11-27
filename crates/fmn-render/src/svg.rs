@@ -11,6 +11,7 @@ use fmn_mobject::{Mob, RenderPrimitive, Stage, StageError};
 
 use crate::Camera;
 
+mod curves;
 mod dots;
 
 /// Geometry admitted to a vector document, counting repeated placements.
@@ -131,12 +132,12 @@ impl GeometryBudget {
 /// viewers own silhouette antialiasing, as they do for ordinary vector paths.
 /// The geometry limits count the expanded paths, including repeated placements.
 ///
-/// Refuses other non-vector draws, varying vector paint/width, dot glow, depth,
-/// lighting, clip planes, and perspective-varying or depth-clipped quadratics.
-/// Constant homogeneous weight is required for existing vector controls:
-/// projecting rational controls directly would change their shape. Dots whose
-/// discs cross a depth/horizon plane also refuse. Validation and budgets precede
-/// geometry copies; every failure leaves the input Stage unchanged.
+/// Perspective-projected vector paths use bounded quadratic subdivision.
+/// Each resulting curve stays within 0.1 output pixel of the camera projection,
+/// including native point-record rounding. Refuses depth-clipped paths and
+/// dots, other non-vector draws, varying vector paint/width, dot glow, depth
+/// tests, lighting and user clip planes. Every failure leaves the input Stage
+/// unchanged.
 pub fn project_svg_stage(
     stage: &Stage,
     camera: &Camera,
@@ -153,7 +154,6 @@ pub fn project_svg_stage(
         points: 0,
         shapes: 0,
     };
-    let (width, height) = camera.pixel_shape();
     for source in sequence {
         if let Some(family) = mapped.get(&source) {
             budget.charge(family.points, family.roots.len())?;
@@ -187,38 +187,7 @@ pub fn project_svg_stage(
         let uniforms = *stage
             .uniforms(source)
             .ok_or_else(|| unsupported("stale uniforms"))?;
-        let mut weight = None;
-        let mut pixels = Vec::new();
-        pixels.try_reserve_exact(points.len())?;
-        for point in points {
-            let clip = camera.project(point, uniforms.is_fixed_in_frame);
-            let w = clip.clip[3];
-            if !clip.clip.iter().all(|v| v.is_finite())
-                || w <= 0.0
-                || clip.clip[2].abs() > w
-                || weight.is_some_and(|old| old != w)
-            {
-                return Err(unsupported("perspective-varying or depth-clipped paths"));
-            }
-            weight = Some(w);
-            let pixel = clip
-                .pixel((width, height))
-                .ok_or_else(|| unsupported("invalid camera projection"))?;
-            let point = [
-                pixel[0] - f64::from(width) / 2.0,
-                f64::from(height) / 2.0 - pixel[1],
-                0.0,
-            ];
-            if point
-                .iter()
-                .any(|value| !value.is_finite() || value.abs() > f64::from(f32::MAX))
-            {
-                return Err(unsupported(
-                    "projected coordinates exceed native record precision",
-                ));
-            }
-            pixels.push(point);
-        }
+        let pixels = curves::project(&points, uniforms.is_fixed_in_frame, camera, &mut budget)?;
         let target = stage.copy_entry_into(source, &mut projected)?;
         projected.set_points(target, &pixels)?;
         projected.set_z_index(target, 0, false);
@@ -451,6 +420,31 @@ mod tests {
     }
 
     #[test]
+    fn svg_tilted_polygon_keeps_each_straight_edge_in_its_original_budget() {
+        let mut stage = Stage::new();
+        let shape = square(&mut stage);
+        stage.add_to_scene(shape).unwrap();
+        let mut camera = camera();
+        camera.frame_mut().rotate(0.8, [1.0, 0.0, 0.0]).unwrap();
+        let projected = project_svg_stage(
+            &stage,
+            &camera,
+            SvgLimits {
+                max_shapes: 1,
+                max_points: 9,
+            },
+        )
+        .unwrap();
+        let pixels = projected.get_points(projected.roots()[0]).unwrap();
+        assert_eq!(pixels.len(), 9);
+        for edge in pixels.windows(3).step_by(2) {
+            for i in 0..2 {
+                assert!((edge[1][i] - 0.5 * (edge[0][i] + edge[2][i])).abs() < 1e-5);
+            }
+        }
+    }
+
+    #[test]
     fn svg_projection_refuses_unrepresentable_paint_camera_and_records() {
         let mut stage = Stage::new();
         let shape = square(&mut stage);
@@ -460,7 +454,7 @@ mod tests {
         assert!(project_svg_stage(&stage, &camera, SvgLimits::default()).is_err());
         stage.uniforms_mut(shape).unwrap().depth_test = false;
         camera.frame_mut().rotate(0.5, [1.0, 0.0, 0.0]).unwrap();
-        assert!(project_svg_stage(&stage, &camera, SvgLimits::default()).is_err());
+        assert!(project_svg_stage(&stage, &camera, SvgLimits::default()).is_ok());
         stage.uniforms_mut(shape).unwrap().is_fixed_in_frame = 1.0;
         assert!(project_svg_stage(&stage, &camera, SvgLimits::default()).is_ok());
         stage
@@ -478,5 +472,19 @@ mod tests {
         let before = stage.get_points(shape).unwrap();
         assert!(project_svg_stage(&stage, &camera, SvgLimits::default()).is_err());
         assert_eq!(stage.get_points(shape).unwrap(), before);
+    }
+
+    #[test]
+    fn svg_projection_refuses_depth_crossing_curves_without_editing_source() {
+        let camera = camera();
+        let mut stage = Stage::new();
+        let points = [[-1.0, 0.0, 0.0], [0.0, 1.0, 1000.0], [1.0, 0.0, 0.0]];
+        let curve = stage.add(Mobject::vector_from_points(&points));
+        stage.add_to_scene(curve).unwrap();
+        assert!(matches!(
+            project_svg_stage(&stage, &camera, SvgLimits::default()),
+            Err(SvgProjectionError::Unsupported("depth-clipped paths"))
+        ));
+        assert_eq!(stage.get_points(curve).unwrap(), points);
     }
 }

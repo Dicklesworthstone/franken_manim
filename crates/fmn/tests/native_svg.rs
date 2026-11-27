@@ -176,6 +176,91 @@ fn native_svg_camera_samples_final_rig_and_keeps_fixed_overlay() {
     }
 }
 
+// Two contours with a real pen-up hop. The first control is several world
+// units closer to the camera than its anchors.
+const PERSPECTIVE_PATH: [[f64; 3]; 7] = [
+    [-3.0, -1.0, 0.0],
+    [0.0, 3.0, 5.0],
+    [3.0, -1.0, -1.0],
+    [3.0, -1.0, -1.0],
+    [-2.0, -2.0, 0.0],
+    [0.0, -2.5, 1.0],
+    [2.0, -2.0, 0.0],
+];
+
+struct PerspectivePath;
+
+impl SceneConstruct for PerspectivePath {
+    fn construct(&mut self, stage: &mut Stage<'_>) -> fmn::Result<()> {
+        let path = stage.add(Mobject::vector_from_points(&PERSPECTIVE_PATH))?;
+        stage.set_stroke(path, Some(YELLOW), Some(2.0), Some(1.0), None, false);
+        Ok(())
+    }
+}
+
+#[test]
+fn native_svg_preserves_perspective_curvature_and_contours_within_budget() {
+    fn at(points: &[[f64; 3]], t: f64) -> [f64; 3] {
+        let u = 1.0 - t;
+        std::array::from_fn(|i| {
+            u * u * points[0][i] + 2.0 * u * t * points[1][i] + t * t * points[2][i]
+        })
+    }
+    let fs = Arc::new(VirtualFs::new());
+    let mut request = options("/perspective.svg");
+    let mut config = request.camera_config().unwrap();
+    config.frame.rotate(0.45, [1.0, 0.0, 0.0]).unwrap();
+    let camera = Camera::new(config.clone()).unwrap();
+    request.camera = Some(config.clone());
+    render_svg_with_fs(&mut PerspectivePath, request, fs.clone()).unwrap();
+    let document = SvgDocument::parse(&fs.read(Path::new("/perspective.svg")).unwrap()).unwrap();
+    assert_eq!(document.shapes.len(), 2, "background and one stroked path");
+    let contours = document.shapes[1].path.subpaths();
+    assert_eq!(contours.len(), 2);
+    assert!(
+        contours[0].len() > 3,
+        "perspective must refine the curved segment"
+    );
+    for (points, source) in contours
+        .iter()
+        .zip([&PERSPECTIVE_PATH[..3], &PERSPECTIVE_PATH[4..]])
+    {
+        let project = |t| camera.project(at(source, t), 0.0).pixel((160, 90)).unwrap();
+        for (actual, t) in [(points[0], 0.0), (*points.last().unwrap(), 1.0)] {
+            let expected = project(t);
+            assert!((actual[0] - expected[0]).hypot(actual[1] - expected[1]) < 1e-4);
+        }
+        // Compare the serialized output with the projection of the 3D curve
+        // itself. These fixtures increase monotonically in screen x, so the
+        // corresponding location on each SVG segment can be found by bisection.
+        for sample in 1..256 {
+            let expected = project(f64::from(sample) / 256.0);
+            let segment = points
+                .windows(3)
+                .step_by(2)
+                .find(|segment| expected[0] <= segment[2][0])
+                .unwrap();
+            let (mut low, mut high) = (0.0, 1.0);
+            for _ in 0..32 {
+                let mid = 0.5 * (low + high);
+                if at(segment, mid)[0] < expected[0] {
+                    low = mid;
+                } else {
+                    high = mid;
+                }
+            }
+            let actual = at(segment, 0.5 * (low + high));
+            assert!((actual[1] - expected[1]).abs() <= 0.1);
+        }
+    }
+    let mut small = options("/perspective-limit.svg");
+    small.camera = Some(config);
+    small.geometry.max_points = PERSPECTIVE_PATH.len();
+    let error = render_svg_with_fs(&mut PerspectivePath, small, fs.clone()).unwrap_err();
+    assert!(error.to_string().contains("geometry budget"));
+    assert!(!fs.exists(Path::new("/perspective-limit.svg")));
+}
+
 struct Scatter;
 
 impl SceneConstruct for Scatter {

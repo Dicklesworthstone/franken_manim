@@ -32,8 +32,8 @@ fmn-python lesson.py --write_all --format svg --transparent --video_dir diagrams
 
 SVG is **final-state vector output**, not an animated SVG or a frame sequence.
 The native skip/final-state timeline runs the scene to its semantic endpoint,
-then serializes its final quadratic paths. Camera pan, zoom, in-plane rotation,
-and fixed-in-frame attachment use the actual native camera. Families retain
+then serializes its final quadratic paths. Camera pan, zoom, rotation and
+fixed-in-frame attachment use the actual native camera. Families retain
 native painter order and shared-object placements. `stroke_behind` emits two
 adjacent vector paint passes in the appropriate order. Camera backgrounds are
 ordinary vector rectangles; fully transparent backgrounds add no geometry.
@@ -54,13 +54,19 @@ components per full ellipse, doubling when necessary to keep curve error within
 0.05 pixel bound. This conversion preserves the silhouette within 0.1 pixel; the
 SVG viewer supplies edge antialiasing. It does not embed raster pixels.
 
+Tilted cameras and paths with points at different depths can produce rational
+quadratic curves in screen space. The exporter subdivides these into SVG
+quadratics until the projected path fits within 0.1 output pixel, including
+point-record rounding. Straight polygon and plot edges retain a single
+quadratic when their projected coordinates fit the same tolerance. Authored
+contour breaks stay separate, including the
+holes in glyph outlines. Subdivision consumes the expanded point budget.
+
 The route refuses image/texture/surface primitives, radial dot glow (including
 `GlowDot`/`GlowDots`), lighting, depth tests, user clip planes, per-vertex vector
-paint or variable-width strokes, and vector paths whose perspective projection
-has varying homogeneous weight. A dot disc that crosses a camera depth or
-horizon plane also refuses. PNG remains available for those Lumen raster
-effects. A nonzero camera tilt may therefore refuse world-space vector curves
-while an unlit dot cloud or fixed-frame overlay remains representable.
+paint or variable-width strokes. Dot discs and vector paths whose controls
+cross a near, far or horizon plane require the PNG renderer. Curves exceeding
+the subdivision, point-record precision or geometry limits refuse publication.
 
 Stroke widths follow the existing native SVG export convention (SVG pixel
 widths). The SVG viewer owns its rasterization and compositing. This is not a

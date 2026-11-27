@@ -41,7 +41,8 @@ const SUBPATH_END_ATOL: f64 = 1e-4;
 /// A move between contours is encoded in a curve slot, but is not a
 /// quadratic to draw or subdivide. Keep the same disambiguation as the
 /// public subpath decomposition, including its distinction from null runs.
-fn is_subpath_break([anchor, handle, next]: [Vec3; 3]) -> bool {
+#[must_use]
+pub fn is_subpath_break([anchor, handle, next]: [Vec3; 3]) -> bool {
     anchor == handle && (0..3).any(|axis| (handle[axis] - next[axis]).abs() > SUBPATH_END_ATOL)
 }
 
