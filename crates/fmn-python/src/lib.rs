@@ -6653,9 +6653,9 @@ impl BridgeMobject {
         magnitude_range: Option<(f64, f64)>,
     ) -> PyResult<Bound<'py, PyList>> {
         let n = sample_points.len();
-        if n < 2 {
+        if n == 0 {
             return Err(PyValueError::new_err(
-                "VectorField needs at least two sample points",
+                "VectorField needs at least one sample point",
             ));
         }
         let sample_budget = fmn_library::SamplingBudget::DEFAULT.max_samples();

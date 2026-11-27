@@ -142,8 +142,8 @@ def install_vector_fields(native: Any) -> None:
     def update_sample_points(self):
         world = self.coordinate_system is None
         coordinates = _rows(np, _samples(self), "VectorField samples", columns=3 if world else None)
-        if len(coordinates) < 2:
-            raise ValueError("VectorField needs at least two sample points")
+        if not len(coordinates):
+            raise ValueError("VectorField needs at least one sample point")
         if world:
             _representable(np, coordinates, "VectorField sample points")
             return
@@ -195,8 +195,8 @@ def install_vector_fields(native: Any) -> None:
             raise RuntimeError("cannot resample during a vector-field update")
         world = self.coordinate_system is None
         coordinates = _rows(np, sample_coords, "VectorField samples", columns=3 if world else None)
-        if len(coordinates) < 2:
-            raise ValueError("VectorField needs at least two sample points")
+        if not len(coordinates):
+            raise ValueError("VectorField needs at least one sample point")
         if world:
             self.sample_points = _representable(np, coordinates, "VectorField sample points")
         else:

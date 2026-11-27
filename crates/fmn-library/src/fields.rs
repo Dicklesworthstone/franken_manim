@@ -92,8 +92,7 @@ pub enum FieldError {
         /// What was being configured.
         context: &'static str,
     },
-    /// `VectorField` needs at least two sample points to derive the step
-    /// size the Reference reads from `sample_points[1] - sample_points[0]`.
+    /// A field needs a sample, or two samples when deriving its step size.
     InsufficientSamples,
     /// The vectorized function returned a row count different from its
     /// input's.
@@ -121,7 +120,7 @@ impl fmt::Display for FieldError {
             }
             Self::InsufficientSamples => write!(
                 f,
-                "vector field needs at least two sample points to derive a step size"
+                "vector field needs a sample point, or at least two to derive a step size"
             ),
             Self::FuncShapeMismatch { expected, got } => write!(
                 f,
@@ -686,7 +685,7 @@ fn build_field(
         Some(coords) => coords,
         None => get_sample_coords(cs, density, budget)?,
     };
-    if sample_coords.len() < 2 {
+    if sample_coords.is_empty() {
         return Err(FieldError::InsufficientSamples);
     }
     budget.ensure_total("vector field samples", sample_coords.len())?;
@@ -3185,6 +3184,25 @@ mod tests {
     }
 
     // -------------------------------------------------------- VectorField
+
+    #[test]
+    fn single_arrow_uses_explicit_length_without_a_sample_spacing() {
+        let sample = [1.0, 0.0, 0.0];
+        let field = || VectorField::new(rotation_field, axes()).with_sample_coords(vec![sample]);
+        assert!(matches!(
+            field().build(),
+            Err(FieldError::InsufficientSamples)
+        ));
+        let built = field()
+            .with_max_vect_len(1.0)
+            .build()
+            .unwrap_or_else(|e| std::panic::panic_any(format!("single arrow: {e}")));
+        let points = built.vmob().points();
+        assert_eq!(points.len(), 7);
+        assert_eq!(points[0], sample);
+        assert!((points[6][1] - fmn_dmath::tanh(1.0)).abs() < 1e-6);
+        assert_eq!(built.stroke_widths().len(), 7);
+    }
 
     #[test]
     fn vector_field_tanh_bounds_drawn_lengths() {

@@ -94,8 +94,8 @@ def fixture():
                 raise native.fail_build
             native.calls.append(dict(bases=np.array(bases), vectors=np.array(vectors),
                                      norms=np.array(norms), config=config))
-            if len(bases) < 2:
-                raise ValueError("VectorField needs at least two sample points")
+            if not len(bases):
+                raise ValueError("VectorField needs at least one sample point")
             count = max(0, 8 * len(bases) - 1)
             # NOT a renderer/arrow implementation. Distinct synthetic rows
             # make stale geometry and incorrect publication observable.
@@ -233,16 +233,18 @@ class FieldProtocolTests(unittest.TestCase):
         np.testing.assert_allclose(self.field.data["stroke_rgba"], np.tile(color, (15, 1)))
         self.assertTrue(np.all(self.field.data["custom"] == 9))
 
-    def test_small_sample_tables_keep_native_capability_boundary(self):
+    def test_singleton_resample_reuses_length_and_empty_table_preserves_state(self):
+        self.field.set_sample_coords([[4., 5.]]).update_vectors()
+        self.assertEqual(len(self.field.data), 7)
+        np.testing.assert_array_equal(self.native.calls[-1]["bases"], [[4., 5., 0.]])
         original = self.field.sample_coords
-        for table in ([], [[0, 0]]):
-            with self.assertRaisesRegex(ValueError, "at least two"):
-                self.field.set_sample_coords(table)
-            self.assertIs(self.field.sample_coords, original)
+        with self.assertRaisesRegex(ValueError, "at least one"):
+            self.field.set_sample_coords([])
+        self.assertIs(self.field.sample_coords, original)
         self.field.sample_coords = np.empty((0, 2))
-        with self.assertRaisesRegex(ValueError, "at least two"):
+        with self.assertRaisesRegex(ValueError, "at least one"):
             self.field.update_vectors()
-        self.assertEqual(self.native.calls, [])
+        self.assertEqual(len(self.native.calls), 1)
 
     def test_callback_failure_preserves_geometry_and_metadata_identity(self):
         points, widths = self.field.sample_points, self.field.base_stroke_width_array

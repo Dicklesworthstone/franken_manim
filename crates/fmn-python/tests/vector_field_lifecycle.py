@@ -262,12 +262,29 @@ class VectorFieldLifecycleTests(unittest.TestCase):
             def init_points(self):
                 calls.append(self)
                 super().init_points()
-        for options in (dict(sample_coords=[[0, 0]]), dict(sample_coords=[[0, 0], [float('nan'), 1]]),
+        for options in (dict(sample_coords=[[0, 0]], max_vect_len=None), dict(sample_coords=[]),
+                        dict(sample_coords=[[0, 0], [float('nan'), 1]]),
                         dict(stroke_width=float('inf')), dict(magnitude_range=(2, 1)),
                         dict(norm_to_opacity_func=3), dict(max_vect_len=0)):
             with self.subTest(options=options), self.assertRaises((TypeError, ValueError)):
                 make(Authored, **options)
         self.assertEqual(calls, [])
+
+    def test_single_arrow_construction_and_live_time_updates(self):
+        sample = [[-1., 0.]]
+        wave = lambda rows, time: np.tile([1., time], (len(rows), 1))
+        single = make(m.TimeVaryingVectorField, wave, sample_coords=sample)
+        pair = make(m.TimeVaryingVectorField, wave)
+        for field in (single, pair):
+            field.update(.5)
+        for column in ("point", "stroke_width", "stroke_rgba"):
+            np.testing.assert_array_equal(single.data[column], pair.data[column][:7])
+        pair.set_sample_coords(sample).update_vectors()
+        for column in ("point", "stroke_width", "stroke_rgba"):
+            np.testing.assert_array_equal(pair.data[column], single.data[column])
+        world = m.VectorField(lambda rows: rows, sample_points=[[1., 2., 3.]],
+                              max_vect_len=np.inf)
+        np.testing.assert_array_equal(world.get_points()[[0, 6]], [[1., 2., 3.], [2., 4., 6.]])
 
     def test_authored_fields_copy_without_rerunning_construction(self):
         calls = []

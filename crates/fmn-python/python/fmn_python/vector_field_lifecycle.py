@@ -121,8 +121,10 @@ def install_vector_field_lifecycle(native: Any) -> None:
                                if sample_coords is None else sample_coords)
                 coordinates = _rows(np, coordinates, "VectorField sample_coords")
                 self.sample_coords = coordinates
-            if len(coordinates) < 2:
-                raise ValueError("VectorField needs at least two sample points")
+            if not len(coordinates):
+                raise ValueError("VectorField needs at least one sample point")
+            if not world and max_vect_len is None and len(coordinates) < 2:
+                raise ValueError("VectorField needs at least two sample points to infer max_vect_len")
             self._native_default_color_map = (color is None and color_map is None
                                               and color_map_name == "3b1b_colormap")
             self.color_map = (None if color is not None else color_map if color_map is not None
