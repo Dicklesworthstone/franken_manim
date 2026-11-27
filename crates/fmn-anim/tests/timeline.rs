@@ -536,6 +536,38 @@ fn locate_and_frame_at_time_agree_with_the_grid() {
 }
 
 #[test]
+fn lookup_skips_empty_segments_and_keeps_labels_at_the_next_sample() {
+    let mut timeline = Timeline::new(FPS).unwrap();
+    for (label, frames) in [
+        ("opening", 0),
+        ("first", 2),
+        ("gap", 0),
+        ("still-empty", 0),
+        ("second", 3),
+        ("tail", 0),
+    ] {
+        timeline.label(label).wait_frames(frames).unwrap();
+    }
+    timeline.label("end");
+    let plan = timeline.compile().unwrap();
+    let decoded = TimelinePlan::from_bytes(&plan.to_bytes().unwrap()).unwrap();
+    for schedule in [&plan, &decoded] {
+        for (frame, expected) in [
+            (0, None),
+            (1, Some((1, 1))),
+            (2, Some((1, 2))),
+            (3, Some((4, 1))),
+            (5, Some((4, 3))),
+            (6, None),
+        ] {
+            assert_eq!(schedule.locate(frame), expected);
+        }
+        let frames: Vec<_> = schedule.labels().iter().map(|label| label.frame).collect();
+        assert_eq!(frames, [1, 1, 3, 3, 3, 5, 5]);
+    }
+}
+
+#[test]
 fn frame_at_time_covers_exact_seconds_before_and_after_serialization() {
     for (fps, split, seconds, at_boundary) in [
         (24, 43, 43.0_f64 / 24.0, 44),

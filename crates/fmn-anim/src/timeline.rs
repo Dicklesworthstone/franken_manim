@@ -235,9 +235,15 @@ fn label_frame_at_or_after(
     total_frames: i64,
 ) -> Option<i64> {
     let tail = segments.get(segment_index..)?;
-    match tail.iter().find(|segment| segment.n_frames > 0) {
-        Some(segment) => segment.base_frame.checked_add(1),
-        None => Some(total_frames),
+    // Empty segments leave the clock at the same base. If any samples
+    // follow this boundary, the first one is always base + 1.
+    let base = tail
+        .first()
+        .map_or(total_frames, |segment| segment.base_frame);
+    if base < total_frames {
+        Some(base + 1)
+    } else {
+        Some(total_frames)
     }
 }
 
@@ -305,13 +311,13 @@ impl TimelinePlan {
     /// inside that segment. `None` outside `1..=total_frames`.
     #[must_use]
     pub fn locate(&self, frame: i64) -> Option<(usize, i64)> {
-        if frame < 1 {
+        if frame < 1 || frame > self.total_frames() {
             return None;
         }
-        self.segments
-            .iter()
-            .position(|s| frame > s.base_frame && s.end_frame().is_some_and(|end| frame <= end))
-            .map(|index| (index, frame - self.segments[index].base_frame))
+        // A segment owns (base, end]. The last base strictly before the
+        // sample belongs to its nonempty segment, even across empty runs.
+        let index = self.segments.partition_point(|s| s.base_frame < frame) - 1;
+        Some((index, frame - self.segments[index].base_frame))
     }
 
     /// The frame covering `seconds` on the grid: sample *k* spans
