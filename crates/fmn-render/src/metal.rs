@@ -2471,6 +2471,10 @@ impl<'a> FlatThreeDFrame<'a> {
         // Within the reservation: `triangle_scalars` is every draw's rows.
         flat.triangles.resize(triangle_scalars, 0.0);
         flatten_three_d_triangles(&pieces, &mut flat.triangles, flat.threads);
+        // The clouds' runs are in the frame's rows now: free them before the
+        // bins and tile lists are made.
+        drop(pieces);
+        drop(clouds);
 
         (flat.tile_offsets, flat.tile_draws) =
             stable_three_d_bins(&draw_bounds, width, height, tile)?;
@@ -2878,9 +2882,20 @@ fn compile_three_d_clouds(
                     fits = false;
                     return;
                 };
-                let (Ok(count), Ok(())) =
-                    (u32::try_from(rows.len()), out.rows.try_reserve(rows.len()))
-                else {
+                // Past the two rows a dot reserved (a dot the clip volume
+                // cuts may make more), the rows grow by a sixteenth rather
+                // than double: the run is held until the frame's rows are
+                // flattened.
+                let grow = rows.len().max(out.rows.len() / 16);
+                let room = out.rows.capacity() - out.rows.len() >= rows.len();
+                let (Ok(count), Ok(())) = (
+                    u32::try_from(rows.len()),
+                    if room {
+                        Ok(())
+                    } else {
+                        out.rows.try_reserve_exact(grow)
+                    },
+                ) else {
                     fits = false;
                     return;
                 };
