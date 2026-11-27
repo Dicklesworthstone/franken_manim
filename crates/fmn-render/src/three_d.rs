@@ -4472,18 +4472,15 @@ fn compile_dot_into<'a>(
     // triangles or depth writes. In particular, never divide its AA width by
     // zero or send a degenerate billboard through clipping.
     if draw.radius > 0.0 {
-        for indices in [[0, 1, 2], [2, 1, 3]] {
-            let triangle = indices.map(|index| corners[index]);
-            append_clipped_triangle(
-                camera,
-                projection,
-                &triangle,
-                draw.is_fixed_in_frame,
-                draw.clip_planes,
-                rows,
-                budget,
-            )?;
-        }
+        append_dot_billboard(
+            camera,
+            projection,
+            &corners,
+            draw.is_fixed_in_frame,
+            draw.clip_planes,
+            rows,
+            budget,
+        )?;
     }
     Ok(CompiledDraw {
         bounds: union_bounds(&rows[start..]),
@@ -4548,6 +4545,83 @@ fn append_clipped_triangle(
     }
 }
 
+/// A dot's billboard, its `corners` in triangle-strip order, appended as
+/// [`append_clipped_triangle`] appends its two triangles, `[0, 1, 2]` and
+/// then `[2, 1, 3]`: the same rows in the same order, the same error, and
+/// the same budget. Both triangles share corners 1 and 2, and a corner's
+/// projection and its place on the screen depend on the corner alone, so
+/// each corner is projected, and taken to the screen, once for both. A
+/// triangle the clipper must cut still goes to [`append_clipped_polygon`]
+/// from its world vertices.
+///
+/// `projection` is `camera.projection()`.
+fn append_dot_billboard(
+    camera: &Camera,
+    projection: &Projection,
+    corners: &[WorldVertex; 4],
+    fixed: f64,
+    clip_planes: [[f64; 4]; 4],
+    output: &mut Vec<RasterTriangle>,
+    budget: &mut PreparationBudget,
+) -> Result<(), ThreeDError> {
+    // Which corners are inside every active world plane, by the world
+    // clipper's own distance ([`unclipped`]).
+    let mut kept = [true; 4];
+    for plane in clip_planes {
+        if plane[..3].iter().all(|value| *value == 0.0) {
+            continue;
+        }
+        for (corner, kept) in corners.iter().zip(&mut kept) {
+            let point = corner.attributes.world;
+            *kept &=
+                inside(point[0] * plane[0] + point[1] * plane[1] + point[2] * plane[2] + plane[3]);
+        }
+    }
+    let clips = corners.map(|corner| projection.project(corner.attributes.world, fixed).clip);
+    // Taken to the screen when a triangle first needs them: none of an
+    // off-screen dot's are.
+    let mut raster = None;
+    for indices in [[0, 1, 2], [2, 1, 3]] {
+        let unclipped = if indices.iter().all(|&corner| kept[corner]) {
+            homogeneous_clipper(indices.map(|corner| clips[corner]))
+        } else {
+            Err(Clipper::Needed)
+        };
+        match unclipped {
+            Ok(()) => {
+                let raster = raster.get_or_insert_with(|| {
+                    std::array::from_fn::<_, 4, _>(|corner| {
+                        raster_vertex(
+                            ProjectedVertex {
+                                attributes: corners[corner].attributes,
+                                clip: clips[corner],
+                            },
+                            camera.pixel_shape(),
+                        )
+                    })
+                });
+                if let [Some(a), Some(b), Some(c)] = indices.map(|corner| raster[corner])
+                    && let Some(triangle) = rasterized_triangle([a, b, c])
+                {
+                    budget.reserve_rows(output, PreparationRows::RasterTriangles, 1)?;
+                    output.push(triangle);
+                }
+            }
+            Err(Clipper::Empty) => {}
+            Err(Clipper::Needed) => append_clipped_polygon(
+                camera,
+                projection,
+                &indices.map(|corner| corners[corner]),
+                fixed,
+                clip_planes,
+                output,
+                budget,
+            )?,
+        }
+    }
+    Ok(())
+}
+
 /// `distance`'s side as the clippers decide it: on the plane is inside, and
 /// NaN is outside.
 fn inside(distance: f64) -> bool {
@@ -4604,18 +4678,18 @@ fn unclipped(
         clip: projection.project(vertex.attributes.world, fixed).clip,
         attributes: vertex.attributes,
     });
-    homogeneous_clipper(&projected)?;
+    homogeneous_clipper(projected.map(|vertex| vertex.clip))?;
     Ok(projected)
 }
 
-/// What the six homogeneous clipping passes would do with `projected`:
-/// return it unchanged (`Ok`), return nothing, or something only they can
-/// tell, as [`Clipper`] says.
-fn homogeneous_clipper(projected: &[ProjectedVertex; 3]) -> Result<(), Clipper> {
+/// What the six homogeneous clipping passes would do with a triangle whose
+/// vertices are at `clips` in clip space: return it unchanged (`Ok`), return
+/// nothing, or something only they can tell, as [`Clipper`] says.
+fn homogeneous_clipper(clips: [[f64; 4]; 3]) -> Result<(), Clipper> {
     for plane in 0..6 {
-        let inside_count = projected
+        let inside_count = clips
             .iter()
-            .filter(|vertex| inside(homogeneous_distance(vertex.clip, plane)))
+            .filter(|&&clip| inside(homogeneous_distance(clip, plane)))
             .count();
         match inside_count {
             3 => {}
@@ -4788,30 +4862,41 @@ fn raster_triangle(
     vertices: [ProjectedVertex; 3],
     resolution: (u32, u32),
 ) -> Option<RasterTriangle> {
-    let mut raster = [RasterVertex {
-        attributes: vertices[0].attributes,
-        screen: [0.0; 2],
-        inverse_w: 0.0,
-        ndc_z: 0.0,
-    }; 3];
-    for (slot, vertex) in raster.iter_mut().zip(vertices) {
-        let w = vertex.clip[3];
-        if w <= 0.0 || !w.is_finite() {
-            return None;
-        }
-        let inverse_w = 1.0 / w;
-        let ndc_x = vertex.clip[0] * inverse_w;
-        let ndc_y = vertex.clip[1] * inverse_w;
-        *slot = RasterVertex {
-            attributes: vertex.attributes,
-            screen: [
-                0.5 * (ndc_x + 1.0) * f64::from(resolution.0),
-                0.5 * (1.0 - ndc_y) * f64::from(resolution.1),
-            ],
-            inverse_w,
-            ndc_z: vertex.clip[2] * inverse_w,
-        };
+    let [a, b, c] = vertices;
+    rasterized_triangle([
+        raster_vertex(a, resolution)?,
+        raster_vertex(b, resolution)?,
+        raster_vertex(c, resolution)?,
+    ])
+}
+
+/// `vertex` on the screen, as [`raster_triangle`] takes each of a
+/// triangle's vertices there; `None` when its `w` is not positive or not
+/// finite, which refuses any triangle it is a vertex of.
+fn raster_vertex(vertex: ProjectedVertex, resolution: (u32, u32)) -> Option<RasterVertex> {
+    let w = vertex.clip[3];
+    if w <= 0.0 || !w.is_finite() {
+        return None;
     }
+    let inverse_w = 1.0 / w;
+    let ndc_x = vertex.clip[0] * inverse_w;
+    let ndc_y = vertex.clip[1] * inverse_w;
+    Some(RasterVertex {
+        attributes: vertex.attributes,
+        screen: [
+            0.5 * (ndc_x + 1.0) * f64::from(resolution.0),
+            0.5 * (1.0 - ndc_y) * f64::from(resolution.1),
+        ],
+        inverse_w,
+        ndc_z: vertex.clip[2] * inverse_w,
+    })
+}
+
+/// The triangle of three vertices on the screen, as [`raster_triangle`]
+/// makes it: `None` when its area is zero or not finite; otherwise with a
+/// positive area, its last two vertices swapped if they must be, and its
+/// screen bounds.
+fn rasterized_triangle(mut raster: [RasterVertex; 3]) -> Option<RasterTriangle> {
     let area = orient(raster[0].screen, raster[1].screen, raster[2].screen);
     if area == 0.0 || !area.is_finite() {
         return None;
@@ -10663,6 +10748,152 @@ mod tests {
     }
 
     #[test]
+    fn a_dot_billboard_appends_its_triangles_as_the_clipper_appends_each() {
+        // Random dots from well inside the view to far outside and behind
+        // the camera, one in five near the eye, with and without user planes
+        // (one in seven through the dot's center), fixed in frame or not, a
+        // few with a non-finite center, and budgets of no rows and of one
+        // row as well as the default. The billboard's two triangles from
+        // corners projected once must equal the two appended one after the
+        // other bit for bit, result for result and budget for budget, and
+        // every path must be exercised.
+        let camera = camera();
+        let projection = camera.projection();
+        let eye = camera.location();
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let none = [[0.0; 4]; 4];
+        let mut one = none;
+        one[0] = [1.0, 0.0, 0.0, 0.0];
+        let mut two = none;
+        two[1] = [0.3, -0.7, 0.2, 1.5];
+        two[3] = [0.0, 1.0, 0.0, 2.0];
+        let (mut both, mut partly, mut rejected, mut general, mut refused) = (0, 0, 0, 0, 0);
+        for case in 0..60_000_usize {
+            let scale = [0.5, 3.0, 9.0, 40.0][case % 4];
+            let mut center: [f64; 3] = if case % 5 == 4 {
+                let t = 0.02 + 0.2 * unit();
+                let lateral = [8.0 * t * (unit() - 0.5), 5.0 * t * (unit() - 0.5), 0.0];
+                std::array::from_fn(|axis| eye[axis] * (1.0 - t) + lateral[axis])
+            } else {
+                std::array::from_fn(|_| (unit() - 0.5) * scale)
+            };
+            match case % 97 {
+                0 => center[2] = f64::NAN,
+                1 => center[1] = f64::INFINITY,
+                _ => {}
+            }
+            let radius = [0.01, 0.1, 0.6, 2.5][(case / 4) % 4] * (0.25 + unit());
+            let mut planes = [none, one, two][case % 3];
+            if case % 7 == 0 {
+                let normal = [unit() - 0.5, unit() - 0.5, unit() - 0.5];
+                planes[2] = [
+                    normal[0],
+                    normal[1],
+                    normal[2],
+                    -(normal[0] * center[0] + normal[1] * center[1] + normal[2] * center[2]),
+                ];
+            }
+            let fixed = if case % 11 == 0 { 1.0 } else { 0.0 };
+            let limits = ThreeDPreparationLimits {
+                max_raster_triangles: match case % 13 {
+                    0 => 0,
+                    1 => 1,
+                    _ => ThreeDPreparationLimits::default().max_raster_triangles,
+                },
+                ..ThreeDPreparationLimits::default()
+            };
+            let [to_camera, right, up] = dot_billboard_axes(eye, center, radius);
+            let color = [unit(), unit(), unit(), 1.0];
+            let corner = |i: f64, j: f64| WorldVertex {
+                attributes: Attributes {
+                    world: add(center, add(mul(right, i), mul(up, j))),
+                    normal: to_camera,
+                    color,
+                    uv: [i, j],
+                    opacity: 1.0,
+                },
+            };
+            let corners = [
+                corner(-1.0, -1.0),
+                corner(-1.0, 1.0),
+                corner(1.0, -1.0),
+                corner(1.0, 1.0),
+            ];
+            let mut quad = Vec::new();
+            let mut quad_budget = PreparationBudget::new(limits);
+            let quad_result = append_dot_billboard(
+                &camera,
+                &projection,
+                &corners,
+                fixed,
+                planes,
+                &mut quad,
+                &mut quad_budget,
+            );
+            let mut each = Vec::new();
+            let mut each_budget = PreparationBudget::new(limits);
+            let each_result = [[0, 1, 2], [2, 1, 3]].into_iter().try_for_each(|indices| {
+                append_clipped_triangle(
+                    &camera,
+                    &projection,
+                    &indices.map(|index| corners[index]),
+                    fixed,
+                    planes,
+                    &mut each,
+                    &mut each_budget,
+                )
+            });
+            assert_eq!(
+                format!("{quad_result:?}"),
+                format!("{each_result:?}"),
+                "case {case}"
+            );
+            assert_eq!(raster_bits(&quad), raster_bits(&each), "case {case}");
+            assert_eq!(
+                quad_budget.rows(PreparationRows::RasterTriangles),
+                each_budget.rows(PreparationRows::RasterTriangles),
+                "case {case}"
+            );
+            let paths = [[0, 1, 2], [2, 1, 3]].map(|indices| {
+                unclipped(
+                    &projection,
+                    &indices.map(|index| corners[index]),
+                    fixed,
+                    planes,
+                )
+            });
+            // The triangles share an edge, so one cannot be unclipped while
+            // the other is wholly outside a plane.
+            match paths {
+                [Ok(_), Ok(_)] => both += 1,
+                [Err(Clipper::Empty), Err(Clipper::Empty)] => rejected += 1,
+                [Ok(_), Err(Clipper::Needed)] | [Err(Clipper::Needed), Ok(_)] => partly += 1,
+                [Ok(_), Err(Clipper::Empty)] | [Err(Clipper::Empty), Ok(_)] => {
+                    panic!("case {case}: a shared edge both kept and rejected")
+                }
+                _ => general += 1,
+            }
+            if each_result.is_err() && each.len() == 1 {
+                refused += 1;
+            }
+        }
+        assert!(both > 5_000, "both triangles unclipped {both} times");
+        assert!(partly > 100, "one unclipped and one clipped {partly} times");
+        assert!(rejected > 3_000, "both rejected {rejected} times");
+        assert!(general > 5_000, "the clipper needed {general} times");
+        assert!(
+            refused > 200,
+            "refused at the second triangle {refused} times"
+        );
+    }
+
+    #[test]
     fn unclipped_triangles_skip_the_clipper_with_its_exact_output() {
         // Random triangles from well inside the view to far outside and
         // behind the camera, with and without user planes, a few vertices
@@ -10845,7 +11076,7 @@ mod tests {
                     break;
                 }
             }
-            match homogeneous_clipper(&projected) {
+            match homogeneous_clipper(projected.map(|vertex| vertex.clip)) {
                 Ok(()) => {
                     assert_eq!(polygon_len, 3, "case {case}: kept, but clipped");
                     for (clipped, vertex) in polygon[..3].iter().zip(&projected) {
