@@ -304,6 +304,17 @@ pub struct MetalReport {
     pub output_surface_reused: bool,
     /// Host-observed prepare/upload/dispatch/output-handoff wall time.
     pub elapsed: Duration,
+    /// Within `elapsed`, the host's time deriving the frame's tables from its
+    /// job (the 3D route's [`FlatThreeDFrame`]); `None` for a route that
+    /// does not time it.
+    pub prepare: Option<Duration>,
+    /// Within `elapsed`, the device's own time for the frame's 3D raster
+    /// kernel and, when the frame has one, its bloom: from when the GPU
+    /// started each command buffer to when it finished it (Metal's
+    /// `GPUStartTime` and `GPUEndTime`), summed. It leaves out encoding,
+    /// queueing, the host's wait and the transfer to the output format.
+    /// `None` for a route that does not measure it.
+    pub device_seconds: Option<f64>,
     /// Format copied back to the host.
     pub output_format: PixelFormat,
     /// Quantization range for a planar YUV output.
@@ -880,26 +891,29 @@ impl MetalRenderer {
     ) -> Result<(FrameBuffer, MetalReport), MetalError> {
         let started = Instant::now();
         let flat = FlatThreeDFrame::derive(job)?;
+        let prepare = started.elapsed();
         let raw_layout = job.layout()?;
-        let (raw_reused, upload_bytes) = self.dispatch_three_d(&flat, raw_layout.total_bytes())?;
+        let dispatch = self.dispatch_three_d(&flat, raw_layout.total_bytes())?;
         let mut frame = FrameBuffer::new(raw_layout);
         self.raw_surface
             .as_ref()
             .ok_or(MetalError::Layout("raw surface disappeared"))?
             .buffer
             .read_u8(frame.as_bytes_mut())?;
-        let report = self.report(
+        let mut report = self.report(
             &self.three_d,
             flat.tile().saturating_mul(flat.tile()),
-            upload_bytes,
+            dispatch.upload_bytes,
             frame.as_bytes().len(),
-            raw_reused,
+            dispatch.raw_reused,
             false,
             started.elapsed(),
             PixelFormat::Rgba16F,
             None,
             None,
         );
+        report.prepare = Some(prepare);
+        report.device_seconds = Some(dispatch.device_seconds);
         Ok((frame, report))
     }
 
@@ -912,7 +926,7 @@ impl MetalRenderer {
         let started = Instant::now();
         let dispatch = self.dispatch_three_d_rgba8_surface(job)?;
         let frame = self.read_rgba8_surface()?;
-        let report = self.report(
+        let mut report = self.report(
             &self.three_d,
             dispatch.threads_per_threadgroup,
             dispatch.upload_bytes,
@@ -924,6 +938,8 @@ impl MetalRenderer {
             None,
             None,
         );
+        report.prepare = dispatch.prepare;
+        report.device_seconds = dispatch.device_seconds;
         Ok((frame, report))
     }
 
@@ -950,6 +966,8 @@ impl MetalRenderer {
                 .ok_or(MetalError::SizeOverflow("frame upload count"))?,
             raw_surface_reused,
             output_surface_reused,
+            prepare: None,
+            device_seconds: None,
         })
     }
 
@@ -957,21 +975,25 @@ impl MetalRenderer {
         &mut self,
         job: &ThreeDJob<'_>,
     ) -> Result<Rgba8SurfaceDispatch, MetalError> {
+        let started = Instant::now();
         let flat = FlatThreeDFrame::derive(job)?;
+        let prepare = started.elapsed();
         let layout = job.layout()?;
-        let (raw_surface_reused, upload_bytes) =
-            self.dispatch_three_d(&flat, layout.total_bytes())?;
+        let dispatch = self.dispatch_three_d(&flat, layout.total_bytes())?;
         let (output_surface_reused, transfer_upload_bytes) =
             self.transfer_rgba8_surface(layout.width(), layout.height())?;
         Ok(Rgba8SurfaceDispatch {
             width: layout.width(),
             height: layout.height(),
             threads_per_threadgroup: flat.tile().saturating_mul(flat.tile()),
-            upload_bytes: upload_bytes
+            upload_bytes: dispatch
+                .upload_bytes
                 .checked_add(transfer_upload_bytes)
                 .ok_or(MetalError::SizeOverflow("3D frame upload count"))?,
-            raw_surface_reused,
+            raw_surface_reused: dispatch.raw_reused,
             output_surface_reused,
+            prepare: Some(prepare),
+            device_seconds: Some(dispatch.device_seconds),
         })
     }
 
@@ -1186,7 +1208,7 @@ impl MetalRenderer {
         &mut self,
         flat: &FlatThreeDFrame,
         raw_bytes: usize,
-    ) -> Result<(bool, usize), MetalError> {
+    ) -> Result<ThreeDDispatch, MetalError> {
         let raw_reused = ensure_surface(self.gateway, &mut self.raw_surface, raw_bytes)?;
         // The kernel reads a table only through the frame's validated counts
         // and offsets, never past its end, so what a kept buffer holds
@@ -1244,44 +1266,57 @@ impl MetalRenderer {
             .cols()
             .checked_mul(flat.rows())
             .ok_or(MetalError::SizeOverflow("3D raster group count"))?;
-        let status =
+        let mut status =
             self.gateway
                 .buffer_zeroed(checked_bytes(group_count, 4, "3D raster status")?)?;
 
         let tile = flat.tile();
         validate_threadgroup(&self.three_d, THREE_D_KERNEL, tile, tile)?;
-        self.gateway.dispatch(
+        // One kernel in one command buffer, waited for, as a plain dispatch
+        // runs it; the batch also reports the device's time for it.
+        let surface = &mut self
+            .raw_surface
+            .as_mut()
+            .ok_or(MetalError::Layout("raw surface disappeared"))?
+            .buffer;
+        let mut batch = self.gateway.batch();
+        let inputs = [
+            params_u32,
+            params_f32,
+            triangles,
+            draw_u32,
+            draw_f32,
+            tile_offsets,
+            tile_draws,
+        ]
+        .map(|buffer| batch.input(buffer).read());
+        let (surface_out, status_out) = (batch.output(surface), batch.output(&mut status));
+        let later = [command_triangles, tile_triangles, texture_u32, texels]
+            .map(|buffer| batch.input(buffer).read());
+        let mut arguments = inputs.to_vec();
+        arguments.extend([surface_out.write(), status_out.write()]);
+        arguments.extend(later);
+        batch.dispatch(
             &self.three_d,
-            &[
-                params_u32,
-                params_f32,
-                triangles,
-                draw_u32,
-                draw_f32,
-                tile_offsets,
-                tile_draws,
-                &self
-                    .raw_surface
-                    .as_ref()
-                    .ok_or(MetalError::Layout("raw surface disappeared"))?
-                    .buffer,
-                &status,
-                command_triangles,
-                tile_triangles,
-                texture_u32,
-                texels,
-            ],
+            &arguments,
             Grid::grid_2d(flat.cols(), flat.rows(), tile, tile),
         )?;
+        let mut device_seconds = batch.submit()?.device_seconds;
         verify_status(&status, group_count, THREE_D_KERNEL)?;
         let mut upload_bytes = flat.upload_bytes(texels_kept)?;
         if let Some(bloom) = &flat.bloom {
             let [width, height] = [flat.params_u32[0], flat.params_u32[1]];
+            let (bloom_bytes, bloom_seconds) = self.bloom_raw_surface(width, height, bloom)?;
             upload_bytes = upload_bytes
-                .checked_add(self.bloom_raw_surface(width, height, bloom)?)
+                .checked_add(bloom_bytes)
                 .ok_or(MetalError::SizeOverflow("3D frame upload count"))?;
+            device_seconds += bloom_seconds;
         }
-        Ok((raw_reused, upload_bytes))
+        Ok(ThreeDDispatch {
+            raw_reused,
+            upload_bytes,
+            device_seconds,
+        })
     }
 
     /// Bloom the raw surface in place ([`Bloom`]), in bands of
@@ -1290,13 +1325,14 @@ impl MetalRenderer {
     /// the column pass and the mix back into the band's rows. Every kernel
     /// runs the CPU route's arithmetic in its order, all in one command
     /// buffer, in order. Returns the bytes of the bloom's new input buffers
-    /// (each band's sizes, the taps and the mix).
+    /// (each band's sizes, the taps and the mix) and the device's time for
+    /// the command buffer, in seconds.
     fn bloom_raw_surface(
         &mut self,
         width: u32,
         height: u32,
         bloom: &Bloom,
-    ) -> Result<usize, MetalError> {
+    ) -> Result<(usize, f64), MetalError> {
         let radius =
             u32::try_from(bloom.radius()).map_err(|_| MetalError::SizeOverflow("bloom radius"))?;
         let band = self.bloom_band_rows.max(1);
@@ -1409,11 +1445,14 @@ impl MetalRenderer {
                 grid(sizes[8]),
             )?;
         }
-        batch.submit()?;
+        let device_seconds = batch.submit()?.device_seconds;
         verify_status(&status, groups, BLOOM_KERNELS)?;
-        Ok(std::mem::size_of_val(bands.as_slice())
-            + std::mem::size_of_val(bloom.taps())
-            + std::mem::size_of_val(&mix))
+        Ok((
+            std::mem::size_of_val(bands.as_slice())
+                + std::mem::size_of_val(bloom.taps())
+                + std::mem::size_of_val(&mix),
+            device_seconds,
+        ))
     }
 
     /// Put the frame's texels on the device (FL-033): the last 3D frame's
@@ -1528,6 +1567,8 @@ impl MetalRenderer {
             raw_surface_reused,
             output_surface_reused,
             elapsed,
+            prepare: None,
+            device_seconds: None,
             output_format,
             color_range,
             chroma_siting,
@@ -1543,6 +1584,20 @@ struct Rgba8SurfaceDispatch {
     upload_bytes: usize,
     raw_surface_reused: bool,
     output_surface_reused: bool,
+    /// The 3D route's derivation time ([`MetalReport::prepare`]).
+    prepare: Option<Duration>,
+    /// The 3D route's device time ([`MetalReport::device_seconds`]).
+    device_seconds: Option<f64>,
+}
+
+/// What [`MetalRenderer::dispatch_three_d`] did: whether it reused the raw
+/// surface, the bytes it copied to the device, and the device's time for the
+/// raster kernel and the bloom ([`MetalReport::device_seconds`]).
+#[derive(Debug, Clone, Copy)]
+struct ThreeDDispatch {
+    raw_reused: bool,
+    upload_bytes: usize,
+    device_seconds: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1723,7 +1778,7 @@ impl NativePreviewRenderer {
             NativeRenderPipeline::TwoD => &self.renderer.raster,
             NativeRenderPipeline::ThreeD => &self.renderer.three_d,
         };
-        let metal = self.renderer.report(
+        let mut metal = self.renderer.report(
             render_pipeline,
             dispatch.threads_per_threadgroup,
             upload_bytes,
@@ -1735,6 +1790,8 @@ impl NativePreviewRenderer {
             None,
             None,
         );
+        metal.prepare = dispatch.prepare;
+        metal.device_seconds = dispatch.device_seconds;
         Ok(NativePreviewReport {
             metal,
             presentation: self.presenter.pipeline_info(),
@@ -5143,6 +5200,35 @@ mod tests {
     }
 
     #[test]
+    fn a_three_d_frames_report_times_its_derivation_and_its_kernel_on_the_device() {
+        // On the device: a 3D frame's report, raw and RGBA8, carries the
+        // host's time deriving its tables and the device's own time for its
+        // raster kernel, each within the call's wall time.
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        let (camera, backdrop, plain, lit, fine) = &cloud_frames()[0];
+        let draws = cloud_draws(backdrop, plain, lit);
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: *fine,
+        };
+        let job = ThreeDJob::new(camera, &draws, tiling).expect("cloud job");
+        let raw = renderer.render_three_d_raw(&job).expect("raw frame").1;
+        let rgba8 = renderer.render_three_d_rgba8(&job).expect("RGBA8 frame").1;
+        for (label, report) in [("raw", raw), ("RGBA8", rgba8)] {
+            let prepare = report.prepare.expect("derivation time");
+            let device = report.device_seconds.expect("device time");
+            assert!(prepare <= report.elapsed, "{label}: {prepare:?} {report:?}");
+            assert!(
+                device.is_finite() && device > 0.0 && device <= report.elapsed.as_secs_f64(),
+                "{label}: {device} {report:?}"
+            );
+        }
+    }
+
+    #[test]
     fn metal_draws_a_dot_cloud_as_its_true_dots_bytes() {
         // On the device: the raw frame of a cloud job is the true dots' raw
         // frame, byte for byte.
@@ -7045,6 +7131,8 @@ mod tests {
             raw_surface_reused: false,
             output_surface_reused: false,
             elapsed: Duration::from_millis(2),
+            prepare: None,
+            device_seconds: None,
             output_format: PixelFormat::Rgba8,
             color_range: None,
             chroma_siting: None,
@@ -7052,6 +7140,8 @@ mod tests {
         let mut observed = base.clone();
         observed.upload_bytes = 999;
         observed.elapsed = Duration::from_secs(3);
+        observed.prepare = Some(Duration::from_secs(1));
+        observed.device_seconds = Some(0.5);
         observed.raw_surface_reused = true;
         assert_eq!(base.backend_digest(), observed.backend_digest());
         observed.device.push_str("-other");
