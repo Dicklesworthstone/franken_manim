@@ -363,3 +363,25 @@ duplicate the stock Transform cleanup to keep an object usable after failure.
 Evidence: `fmn-python/tests/test_camera_choreography_protocol.py` covers drawable
 and camera leaves, raising hooks and cleanup methods, pre-existing suspension,
 nested mixed playback, exception identity, repeated abort, and successful retry.
+
+## Moving-camera scenes from older Manim projects
+
+Use the historical import in a scene file or a project's shared imports module.
+The portal also exposes the class at `manimlib.scene.moving_camera_scene`.
+
+```python
+from manimlib.imports import MovingCameraScene, RIGHT, Square
+
+class FollowSquare(MovingCameraScene):
+    def construct(self):
+        self.add(Square().shift(RIGHT))
+        self.play(self.camera_frame.shift, RIGHT, self.camera_frame.scale, 0.5)
+```
+
+`setup()` assigns the scene's live camera frame to `self.camera_frame`.
+Subclasses that override `setup()` can call `super().setup()` before using
+that attribute. Consecutive method calls on one object edit one animation
+target. A trailing dictionary supplies keyword arguments to the preceding
+method. Explicit animations and `.animate` builders can share the same play.
+Projects whose shared helper imports from the modern `manimlib` root can add
+`from manimlib.imports import MovingCameraScene` there for their older scenes.

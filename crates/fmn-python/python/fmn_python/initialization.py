@@ -122,6 +122,8 @@ def initialize(native: ModuleType) -> ModuleType:
             SchemaProvenanceError, apply_schema_placeholder_provenance,
         )
 
+        from fmn_python.vintage_camera import install_vintage_camera
+
         _ensure_exclusive_manimlib_namespace()
         installers = []
         for module_name, attribute in _STEPS:
@@ -152,6 +154,8 @@ def initialize(native: ModuleType) -> ModuleType:
         finalize_native_playback = namespace.pop("_fmn_finalize_native_playback", None)
         if finalize_native_playback is not None:
             finalize_native_playback()
+        # The vintage wildcard mirrors the completed native table.
+        install_vintage_camera(native)
     except BaseException:
         # Do not retain an exception/traceback cycle owning native proxies. A
         # failed instance must be discarded, never retried as a success-shaped

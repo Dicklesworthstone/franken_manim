@@ -426,6 +426,59 @@ def scale_side_effects_keep_their_authored_camera_pose():
     assert frame.get_bounding_box()[2, 2] == 3.
 
 
+def vintage_camera_play_matches_modern_camera():
+    import importlib
+    from manimlib.imports import MovingCameraScene
+
+    from manimlib.scene.moving_camera_scene import MovingCameraScene as Qualified
+
+    assert Qualified is MovingCameraScene
+    assert m.imports is importlib.import_module("manimlib.imports")
+    legacy_names = {name for name in vars(importlib.import_module("manimlib.imports"))
+                    if not name.startswith("_")}
+    modern_names = {name for name in vars(m) if not name.startswith("_")}
+    assert legacy_names == modern_names | {"MovingCameraScene"}
+    assert "MovingCameraScene" not in modern_names and "imports" not in modern_names
+
+    # Each method group must already own its target when another group on
+    # the same object calls generate_target. Explicit builders may predate both.
+    from unittest.mock import patch
+    first, middle = m.Square(), m.Circle()
+    explicit = first.animate.shift(3 * m.RIGHT)
+    with patch.object(m.Scene, "play", lambda self, *animations: animations):
+        moves = MovingCameraScene().play(first.shift, m.RIGHT, middle.shift, m.UP,
+                                         first.shift, 2 * m.RIGHT, explicit)
+    for move, receiver, center in zip(moves, (first, middle, first, first),
+                                      (m.RIGHT, m.UP, 2 * m.RIGHT, 3 * m.RIGHT), strict=True):
+        assert move.mobject is receiver
+        close(move.target_mobject.get_center(), center)
+
+    class Vintage(MovingCameraScene):
+        def construct(self):
+            assert self.camera_frame is self.frame is self.camera.frame
+            self.add(m.Square().shift(m.RIGHT))
+            self.play(self.camera_frame.shift, m.RIGHT,
+                      self.camera_frame.scale, .5, {"about_point": m.ORIGIN},
+                      run_time=2 / 30, rate_func=m.linear)
+
+    class Modern(m.Scene):
+        def construct(self):
+            self.add(m.Square().shift(m.RIGHT))
+            self.play(self.frame.animate.shift(m.RIGHT).scale(.5, about_point=m.ORIGIN),
+                      run_time=2 / 30, rate_func=m.linear)
+
+    with tempfile.TemporaryDirectory() as directory:
+        legacy, modern = Vintage(), Modern()
+        old_path = Path(directory) / "legacy.png"
+        new_path = Path(directory) / "modern.png"
+        legacy.render(str(old_path), format="png", resolution=(96, 54))
+        modern.render(str(new_path), format="png", resolution=(96, 54))
+        close(legacy.frame.get_center(), 0.5 * m.RIGHT)
+        close(legacy.frame.get_center(), modern.frame.get_center())
+        close(legacy.frame.get_shape(), modern.frame.get_shape())
+        assert old_path.read_bytes() == new_path.read_bytes()
+
+
 _CASES = (rotation_is_absolute_at_every_native_sample,
           rotation_obeys_live_rates_windows_and_final_alpha,
           succession_captures_predecessor_camera_orientation,
@@ -442,7 +495,8 @@ _CASES = (rotation_is_absolute_at_every_native_sample,
           authored_rotation_owns_axis_interpretation,
           affine_precision_survives_placement_copy_and_raw_control_edits,
           scale_side_effects_keep_their_authored_camera_pose,
-          final_camera_motion_changes_real_native_pixels)
+          final_camera_motion_changes_real_native_pixels,
+          vintage_camera_play_matches_modern_camera)
 for _case in _CASES:
     _case()
 print(f"camera motion acceptance: {len(_CASES)} cases passed")
