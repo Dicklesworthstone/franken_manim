@@ -2906,66 +2906,83 @@ fn compile_three_d_clouds(
     let too_large = || MetalError::Frame(FrameError::TooLarge);
     let camera = job.camera();
     let limits = job.preparation_limits();
+    // Each cloud's runs: its cloud and its first and end dot. A cloud is
+    // split as it would be alone, so a run's rows and its own preparation
+    // limits are the same however many clouds the job has.
+    let mut runs = Vec::new();
+    for (index, cloud) in job.clouds().iter().enumerate() {
+        let dots = cloud.dots.len();
+        let workers = threads
+            .min(dots / DOTS_PER_CLOUD_WORKER)
+            .clamp(1, MAX_HOST_WORKERS);
+        let per_worker = dots.div_ceil(workers).max(1);
+        runs.extend(
+            (0..dots)
+                .step_by(per_worker)
+                .map(|first| (index, first, dots.min(first + per_worker))),
+        );
+    }
+    // Every cloud's runs in one phase.
+    let compiled = on_host_workers_pulling(runs.len(), threads.min(MAX_HOST_WORKERS), |run| {
+        let (index, first, end) = runs[run];
+        let cloud = &job.clouds()[index];
+        let dots = &cloud.dots[first..end];
+        let mut out = CloudRun::default();
+        out.slabs.try_reserve_exact(dots.len()).ok()?;
+        out.counts.try_reserve_exact(dots.len()).ok()?;
+        out.bounds.try_reserve_exact(dots.len()).ok()?;
+        // Two triangles a dot unless the clip volume cuts it.
+        out.rows.try_reserve(dots.len().checked_mul(2)?).ok()?;
+        let mut fits = true;
+        crate::three_d::compile_cloud_dots(camera, cloud, dots, limits, |draw, rows| {
+            let CompiledPrimitive::Triangles { shader, .. } = &draw.primitive else {
+                fits = false;
+                return;
+            };
+            // Past the two rows a dot reserved (a dot the clip volume
+            // cuts may make more), the rows grow by a sixteenth rather
+            // than double: the run is held until the frame's rows are
+            // flattened.
+            let grow = rows.len().max(out.rows.len() / 16);
+            let room = out.rows.capacity() - out.rows.len() >= rows.len();
+            let (Ok(count), Ok(())) = (
+                u32::try_from(rows.len()),
+                if room {
+                    Ok(())
+                } else {
+                    out.rows.try_reserve_exact(grow)
+                },
+            ) else {
+                fits = false;
+                return;
+            };
+            let slab = three_d_shader_slab(*shader);
+            let first = out.rows.len();
+            out.rows.extend(rows.iter().map(three_d_triangle_row));
+            out.non_finite |=
+                !scalars_finite(&slab) || !scalars_finite(out.rows[first..].as_flattened());
+            out.slabs.push(slab);
+            out.counts.push(count);
+            out.bounds.push(draw.bounds);
+        })
+        .ok()?;
+        fits.then_some(out)
+    });
+    // Each cloud's runs in order, refused as the clouds' compiles one after
+    // another would refuse them.
     let mut triangles = job_triangles;
     let mut clouds = Vec::new();
     clouds
         .try_reserve_exact(job.clouds().len())
         .map_err(|_| too_large())?;
-    for cloud in job.clouds() {
-        let dots = cloud.dots;
-        let workers = threads
-            .min(dots.len() / DOTS_PER_CLOUD_WORKER)
-            .clamp(1, MAX_HOST_WORKERS);
-        let per_worker = dots.len().div_ceil(workers).max(1);
-        let runs = dots.len().div_ceil(per_worker);
-        let compiled = on_host_workers(runs, |run| {
-            let dots = &dots[run * per_worker..dots.len().min((run + 1) * per_worker)];
-            let mut out = CloudRun::default();
-            out.slabs.try_reserve_exact(dots.len()).ok()?;
-            out.counts.try_reserve_exact(dots.len()).ok()?;
-            out.bounds.try_reserve_exact(dots.len()).ok()?;
-            // Two triangles a dot unless the clip volume cuts it.
-            out.rows.try_reserve(dots.len().checked_mul(2)?).ok()?;
-            let mut fits = true;
-            crate::three_d::compile_cloud_dots(camera, cloud, dots, limits, |draw, rows| {
-                let CompiledPrimitive::Triangles { shader, .. } = &draw.primitive else {
-                    fits = false;
-                    return;
-                };
-                // Past the two rows a dot reserved (a dot the clip volume
-                // cuts may make more), the rows grow by a sixteenth rather
-                // than double: the run is held until the frame's rows are
-                // flattened.
-                let grow = rows.len().max(out.rows.len() / 16);
-                let room = out.rows.capacity() - out.rows.len() >= rows.len();
-                let (Ok(count), Ok(())) = (
-                    u32::try_from(rows.len()),
-                    if room {
-                        Ok(())
-                    } else {
-                        out.rows.try_reserve_exact(grow)
-                    },
-                ) else {
-                    fits = false;
-                    return;
-                };
-                let slab = three_d_shader_slab(*shader);
-                let first = out.rows.len();
-                out.rows.extend(rows.iter().map(three_d_triangle_row));
-                out.non_finite |=
-                    !scalars_finite(&slab) || !scalars_finite(out.rows[first..].as_flattened());
-                out.slabs.push(slab);
-                out.counts.push(count);
-                out.bounds.push(draw.bounds);
-            })
-            .ok()?;
-            fits.then_some(out)
-        });
+    let mut compiled = compiled.into_iter();
+    for index in 0..job.clouds().len() {
+        let count = runs.iter().filter(|&&(cloud, _, _)| cloud == index).count();
         let mut cloud_runs = Vec::new();
         cloud_runs
-            .try_reserve_exact(runs)
+            .try_reserve_exact(count)
             .map_err(|_| too_large())?;
-        for run in compiled {
+        for run in compiled.by_ref().take(count) {
             let run = run.ok_or_else(too_large)?;
             triangles = triangles
                 .checked_add(run.rows.len())
@@ -3571,6 +3588,51 @@ fn on_host_workers<T: Send>(runs: usize, work: impl Fn(usize) -> T + Sync) -> Ve
         done
     });
     done.sort_unstable_by_key(|&(run, _)| run);
+    done.into_iter().map(|(_, value)| value).collect()
+}
+
+/// `work` for each of `tasks` tasks, in task order, on the calling thread
+/// and up to `workers - 1` host workers ([`spawn_host_worker`]). Each takes
+/// the next task none has taken until none is left, so a thread the system
+/// holds back delays only the task it holds, not a share fixed in advance.
+/// Which thread does a task does not change its result; a worker that
+/// cannot start leaves its tasks to the others.
+fn on_host_workers_pulling<T: Send>(
+    tasks: usize,
+    workers: usize,
+    work: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    let workers = workers.min(tasks);
+    if workers < 2 {
+        return (0..tasks).map(work).collect();
+    }
+    #[cfg(test)]
+    HOST_RUNS_OFFERED.set(HOST_RUNS_OFFERED.get() + (workers - 1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let pull = || {
+        let mut done = Vec::new();
+        loop {
+            let task = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if task >= tasks {
+                break done;
+            }
+            done.push((task, work(task)));
+        }
+    };
+    let mut done = std::thread::scope(|scope| {
+        let started = (1..workers)
+            .filter_map(|worker| spawn_host_worker(scope, worker, pull).ok())
+            .collect::<Vec<_>>();
+        let mut done = pull();
+        for handle in started {
+            match handle.join() {
+                Ok(value) => done.extend(value),
+                Err(panic) => std::panic::resume_unwind(panic),
+            }
+        }
+        done
+    });
+    done.sort_unstable_by_key(|&(task, _)| task);
     done.into_iter().map(|(_, value)| value).collect()
 }
 
@@ -4347,6 +4409,147 @@ mod tests {
                         "{error:?}"
                     );
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn pulled_tasks_come_back_in_task_order_each_done_once() {
+        for tasks in [0, 1, 2, 7, 64, 300] {
+            for workers in [0, 1, 2, 3, 8, 64] {
+                for refused in [0_u64, 0b10, 0b1010_1010, u64::MAX] {
+                    let calls = std::sync::atomic::AtomicUsize::new(0);
+                    HOST_WORKERS_REFUSED.set(refused);
+                    HOST_RUNS_OFFERED.set(0);
+                    let done = on_host_workers_pulling(tasks, workers, |task| {
+                        calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        task * 3 + 1
+                    });
+                    let offered = HOST_RUNS_OFFERED.get();
+                    HOST_WORKERS_REFUSED.set(0);
+                    let label = format!("{tasks} tasks, {workers} workers, refused {refused:#b}");
+                    assert_eq!(
+                        done,
+                        (0..tasks).map(|task| task * 3 + 1).collect::<Vec<_>>(),
+                        "{label}"
+                    );
+                    assert_eq!(calls.into_inner(), tasks, "{label}");
+                    let pullers = workers.min(tasks);
+                    assert_eq!(
+                        offered,
+                        if pullers < 2 { 0 } else { pullers - 1 },
+                        "{label}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_held_task_leaves_the_rest_to_the_other_pullers() {
+        // Task 0 waits until every other task is done: with shares fixed in
+        // advance its thread would hold the tasks after it, and it would
+        // wait out its whole limit.
+        let tasks = 16;
+        let others = std::sync::atomic::AtomicUsize::new(0);
+        let done = on_host_workers_pulling(tasks, 4, |task| {
+            if task > 0 {
+                others.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return true;
+            }
+            let start = Instant::now();
+            while others.load(std::sync::atomic::Ordering::SeqCst) < tasks - 1 {
+                if start.elapsed() > Duration::from_secs(60) {
+                    return false;
+                }
+                std::thread::yield_now();
+            }
+            true
+        });
+        assert_eq!(done, vec![true; tasks]);
+    }
+
+    #[test]
+    fn every_clouds_runs_compile_in_one_phase_as_the_cloud_alone_would() {
+        // A cloud's runs (its dots' slabs, counts, bounds and rows) are those
+        // of a job holding that cloud alone, so its own preparation limits
+        // are met run for run as before; and every cloud's runs are offered
+        // to the threads once, not a phase a cloud.
+        fn surface(mesh: &SurfaceMesh) -> ThreeDDraw<'_> {
+            ThreeDDraw::Surface(SurfaceDraw::new(mesh))
+        }
+        fn cloud(dots: &[CloudDot]) -> ThreeDDraw<'_> {
+            ThreeDDraw::DotCloud(DotCloudDraw::new(dots))
+        }
+        // A run's slabs, counts, bounds and rows as bits, and its flag.
+        type RunBits = (Vec<u32>, Vec<u32>, Vec<Option<[u64; 4]>>, Vec<u32>, bool);
+        fn run_bits(run: &CloudRun) -> RunBits {
+            (
+                run.slabs
+                    .as_flattened()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect(),
+                run.counts.clone(),
+                run.bounds
+                    .iter()
+                    .map(|bounds| bounds.map(|bounds| bounds.map(f64::to_bits)))
+                    .collect(),
+                run.rows
+                    .as_flattened()
+                    .iter()
+                    .map(|value| value.to_bits())
+                    .collect(),
+                run.non_finite,
+            )
+        }
+        let (camera, backdrop, plain, lit, fine) = cloud_frames().swap_remove(0);
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: fine,
+        };
+        let second = cloud_test_dots(&camera, 3 * DOTS_PER_CLOUD_WORKER + 5, 0x5EED_C10D);
+        let draws = [
+            surface(&backdrop),
+            cloud(&plain),
+            cloud(&[]),
+            cloud(&lit),
+            cloud(&second),
+        ];
+        let job = ThreeDJob::new(&camera, &draws, tiling).expect("job");
+        for threads in [1, 2, 3, 8] {
+            HOST_RUNS_OFFERED.set(0);
+            let clouds = compile_three_d_clouds(&job, 0, threads).expect("clouds");
+            let offered = HOST_RUNS_OFFERED.get();
+            assert_eq!(clouds.len(), 4);
+            let mut runs = 0;
+            for (index, (alone, runs_of)) in
+                [cloud(&plain), cloud(&[]), cloud(&lit), cloud(&second)]
+                    .into_iter()
+                    .zip(&clouds)
+                    .enumerate()
+            {
+                let alone_job = ThreeDJob::new(&camera, &[alone], tiling).expect("alone");
+                HOST_RUNS_OFFERED.set(0);
+                let expected = compile_three_d_clouds(&alone_job, 0, threads).expect("alone");
+                assert_eq!(expected.len(), 1);
+                assert_eq!(
+                    runs_of.iter().map(run_bits).collect::<Vec<_>>(),
+                    expected[0].iter().map(run_bits).collect::<Vec<_>>(),
+                    "cloud {index}, {threads} threads"
+                );
+                runs += runs_of.len();
+            }
+            let pullers = threads.min(runs);
+            assert_eq!(
+                offered,
+                if pullers < 2 { 0 } else { pullers - 1 },
+                "{threads} threads, {runs} runs"
+            );
+            if threads == 8 {
+                // Two clouds of several runs each: one phase for both.
+                assert!(clouds[0].len() > 1 && clouds[3].len() > 1, "{threads}");
+                assert_eq!(offered, 7);
             }
         }
     }
