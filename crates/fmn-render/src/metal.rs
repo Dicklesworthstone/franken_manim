@@ -2383,6 +2383,9 @@ impl<'a> FlatThreeDFrame<'a> {
             threads,
         };
         let mut draw_bounds = Vec::with_capacity(draws);
+        // Whether every draw scalar and row the frame writes is finite,
+        // checked as they are written (see `validate_with`).
+        let mut finite = true;
         let mut uploaded = std::collections::HashMap::new();
         let triangle_scalars = clouds
             .iter()
@@ -2404,6 +2407,7 @@ impl<'a> FlatThreeDFrame<'a> {
                     .get(cloud)
                     .ok_or(MetalError::Layout("3D dot cloud missing"))?;
                 for run in runs {
+                    finite &= !run.non_finite;
                     pieces.push(TrianglePiece {
                         first: next_triangle,
                         rows: PieceRows::Kernel(&run.rows),
@@ -2464,13 +2468,14 @@ impl<'a> FlatThreeDFrame<'a> {
                 u32::from(draw.depth_test),
                 texture_row,
             ]);
-            flat.draw_f32
-                .extend_from_slice(&three_d_shader_slab(*shader));
+            let slab = three_d_shader_slab(*shader);
+            finite &= scalars_finite(&slab);
+            flat.draw_f32.extend_from_slice(&slab);
             draw_bounds.push(draw.bounds);
         }
         // Within the reservation: `triangle_scalars` is every draw's rows.
         flat.triangles.resize(triangle_scalars, 0.0);
-        flatten_three_d_triangles(&pieces, &mut flat.triangles, flat.threads);
+        finite &= flatten_three_d_triangles(&pieces, &mut flat.triangles, flat.threads);
         // The clouds' runs are in the frame's rows now: free them before the
         // bins and tile lists are made.
         drop(pieces);
@@ -2487,7 +2492,7 @@ impl<'a> FlatThreeDFrame<'a> {
             bins,
             flat.threads,
         )?;
-        flat.validate()?;
+        flat.validate_with(Some(finite))?;
         Ok(flat)
     }
 
@@ -2576,7 +2581,17 @@ impl<'a> FlatThreeDFrame<'a> {
             .collect()
     }
 
+    /// [`Self::validate_with`], checking every draw scalar and row here.
+    #[cfg(test)]
     fn validate(&self) -> Result<(), MetalError> {
+        self.validate_with(None)
+    }
+
+    /// Refuse a frame the kernel cannot draw as it is. `written_finite` is
+    /// whether every draw scalar and triangle row is finite, when whoever
+    /// wrote them checked them as it did (the derive); `None` checks them
+    /// here. Either way the refusal is the same, in the same order.
+    fn validate_with(&self, written_finite: Option<bool>) -> Result<(), MetalError> {
         if self.params_u32.len() != 6 || self.params_f32.len() != 4 {
             return Err(MetalError::Layout("3D frame parameters"));
         }
@@ -2587,8 +2602,10 @@ impl<'a> FlatThreeDFrame<'a> {
             return Err(MetalError::Layout("3D scalar-table stride"));
         }
         if self.params_f32.iter().any(|value| !value.is_finite())
-            || !all_finite_on(&self.draw_f32, self.threads)
-            || !all_finite_on(&self.triangles, self.threads)
+            || !written_finite.unwrap_or_else(|| {
+                all_finite_on(&self.draw_f32, self.threads)
+                    && all_finite_on(&self.triangles, self.threads)
+            })
         {
             return Err(MetalError::Layout(
                 "3D f32 packet contains a non-finite value",
@@ -2862,6 +2879,9 @@ struct CloudRun {
     counts: Vec<u32>,
     bounds: Vec<Option<[f64; 4]>>,
     rows: Vec<[f32; THREE_D_TRIANGLE_STRIDE]>,
+    /// Whether a slab or row holds a non-finite scalar, checked as each
+    /// dot's are written.
+    non_finite: bool,
 }
 
 /// A cloud worker compiles at least this many dots; with fewer, the calling
@@ -2929,10 +2949,14 @@ fn compile_three_d_clouds(
                     fits = false;
                     return;
                 };
-                out.slabs.push(three_d_shader_slab(*shader));
+                let slab = three_d_shader_slab(*shader);
+                let first = out.rows.len();
+                out.rows.extend(rows.iter().map(three_d_triangle_row));
+                out.non_finite |=
+                    !scalars_finite(&slab) || !scalars_finite(out.rows[first..].as_flattened());
+                out.slabs.push(slab);
                 out.counts.push(count);
                 out.bounds.push(draw.bounds);
-                out.rows.extend(rows.iter().map(three_d_triangle_row));
             })
             .ok()?;
             fits.then_some(out)
@@ -3000,45 +3024,61 @@ const MAX_HOST_WORKERS: usize = 64;
 /// writes its own run of rows, and every scalar is its vertex value's `f32`
 /// cast, so the table does not depend on the threads. A worker that cannot
 /// start leaves its rows to the calling thread.
-fn flatten_three_d_triangles(pieces: &[TrianglePiece<'_>], out: &mut [f32], threads: usize) {
+///
+/// Returns whether every row it makes from a raster triangle is finite. A
+/// kernel row is copied as its cloud run holds it, and the run says whether
+/// it is ([`CloudRun`]).
+fn flatten_three_d_triangles(
+    pieces: &[TrianglePiece<'_>],
+    out: &mut [f32],
+    threads: usize,
+) -> bool {
     let rows = out.as_chunks_mut::<THREE_D_TRIANGLE_STRIDE>().0;
     let workers = threads
         .min(rows.len() / TRIANGLES_PER_FLATTEN_WORKER)
         .min(MAX_HOST_WORKERS);
     if workers < 2 {
-        flatten_three_d_rows(pieces, 0, rows);
-        return;
+        return flatten_three_d_rows(pieces, 0, rows);
     }
     let per_worker = rows.len().div_ceil(workers);
     let mut missed = Vec::new();
-    std::thread::scope(|scope| {
+    let mut finite = std::thread::scope(|scope| {
         let mut chunks = rows.chunks_mut(per_worker).enumerate();
         let mine = chunks.next();
+        let mut started = Vec::new();
         for (worker, chunk) in chunks {
             let first = worker * per_worker;
             let work = move || flatten_three_d_rows(pieces, first, chunk);
-            if spawn_host_worker(scope, worker, work).is_err() {
-                missed.push(worker);
+            match spawn_host_worker(scope, worker, work) {
+                Ok(handle) => started.push(handle),
+                Err(_) => missed.push(worker),
             }
         }
-        if let Some((_, chunk)) = mine {
-            flatten_three_d_rows(pieces, 0, chunk);
+        let mut finite = mine.is_none_or(|(_, chunk)| flatten_three_d_rows(pieces, 0, chunk));
+        for handle in started {
+            finite &= handle
+                .join()
+                .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
         }
+        finite
     });
     for worker in missed {
         let first = worker * per_worker;
         let end = first.saturating_add(per_worker).min(rows.len());
-        flatten_three_d_rows(pieces, first, &mut rows[first..end]);
+        finite &= flatten_three_d_rows(pieces, first, &mut rows[first..end]);
     }
+    finite
 }
 
-/// Write rows `first..first + rows.len()` of `pieces` into `rows`.
+/// Write rows `first..first + rows.len()` of `pieces` into `rows`, and say
+/// whether every row it made from a raster triangle is finite.
 fn flatten_three_d_rows(
     pieces: &[TrianglePiece<'_>],
     first: usize,
     rows: &mut [[f32; THREE_D_TRIANGLE_STRIDE]],
-) {
+) -> bool {
     let end = first + rows.len();
+    let mut finite = true;
     // The first piece with a row at or after `first`.
     let start = pieces.partition_point(|piece| piece.first + piece.rows.len() <= first);
     for piece in &pieces[start..] {
@@ -3053,11 +3093,21 @@ fn flatten_three_d_rows(
             PieceRows::Raster(triangles) => {
                 for (row, triangle) in out.iter_mut().zip(&triangles[skip..take]) {
                     *row = three_d_triangle_row(triangle);
+                    finite &= scalars_finite(row);
                 }
             }
             PieceRows::Kernel(kernel) => out.copy_from_slice(&kernel[skip..take]),
         }
     }
+    finite
+}
+
+/// Whether every value is finite: no magnitude's bits reach infinity's (a
+/// NaN's pass them). One pass with no early exit, so it vectorizes.
+fn scalars_finite(values: &[f32]) -> bool {
+    values.iter().fold(0_u32, |largest, value| {
+        largest.max(value.to_bits() & 0x7fff_ffff)
+    }) < f32::INFINITY.to_bits()
 }
 
 /// A triangle's row: each vertex's screen position, `1/w`, NDC depth, world
@@ -4296,6 +4346,194 @@ mod tests {
                         matches!(error, MetalError::Frame(FrameError::TooLarge)),
                         "{error:?}"
                     );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn scalars_are_finite_exactly_when_every_one_is() {
+        let specials = [
+            0.0,
+            -0.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1),
+            -f32::from_bits(0x007f_ffff),
+            f32::MAX,
+            f32::MIN,
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7f80_0001),
+            f32::from_bits(0xffff_ffff),
+        ];
+        assert!(scalars_finite(&[]));
+        for &special in &specials {
+            for len in 1..70 {
+                for at in 0..len {
+                    let mut values = (0..len)
+                        .map(|index| index as f32 - 30.5)
+                        .collect::<Vec<_>>();
+                    values[at] = special;
+                    assert_eq!(
+                        scalars_finite(&values),
+                        special.is_finite(),
+                        "{:#x} at {at} of {len}",
+                        special.to_bits()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_refuses_a_non_finite_scalar_it_writes_on_any_number_of_threads() {
+        // A finite f64 past f32's range is infinite in the frame's f32
+        // tables: in a cloud dot's draw and rows (its colour), or only in a
+        // surface's rows (its uv, which no draw scalar holds), the first or
+        // the last of them. The frame refuses each with the one thread's
+        // error on any number of threads, also when workers cannot start,
+        // and the same frames without it derive.
+        let (camera, _, plain, _, fine) = cloud_frames().swap_remove(0);
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: fine,
+        };
+        let past = 1.0e39;
+        let color = Srgb::from_rgb8(40, 60, 90).to_linear(1.0);
+        let normal = [0.0, 0.0, 1.0];
+        let backdrop_with = |uv: [f64; 2]| {
+            SurfaceMesh::new(
+                vec![
+                    SurfaceVertex {
+                        uv,
+                        ..SurfaceVertex::colored([-9.0, -6.0, -1.5], normal, color)
+                    },
+                    SurfaceVertex::colored([9.0, -6.0, -1.5], normal, color),
+                    SurfaceVertex::colored([0.0, 7.0, -1.5], normal, color),
+                ],
+                vec![0, 1, 2],
+            )
+            .expect("backdrop")
+        };
+        let finite = backdrop_with([0.0, 0.0]);
+        let far_uv = backdrop_with([past, 0.0]);
+        // The first or last dot, moved into the view.
+        let colored_past = |at: usize| {
+            let mut dots = plain.clone();
+            dots[at].center = [0.5, -0.25, 0.0];
+            dots[at].radius = 0.3;
+            dots[at].color.r = past;
+            dots
+        };
+        let (first_dot, last_dot) = (colored_past(0), colored_past(plain.len() - 1));
+        fn surface(mesh: &SurfaceMesh) -> ThreeDDraw<'_> {
+            ThreeDDraw::Surface(SurfaceDraw::new(mesh))
+        }
+        fn cloud(dots: &[CloudDot]) -> ThreeDDraw<'_> {
+            ThreeDDraw::DotCloud(DotCloudDraw::new(dots))
+        }
+        // A dot's shading is in its draw's scalars and not in its rows.
+        let shaded_past = [past, 0.0, 0.0];
+        let shaded_dot = ThreeDDraw::TrueDot(TrueDotDraw {
+            shading: shaded_past,
+            ..TrueDotDraw::new([0.5, -0.25, 0.0], 0.3, color)
+        });
+        let shaded_cloud = ThreeDDraw::DotCloud(DotCloudDraw {
+            shading: shaded_past,
+            ..DotCloudDraw::new(&plain)
+        });
+        // Each case: its draws, whether their rows are finite, whether the
+        // frame derives.
+        let cases = [
+            (
+                "finite, surface first",
+                vec![surface(&finite), cloud(&plain)],
+                true,
+                true,
+            ),
+            (
+                "finite, surface last",
+                vec![cloud(&plain), surface(&finite)],
+                true,
+                true,
+            ),
+            (
+                "uv, surface first",
+                vec![surface(&far_uv), cloud(&plain)],
+                false,
+                false,
+            ),
+            (
+                "uv, surface last",
+                vec![cloud(&plain), surface(&far_uv)],
+                false,
+                false,
+            ),
+            (
+                "colour, first dot",
+                vec![surface(&finite), cloud(&first_dot)],
+                false,
+                false,
+            ),
+            (
+                "colour, last dot",
+                vec![surface(&finite), cloud(&last_dot)],
+                false,
+                false,
+            ),
+            (
+                "shading, a true dot",
+                vec![surface(&finite), cloud(&plain), shaded_dot],
+                true,
+                false,
+            ),
+            (
+                "shading, the cloud",
+                vec![surface(&finite), shaded_cloud],
+                true,
+                false,
+            ),
+        ];
+        let refused = format!(
+            "{:?}",
+            Err::<(), _>(MetalError::Layout(
+                "3D f32 packet contains a non-finite value"
+            ))
+        );
+        for (label, draws, rows_finite, finite) in &cases {
+            // The value reaches the rows of the frame's true dots, or not.
+            let true_dots = clouds_as_true_dots(draws);
+            let oracle = ThreeDJob::new(&camera, &true_dots, tiling).expect("true dots");
+            let rows = sequential_triangle_rows(&oracle);
+            assert!(
+                rows.len() >= 3 * TRIANGLES_PER_FLATTEN_WORKER * THREE_D_TRIANGLE_STRIDE,
+                "{label}"
+            );
+            assert_eq!(
+                rows.iter().all(|value| value.is_finite()),
+                *rows_finite,
+                "{label}"
+            );
+            let job = ThreeDJob::new(&camera, draws, tiling).expect("job");
+            for (threads, workers_refused) in [
+                (1, 0),
+                (2, 0),
+                (3, 0),
+                (8, 0),
+                (8, u64::MAX),
+                (8, 0b1010_1010),
+            ] {
+                HOST_WORKERS_REFUSED.set(workers_refused);
+                let derived = FlatThreeDFrame::derive_on(&job, TriangleBins::PerTile, threads)
+                    .map(|flat| flat.triangles.len());
+                HOST_WORKERS_REFUSED.set(0);
+                let label = format!("{label}: {threads} threads, refused {workers_refused:#b}");
+                if *finite {
+                    assert!(derived.is_ok(), "{label}: {derived:?}");
+                } else {
+                    assert_eq!(format!("{:?}", derived.map(|_| ())), refused, "{label}");
                 }
             }
         }
