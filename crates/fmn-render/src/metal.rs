@@ -2477,7 +2477,7 @@ impl<'a> FlatThreeDFrame<'a> {
         drop(clouds);
 
         (flat.tile_offsets, flat.tile_draws) =
-            stable_three_d_bins(&draw_bounds, width, height, tile)?;
+            stable_three_d_bins(&draw_bounds, width, height, tile, flat.threads)?;
         (flat.command_triangles, flat.tile_triangles) = three_d_tile_triangles(
             &flat.triangles,
             &flat.draw_u32,
@@ -2586,11 +2586,8 @@ impl<'a> FlatThreeDFrame<'a> {
         {
             return Err(MetalError::Layout("3D scalar-table stride"));
         }
-        if self
-            .params_f32
-            .iter()
-            .chain(&self.draw_f32)
-            .any(|value| !value.is_finite())
+        if self.params_f32.iter().any(|value| !value.is_finite())
+            || !all_finite_on(&self.draw_f32, self.threads)
             || !all_finite_on(&self.triangles, self.threads)
         {
             return Err(MetalError::Layout(
@@ -2608,38 +2605,71 @@ impl<'a> FlatThreeDFrame<'a> {
             .cols()
             .checked_mul(self.rows())
             .ok_or(MetalError::SizeOverflow("3D tile count"))?;
-        if self.tile_offsets.len() != tile_count + 1
-            || self.tile_offsets.first().copied() != Some(0)
-            || self.tile_offsets.last().copied() != u32::try_from(self.tile_draws.len()).ok()
-            || self.tile_offsets.windows(2).any(|pair| pair[0] > pair[1])
-            || self.tile_draws.iter().any(|&draw| draw as usize >= draws)
-        {
+        let tiles_listed = self.tile_offsets.len() == tile_count + 1
+            && self.tile_offsets.first().copied() == Some(0)
+            && self.tile_offsets.last().copied() == u32::try_from(self.tile_draws.len()).ok()
+            && self.tile_offsets.windows(2).all(|pair| pair[0] <= pair[1]);
+        let triangles_listed = self.command_triangles.len() == self.tile_draws.len() + 1
+            && self.command_triangles.first().copied() == Some(0)
+            && self.command_triangles.last().copied()
+                == u32::try_from(self.tile_triangles.len()).ok();
+        // The commands' checks, in runs on the host workers: every command
+        // names a draw; the triangle offsets ascend; every listed triangle is
+        // its command's draw's, ascending. A failure is reported in that
+        // order whichever run finds it.
+        let ranges = self.draw_u32.as_chunks::<THREE_D_DRAW_U32_STRIDE>().0;
+        let (tile_draws, offsets, tile_triangles) = (
+            &self.tile_draws,
+            &self.command_triangles,
+            &self.tile_triangles,
+        );
+        let commands = tile_draws.len();
+        let workers = self
+            .threads
+            .min(commands / COMMANDS_PER_CHECK_WORKER)
+            .clamp(1, MAX_HOST_WORKERS);
+        let per_worker = commands.div_ceil(workers).max(1);
+        let runs = commands.div_ceil(per_worker).max(1);
+        let checked = on_host_workers(runs, |run| {
+            let run = run * per_worker..commands.min((run + 1) * per_worker);
+            if tile_draws[run.clone()]
+                .iter()
+                .any(|&draw| draw as usize >= draws)
+            {
+                return CommandCheck::NoDraw;
+            }
+            if !triangles_listed
+                || offsets[run.start..=run.end]
+                    .windows(2)
+                    .any(|pair| pair[0] > pair[1])
+            {
+                return CommandCheck::Unordered;
+            }
+            for command in run {
+                let [first, count, ..] = ranges[tile_draws[command] as usize];
+                let (lo, hi) = (offsets[command] as usize, offsets[command + 1] as usize);
+                // Past the end only when a later run's offsets descend.
+                let Some(listed) = tile_triangles.get(lo..hi) else {
+                    return CommandCheck::Unordered;
+                };
+                if listed.windows(2).any(|pair| pair[0] >= pair[1])
+                    || listed
+                        .iter()
+                        .any(|&triangle| triangle < first || triangle - first >= count)
+                {
+                    return CommandCheck::Outside;
+                }
+            }
+            CommandCheck::Listed
+        });
+        if !tiles_listed || checked.contains(&CommandCheck::NoDraw) {
             return Err(MetalError::Layout("3D stable tile CSR"));
         }
-        // Every listed triangle is its command's draw's, ascending.
-        if self.command_triangles.len() != self.tile_draws.len() + 1
-            || self.command_triangles.first().copied() != Some(0)
-            || self.command_triangles.last().copied()
-                != u32::try_from(self.tile_triangles.len()).ok()
-            || self
-                .command_triangles
-                .windows(2)
-                .any(|pair| pair[0] > pair[1])
-        {
+        if checked.contains(&CommandCheck::Unordered) {
             return Err(MetalError::Layout("3D tile triangle CSR"));
         }
-        let ranges = self.draw_u32.as_chunks::<THREE_D_DRAW_U32_STRIDE>().0;
-        for (command, &draw) in self.tile_draws.iter().enumerate() {
-            let [first, count, ..] = ranges[draw as usize];
-            let listed = &self.tile_triangles[self.command_triangles[command] as usize
-                ..self.command_triangles[command + 1] as usize];
-            if listed.windows(2).any(|pair| pair[0] >= pair[1])
-                || listed
-                    .iter()
-                    .any(|&triangle| triangle < first || triangle - first >= count)
-            {
-                return Err(MetalError::Layout("3D tile triangle outside its draw"));
-            }
+        if checked.contains(&CommandCheck::Outside) {
+            return Err(MetalError::Layout("3D tile triangle outside its draw"));
         }
         Ok(())
     }
@@ -2936,6 +2966,31 @@ const TRIANGLES_PER_TILE_WORKER: usize = 4096;
 
 /// A finiteness check worker takes at least this many scalars.
 const SCALARS_PER_CHECK_WORKER: usize = 1 << 18;
+
+/// A bins worker takes at least this many draws; with fewer, the calling
+/// thread bins them all.
+const DRAWS_PER_BIN_WORKER: usize = 4096;
+
+/// The most workers one binning starts: the calling thread then lays out
+/// each tile's lists run by run, so more runs cost it more.
+const MAX_BIN_WORKERS: usize = 16;
+
+/// A tile-list check worker takes at least this many tile commands.
+const COMMANDS_PER_CHECK_WORKER: usize = 8192;
+
+/// What a run of a 3D frame's tile commands is found to be when the frame
+/// is checked ([`FlatThreeDFrame::validate`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandCheck {
+    /// Every command's draw and triangle list is in order.
+    Listed,
+    /// A command names no draw of the frame.
+    NoDraw,
+    /// The commands' triangle offsets descend, or pass the lists.
+    Unordered,
+    /// A command lists a triangle of another draw, or one out of order.
+    Outside,
+}
 
 /// The most workers one flatten or check starts.
 const MAX_HOST_WORKERS: usize = 64;
@@ -3469,31 +3524,61 @@ fn on_host_workers<T: Send>(runs: usize, work: impl Fn(usize) -> T + Sync) -> Ve
     done.into_iter().map(|(_, value)| value).collect()
 }
 
+/// Each tile's draws in draw order, as one CSR: `tile_offsets`, one more
+/// than the tiles, and `tile_draws`. A draw is binned to every tile its
+/// bounds meet ([`visit_three_d_tiles`]).
+///
+/// On up to `threads` threads (and [`MAX_BIN_WORKERS`]), each binning a run
+/// of whole draws, at least [`DRAWS_PER_BIN_WORKER`], into lists of its own.
+/// The calling thread lays the runs' lists out tile by tile in run order, so
+/// a tile's draws are in draw order whichever run binned them: the tables of
+/// one thread. The refusal is one thread's too: the first draw's whose bounds
+/// are refused, then an overflowing count, total or offset, then a draw index
+/// past `u32`.
 fn stable_three_d_bins(
     bounds: &[Option<[f64; 4]>],
     width: u32,
     height: u32,
     tile: u32,
+    threads: usize,
 ) -> Result<(Vec<u32>, Vec<u32>), MetalError> {
     let cols = width.div_ceil(tile) as usize;
     let rows = height.div_ceil(tile) as usize;
     let tile_count = cols
         .checked_mul(rows)
         .ok_or(MetalError::SizeOverflow("3D tile count"))?;
-    let mut counts = vec![0usize; tile_count];
-    for &draw_bounds in bounds {
-        visit_three_d_tiles(draw_bounds, width, height, tile, |index| {
-            counts[index] = counts[index]
-                .checked_add(1)
-                .ok_or(MetalError::SizeOverflow("3D tile command count"))?;
-            Ok(())
-        })?;
-    }
+    let workers = threads
+        .min(bounds.len() / DRAWS_PER_BIN_WORKER)
+        .clamp(1, MAX_BIN_WORKERS);
+    let per_worker = bounds.len().div_ceil(workers).max(1);
+    let runs = bounds.len().div_ceil(per_worker).max(1);
+    let run_draws = |run: usize| run * per_worker..bounds.len().min((run + 1) * per_worker);
+
+    // Each run's count of draws in each tile; the first refusal in run order
+    // is the first in draw order.
+    let counted = on_host_workers(runs, |run| {
+        let mut counts = vec![0_usize; tile_count];
+        for &draw_bounds in &bounds[run_draws(run)] {
+            visit_three_d_tiles(draw_bounds, width, height, tile, |index| {
+                counts[index] = counts[index]
+                    .checked_add(1)
+                    .ok_or(MetalError::SizeOverflow("3D tile command count"))?;
+                Ok(())
+            })?;
+        }
+        Ok(counts)
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>, MetalError>>()?;
 
     let mut tile_offsets = Vec::with_capacity(tile_count + 1);
     tile_offsets.push(0);
     let mut total = 0usize;
-    for &count in &counts {
+    for index in 0..tile_count {
+        let count = counted
+            .iter()
+            .try_fold(0_usize, |sum, counts| sum.checked_add(counts[index]))
+            .ok_or(MetalError::SizeOverflow("3D tile command count"))?;
         total = total
             .checked_add(count)
             .ok_or(MetalError::SizeOverflow("3D tile command total"))?;
@@ -3501,19 +3586,42 @@ fn stable_three_d_bins(
             u32::try_from(total).map_err(|_| MetalError::SizeOverflow("3D tile command offset"))?,
         );
     }
-    let mut tile_draws = vec![0u32; total];
-    let mut cursors = tile_offsets[..tile_count]
-        .iter()
-        .map(|&offset| offset as usize)
-        .collect::<Vec<_>>();
-    for (draw, &draw_bounds) in bounds.iter().enumerate() {
-        let draw = u32::try_from(draw).map_err(|_| MetalError::SizeOverflow("3D draw index"))?;
-        visit_three_d_tiles(draw_bounds, width, height, tile, |index| {
-            let cursor = cursors[index];
-            tile_draws[cursor] = draw;
-            cursors[index] = cursor + 1;
-            Ok(())
-        })?;
+
+    // Each run's draws, tile by tile, each tile's in draw order. Its bounds
+    // were binned above without a refusal, so binning them again makes none.
+    let binned = on_host_workers(runs, |run| {
+        let counts = &counted[run];
+        let mut cursors = Vec::with_capacity(tile_count);
+        let mut end = 0_usize;
+        for &count in counts {
+            cursors.push(end);
+            end += count;
+        }
+        let mut draws = vec![0_u32; end];
+        let first = run * per_worker;
+        for (draw, &draw_bounds) in (first..).zip(&bounds[run_draws(run)]) {
+            let draw =
+                u32::try_from(draw).map_err(|_| MetalError::SizeOverflow("3D draw index"))?;
+            visit_three_d_tiles(draw_bounds, width, height, tile, |index| {
+                let cursor = cursors[index];
+                draws[cursor] = draw;
+                cursors[index] = cursor + 1;
+                Ok(())
+            })?;
+        }
+        Ok(draws)
+    })
+    .into_iter()
+    .collect::<Result<Vec<_>, MetalError>>()?;
+
+    let mut tile_draws = Vec::with_capacity(total);
+    let mut read = vec![0_usize; runs];
+    for index in 0..tile_count {
+        for ((draws, counts), at) in binned.iter().zip(&counted).zip(&mut read) {
+            let count = counts[index];
+            tile_draws.extend_from_slice(&draws[*at..*at + count]);
+            *at += count;
+        }
     }
     Ok((tile_offsets, tile_draws))
 }
@@ -4193,6 +4301,192 @@ mod tests {
         }
     }
 
+    /// `count` draw bounds over and past a `width` x `height` frame of `tile`
+    /// pixel tiles, from a fixed generator: some none, some lying on tile
+    /// lines, some spanning the frame, some wholly outside it, most small and
+    /// some across its edges.
+    fn bin_test_bounds(count: usize, width: u32, height: u32, tile: u32) -> Vec<Option<[f64; 4]>> {
+        let mut state = 0x5851_F42D_4C95_7F2D_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let (w, h, t) = (f64::from(width), f64::from(height), f64::from(tile));
+        (0..count)
+            .map(|index| match index % 9 {
+                0 => None,
+                1 => {
+                    let x = t * (unit() * (w / t)).floor();
+                    let y = t * (unit() * (h / t)).floor();
+                    Some([x, y, x + t, y])
+                }
+                2 => Some([-w, -h, 2.0 * w, 2.0 * h]),
+                3 => Some([w + 1.0 + unit() * w, 0.0, 3.0 * w, h]),
+                _ => {
+                    let (x, y) = (unit() * (w + 20.0) - 10.0, unit() * (h + 20.0) - 10.0);
+                    let r = unit() * 6.0;
+                    Some([x - r, y - r, x + r, y + r])
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_frames_bins_are_one_threads_on_any_number_with_each_tiles_draws_in_order() {
+        // FrankenLife FL-033: a frame of a 100,000-organism view holds about
+        // 200,000 draws, and they are binned in runs on the host workers. The
+        // bins are the one thread's, and each tile lists exactly the draws
+        // whose bounds meet it, edges included, in draw order: an oracle over
+        // every tile and draw.
+        let (width, height, tile) = (100_u32, 70_u32, 8_u32);
+        let bounds = bin_test_bounds(3 * DRAWS_PER_BIN_WORKER + 333, width, height, tile);
+        let mut offsets = vec![0_u32];
+        let mut listed = Vec::new();
+        for y in 0..height.div_ceil(tile) {
+            for x in 0..width.div_ceil(tile) {
+                let [x0, y0] = [x * tile, y * tile];
+                let [x1, y1] = [(x0 + tile).min(width), (y0 + tile).min(height)];
+                let [x0, y0, x1, y1] = [x0, y0, x1, y1].map(f64::from);
+                for (draw, bounds) in bounds.iter().enumerate() {
+                    if let Some([left, top, right, bottom]) = *bounds
+                        && right >= x0
+                        && bottom >= y0
+                        && left <= x1
+                        && top <= y1
+                    {
+                        listed.push(u32::try_from(draw).expect("draw index"));
+                    }
+                }
+                offsets.push(u32::try_from(listed.len()).expect("offset"));
+            }
+        }
+        let oracle = (offsets, listed);
+        // Spanning draws are in every tile; small ones in a few.
+        assert!(
+            oracle.1.len() > 2 * bounds.len(),
+            "{} listed",
+            oracle.1.len()
+        );
+        for threads in [1, 2, 3, 8, 64] {
+            assert_eq!(
+                stable_three_d_bins(&bounds, width, height, tile, threads).expect("bins"),
+                oracle,
+                "{threads} threads"
+            );
+        }
+        // A non-finite bound is refused on any number of threads; here it is
+        // in the last run.
+        let mut refused = bounds;
+        refused[3 * DRAWS_PER_BIN_WORKER + 100] = Some([0.0, f64::NAN, 4.0, 4.0]);
+        for threads in [1, 2, 8] {
+            assert!(
+                matches!(
+                    stable_three_d_bins(&refused, width, height, tile, threads),
+                    Err(MetalError::Layout("non-finite 3D draw bounds"))
+                ),
+                "{threads} threads"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frames_tile_commands_are_refused_alike_on_any_number_of_threads() {
+        // FrankenLife FL-033: `validate` checks the tile commands in runs on
+        // the host workers. A frame's tables pass on any number; a fault is
+        // refused with one thread's error wherever it lies, and of two faults
+        // in different runs, a command naming no draw is refused before
+        // descending triangle offsets, and those before a triangle outside
+        // its draw, as one thread checks them.
+        let (camera, backdrop, plain, lit, fine) = cloud_frames().swap_remove(0);
+        let draws = cloud_draws(&backdrop, &plain, &lit);
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: fine,
+        };
+        let job = ThreeDJob::new(&camera, &draws, tiling).expect("job");
+        let frame = FlatThreeDFrame::derive_on(&job, TriangleBins::PerTile, 8).expect("frame");
+        let commands = frame.tile_draws.len();
+        assert!(
+            commands >= 2 * COMMANDS_PER_CHECK_WORKER,
+            "{commands} commands"
+        );
+        let refusals = |flat: &mut FlatThreeDFrame<'_>| {
+            [1, 2, 8].map(|threads| {
+                flat.threads = threads;
+                match flat.validate() {
+                    Ok(()) => None,
+                    Err(MetalError::Layout(message)) => Some(message),
+                    Err(error) => panic!("{error:?}"),
+                }
+            })
+        };
+        let mut flat = FlatThreeDFrame::derive_on(&job, TriangleBins::PerTile, 8).expect("frame");
+        assert_eq!(refusals(&mut flat), [None; 3]);
+
+        // Faults early (the first run) and late (the last).
+        let no_draw = |flat: &mut FlatThreeDFrame<'_>, command: usize| {
+            flat.tile_draws[command] = u32::try_from(flat.draw_u32.len()).expect("draws");
+        };
+        let descend = |flat: &mut FlatThreeDFrame<'_>, command: usize| {
+            flat.command_triangles[command] = flat.command_triangles[command + 1] + 1;
+        };
+        let listed = (0..commands)
+            .filter(|&command| {
+                frame.command_triangles[command] < frame.command_triangles[command + 1]
+            })
+            .collect::<Vec<_>>();
+        let outside = |flat: &mut FlatThreeDFrame<'_>, command: usize| {
+            let entry = flat.command_triangles[command] as usize;
+            flat.tile_triangles[entry] = u32::MAX;
+        };
+        // An offset past the lists: where it ends a run, that run's offsets
+        // ascend and its last list would pass the lists' end.
+        let past = |flat: &mut FlatThreeDFrame<'_>, command: usize| {
+            flat.command_triangles[command] =
+                u32::try_from(flat.tile_triangles.len() + 5).expect("entries");
+        };
+        let (early, late) = (listed[3], listed[listed.len() - 3]);
+        let tile_csr = Some("3D stable tile CSR");
+        let triangle_csr = Some("3D tile triangle CSR");
+        let outside_draw = Some("3D tile triangle outside its draw");
+        // A case: its label, its faults and the commands they are planted
+        // at, and the refusal expected.
+        type Fault<'f> = &'f dyn Fn(&mut FlatThreeDFrame<'_>, usize);
+        type Case<'f> = (&'static str, Vec<(Fault<'f>, usize)>, Option<&'static str>);
+        let cases: [Case<'_>; 7] = [
+            ("no draw, late", vec![(&no_draw, late)], tile_csr),
+            ("descending, late", vec![(&descend, late)], triangle_csr),
+            ("outside, early", vec![(&outside, early)], outside_draw),
+            ("outside, late", vec![(&outside, late)], outside_draw),
+            (
+                "descending early, no draw late",
+                vec![(&descend, early), (&no_draw, late)],
+                tile_csr,
+            ),
+            (
+                "outside early, descending late",
+                vec![(&outside, early), (&descend, late)],
+                triangle_csr,
+            ),
+            // At the end of the first of two runs.
+            (
+                "past the lists",
+                vec![(&past, commands.div_ceil(2))],
+                triangle_csr,
+            ),
+        ];
+        for (label, faults, refusal) in cases {
+            let mut flat =
+                FlatThreeDFrame::derive_on(&job, TriangleBins::PerTile, 8).expect("frame");
+            for (fault, command) in faults {
+                fault(&mut flat, command);
+            }
+            assert_eq!(refusals(&mut flat), [refusal; 3], "{label}");
+        }
+    }
+
     /// Diagnostic, not a gate: host preparation of 200,000 dots at 1080p
     /// (FrankenLife's 100k organisms, a dot and a halo each), as true dots
     /// and as one cloud, from the draws to the frame's tables, alternating.
@@ -4827,13 +5121,22 @@ mod tests {
             assert!((&flat.command_triangles, &flat.tile_triangles) == (&lists.0, &lists.1));
             // The job's one thread offers no runs; a frame on 8 threads lists
             // on them, offering 7 runs to workers for the counts and 7 for
-            // the lists, and its tables are the same.
+            // the lists, and its tables are the same. It also bins its draws
+            // in runs (counts, then lists) and checks its tile commands in
+            // runs.
             assert_eq!(flat.threads, 1);
             HOST_RUNS_OFFERED.set(0);
             drop(FlatThreeDFrame::derive_with(&job, bins).expect("one thread"));
             assert_eq!(HOST_RUNS_OFFERED.get(), 0, "{bins:?}");
+            let bin_runs = 8.min(ranges.len() / DRAWS_PER_BIN_WORKER);
+            let check_runs = 8.min(flat.tile_draws.len() / COMMANDS_PER_CHECK_WORKER);
+            assert!(bin_runs > 1 && check_runs > 1, "{bin_runs}, {check_runs}");
             let threaded = FlatThreeDFrame::derive_on(&job, bins, 8).expect("8 threads");
-            assert_eq!(HOST_RUNS_OFFERED.get(), 2 * 7, "{bins:?}");
+            assert_eq!(
+                HOST_RUNS_OFFERED.get(),
+                2 * 7 + 2 * (bin_runs - 1) + (check_runs - 1),
+                "{bins:?}"
+            );
             assert!(frame_tables(&threaded) == frame_tables(&flat), "{bins:?}");
             let ours = |triangles: &[f32], draw_u32: &[u32], threads: usize, refused: u64| {
                 HOST_WORKERS_REFUSED.set(refused);
