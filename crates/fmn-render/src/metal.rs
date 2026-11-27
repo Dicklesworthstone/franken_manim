@@ -3620,11 +3620,13 @@ impl TileBand {
         }
     }
 
-    /// Visit its lists in list order: draw by draw, and within a draw
-    /// triangle by triangle, the commands of its tiles the triangle's f32
-    /// pixel span meets (`PerTile`, each triangle's tiles in `tiles`, by
-    /// triangle index), or the draw's whole range at each of its commands
-    /// (`Whole`, `tiles` unread). A command is named counting from
+    /// Visit its lists in list order: draw by draw, and within a draw run by
+    /// run of its consecutive triangles that meet the same tiles, the
+    /// commands of the tiles their f32 pixel span meets with the run
+    /// (`PerTile`, each triangle's tiles in `tiles`, by triangle index), or
+    /// the draw's whole range at each of its commands (`Whole`, `tiles`
+    /// unread). A command gets each triangle once, in order, as it would
+    /// visited one at a time. A command is named counting from
     /// `commands.start`. A refusal names its draw, the first in draw order
     /// the band lists; a draw refuses alike in every band.
     fn visit(
@@ -3665,15 +3667,28 @@ impl TileBand {
             for &pair in pairs {
                 command_of_tile[self.tile_of_command[command(pair)]] = command(pair);
             }
-            for triangle in first..last {
+            let mut triangle = first;
+            while triangle < last {
                 // A triangle past the rows has a corner missing from them.
-                let [col_lo, col_hi, row_lo, row_hi] = match tiles.get(triangle as usize) {
-                    Some(TriangleTiles::Meets(range)) => range.map(|index| index as usize),
-                    Some(TriangleTiles::None) => continue,
+                let range = match tiles.get(triangle as usize) {
+                    Some(&TriangleTiles::Meets(range)) => range,
+                    Some(TriangleTiles::None) => {
+                        triangle += 1;
+                        continue;
+                    }
                     Some(TriangleTiles::Refused) | None => {
                         return Err((draw, MetalError::Layout("3D triangle corner")));
                     }
                 };
+                // The run of the draw's triangles from this one that meet
+                // the same tiles (a billboard's two, a grid quad's): each of
+                // their commands lists the run's triangles in order, as
+                // visiting them one at a time would.
+                let mut end = triangle + 1;
+                while end < last && tiles.get(end as usize) == Some(&TriangleTiles::Meets(range)) {
+                    end += 1;
+                }
+                let [col_lo, col_hi, row_lo, row_hi] = range.map(|index| index as usize);
                 for row in row_lo.max(rows.start)..(row_hi + 1).min(rows.end) {
                     let row_base = row * cols - self.tiles.start;
                     for col in col_lo..=col_hi {
@@ -3681,10 +3696,11 @@ impl TileBand {
                             continue;
                         };
                         if command != usize::MAX {
-                            visit(command, triangle..triangle + 1);
+                            visit(command, triangle..end);
                         }
                     }
                 }
+                triangle = end;
             }
             for &pair in pairs {
                 command_of_tile[self.tile_of_command[command(pair)]] = usize::MAX;
@@ -5723,6 +5739,70 @@ mod tests {
         .expect("two tiles");
         assert_eq!(ours, lists);
         assert_eq!(ours, (vec![0, 1, 2], vec![0, 1]));
+
+        // Runs of triangles meeting the same tiles, in three tiles of one
+        // row: tile 0 binned to draws 0 and 1, tile 1 to draw 0, tile 2 to
+        // draws 0 and 1. Draw 0's triangles 0 to 2 meet tiles 0 and 1 (a
+        // run of three), 3 is off screen, 4 meets tiles 0 and 1 again (a
+        // run the off-screen one ends), 5 meets tiles 1 and 2, and 6 tiles
+        // 0 and 1; draw 1's 7 and 8 meet tiles 0 and 1, a run that does not
+        // reach into draw 0's. Each command lists its triangles once, in
+        // order; and a packet whose rows end inside triangle 4's last
+        // corner refuses after the first run, as the lists do.
+        let spans: [[f32; 2]; 9] = [
+            [2.0, 20.0],
+            [3.0, 19.0],
+            [4.0, 18.0],
+            [-40.0, -30.0],
+            [5.0, 17.0],
+            [20.0, 40.0],
+            [5.0, 17.0],
+            [2.0, 20.0],
+            [6.0, 30.0],
+        ];
+        let mut triangles = vec![0.0_f32; spans.len() * THREE_D_TRIANGLE_STRIDE];
+        for (triangle, [lo, hi]) in spans.into_iter().enumerate() {
+            for (corner, [x, y]) in [[lo, 1.0], [hi, 1.0], [lo, 5.0]].into_iter().enumerate() {
+                let base = triangle * THREE_D_TRIANGLE_STRIDE + corner * THREE_D_VERTEX_STRIDE;
+                triangles[base] = x;
+                triangles[base + 1] = y;
+            }
+        }
+        let mut draw_u32 = vec![0_u32; 2 * THREE_D_DRAW_U32_STRIDE];
+        draw_u32[..2].copy_from_slice(&[0, 7]);
+        draw_u32[THREE_D_DRAW_U32_STRIDE..THREE_D_DRAW_U32_STRIDE + 2].copy_from_slice(&[7, 2]);
+        let (tile_offsets, tile_draws) = ([0_u32, 2, 3, 5], [0_u32, 1, 0, 0, 1]);
+        let short = &triangles[..4 * THREE_D_TRIANGLE_STRIDE + 2 * THREE_D_VERTEX_STRIDE + 1];
+        for (triangles, expected) in [
+            (
+                triangles.as_slice(),
+                Some((
+                    vec![0, 5, 7, 13, 14, 14],
+                    vec![0, 1, 2, 4, 6, 7, 8, 0, 1, 2, 4, 5, 6, 5],
+                )),
+            ),
+            (short, None),
+        ] {
+            let ours = three_d_tile_triangles(
+                triangles,
+                &draw_u32,
+                &tile_offsets,
+                &tile_draws,
+                [48, 16, 16],
+                TriangleBins::PerTile,
+                1,
+            );
+            let lists = three_d_tile_triangles_by_lists(
+                triangles,
+                &draw_u32,
+                &tile_offsets,
+                &tile_draws,
+                [48, 16, 16],
+                TriangleBins::PerTile,
+            );
+            assert_eq!(format!("{ours:?}"), format!("{lists:?}"));
+            assert_eq!(ours.ok(), expected);
+        }
     }
 
     #[test]
