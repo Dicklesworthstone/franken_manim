@@ -179,15 +179,44 @@
     for (const item of $("tree").querySelectorAll("[role=treeitem]")) item.tabIndex = item === target ? 0 : -1;
     target.focus();
   }
+  const RESULT_PAGE_SIZE = 100;
+  let resultPage = 0;
+  function matchingObjects(nodes, query) {
+    if (/^#?\d+$/.test(query)) {
+      const id = Number(query.replace(/^#/, ""));
+      return nodes.filter(node => node.id === id);
+    }
+    const contains = value => value?.toLowerCase().includes(query);
+    return nodes.filter(node => contains(node.source_span?.kind) || contains(node.source_span?.excerpt) ||
+      node.records.fields.some(field => contains(field.name)));
+  }
+  $("object-search").addEventListener("input", () => {
+    resultPage = 0;
+    if (state.snapshot) renderTree();
+  });
+  for (const [button, step] of [["earlier-results", -1], ["later-results", 1]]) {
+    $(button).addEventListener("click", () => { resultPage += step; renderTree(); });
+  }
   function renderTree() {
-    const tree = $("tree"), nodes = new Map(state.snapshot.nodes.map(n => [n.id, n]));
+    const tree = $("tree"), captured = state.snapshot.nodes;
+    const query = $("object-search").value.trim().toLowerCase();
+    const matches = query ? matchingObjects(captured, query) : null;
+    const pages = matches ? Math.ceil(matches.length / RESULT_PAGE_SIZE) : 0;
+    resultPage = Math.max(0, Math.min(resultPage, pages - 1));
+    const offset = resultPage * RESULT_PAGE_SIZE;
+    const roots = matches ? matches.slice(offset, offset + RESULT_PAGE_SIZE) : captured.filter(n => n.root);
+    const nodes = matches ? null : new Map(captured.map(n => [n.id, n]));
+    $("result-pages").hidden = pages < 2;
+    $("earlier-results").disabled = resultPage === 0;
+    $("later-results").disabled = resultPage + 1 >= pages;
+    tree.setAttribute("aria-label", query ? "Matching objects" : "Scene family");
     const focused = document.activeElement?.dataset.entry;
     tree.replaceChildren();
     let count = 0;
     let tabAssigned = false;
     // Iterative traversal bounds both DAG expansion and call-stack use. IDs are
     // capture-local; restart clears selection and expansion state explicitly.
-    const stack = state.snapshot.nodes.filter(n => n.root).reverse().map(node => ({node, parent: tree, depth: 1, ancestors: new Set()}));
+    const stack = roots.reverse().map(node => ({node, parent: tree, depth: 1, ancestors: new Set()}));
     while (stack.length && count < 1000) {
       const {node, parent, depth, ancestors} = stack.pop();
       if (ancestors.has(node.id) || depth > 64) continue;
@@ -197,7 +226,7 @@
       const tabStop = !tabAssigned && (state.selected === null || node.id === state.selected);
       item.tabIndex = tabStop ? 0 : -1; tabAssigned ||= tabStop;
       item.setAttribute("aria-level", String(depth)); item.setAttribute("aria-selected", String(node.id === state.selected));
-      const children = node.children.map(id => nodes.get(id)).filter(Boolean);
+      const children = matches ? [] : node.children.map(id => nodes.get(id)).filter(Boolean);
       const expanded = !state.collapsed.has(node.id);
       if (children.length) item.setAttribute("aria-expanded", String(expanded));
       const label = `${children.length ? (expanded ? "▾ " : "▸ ") : "· "}#${node.id}${node.source_span ? " " + node.source_span.kind : " Object"} · ${node.records.count} records`;
@@ -214,7 +243,9 @@
       }
     }
     if (!tabAssigned && tree.firstElementChild) tree.firstElementChild.tabIndex = 0;
-    $("tree-state").textContent = `${state.snapshot.nodes.length} captured objects · ${count} visible entries · selection belongs to this frame${state.snapshot.truncated || stack.length ? " · display truncated; expand fewer branches" : ""}`;
+    const status = matches ? (count ? `Showing ${offset + 1}–${offset + count} of ${matches.length} matching objects` : "No matching objects")
+      : `${captured.length} captured objects · ${count} visible entries${stack.length ? " · search to reach other objects" : ""}`;
+    $("tree-state").textContent = status + (state.snapshot.truncated ? " · worker capture truncated" : "");
     if (focused) focusTreeEntry(focused);
   }
   $("tree").addEventListener("keydown", event => {

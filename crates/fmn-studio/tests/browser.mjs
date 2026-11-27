@@ -378,9 +378,18 @@ try {
     } else {
       const glyph = end.nodes.find(n => n.source_span?.kind === "math_glyph" && n.source_span.excerpt === "x"); assert.ok(glyph);
       assert.ok(glyph.parents.length > 0, "select a nested glyph");
-      await evaluate(`document.querySelector('[data-node="${glyph.id}"]').scrollIntoView({block:"center"})`);
+      const filterTree = value => evaluate(`(() => { const input = document.getElementById('object-search');
+        input.value = ${JSON.stringify(value)}; input.dispatchEvent(new Event('input')); })()`);
+      await filterTree("MATH_GLYPH");
+      assert.ok(await evaluate(`document.querySelector('[data-node="${glyph.id}"]') !== null`));
+      await filterTree("#" + glyph.id);
+      assert.equal(await evaluate("document.querySelectorAll('#tree [role=treeitem]').length"), 1);
       await click(`[data-node="${glyph.id}"] > .tree-label`);
       assert.match(await evaluate("document.getElementById('details').textContent"), /UTF-8 bytes 6\.\.7/);
+      await filterTree("no such field or span");
+      assert.equal(await evaluate("document.querySelectorAll('#tree [role=treeitem]').length"), 0);
+      await filterTree("");
+      await click(`[data-node="${glyph.id}"] > .tree-label`);
       await screenshot(scene + ".inspection.png");
       assert.equal(await evaluate("document.activeElement.getAttribute('role')"), "treeitem");
       await key("Home","Home",36);

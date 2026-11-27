@@ -30,6 +30,8 @@ fieldset { border: 1px solid #526278; border-radius: 6px; margin: 18px 0 10px; }
 fieldset label { display: inline-block; margin: 4px 12px 6px 0; }
 #error { border: 1px solid #ee9b89; background: #462b2d; padding: 12px; border-radius: 6px; white-space: pre-wrap; overflow-wrap: anywhere; }
 #tree { max-height: 340px; overflow: auto; }
+#object-search { display: block; width: 100%; margin: 4px 0 8px; padding: 7px; color: inherit; background: #11151c; border: 1px solid #526278; border-radius: 6px; }
+#result-pages { margin-bottom: 8px; }
 [role=group] { padding-left: 16px; }
 [role=treeitem] { cursor: pointer; border-left: 2px solid transparent; }
 .tree-label { display: block; padding: 5px 8px; overflow-wrap: anywhere; }

@@ -98,7 +98,12 @@ const STUDIO_INDEX_HTML_PREFIX: &str = concat!(
 <label><input id="input-events" type="checkbox" disabled> Send preview input to the scene</label>
 <p id="input-support">Checking scene input support…</p></section>
 <aside aria-label="Scene inspector"><section><h2>Family tree</h2>
-<p id="tree-state"></p><div id="tree" role="tree" aria-label="Scene family"></div></section>
+<label for="object-search">Find an object</label>
+<input id="object-search" type="search" placeholder="Object ID, source text or record field">
+<p id="tree-state"></p>
+<div id="result-pages" hidden><button id="earlier-results" type="button">Previous results</button>
+<button id="later-results" type="button">Next results</button></div>
+<div id="tree" role="tree" aria-label="Scene family"></div></section>
 <section aria-label="Selected object"><h2 id="selection">Select an object</h2>
 <div id="details"></div></section></aside></main>
 <footer>Arrow keys navigate the family tree. Home / End select its first / last visible item.
