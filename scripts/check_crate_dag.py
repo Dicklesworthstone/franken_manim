@@ -173,6 +173,7 @@ EXPECTED: dict[str, set[str]] = {
     # (fm-oee) decodes the FMTL/1 timeline bundle, a §6.7 canonical
     # container — the format layer itself, never a reimplemented parser.
     "fmn-wasm": {
+        "fmn-library",  # opt-in browser typesetting
         "fmn-core",
         "fmn-dmath",
         "fmn-geom",

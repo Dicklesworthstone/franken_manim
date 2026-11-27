@@ -98,6 +98,7 @@ fn inherited_family_does_not_mask_an_inner_monospace_tag() {
     assert_eq!(built.layout.glyphs[1].face.family, "IBM Plex Sans");
 }
 
+#[cfg(feature = "atlas-providers")]
 #[test]
 fn native_highlighter_exposes_positional_styles_without_source_rewriting() {
     use fmn_core::color::Srgb;

@@ -6,6 +6,13 @@ license.workspace = true
 repository.workspace = true
 description = "Menagerie + Atlas"
 
+[features]
+# The native distribution includes the scientific, graph, dataframe, and
+# Markdown authoring adapters. Scribe uses the same Text/Tex builders without
+# pulling their unrelated host-side providers into the browser.
+default = ["atlas-providers"]
+atlas-providers = ["dep:fsci-integrate", "dep:franken_markdown", "dep:fnx-classes", "dep:fp-frame", "dep:fp-types"]
+
 [dependencies]
 fmn-dmath.workspace = true
 fmn-core.workspace = true
@@ -15,16 +22,40 @@ fmn-mobject.workspace = true
 fmn-anim.workspace = true
 fmn-text.workspace = true
 fmn-tex.workspace = true
-fsci-integrate.workspace = true
-franken_markdown.workspace = true
-fnx-classes.workspace = true
-fp-frame.workspace = true
-fp-types.workspace = true
+fsci-integrate = { workspace = true, optional = true }
+franken_markdown = { workspace = true, optional = true }
+fnx-classes = { workspace = true, optional = true }
+fp-frame = { workspace = true, optional = true }
+fp-types = { workspace = true, optional = true }
 
 
 [dev-dependencies]
 fmn-hash.workspace = true
 fmn-render.workspace = true
+
+[[test]]
+name = "code_and_markdown"
+required-features = ["atlas-providers"]
+
+[[test]]
+name = "data_mobjects"
+required-features = ["atlas-providers"]
+
+[[test]]
+name = "live_streamlines"
+required-features = ["atlas-providers"]
+
+[[test]]
+name = "markdown_documents"
+required-features = ["atlas-providers"]
+
+[[test]]
+name = "network_graph"
+required-features = ["atlas-providers"]
+
+[[test]]
+name = "ode_callbacks"
+required-features = ["atlas-providers"]
 
 [lints]
 workspace = true

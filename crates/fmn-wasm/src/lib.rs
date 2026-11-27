@@ -63,6 +63,8 @@ use wasm_bindgen::JsError;
 use wasm_bindgen::prelude::wasm_bindgen;
 
 pub mod player;
+#[cfg(feature = "scribe")]
+pub mod scribe;
 
 /// The tier-2 demo bundle builder — host-side tooling only; the wasm32
 /// artifact never carries the exporter.
@@ -333,11 +335,7 @@ fn build_scene(kind: &str, width: u32, height: u32) -> Result<SceneBuild, Surfac
             SCENE_KINDS.join(", ")
         )));
     }
-    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
-        return Err(SurfaceError(format!(
-            "invalid dimensions {width}x{height}: each must be in 1..={MAX_DIMENSION}"
-        )));
-    }
+    validate_dimensions(width, height)?;
 
     let config = RuntimeConfig {
         fps: FPS,
@@ -447,6 +445,15 @@ fn frame_config(width: u32, height: u32) -> FrameConfig {
         },
         Srgb::from_rgb8(0x00, 0x00, 0x00).to_linear(1.0),
     )
+}
+
+fn validate_dimensions(width: u32, height: u32) -> Result<(), SurfaceError> {
+    if width == 0 || height == 0 || width > MAX_DIMENSION || height > MAX_DIMENSION {
+        return Err(SurfaceError(format!(
+            "invalid dimensions {width}x{height}: each must be in 1..={MAX_DIMENSION}"
+        )));
+    }
+    Ok(())
 }
 
 fn rgba8_output_len(width: u32, height: u32) -> Result<usize, SurfaceError> {

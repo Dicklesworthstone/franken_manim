@@ -1061,6 +1061,7 @@ dependencies = [
  "fmn-frame",
  "fmn-geom",
  "fmn-hash",
+ "fmn-library",
  "fmn-mobject",
  "fmn-render",
  "fmn-scene",

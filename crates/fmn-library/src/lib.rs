@@ -89,18 +89,23 @@ pub mod arc;
 pub mod boolean_ops;
 pub mod brace;
 pub mod bubble;
+#[cfg(feature = "atlas-providers")]
 pub mod code;
 pub mod controls;
 pub mod coords;
+#[cfg(feature = "atlas-providers")]
 pub mod data_mobjects;
 pub mod drawings;
+#[cfg(feature = "atlas-providers")]
 pub mod fields;
 pub mod graphs;
 pub mod image;
 pub mod line;
+#[cfg(feature = "atlas-providers")]
 pub mod markdown;
 pub mod matchers;
 pub mod matrix;
+#[cfg(feature = "atlas-providers")]
 pub mod network_graph;
 pub mod neural_network;
 pub mod numbers;
@@ -132,6 +137,7 @@ pub use bubble::{
     Bubble, BubbleConfig, BubbleDirection, BubbleError, MAX_BUBBLE_BULGES, MAX_BUBBLE_POINTS,
     MAX_BUBBLE_TRAIL_CIRCLES, SpeechBubble, ThoughtBubble,
 };
+#[cfg(feature = "atlas-providers")]
 pub use code::{Code, CodeTheme};
 pub use controls::{
     Button, Checkbox, ColorSliders, ControlMob, ControlMobject, ControlPanel, ControlPanelMobject,
@@ -142,9 +148,11 @@ pub use coords::{
     Axes, AxisConfig, CoordinateFrame, CoordinateFrameError, CoordinateSystem, CoordsError,
     LiveCoordinateSystem, NumberLine, RiemannConfig, Slider, UnitInterval, create_axis,
 };
+#[cfg(feature = "atlas-providers")]
 pub use data_mobjects::{
     BarChart, BarChartBinding, ChangeBarValues, DataMobjectError, TableMobject,
 };
+#[cfg(feature = "atlas-providers")]
 pub use fields::{
     AnimatedBoundary, AnimatedStreamLines, FieldError, IntegratorTune, OdeError, OdeSamples,
     STREAM_LINES_SUBSTREAM, StreamLineMeta, StreamLineStyle, StreamLines, StreamLinesMobject,
@@ -160,6 +168,7 @@ pub use graphs::{
 };
 pub use image::{DEFAULT_IMAGE_HEIGHT, ImageError, ImageMobject};
 pub use line::{Arrow, DashedLine, Elbow, Line, StrokeArrow, tangent_line, vector};
+#[cfg(feature = "atlas-providers")]
 pub use markdown::{LaidBlock, Markdown, MarkdownMobject, heading_factor};
 pub use matchers::{
     SurroundingRectangle, background_rectangle, checkmark, cross, exmark, underline,
@@ -168,10 +177,12 @@ pub use matrix::{
     DEFAULT_MAX_MATRIX_ENTRIES, DecimalMatrix, IntegerMatrix, Matrix, MatrixError, MatrixMobject,
     MobjectMatrix, TexMatrix,
 };
+#[cfg(feature = "atlas-providers")]
 pub use network_graph::{
     DEFAULT_SPRING_IDEAL_EDGE, DEFAULT_SPRING_ITERATIONS, GraphLayout, NetworkGraph,
     NetworkGraphError,
 };
+#[cfg(feature = "atlas-providers")]
 pub use network_graph::{
     FlowAlongEdges, GraphAnimationError, GraphFlowConfig, GraphTraversal, GraphTraversalConfig,
     LayoutTransition, NetworkGraphMobject, TraverseGraph,

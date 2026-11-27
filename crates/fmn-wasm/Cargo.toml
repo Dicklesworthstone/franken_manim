@@ -12,7 +12,11 @@ readme = "README.md"
 # the same code (the bindgen macros are inert off-target).
 crate-type = ["cdylib", "rlib"]
 
+[features]
+scribe = ["dep:fmn-library"]
+
 [dependencies]
+fmn-library = { path = "../fmn-library", default-features = false, optional = true }
 fmn-core.workspace = true
 fmn-dmath.workspace = true
 fmn-frame.workspace = true

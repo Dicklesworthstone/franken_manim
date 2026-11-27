@@ -145,3 +145,18 @@ tools are not on `PATH`.
 `crates/fmn-wasm/SIZE_BUDGET.tsv` records the measured sizes and the
 enforced budget (measured + 10% headroom); a host test in the crate
 (`size_budget_within_headroom`) fails if a rebuilt artifact exceeds it.
+
+### Browser-local text and math
+
+The [typesetter](./scribe.html) accepts plain text, markup, and display TeX.
+Build its optional Wasm module alongside the standard player, serve the demo
+directory as above, and open `scribe.html`.
+
+```sh
+wasm-pack build --target web --out-dir ../../demo/wasm/pkg-scribe crates/fmn-wasm -- --features scribe
+```
+
+`FmnScribe.typeset(kind, source, fontSize)` uses the native builders and bundled
+faces. Keep the returned object to redraw at multiple resolutions with
+`render_into(width, height, rgba)`. Call `to_bundle()` to save the preview as a single-frame FMTL file for the
+standard player. Release the typeset object with `free()` after use.

@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FrankenManim · Typesetter</title>
+<style>
+  :root { color-scheme: dark; font: 1rem/1.5 system-ui, sans-serif; }
+  body { max-width: 54rem; margin: 3rem auto; padding: 0 1rem; }
+  form { display: grid; gap: .8rem; }
+  label { display: grid; gap: .25rem; }
+  textarea, select, button { font: inherit; padding: .5rem; }
+  button { justify-self: start; }
+  canvas { display: block; width: 100%; margin: 1rem 0; background: black; }
+</style>
+<h1>Typesetter</h1>
+<form>
+  <label>Content type <select id="kind"><option value="math">Display math</option><option value="text">Plain text</option><option value="markup">Markup text</option></select></label>
+  <label>Source <textarea id="source" rows="3" spellcheck="false">\frac{d}{dx}x^2 = 2x</textarea></label>
+  <div><button disabled>Render</button> <button type="button" id="save" disabled>Save preview as .fmtl</button></div>
+</form>
+<canvas width="864" height="360" aria-label="Typeset preview"></canvas>
+<p role="status" id="status">Loading bundled fonts…</p>
+<script type="module">
+  const form = document.querySelector("form");
+  const status = document.querySelector("#status");
+  const canvas = document.querySelector("canvas");
+  const ctx = canvas.getContext("2d");
+  const pixels = new Uint8Array(canvas.width * canvas.height * 4);
+  const frame = new ImageData(new Uint8ClampedArray(pixels.buffer), canvas.width, canvas.height);
+  try {
+    const { default: init, FmnScribe } = await import("./pkg-scribe/fmn_wasm.js");
+    await init();
+    const scribe = new FmnScribe();
+    const save = document.querySelector("#save");
+    let preview;
+    function render() {
+      let object;
+      try {
+        object = scribe.typeset(form.elements.kind.value, form.elements.source.value, 90);
+        object.render_into(canvas.width, canvas.height, pixels);
+        ctx.putImageData(frame, 0, 0);
+        preview?.free();
+        preview = object;
+        object = undefined;
+        save.disabled = false;
+        status.textContent = "";
+      } catch (error) {
+        status.textContent = String(error);
+      } finally {
+        object?.free();
+      }
+    }
+    form.addEventListener("submit", event => { event.preventDefault(); render(); });
+    save.addEventListener("click", () => {
+      try {
+        const url = URL.createObjectURL(new Blob([preview.to_bundle()]));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "typeset.fmtl";
+        link.click();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } catch (error) {
+        status.textContent = String(error);
+      }
+    });
+    form.querySelector("button").disabled = false;
+    render();
+  } catch (error) {
+    status.textContent = "Could not load the Scribe build. " + error;
+  }
+</script>
+</html>
