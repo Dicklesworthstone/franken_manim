@@ -1128,6 +1128,91 @@ impl TrueDotDraw {
     }
 }
 
+/// One dot of a [`DotCloudDraw`]: what varies from dot to dot.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CloudDot {
+    /// World-space center.
+    pub center: Vec3,
+    /// Non-negative world-space radius. Zero draws nothing.
+    pub radius: f64,
+    /// Linear-light straight color.
+    pub color: LinearRgba,
+}
+
+/// Many camera-facing dots as one draw (FrankenLife FL-033): in painter
+/// order, the [`TrueDotDraw`] of each of its dots with the cloud's glow
+/// factor, anti-alias width, shading and depth test, in the world
+/// (`is_fixed_in_frame` zero) and cut by no plane
+/// ([`DotCloudDraw::true_dot`]). A job draws a cloud exactly as it draws those
+/// true dots in its place, on every route, byte for byte.
+///
+/// What differs is where the work is done. A job keeps the cloud's dots
+/// borrowed rather than compiling them: it refuses their values as it would
+/// refuse the true dots' (the first refused dot's error), and counts each dot
+/// as a draw row (an empty cloud as one). Their triangle rows are counted
+/// where they are made. The CPU route compiles the true dots when it renders,
+/// with the job's other draws again, and refuses as the job of those draws
+/// would. The Metal route compiles them when it derives its frame, on its host
+/// threads, straight into the frame's tables, which are the true dots' tables
+/// scalar for scalar: no per-dot draw or row is held between the job and the
+/// frame, and the frame uploads what the true dots' frame uploads.
+///
+/// Only a job draws a cloud: a retained projection (the retained frame
+/// renderer's camera cache) refuses one as a mismatched layout
+/// ([`ThreeDError::ProjectionMismatch`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DotCloudDraw<'a> {
+    /// The dots, in painter order.
+    pub dots: &'a [CloudDot],
+    /// Zero for TrueDot/DotCloud; two for GlowDot.
+    pub glow_factor: f64,
+    /// Silhouette anti-alias width in output pixels.
+    pub anti_alias_width: f64,
+    /// `(reflectiveness, gloss, shadow)`.
+    pub shading: Vec3,
+    /// Opt-in depth test/write.
+    pub depth_test: bool,
+}
+
+impl<'a> DotCloudDraw<'a> {
+    /// Unlit, hard-interior dots, as [`TrueDotDraw::new`] draws each.
+    #[must_use]
+    pub const fn new(dots: &'a [CloudDot]) -> Self {
+        Self {
+            dots,
+            glow_factor: 0.0,
+            anti_alias_width: TRUE_DOT_AA_WIDTH,
+            shading: [0.0; 3],
+            depth_test: false,
+        }
+    }
+
+    /// Glow dots, as [`TrueDotDraw::glow`] draws each.
+    #[must_use]
+    pub const fn glow(dots: &'a [CloudDot]) -> Self {
+        Self {
+            glow_factor: GLOW_DOT_FACTOR,
+            ..Self::new(dots)
+        }
+    }
+
+    /// The true dot `dot` stands for in this cloud.
+    #[must_use]
+    pub const fn true_dot(&self, dot: CloudDot) -> TrueDotDraw {
+        TrueDotDraw {
+            center: dot.center,
+            radius: dot.radius,
+            color: dot.color,
+            glow_factor: self.glow_factor,
+            anti_alias_width: self.anti_alias_width,
+            shading: self.shading,
+            is_fixed_in_frame: 0.0,
+            clip_planes: [[0.0; 4]; 4],
+            depth_test: self.depth_test,
+        }
+    }
+}
+
 /// One command in the 3D painter sequence.
 #[derive(Debug, Clone, Copy)]
 pub enum ThreeDDraw<'a> {
@@ -1137,6 +1222,8 @@ pub enum ThreeDDraw<'a> {
     Surface(SurfaceDraw<'a>),
     /// Camera-facing radial dot.
     TrueDot(TrueDotDraw),
+    /// Many camera-facing radial dots as one command ([`DotCloudDraw`]).
+    DotCloud(DotCloudDraw<'a>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1624,6 +1711,7 @@ impl<M> ProjectedDraw<M> {
         match &self.primitive {
             ProjectedPrimitive::Triangles { triangles, .. } => triangles.shared_owner_bytes(),
             ProjectedPrimitive::Vector(vector) => vector.0.shared_owner_bytes(),
+            ProjectedPrimitive::DotCloud { .. } => 0,
         }
     }
 
@@ -1636,6 +1724,7 @@ impl<M> ProjectedDraw<M> {
             ProjectedPrimitive::Vector(vector) => {
                 ProjectedPrimitive::Vector(CompiledVectorSlot(vector.0.into_shared(budget)?))
             }
+            ProjectedPrimitive::DotCloud { cloud } => ProjectedPrimitive::DotCloud { cloud },
         };
         Ok(self)
     }
@@ -1650,6 +1739,7 @@ impl<M> ProjectedDraw<M> {
                     }
                 }
                 ProjectedPrimitive::Vector(vector) => ProjectedPrimitive::Vector(vector),
+                ProjectedPrimitive::DotCloud { cloud } => ProjectedPrimitive::DotCloud { cloud },
             },
             depth_test: self.depth_test,
             bounds: self.bounds,
@@ -1675,6 +1765,12 @@ pub(crate) enum ProjectedPrimitive<M> {
         shader: ProjectedShader<M>,
     },
     Vector(CompiledVectorSlot),
+    /// A [`DotCloudDraw`], its dots validated and not compiled: the job's
+    /// cloud `cloud` (in the job's `clouds`). It holds no rows and has no
+    /// bounds. Only a job holds one: a retained projection refuses a cloud.
+    DotCloud {
+        cloud: usize,
+    },
 }
 
 pub(crate) type CompiledPrimitive<'a> = ProjectedPrimitive<TextureMaterial<'a>>;
@@ -2227,6 +2323,8 @@ impl PreparedThreeDProjection {
             scratch_pool: Arc::clone(&self.scratch_pool),
             bloom: None,
             threads: 1,
+            clouds: Vec::new(),
+            source: Vec::new(),
         })
     }
 }
@@ -2262,6 +2360,12 @@ pub struct ThreeDJob<'a> {
     bloom: Option<Bloom>,
     /// The threads the job was prepared on ([`ThreeDJob::preparation_threads`]).
     threads: usize,
+    /// The job's [`ThreeDDraw::DotCloud`]s, in painter order: a cloud's
+    /// command names its index here.
+    clouds: Vec<DotCloudDraw<'a>>,
+    /// The draws the job was made from, kept only when it has a cloud, for
+    /// the job with the clouds' true dots ([`ThreeDJob::with_true_dots`]).
+    source: Vec<ThreeDDraw<'a>>,
 }
 
 impl<'a> ThreeDJob<'a> {
@@ -2336,7 +2440,20 @@ impl<'a> ThreeDJob<'a> {
         let mut budget = PreparationBudget::new(limits);
         let mut compiled = Vec::new();
         budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
-        compile_draws(camera, draws, &mut budget, &mut compiled, threads)?;
+        let mut clouds = Vec::new();
+        compile_draws(
+            camera,
+            draws,
+            &mut budget,
+            &mut compiled,
+            &mut clouds,
+            threads,
+        )?;
+        let mut source = Vec::new();
+        if !clouds.is_empty() {
+            budget.reserve_retained(&mut source, "dot cloud job draws", draws.len())?;
+            source.extend_from_slice(draws);
+        }
         let sample_grid = match camera.edge_sample_limit() {
             EdgeSampleLimit::Native => 1,
             EdgeSampleLimit::TwoByTwo => 2,
@@ -2367,7 +2484,70 @@ impl<'a> ThreeDJob<'a> {
             scratch_pool: Arc::new(TileScratchPool::new()),
             bloom: None,
             threads,
+            clouds,
+            source,
         })
+    }
+
+    /// The job's [`ThreeDDraw::DotCloud`]s, in painter order: a cloud's
+    /// command names its index here.
+    #[cfg(feature = "metal")]
+    pub(crate) fn clouds(&self) -> &[DotCloudDraw<'a>] {
+        &self.clouds
+    }
+
+    /// The limits the job was prepared under.
+    #[cfg(feature = "metal")]
+    pub(crate) const fn preparation_limits(&self) -> ThreeDPreparationLimits {
+        self.preparation_limits
+    }
+
+    /// The job of the same draws with each [`ThreeDDraw::DotCloud`] replaced
+    /// by its true dots ([`DotCloudDraw::true_dot`]), in its place: what
+    /// [`ThreeDJob::new_with_threads`] makes of them on this job's camera,
+    /// tiling, limits and threads, with this job's arithmetic identity and no
+    /// bloom. A job without a cloud is not asked for it.
+    ///
+    /// # Errors
+    /// As [`ThreeDJob::new_with_threads`] on those draws. Their validation
+    /// was this job's, so only their rows' limits and allocation can refuse.
+    fn with_true_dots(&self) -> Result<Self, ThreeDError> {
+        let dots = self
+            .clouds
+            .iter()
+            .try_fold(self.source.len(), |count, cloud| {
+                count.checked_add(cloud.dots.len())
+            })
+            .ok_or(ThreeDError::PreparationSizeOverflow {
+                resource: "dot cloud true dots",
+            })?;
+        let mut draws = Vec::new();
+        draws
+            .try_reserve_exact(dots)
+            .map_err(|_| ThreeDError::PreparationAllocationFailed {
+                resource: "dot cloud true dots",
+                requested: u64::try_from(dots).unwrap_or(u64::MAX),
+            })?;
+        for &draw in &self.source {
+            match draw {
+                ThreeDDraw::DotCloud(cloud) => draws.extend(
+                    cloud
+                        .dots
+                        .iter()
+                        .map(|&dot| ThreeDDraw::TrueDot(cloud.true_dot(dot))),
+                ),
+                other => draws.push(other),
+            }
+        }
+        let mut job = Self::new_with_threads(
+            self.camera,
+            &draws,
+            self.tiling,
+            self.preparation_limits,
+            self.threads,
+        )?;
+        job.scratch_pool = Arc::clone(&self.scratch_pool);
+        Ok(job)
     }
 
     /// The threads the job was prepared on: the `threads` of
@@ -2398,7 +2578,14 @@ impl<'a> ThreeDJob<'a> {
     }
 
     /// Freeze the projected rows without retaining any borrowed texture.
+    ///
+    /// # Errors
+    /// [`ThreeDError::ProjectionMismatch`] for a job with a cloud: a retained
+    /// projection holds none ([`DotCloudDraw`]).
     pub(crate) fn into_projection(self) -> Result<PreparedThreeDProjection, ThreeDError> {
+        if !self.clouds.is_empty() {
+            return Err(ThreeDError::ProjectionMismatch);
+        }
         let mut budget = PreparationBudget::new(self.preparation_limits);
         budget.working_bytes = self.preparation_bytes;
         let mut draws = Vec::new();
@@ -2424,14 +2611,16 @@ impl<'a> ThreeDJob<'a> {
         })
     }
 
-    /// Number of painter-sequence commands, including clipped-empty draws.
+    /// Number of painter-sequence commands, including clipped-empty draws. A
+    /// cloud ([`DotCloudDraw`]) is one.
     #[must_use]
     pub fn draw_count(&self) -> usize {
         self.draws.len()
     }
 
     /// Number of draw/tile pairs admitted to the raster pass by the prepared
-    /// screen bounds.
+    /// screen bounds. A cloud ([`DotCloudDraw`]) has none: its dots' bounds
+    /// are made with their rows, when a route draws the frame.
     ///
     /// This is the deterministic work unit behind the first bounds rejection
     /// in the tile raster loop. It deliberately excludes per-primitive and
@@ -2464,7 +2653,9 @@ impl<'a> ThreeDJob<'a> {
         self.triangle_bins.take().is_some()
     }
 
-    /// Conservative logical bytes admitted while preparing this job.
+    /// Conservative logical bytes admitted while preparing this job. A
+    /// cloud's ([`DotCloudDraw`]) are its dots' draw rows only: the rows of
+    /// their triangles are made, and held, while a route draws the frame.
     #[must_use]
     pub const fn preparation_bytes(&self) -> u64 {
         self.preparation_bytes
@@ -2525,7 +2716,9 @@ impl<'a> ThreeDJob<'a> {
     /// # Errors
     /// Returns [`FrameError::FormatMismatch`] or [`FrameError::DimensionMismatch`]
     /// for a mismatched destination, and [`FrameError::TooLarge`] if covered
-    /// scratch geometry is not addressable or cannot be reserved. Returns
+    /// scratch geometry is not addressable or cannot be reserved, or if the
+    /// rows of the true dots of the job's clouds ([`DotCloudDraw`]), compiled
+    /// now, pass its preparation limits or cannot be allocated. Returns
     /// [`FrameError::WorkerSpawnFailed`] if the host cannot start the complete
     /// requested CPU render team. With a bloom, as [`Bloom::apply`] after the
     /// raster.
@@ -2547,6 +2740,13 @@ impl<'a> ThreeDJob<'a> {
         destination: &mut FrameBuffer,
         spawner: &S,
     ) -> Result<(), FrameError> {
+        if !self.clouds.is_empty() {
+            // The CPU route draws a cloud as its true dots, compiled now.
+            return self
+                .with_true_dots()
+                .map_err(|_| FrameError::TooLarge)?
+                .render_into_with_spawner(threads, destination, spawner);
+        }
         // W5 wasm tier 1: collapses to 1 on wasm32 (no spawnable threads);
         // the identity on native. See crate::effective_threads.
         let threads = crate::effective_threads(threads);
@@ -2748,6 +2948,9 @@ impl<M: Copy> RasterPass<'_, M> {
                             height,
                         );
                     }
+                    // No bounds, so never here: the CPU route rasters a
+                    // cloud's true dots (ThreeDJob::with_true_dots).
+                    ProjectedPrimitive::DotCloud { .. } => {}
                 }
             }
         }
@@ -2786,6 +2989,8 @@ impl<M: Copy> RasterPass<'_, M> {
                         height,
                     );
                 }
+                // As in the boundary pass: never here.
+                ProjectedPrimitive::DotCloud { .. } => {}
             }
         }
 
@@ -3799,6 +4004,7 @@ fn compile_draws<'a>(
     draws: &[ThreeDDraw<'a>],
     budget: &mut PreparationBudget,
     compiled: &mut Vec<CompiledDraw<'a>>,
+    clouds: &mut Vec<DotCloudDraw<'a>>,
     threads: usize,
 ) -> Result<(), ThreeDError> {
     // The camera's constants, once for the job rather than per point.
@@ -3828,7 +4034,14 @@ fn compile_draws<'a>(
         }
         let end = index + run.max(1);
         for &draw in &draws[index..end] {
-            compiled.push(compile_draw(camera, &projection, location, draw, budget)?);
+            compiled.push(compile_draw(
+                camera,
+                &projection,
+                location,
+                draw,
+                budget,
+                clouds,
+            )?);
         }
         index = end;
     }
@@ -3836,19 +4049,110 @@ fn compile_draws<'a>(
 }
 
 /// One draw, sequentially. `projection` is `camera.projection()` and
-/// `location` is `camera.location()`.
+/// `location` is `camera.location()`; a cloud is recorded in `clouds`.
 fn compile_draw<'a>(
     camera: &'a Camera,
     projection: &Projection,
     location: Vec3,
     draw: ThreeDDraw<'a>,
     budget: &mut PreparationBudget,
+    clouds: &mut Vec<DotCloudDraw<'a>>,
 ) -> Result<CompiledDraw<'a>, ThreeDError> {
     match draw {
         ThreeDDraw::Vector(vector) => compile_vector(camera, vector, budget),
         ThreeDDraw::Surface(surface) => compile_surface(camera, projection, surface, budget),
         ThreeDDraw::TrueDot(dot) => compile_dot(camera, projection, location, dot, budget),
+        ThreeDDraw::DotCloud(cloud) => compile_cloud(cloud, clouds, budget),
     }
+}
+
+/// A [`DotCloudDraw`] as the next of `clouds`, compiling nothing
+/// ([`ProjectedPrimitive::DotCloud`]). Its dots are refused as
+/// [`compile_dot`] would refuse the first refused one of its true dots, and
+/// each is counted as the draw row its true dot would take (the cloud's
+/// command, already counted, is the first; an empty cloud keeps it).
+fn compile_cloud<'a>(
+    draw: DotCloudDraw<'a>,
+    clouds: &mut Vec<DotCloudDraw<'a>>,
+    budget: &mut PreparationBudget,
+) -> Result<CompiledDraw<'a>, ThreeDError> {
+    // compile_dot_into's checks of each true dot, in its order.
+    let shared_finite =
+        finite3(draw.shading) && draw.glow_factor.is_finite() && draw.anti_alias_width.is_finite();
+    for dot in draw.dots {
+        let finite = shared_finite
+            && finite3(dot.center)
+            && [
+                dot.radius,
+                dot.color.r,
+                dot.color.g,
+                dot.color.b,
+                dot.color.a,
+            ]
+            .iter()
+            .all(|value| value.is_finite());
+        if !finite {
+            return Err(ThreeDError::NonFinite);
+        }
+        if dot.radius < 0.0 {
+            return Err(ThreeDError::InvalidRadius);
+        }
+        if draw.anti_alias_width < 0.0 {
+            return Err(ThreeDError::InvalidAntiAliasWidth);
+        }
+    }
+    if let Some(more) = draw.dots.len().checked_sub(1) {
+        budget.charge_rows::<CompiledDraw<'a>>(PreparationRows::Draws, more)?;
+    }
+    clouds
+        .try_reserve(1)
+        .map_err(|_| ThreeDError::PreparationAllocationFailed {
+            resource: "dot clouds",
+            requested: u64::try_from(clouds.len()).map_or(u64::MAX, |count| count + 1),
+        })?;
+    let cloud = clouds.len();
+    clouds.push(draw);
+    Ok(CompiledDraw {
+        primitive: ProjectedPrimitive::DotCloud { cloud },
+        depth_test: draw.depth_test,
+        bounds: None,
+    })
+}
+
+/// Compile `dots`, a run of `cloud`'s, as a job on `camera` compiles their
+/// true dots ([`DotCloudDraw::true_dot`]), for a route that draws a cloud
+/// from its rows: for each dot in order, `emit` gets its compiled draw (its
+/// shader and bounds; it holds no rows) and its raster triangles. The rows
+/// are counted against `limits` as one job's would be, from zero.
+///
+/// # Errors
+/// As [`compile_dot`] on the true dots: only their rows' limits and
+/// allocation, since the job refused their values when it was made.
+#[cfg(feature = "metal")]
+pub(crate) fn compile_cloud_dots<'a>(
+    camera: &'a Camera,
+    cloud: &DotCloudDraw<'_>,
+    dots: &[CloudDot],
+    limits: ThreeDPreparationLimits,
+    mut emit: impl FnMut(&CompiledDraw<'a>, &[RasterTriangle]),
+) -> Result<(), ThreeDError> {
+    let projection = camera.projection();
+    let location = camera.location();
+    let mut budget = PreparationBudget::new(limits);
+    let mut rows = Vec::new();
+    for &dot in dots {
+        rows.clear();
+        let compiled = compile_dot_into(
+            camera,
+            &projection,
+            location,
+            cloud.true_dot(dot),
+            &mut rows,
+            &mut budget,
+        )?;
+        emit(&compiled, &rows);
+    }
+    Ok(())
 }
 
 /// Compile the first of `dots` (a run of [`ThreeDDraw::TrueDot`]s) onto
@@ -3873,6 +4177,8 @@ fn compile_dot_round<'a>(
     compiled: &mut Vec<CompiledDraw<'a>>,
     threads: usize,
 ) -> Result<usize, ThreeDError> {
+    // True dots record no cloud.
+    let clouds = &mut Vec::new();
     let allowance = budget.remaining_rows::<RasterTriangle>(PreparationRows::RasterTriangles);
     // A dot is two triangles unless clipping splits it, so a round takes at
     // most half as many dots as the allowance has rows.
@@ -3881,7 +4187,9 @@ fn compile_dot_round<'a>(
     if count < PARALLEL_DOT_RUN || workers < 2 {
         // Too few rows left to share out: the rest of the run sequentially.
         for &dot in dots {
-            compiled.push(compile_draw(camera, projection, location, dot, budget)?);
+            compiled.push(compile_draw(
+                camera, projection, location, dot, budget, clouds,
+            )?);
         }
         return Ok(dots.len());
     }
@@ -3932,7 +4240,7 @@ fn compile_dot_round<'a>(
             let at = offset + done;
             compiled.truncate(start + at);
             compiled.push(compile_draw(
-                camera, projection, location, dots[at], budget,
+                camera, projection, location, dots[at], budget, clouds,
             )?);
             return Ok(at + 1);
         }
@@ -4054,7 +4362,7 @@ fn empty_dot_slot<'a>() -> CompiledDraw<'a> {
 fn slot_triangles(slot: &CompiledDraw<'_>) -> usize {
     match &slot.primitive {
         ProjectedPrimitive::Triangles { triangles, .. } => triangles.len(),
-        ProjectedPrimitive::Vector(_) => 0,
+        ProjectedPrimitive::Vector(_) | ProjectedPrimitive::DotCloud { .. } => 0,
     }
 }
 
@@ -7393,7 +7701,7 @@ mod tests {
             .first()
             .and_then(|draw| match &draw.primitive {
                 CompiledPrimitive::Vector(vector) => Some(vector.get()),
-                CompiledPrimitive::Triangles { .. } => None,
+                CompiledPrimitive::Triangles { .. } | CompiledPrimitive::DotCloud { .. } => None,
             })
             .expect("fixture must compile as a retained vector")
     }
@@ -7640,6 +7948,328 @@ mod tests {
                 "{threads}"
             );
         }
+    }
+
+    /// `count` dots meeting every case a true dot meets, from a fixed
+    /// generator: inside the frame, across its edges (the clipper), wholly
+    /// outside it, behind the camera, of zero radius, and overlapping.
+    fn cloud_dots(camera: &Camera, count: usize, seed: u64) -> Vec<CloudDot> {
+        let mut state = seed;
+        let mut next = move || {
+            state = state
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let behind = add(camera.location(), [0.0, 0.0, 5.0]);
+        (0..count)
+            .map(|index| {
+                let (center, radius) = match index % 9 {
+                    // Behind the camera.
+                    0 => (add(behind, [next() - 0.5, next() - 0.5, 0.0]), 0.5),
+                    1 => ([next() * 4.0 - 2.0, next() * 3.0 - 1.5, 0.0], 0.0),
+                    // Wholly outside the frame.
+                    2 => ([30.0 + next(), next() * 4.0, 0.0], 0.4),
+                    // Across an edge (half width 7.1, half height 4).
+                    3 => ([7.0 + next() * 0.4, next() * 6.0 - 3.0, 0.0], 0.6),
+                    4 => ([next() * 10.0 - 5.0, -4.1 + next() * 0.3, 0.5], 0.5),
+                    _ => (
+                        [next() * 12.0 - 6.0, next() * 7.0 - 3.5, next() * 2.0 - 1.0],
+                        0.05 + next() * 0.6,
+                    ),
+                };
+                CloudDot {
+                    center,
+                    radius,
+                    color: LinearRgba {
+                        r: next(),
+                        g: next(),
+                        b: next(),
+                        a: 0.2 + 0.8 * next(),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// The true dot of `dot` in a cloud of `glow_factor`, `anti_alias_width`,
+    /// `shading` and `depth_test`, built field by field (the oracle does not
+    /// use [`DotCloudDraw::true_dot`]).
+    fn true_dot_of(
+        dot: CloudDot,
+        glow_factor: f64,
+        anti_alias_width: f64,
+        shading: Vec3,
+        depth_test: bool,
+    ) -> TrueDotDraw {
+        TrueDotDraw {
+            glow_factor,
+            anti_alias_width,
+            shading,
+            depth_test,
+            ..TrueDotDraw::new(dot.center, dot.radius, dot.color)
+        }
+    }
+
+    /// `draws` with each cloud replaced by its true dots, in its place.
+    fn with_clouds_as_true_dots<'a>(draws: &[ThreeDDraw<'a>]) -> Vec<ThreeDDraw<'a>> {
+        let mut out = Vec::new();
+        for &draw in draws {
+            match draw {
+                ThreeDDraw::DotCloud(cloud) => out.extend(cloud.dots.iter().map(|&dot| {
+                    ThreeDDraw::TrueDot(true_dot_of(
+                        dot,
+                        cloud.glow_factor,
+                        cloud.anti_alias_width,
+                        cloud.shading,
+                        cloud.depth_test,
+                    ))
+                })),
+                other => out.push(other),
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_dot_cloud_renders_exactly_its_true_dots() {
+        // FrankenLife FL-033: a cloud is its true dots, in its place, on the
+        // CPU route, byte for byte, at any thread count and with a bloom.
+        use crate::bloom::Bloom;
+
+        let camera = Camera::new(crate::camera::CameraConfig {
+            resolution: (96, 54),
+            samples: 4,
+            background: color("#050810", 1.0),
+            ..crate::camera::CameraConfig::default()
+        })
+        .expect("camera");
+        let plain = cloud_dots(&camera, 700, 1);
+        let lit = cloud_dots(&camera, 300, 2);
+        let backdrop = full_triangle(-1.5, color("#203040", 1.0));
+        let draws = [
+            ThreeDDraw::Surface(SurfaceDraw::new(&backdrop)),
+            ThreeDDraw::DotCloud(DotCloudDraw::new(&plain)),
+            ThreeDDraw::TrueDot(TrueDotDraw::glow(
+                [0.5, 0.2, 0.3],
+                1.2,
+                color("#FFAA00", 0.8),
+            )),
+            ThreeDDraw::DotCloud(DotCloudDraw::new(&[])),
+            ThreeDDraw::DotCloud(DotCloudDraw {
+                shading: [0.4, 0.3, 0.2],
+                depth_test: true,
+                anti_alias_width: 1.25,
+                ..DotCloudDraw::glow(&lit)
+            }),
+        ];
+        let true_dots = with_clouds_as_true_dots(&draws);
+        // The backdrop and the true dot, then the clouds' dots.
+        assert_eq!(true_dots.len(), 2 + plain.len() + lit.len());
+
+        // The true dots meet the clipper, the empty cases and plain pairs.
+        let oracle = ThreeDJob::new(&camera, &true_dots, Tiling::default()).expect("true dots");
+        let rows = oracle
+            .draws
+            .iter()
+            .filter_map(|draw| match &draw.primitive {
+                ProjectedPrimitive::Triangles {
+                    triangles,
+                    shader: Shader::Dot { .. },
+                } => Some(triangles.len()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(rows.contains(&0) && rows.contains(&2), "{rows:?}");
+        assert!(
+            rows.iter().any(|&rows| rows != 0 && rows != 2),
+            "no clipped dot"
+        );
+
+        for threads in [1, 3] {
+            let cloud = ThreeDJob::new_with_threads(
+                &camera,
+                &draws,
+                Tiling::default(),
+                ThreeDPreparationLimits::default(),
+                threads,
+            )
+            .expect("cloud job");
+            // One command a cloud, holding no rows.
+            assert_eq!(cloud.draws.len(), draws.len());
+            assert_eq!(cloud.clouds.len(), 3);
+            for render_threads in [1, 4] {
+                assert_eq!(
+                    cloud.render(render_threads).expect("cloud").as_bytes(),
+                    oracle.render(render_threads).expect("true dots").as_bytes(),
+                    "threads {threads}, render threads {render_threads}"
+                );
+            }
+        }
+        let bloom = Bloom::new(0.3, 2.0).expect("bloom");
+        assert_eq!(
+            ThreeDJob::new(&camera, &draws, Tiling::default())
+                .expect("cloud job")
+                .with_bloom(bloom.clone())
+                .render(2)
+                .expect("cloud")
+                .as_bytes(),
+            ThreeDJob::new(&camera, &true_dots, Tiling::default())
+                .expect("true dots")
+                .with_bloom(bloom)
+                .render(2)
+                .expect("true dots")
+                .as_bytes(),
+        );
+    }
+
+    #[test]
+    fn a_dot_cloud_is_refused_as_its_true_dots_are() {
+        let camera = camera();
+        let fine = cloud_dots(&camera, 40, 3);
+        let mut cases: Vec<(&str, Vec<CloudDot>, DotCloudDraw<'static>)> = Vec::new();
+        let template = DotCloudDraw::new(&[]);
+        for (label, at, change) in [
+            ("nan center", 7, 0),
+            ("infinite radius", 0, 1),
+            ("nan alpha", 39, 2),
+            ("negative radius", 12, 3),
+            ("a nan before a negative radius", 5, 4),
+            ("a negative radius before a nan", 6, 5),
+        ] {
+            let mut dots = fine.clone();
+            match change {
+                0 => dots[at].center[1] = f64::NAN,
+                1 => dots[at].radius = f64::INFINITY,
+                2 => dots[at].color.a = f64::NAN,
+                3 => dots[at].radius = -0.25,
+                4 => {
+                    dots[at].radius = -0.25;
+                    dots[at - 3].color.g = f64::NAN;
+                }
+                _ => {
+                    dots[at].radius = -0.25;
+                    dots[at + 3].color.g = f64::NAN;
+                }
+            }
+            cases.push((label, dots, template));
+        }
+        for (label, cloud) in [
+            (
+                "nan glow",
+                DotCloudDraw {
+                    glow_factor: f64::NAN,
+                    ..template
+                },
+            ),
+            (
+                "infinite shading",
+                DotCloudDraw {
+                    shading: [0.0, f64::INFINITY, 0.0],
+                    ..template
+                },
+            ),
+            (
+                "negative aa",
+                DotCloudDraw {
+                    anti_alias_width: -1.0,
+                    ..template
+                },
+            ),
+            (
+                "nan aa",
+                DotCloudDraw {
+                    anti_alias_width: f64::NAN,
+                    ..template
+                },
+            ),
+        ] {
+            cases.push((label, fine.clone(), cloud));
+        }
+        for (label, dots, shared) in &cases {
+            let cloud = DotCloudDraw { dots, ..*shared };
+            let draws = [ThreeDDraw::DotCloud(cloud)];
+            let expected = ThreeDJob::new(
+                &camera,
+                &with_clouds_as_true_dots(&draws),
+                Tiling::default(),
+            )
+            .expect_err("the true dots are refused");
+            assert_eq!(
+                ThreeDJob::new(&camera, &draws, Tiling::default()).expect_err(label),
+                expected,
+                "{label}"
+            );
+        }
+        // An empty cloud has no dot to refuse, as no true dots have none.
+        let empty = [ThreeDDraw::DotCloud(DotCloudDraw {
+            anti_alias_width: -1.0,
+            glow_factor: f64::NAN,
+            ..template
+        })];
+        assert!(ThreeDJob::new(&camera, &empty, Tiling::default()).is_ok());
+    }
+
+    #[test]
+    fn a_dot_cloud_counts_its_dots_and_their_rows_as_its_true_dots() {
+        let camera = camera();
+        let dots = cloud_dots(&camera, 30, 4);
+        let backdrop = full_triangle(-1.0, color("#102030", 1.0));
+        let draws = [
+            ThreeDDraw::Surface(SurfaceDraw::new(&backdrop)),
+            ThreeDDraw::DotCloud(DotCloudDraw::new(&dots)),
+        ];
+        let true_dots = with_clouds_as_true_dots(&draws);
+        // Each dot is a draw row: the limit of the true dots' draws is the
+        // cloud's.
+        for max_draws in [30, 31, 32] {
+            let limits = ThreeDPreparationLimits {
+                max_draws,
+                ..ThreeDPreparationLimits::default()
+            };
+            assert_eq!(
+                ThreeDJob::new_with_limits(&camera, &draws, Tiling::default(), limits).err(),
+                ThreeDJob::new_with_limits(&camera, &true_dots, Tiling::default(), limits).err(),
+                "max draws {max_draws}"
+            );
+        }
+        // Their triangle rows are counted when the CPU route makes them: the
+        // job of the true dots refuses what the cloud's frame cannot hold.
+        let rows = ThreeDJob::new(&camera, &true_dots, Tiling::default())
+            .expect("true dots")
+            .draws
+            .iter()
+            .map(slot_triangles)
+            .sum::<usize>() as u64;
+        for max_raster_triangles in [rows - 1, rows] {
+            let limits = ThreeDPreparationLimits {
+                max_raster_triangles,
+                ..ThreeDPreparationLimits::default()
+            };
+            let cloud = ThreeDJob::new_with_limits(&camera, &draws, Tiling::default(), limits)
+                .expect("the cloud's rows are not made yet");
+            match ThreeDJob::new_with_limits(&camera, &true_dots, Tiling::default(), limits) {
+                Ok(oracle) => assert_eq!(
+                    cloud.render(2).expect("fits").as_bytes(),
+                    oracle.render(2).expect("fits").as_bytes()
+                ),
+                Err(ThreeDError::PreparationLimitExceeded { .. }) => {
+                    assert_eq!(
+                        cloud.render(2).expect_err("too many rows"),
+                        FrameError::TooLarge
+                    );
+                }
+                Err(error) => panic!("{error:?}"),
+            }
+        }
+        // A retained projection holds no cloud.
+        assert_eq!(
+            ThreeDJob::new(&camera, &draws, Tiling::default())
+                .expect("cloud job")
+                .into_projection()
+                .err(),
+            Some(ThreeDError::ProjectionMismatch)
+        );
     }
 
     #[test]
@@ -9524,6 +10154,7 @@ mod tests {
         budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
         let projection = camera.projection();
         let location = camera.location();
+        let mut clouds = Vec::new();
         for draw in draws {
             compiled.push(match *draw {
                 ThreeDDraw::Vector(vector) => compile_vector(camera, vector, &mut budget)?,
@@ -9533,6 +10164,7 @@ mod tests {
                 ThreeDDraw::TrueDot(dot) => {
                     compile_dot(camera, &projection, location, dot, &mut budget)?
                 }
+                ThreeDDraw::DotCloud(cloud) => compile_cloud(cloud, &mut clouds, &mut budget)?,
             });
         }
         Ok((compiled, budget))
@@ -9548,7 +10180,14 @@ mod tests {
         let mut budget = PreparationBudget::new(limits);
         let mut compiled = Vec::new();
         budget.reserve_rows(&mut compiled, PreparationRows::Draws, draws.len())?;
-        compile_draws(camera, draws, &mut budget, &mut compiled, threads)?;
+        compile_draws(
+            camera,
+            draws,
+            &mut budget,
+            &mut compiled,
+            &mut Vec::new(),
+            threads,
+        )?;
         Ok((compiled, budget))
     }
 
@@ -9876,8 +10515,15 @@ mod tests {
                         .expect("draw slots fit");
                     let projection = camera.projection();
                     compiled.push(
-                        compile_draw(&camera, &projection, eye, draws[0], &mut budget)
-                            .expect("the first draw fits"),
+                        compile_draw(
+                            &camera,
+                            &projection,
+                            eye,
+                            draws[0],
+                            &mut budget,
+                            &mut Vec::new(),
+                        )
+                        .expect("the first draw fits"),
                     );
                     budget.remaining_rows::<RasterTriangle>(PreparationRows::RasterTriangles)
                 };

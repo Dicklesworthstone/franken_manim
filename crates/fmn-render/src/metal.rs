@@ -1417,8 +1417,8 @@ impl MetalRenderer {
     }
 
     /// Put the frame's texels on the device (FL-033): the last 3D frame's
-    /// buffer when the frame samples the same textures (equal content digests
-    /// and sizes, in the same order), else a new buffer in its place. The old
+    /// buffer when the frame samples the same textures (equal digests and
+    /// sizes, in the same order), else a new buffer in its place. The old
     /// buffer is dropped before the new one is made, so the renderer never
     /// holds two. Returns whether the last frame's buffer was kept.
     fn reside_texels(&mut self, flat: &FlatThreeDFrame<'_>) -> Result<bool, MetalError> {
@@ -2329,8 +2329,37 @@ impl<'a> FlatThreeDFrame<'a> {
         if !matches!(sample_grid, 1 | 2 | 4) {
             return Err(MetalError::Layout("unsupported 3D sample grid"));
         }
-        let draw_count = u32::try_from(job.prepared_draws().len())
-            .map_err(|_| MetalError::SizeOverflow("3D draw count"))?;
+        let threads = crate::effective_threads(threads).max(1);
+        // The frame's triangle rows are reserved once, at their exact count,
+        // instead of growing a triangle at a time (a frame of 50,000 dots
+        // holds about 22 MB of them). The rows are unchanged.
+        let job_triangles = job
+            .prepared_draws()
+            .iter()
+            .map(|draw| match &draw.primitive {
+                CompiledPrimitive::Triangles { triangles, .. } => triangles.len(),
+                CompiledPrimitive::Vector(_) | CompiledPrimitive::DotCloud { .. } => 0,
+            })
+            .try_fold(0_usize, usize::checked_add)
+            .ok_or(MetalError::SizeOverflow("3D triangles"))?;
+        // A cloud's dots are compiled here, each into the draw and rows of
+        // its true dot (DotCloudDraw), so the frame is the true dots' frame.
+        let clouds = compile_three_d_clouds(job, job_triangles, threads)?;
+        let cloud_rows = |runs: &[CloudRun]| runs.iter().map(|run| run.rows.len()).sum::<usize>();
+        let cloud_dots = |runs: &[CloudRun]| runs.iter().map(|run| run.counts.len()).sum::<usize>();
+        let draws = job
+            .prepared_draws()
+            .iter()
+            .map(|draw| match &draw.primitive {
+                CompiledPrimitive::DotCloud { cloud } => {
+                    clouds.get(*cloud).map(|runs| cloud_dots(runs))
+                }
+                CompiledPrimitive::Triangles { .. } | CompiledPrimitive::Vector(_) => Some(1),
+            })
+            .try_fold(0_usize, |sum, draws| sum.checked_add(draws?))
+            .ok_or(MetalError::SizeOverflow("3D draw count"))?;
+        let draw_count =
+            u32::try_from(draws).map_err(|_| MetalError::SizeOverflow("3D draw count"))?;
         let background = camera.background();
         let mut flat = Self {
             params_u32: vec![width, height, tile, cols, sample_grid, draw_count],
@@ -2341,8 +2370,8 @@ impl<'a> FlatThreeDFrame<'a> {
                 background.a as f32,
             ],
             triangles: Vec::new(),
-            draw_u32: Vec::with_capacity(job.prepared_draws().len() * THREE_D_DRAW_U32_STRIDE),
-            draw_f32: Vec::with_capacity(job.prepared_draws().len() * THREE_D_DRAW_F32_STRIDE),
+            draw_u32: Vec::with_capacity(draws * THREE_D_DRAW_U32_STRIDE),
+            draw_f32: Vec::with_capacity(draws * THREE_D_DRAW_F32_STRIDE),
             tile_offsets: Vec::new(),
             tile_draws: Vec::new(),
             command_triangles: Vec::new(),
@@ -2351,21 +2380,14 @@ impl<'a> FlatThreeDFrame<'a> {
             textures: Vec::new(),
             texel_count: 0,
             bloom: job.bloom().cloned(),
-            threads: crate::effective_threads(threads).max(1),
+            threads,
         };
-        let mut draw_bounds = Vec::with_capacity(job.prepared_draws().len());
+        let mut draw_bounds = Vec::with_capacity(draws);
         let mut uploaded = std::collections::HashMap::new();
-        // The frame's triangle rows are reserved once, at their exact count,
-        // instead of growing a triangle at a time (a frame of 50,000 dots
-        // holds about 22 MB of them). The rows are unchanged.
-        let triangle_scalars = job
-            .prepared_draws()
+        let triangle_scalars = clouds
             .iter()
-            .map(|draw| match &draw.primitive {
-                CompiledPrimitive::Triangles { triangles, .. } => triangles.len(),
-                CompiledPrimitive::Vector(_) => 0,
-            })
-            .try_fold(0_usize, usize::checked_add)
+            .map(|runs| cloud_rows(runs))
+            .try_fold(job_triangles, usize::checked_add)
             .and_then(|triangles| triangles.checked_mul(THREE_D_TRIANGLE_STRIDE))
             .ok_or(MetalError::SizeOverflow("3D triangles"))?;
         flat.triangles
@@ -2377,6 +2399,37 @@ impl<'a> FlatThreeDFrame<'a> {
         let mut pieces = Vec::with_capacity(job.prepared_draws().len());
         let mut next_triangle = 0_usize;
         for (draw_index, draw) in job.prepared_draws().iter().enumerate() {
+            if let CompiledPrimitive::DotCloud { cloud } = draw.primitive {
+                let runs = clouds
+                    .get(cloud)
+                    .ok_or(MetalError::Layout("3D dot cloud missing"))?;
+                for run in runs {
+                    pieces.push(TrianglePiece {
+                        first: next_triangle,
+                        rows: PieceRows::Kernel(&run.rows),
+                    });
+                    for ((slab, &count), &bounds) in
+                        run.slabs.iter().zip(&run.counts).zip(&run.bounds)
+                    {
+                        // As for a true dot's draw, below.
+                        let first_triangle = u32::try_from(next_triangle)
+                            .map_err(|_| MetalError::SizeOverflow("3D triangle index"))?;
+                        next_triangle += count as usize;
+                        u32::try_from(next_triangle)
+                            .map_err(|_| MetalError::SizeOverflow("3D triangle count"))?;
+                        flat.draw_u32.extend_from_slice(&[
+                            first_triangle,
+                            count,
+                            THREE_D_SHADER_DOT,
+                            u32::from(draw.depth_test),
+                            THREE_D_NO_TEXTURE,
+                        ]);
+                        flat.draw_f32.extend_from_slice(slab);
+                        draw_bounds.push(bounds);
+                    }
+                }
+                continue;
+            }
             let CompiledPrimitive::Triangles { triangles, shader } = &draw.primitive else {
                 return Err(MetalError::UnsupportedThreeDPrimitive {
                     draw: draw_index,
@@ -2396,7 +2449,7 @@ impl<'a> FlatThreeDFrame<'a> {
                 .map_err(|_| MetalError::SizeOverflow("3D triangle index"))?;
             pieces.push(TrianglePiece {
                 first: next_triangle,
-                triangles,
+                rows: PieceRows::Raster(triangles),
             });
             // No overflow: the sum of every draw's triangles was checked above.
             next_triangle += triangles.len();
@@ -2509,8 +2562,9 @@ impl<'a> FlatThreeDFrame<'a> {
         Ok(texels)
     }
 
-    /// What the frame's texels are: each texture's content digest and size,
-    /// in order. Frames with equal keys sample equal texels.
+    /// What the frame's texels are: each texture's digest (its content
+    /// address, or its build's identity) and size, in order. Frames with
+    /// equal keys sample equal texels.
     fn texel_key(&self) -> Vec<(Digest, u32, u32)> {
         self.textures
             .iter()
@@ -2745,7 +2799,116 @@ fn reside_table(
 /// One draw's triangles, and the frame row of the first.
 struct TrianglePiece<'r> {
     first: usize,
-    triangles: &'r [RasterTriangle],
+    rows: PieceRows<'r>,
+}
+
+/// A piece's triangles: a draw's raster triangles, or a run of cloud dots'
+/// already as their rows ([`CloudRun`]).
+#[derive(Clone, Copy)]
+enum PieceRows<'r> {
+    Raster(&'r [RasterTriangle]),
+    Kernel(&'r [[f32; THREE_D_TRIANGLE_STRIDE]]),
+}
+
+impl PieceRows<'_> {
+    const fn len(self) -> usize {
+        match self {
+            Self::Raster(triangles) => triangles.len(),
+            Self::Kernel(rows) => rows.len(),
+        }
+    }
+}
+
+/// A run of a cloud's dots as the frame holds their true dots (see
+/// [`crate::DotCloudDraw`]): for each dot in order, its draw's shader slab, triangle
+/// count and bounds; and their triangles' rows, in order.
+#[derive(Debug, Default)]
+struct CloudRun {
+    slabs: Vec<[f32; THREE_D_DRAW_F32_STRIDE]>,
+    counts: Vec<u32>,
+    bounds: Vec<Option<[f64; 4]>>,
+    rows: Vec<[f32; THREE_D_TRIANGLE_STRIDE]>,
+}
+
+/// A cloud worker compiles at least this many dots; with fewer, the calling
+/// thread compiles them all.
+const DOTS_PER_CLOUD_WORKER: usize = 2048;
+
+/// Each of the job's clouds as runs of its dots, in order ([`CloudRun`]):
+/// every dot compiled as the job would have compiled its true dot, on up to
+/// `threads` threads. The runs do not depend on the threads' count: each
+/// dot's draw and rows are its own.
+///
+/// # Errors
+/// [`FrameError::TooLarge`] when the rows cannot be allocated, or when they
+/// pass the job's limit on raster triangles with the job's own
+/// (`job_triangles`), or a run's alone passes one of its preparation limits:
+/// limits the job of the clouds' true dots would refuse them under.
+fn compile_three_d_clouds(
+    job: &ThreeDJob<'_>,
+    job_triangles: usize,
+    threads: usize,
+) -> Result<Vec<Vec<CloudRun>>, MetalError> {
+    let too_large = || MetalError::Frame(FrameError::TooLarge);
+    let camera = job.camera();
+    let limits = job.preparation_limits();
+    let mut triangles = job_triangles;
+    let mut clouds = Vec::new();
+    clouds
+        .try_reserve_exact(job.clouds().len())
+        .map_err(|_| too_large())?;
+    for cloud in job.clouds() {
+        let dots = cloud.dots;
+        let workers = threads
+            .min(dots.len() / DOTS_PER_CLOUD_WORKER)
+            .clamp(1, MAX_HOST_WORKERS);
+        let per_worker = dots.len().div_ceil(workers).max(1);
+        let runs = dots.len().div_ceil(per_worker);
+        let compiled = on_host_workers(runs, |run| {
+            let dots = &dots[run * per_worker..dots.len().min((run + 1) * per_worker)];
+            let mut out = CloudRun::default();
+            out.slabs.try_reserve_exact(dots.len()).ok()?;
+            out.counts.try_reserve_exact(dots.len()).ok()?;
+            out.bounds.try_reserve_exact(dots.len()).ok()?;
+            // Two triangles a dot unless the clip volume cuts it.
+            out.rows.try_reserve(dots.len().checked_mul(2)?).ok()?;
+            let mut fits = true;
+            crate::three_d::compile_cloud_dots(camera, cloud, dots, limits, |draw, rows| {
+                let CompiledPrimitive::Triangles { shader, .. } = &draw.primitive else {
+                    fits = false;
+                    return;
+                };
+                let (Ok(count), Ok(())) =
+                    (u32::try_from(rows.len()), out.rows.try_reserve(rows.len()))
+                else {
+                    fits = false;
+                    return;
+                };
+                out.slabs.push(three_d_shader_slab(*shader));
+                out.counts.push(count);
+                out.bounds.push(draw.bounds);
+                out.rows.extend(rows.iter().map(three_d_triangle_row));
+            })
+            .ok()?;
+            fits.then_some(out)
+        });
+        let mut cloud_runs = Vec::new();
+        cloud_runs
+            .try_reserve_exact(runs)
+            .map_err(|_| too_large())?;
+        for run in compiled {
+            let run = run.ok_or_else(too_large)?;
+            triangles = triangles
+                .checked_add(run.rows.len())
+                .ok_or_else(too_large)?;
+            cloud_runs.push(run);
+        }
+        if u64::try_from(triangles).map_or(true, |rows| rows > limits.max_raster_triangles) {
+            return Err(too_large());
+        }
+        clouds.push(cloud_runs);
+    }
+    Ok(clouds)
 }
 
 /// A flatten worker takes at least this many triangles; with fewer, the
@@ -2807,19 +2970,22 @@ fn flatten_three_d_rows(
 ) {
     let end = first + rows.len();
     // The first piece with a row at or after `first`.
-    let start = pieces.partition_point(|piece| piece.first + piece.triangles.len() <= first);
+    let start = pieces.partition_point(|piece| piece.first + piece.rows.len() <= first);
     for piece in &pieces[start..] {
         if piece.first >= end {
             break;
         }
         let skip = first.saturating_sub(piece.first);
-        let take = (end - piece.first).min(piece.triangles.len());
+        let take = (end - piece.first).min(piece.rows.len());
         let at = piece.first + skip - first;
-        for (row, triangle) in rows[at..at + (take - skip)]
-            .iter_mut()
-            .zip(&piece.triangles[skip..take])
-        {
-            *row = three_d_triangle_row(triangle);
+        let out = &mut rows[at..at + (take - skip)];
+        match piece.rows {
+            PieceRows::Raster(triangles) => {
+                for (row, triangle) in out.iter_mut().zip(&triangles[skip..take]) {
+                    *row = three_d_triangle_row(triangle);
+                }
+            }
+            PieceRows::Kernel(kernel) => out.copy_from_slice(&kernel[skip..take]),
         }
     }
 }
@@ -3497,7 +3663,9 @@ mod tests {
     #[cfg(not(target_os = "macos"))]
     use crate::bin::{ScreenMap, Tiling, Viewport};
     use crate::camera::{Camera, CameraConfig};
-    use crate::three_d::{SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDDraw, TrueDotDraw};
+    use crate::three_d::{
+        CloudDot, DotCloudDraw, SurfaceDraw, SurfaceMesh, SurfaceVertex, ThreeDDraw, TrueDotDraw,
+    };
 
     #[test]
     fn the_shader_mirrors_every_host_stride_and_entry_point() {
@@ -3739,6 +3907,392 @@ mod tests {
         draws
     }
 
+    /// `count` dots over and past the frame, from a fixed generator: some
+    /// across its edges (so clipped), some wholly outside it, some behind the
+    /// camera, some of zero radius.
+    fn cloud_test_dots(camera: &Camera, count: usize, seed: u64) -> Vec<CloudDot> {
+        let mut state = seed | 1;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let eye = camera.location();
+        (0..count)
+            .map(|index| {
+                let (center, radius) = match index % 11 {
+                    0 => ([eye[0], eye[1] + unit() - 0.5, eye[2] + 4.0], 0.5),
+                    1 => ([unit() * 4.0, unit() * 2.0, 0.0], 0.0),
+                    _ => (
+                        [
+                            (unit() - 0.5) * 18.0,
+                            (unit() - 0.5) * 11.0,
+                            unit() * 2.0 - 1.0,
+                        ],
+                        0.02 + 0.7 * unit(),
+                    ),
+                };
+                CloudDot {
+                    center,
+                    radius,
+                    color: Srgb::from_rgb8(
+                        (unit() * 255.0) as u8,
+                        (unit() * 255.0) as u8,
+                        (unit() * 255.0) as u8,
+                    )
+                    .to_linear(0.3 + 0.7 * unit()),
+                }
+            })
+            .collect()
+    }
+
+    /// `draws` with each cloud replaced by its true dots, built field by
+    /// field (not through [`DotCloudDraw::true_dot`]).
+    fn clouds_as_true_dots<'a>(draws: &[ThreeDDraw<'a>]) -> Vec<ThreeDDraw<'a>> {
+        let mut out = Vec::new();
+        for &draw in draws {
+            let ThreeDDraw::DotCloud(cloud) = draw else {
+                out.push(draw);
+                continue;
+            };
+            out.extend(cloud.dots.iter().map(|dot| {
+                ThreeDDraw::TrueDot(TrueDotDraw {
+                    glow_factor: cloud.glow_factor,
+                    anti_alias_width: cloud.anti_alias_width,
+                    shading: cloud.shading,
+                    depth_test: cloud.depth_test,
+                    ..TrueDotDraw::new(dot.center, dot.radius, dot.color)
+                })
+            }));
+        }
+        out
+    }
+
+    /// The first scalar at which two tables differ, if any.
+    fn first_difference<T: PartialEq>(a: &[T], b: &[T]) -> Option<usize> {
+        (a.len() != b.len())
+            .then_some(a.len().min(b.len()))
+            .or_else(|| a.iter().zip(b).position(|(a, b)| a != b))
+    }
+
+    /// Every table of two frames, scalar for scalar (f32 by bits).
+    fn assert_same_three_d_tables(a: &FlatThreeDFrame<'_>, b: &FlatThreeDFrame<'_>, label: &str) {
+        let bits = |values: &[f32]| {
+            values
+                .iter()
+                .map(|value| value.to_bits())
+                .collect::<Vec<_>>()
+        };
+        for (name, left, right) in [
+            ("params_u32", &a.params_u32, &b.params_u32),
+            ("draw_u32", &a.draw_u32, &b.draw_u32),
+            ("tile_offsets", &a.tile_offsets, &b.tile_offsets),
+            ("tile_draws", &a.tile_draws, &b.tile_draws),
+            (
+                "command_triangles",
+                &a.command_triangles,
+                &b.command_triangles,
+            ),
+            ("tile_triangles", &a.tile_triangles, &b.tile_triangles),
+            ("texture_u32", &a.texture_u32, &b.texture_u32),
+        ] {
+            assert_eq!(first_difference(left, right), None, "{label}: {name}");
+        }
+        for (name, left, right) in [
+            ("params_f32", &a.params_f32, &b.params_f32),
+            ("triangles", &a.triangles, &b.triangles),
+            ("draw_f32", &a.draw_f32, &b.draw_f32),
+        ] {
+            assert_eq!(
+                first_difference(&bits(left), &bits(right)),
+                None,
+                "{label}: {name}"
+            );
+        }
+        assert_eq!(a.texel_count, b.texel_count, "{label}: texels");
+        assert_eq!(a.bloom, b.bloom, "{label}: bloom");
+    }
+
+    /// A cloud test's camera, backdrop, plain and lit dots, and fine tile.
+    type CloudFrame = (Camera, SurfaceMesh, Vec<CloudDot>, Vec<CloudDot>, u32);
+
+    /// Cameras and the draws of a cloud test: a backdrop, a plain cloud large
+    /// enough for several host workers, a true dot, an empty cloud, and a lit,
+    /// depth-tested glow cloud.
+    fn cloud_frames() -> Vec<CloudFrame> {
+        [
+            ((96_u32, 72_u32), 1_u8, 8_u32),
+            ((80, 64), 2, 8),
+            ((64, 48), 4, 16),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(case, (resolution, samples, fine))| {
+            let camera = Camera::new(CameraConfig {
+                resolution,
+                samples,
+                background: Srgb::from_rgb8(4, 8, 16).to_linear(1.0),
+                ..CameraConfig::default()
+            })
+            .expect("camera");
+            let color = Srgb::from_rgb8(40, 60, 90).to_linear(1.0);
+            let normal = [0.0, 0.0, 1.0];
+            let backdrop = SurfaceMesh::new(
+                vec![
+                    SurfaceVertex::colored([-9.0, -6.0, -1.5], normal, color),
+                    SurfaceVertex::colored([9.0, -6.0, -1.5], normal, color),
+                    SurfaceVertex::colored([0.0, 7.0, -1.5], normal, color),
+                ],
+                vec![0, 1, 2],
+            )
+            .expect("backdrop");
+            let seed = 0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(case as u64 + 1);
+            // Several runs of dots, flattened by several workers.
+            let plain = cloud_test_dots(&camera, 4 * TRIANGLES_PER_FLATTEN_WORKER + 77, seed);
+            let lit = cloud_test_dots(&camera, 900, seed ^ 0xABCD);
+            (camera, backdrop, plain, lit, fine)
+        })
+        .collect()
+    }
+
+    fn cloud_draws<'a>(
+        backdrop: &'a SurfaceMesh,
+        plain: &'a [CloudDot],
+        lit: &'a [CloudDot],
+    ) -> [ThreeDDraw<'a>; 5] {
+        [
+            ThreeDDraw::Surface(SurfaceDraw::new(backdrop)),
+            ThreeDDraw::DotCloud(DotCloudDraw::new(plain)),
+            ThreeDDraw::TrueDot(TrueDotDraw::glow(
+                [0.5, 0.2, 0.3],
+                1.2,
+                Srgb::from_rgb8(255, 170, 0).to_linear(0.8),
+            )),
+            ThreeDDraw::DotCloud(DotCloudDraw::new(&[])),
+            ThreeDDraw::DotCloud(DotCloudDraw {
+                shading: [0.4, 0.3, 0.2],
+                depth_test: true,
+                anti_alias_width: 1.25,
+                ..DotCloudDraw::glow(lit)
+            }),
+        ]
+    }
+
+    #[test]
+    fn a_dot_clouds_frame_is_its_true_dots_frame_table_for_table() {
+        // FrankenLife FL-033: the derive compiles a cloud's dots into the
+        // draws and rows of their true dots, so the frame's tables are the
+        // true dots' frame's, scalar for scalar, on any number of threads.
+        for (case, (camera, backdrop, plain, lit, fine)) in cloud_frames().iter().enumerate() {
+            let draws = cloud_draws(backdrop, plain, lit);
+            let true_dots = clouds_as_true_dots(&draws);
+            let tiling = crate::bin::Tiling {
+                macro_tile: 32,
+                fine_tile: *fine,
+            };
+            let oracle = ThreeDJob::new(camera, &true_dots, tiling).expect("true dots");
+            let expected = FlatThreeDFrame::derive_on(&oracle, TriangleBins::PerTile, 1)
+                .expect("true dots' frame");
+            // The frame holds clipped dots, empty dots and plain pairs.
+            let counts = expected
+                .draw_u32
+                .as_chunks::<THREE_D_DRAW_U32_STRIDE>()
+                .0
+                .iter()
+                .filter(|draw| draw[2] == THREE_D_SHADER_DOT)
+                .map(|draw| draw[1])
+                .collect::<Vec<_>>();
+            assert!(counts.contains(&0) && counts.contains(&2), "case {case}");
+            assert!(
+                counts.iter().any(|&count| count > 2),
+                "case {case}: no clipped dot"
+            );
+            // Workers split the cloud's dots into runs and its rows between
+            // them, so a flatten worker starts inside a run.
+            assert!(plain.len() >= 3 * DOTS_PER_CLOUD_WORKER, "case {case}");
+            let rows = expected.triangles.len() / THREE_D_TRIANGLE_STRIDE;
+            assert!(
+                rows >= 3 * TRIANGLES_PER_FLATTEN_WORKER,
+                "case {case}: {rows} rows"
+            );
+            let job = ThreeDJob::new(camera, &draws, tiling).expect("cloud job");
+            for threads in [1, 2, 8] {
+                let flat = FlatThreeDFrame::derive_on(&job, TriangleBins::PerTile, threads)
+                    .expect("cloud frame");
+                assert_same_three_d_tables(&flat, &expected, &format!("case {case}, {threads}"));
+            }
+            // The bloom is the job's, as for the true dots.
+            let bloom = crate::bloom::Bloom::new(0.3, 2.0).expect("bloom");
+            let bloomed = ThreeDJob::new(camera, &draws, tiling)
+                .expect("cloud job")
+                .with_bloom(bloom.clone());
+            assert_eq!(
+                FlatThreeDFrame::derive(&bloomed).expect("frame").bloom,
+                Some(bloom)
+            );
+        }
+    }
+
+    #[test]
+    fn a_dot_clouds_frame_is_refused_when_its_rows_pass_the_job_limits() {
+        // The rows a frame makes for a cloud are counted with the job's own
+        // against the job's limit, as the job of the true dots counts them.
+        let (camera, backdrop, plain, lit, fine) = cloud_frames().swap_remove(0);
+        let draws = cloud_draws(&backdrop, &plain, &lit);
+        let true_dots = clouds_as_true_dots(&draws);
+        let tiling = crate::bin::Tiling {
+            macro_tile: 32,
+            fine_tile: fine,
+        };
+        let rows = FlatThreeDFrame::derive(
+            &ThreeDJob::new(&camera, &true_dots, tiling).expect("true dots"),
+        )
+        .expect("frame")
+        .triangles
+        .len()
+            / THREE_D_TRIANGLE_STRIDE;
+        for (max_raster_triangles, fits) in [(rows as u64 - 1, false), (rows as u64, true)] {
+            let limits = crate::three_d::ThreeDPreparationLimits {
+                max_raster_triangles,
+                ..crate::three_d::ThreeDPreparationLimits::default()
+            };
+            assert_eq!(
+                ThreeDJob::new_with_limits(&camera, &true_dots, tiling, limits).is_ok(),
+                fits
+            );
+            let job = ThreeDJob::new_with_limits(&camera, &draws, tiling, limits).expect("job");
+            match FlatThreeDFrame::derive_on(&job, TriangleBins::PerTile, 4) {
+                Ok(flat) => {
+                    assert!(fits);
+                    assert_eq!(flat.triangles.len(), rows * THREE_D_TRIANGLE_STRIDE);
+                }
+                Err(error) => {
+                    assert!(!fits);
+                    assert!(
+                        matches!(error, MetalError::Frame(FrameError::TooLarge)),
+                        "{error:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Diagnostic, not a gate: host preparation of 200,000 dots at 1080p
+    /// (FrankenLife's 100k organisms, a dot and a halo each), as true dots
+    /// and as one cloud, from the draws to the frame's tables, alternating.
+    /// `cargo test --release --features metal -p fmn-render --lib
+    /// dot_cloud_preparation_timing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "timing diagnostic"]
+    fn dot_cloud_preparation_timing() {
+        let camera = Camera::new(CameraConfig {
+            resolution: (1920, 1080),
+            samples: 2,
+            ..CameraConfig::default()
+        })
+        .expect("camera");
+        let mut state = 0x2545_F491_4F6C_DD1D_u64;
+        let mut unit = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 11) as f64 / (1_u64 << 53) as f64
+        };
+        let dots = (0..200_000)
+            .map(|_| CloudDot {
+                center: [(unit() - 0.5) * 14.0, (unit() - 0.5) * 7.8, 0.0],
+                radius: 0.01 + 0.03 * unit(),
+                color: Srgb::from_rgb8(200, 220, 255).to_linear(0.4 + 0.6 * unit()),
+            })
+            .collect::<Vec<_>>();
+        let draws = [ThreeDDraw::DotCloud(DotCloudDraw::glow(&dots))];
+        let true_dots = clouds_as_true_dots(&draws);
+        let tiling = crate::bin::Tiling::default();
+        let limits = crate::three_d::ThreeDPreparationLimits::default();
+        for threads in [1, 8] {
+            let mut times = [Vec::new(), Vec::new()];
+            for round in 0..12 {
+                for side in [round % 2, 1 - round % 2] {
+                    let draws: &[ThreeDDraw<'_>] = if side == 0 { &true_dots } else { &draws };
+                    let start = Instant::now();
+                    let job = ThreeDJob::new_with_threads(&camera, draws, tiling, limits, threads)
+                        .expect("job");
+                    let built = start.elapsed();
+                    let flat = FlatThreeDFrame::derive(&job).expect("frame");
+                    let total = start.elapsed();
+                    std::hint::black_box(&flat);
+                    if round >= 2 {
+                        times[side].push((built.as_secs_f64(), total.as_secs_f64()));
+                    }
+                }
+            }
+            for (side, label) in [(0, "true dots"), (1, "cloud")] {
+                let mut built = times[side].iter().map(|time| time.0).collect::<Vec<_>>();
+                let mut total = times[side].iter().map(|time| time.1).collect::<Vec<_>>();
+                built.sort_by(f64::total_cmp);
+                total.sort_by(f64::total_cmp);
+                let mean = total.iter().sum::<f64>() / total.len() as f64;
+                let sd = (total.iter().map(|t| (t - mean).powi(2)).sum::<f64>()
+                    / (total.len() - 1) as f64)
+                    .sqrt();
+                println!(
+                    "threads {threads} {label}: job p50 {:.2} ms, job+derive p50 {:.2} ms \
+                     (min {:.2}, max {:.2}, cv {:.1}%)",
+                    built[built.len() / 2] * 1e3,
+                    total[total.len() / 2] * 1e3,
+                    total[0] * 1e3,
+                    total[total.len() - 1] * 1e3,
+                    100.0 * sd / mean,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn metal_draws_a_dot_cloud_as_its_true_dots_bytes() {
+        // On the device: the raw frame of a cloud job is the true dots' raw
+        // frame, byte for byte.
+        if !MetalRenderer::is_available() {
+            return;
+        }
+        let mut renderer = MetalRenderer::new().expect("Metal renderer");
+        for (case, (camera, backdrop, plain, lit, fine)) in cloud_frames().iter().enumerate() {
+            let draws = cloud_draws(backdrop, plain, lit);
+            let true_dots = clouds_as_true_dots(&draws);
+            let tiling = crate::bin::Tiling {
+                macro_tile: 32,
+                fine_tile: *fine,
+            };
+            let job = ThreeDJob::new(camera, &draws, tiling).expect("cloud job");
+            let oracle = ThreeDJob::new(camera, &true_dots, tiling).expect("true dots");
+            let (cloud, _) = renderer.render_three_d_raw(&job).expect("cloud frame");
+            let (expected, _) = renderer
+                .render_three_d_raw(&oracle)
+                .expect("true dots' frame");
+            assert_eq!(
+                first_difference(cloud.as_bytes(), expected.as_bytes()),
+                None,
+                "case {case}"
+            );
+            // Not an empty frame.
+            assert_ne!(
+                first_difference(
+                    cloud.as_bytes(),
+                    renderer
+                        .render_three_d_raw(
+                            &ThreeDJob::new(camera, &draws[..1], tiling).expect("backdrop")
+                        )
+                        .expect("backdrop frame")
+                        .0
+                        .as_bytes()
+                ),
+                None,
+                "case {case}"
+            );
+        }
+    }
+
     #[test]
     fn a_three_d_frame_reserves_its_triangle_rows_once_at_their_exact_count() {
         // Grown a triangle at a time, the rows would end with slack (the
@@ -3762,7 +4316,7 @@ mod tests {
                 .iter()
                 .map(|draw| match &draw.primitive {
                     CompiledPrimitive::Triangles { triangles, .. } => triangles.len(),
-                    CompiledPrimitive::Vector(_) => 0,
+                    CompiledPrimitive::Vector(_) | CompiledPrimitive::DotCloud { .. } => 0,
                 })
                 .sum::<usize>()
                 * THREE_D_TRIANGLE_STRIDE;
@@ -3921,7 +4475,7 @@ mod tests {
             .iter()
             .map(|draw| match &draw.primitive {
                 CompiledPrimitive::Triangles { triangles, .. } => triangles.len(),
-                CompiledPrimitive::Vector(_) => 0,
+                CompiledPrimitive::Vector(_) | CompiledPrimitive::DotCloud { .. } => 0,
             })
             .collect::<Vec<_>>();
         // Eight workers flatten and eight check; the mesh spans several runs;
@@ -5204,6 +5758,70 @@ mod tests {
             &[&other, &fine, &dark],
             "the textures again",
         );
+
+        // FrankenLife FL-033: textures built without hashing their texels
+        // draw the hashed textures' frame. Their texels are kept while a
+        // frame samples the same builds or their clones, and uploaded for a
+        // rebuild of equal texels, whose digest is its own.
+        let unhashed = |texture: &Texture| {
+            Texture::from_premultiplied_linear_unhashed(
+                texture.width(),
+                texture.height(),
+                texture.premultiplied_texels().to_vec(),
+            )
+            .expect("valid texels")
+        };
+        let (fine3, other3, dark3) = (unhashed(&fine), unhashed(&other), unhashed(&dark));
+        let job = ThreeDJob::new(
+            &camera,
+            &draws(&back, &front, &fine3, &other3, &dark3),
+            tiling,
+        )
+        .expect("job");
+        let built = frame(
+            &job,
+            false,
+            false,
+            &[&fine3, &other3, &dark3],
+            "unhashed textures",
+        );
+        assert_eq!(built, changed, "the hashed textures' frame");
+        frame(
+            &job,
+            true,
+            true,
+            &[&fine3, &other3, &dark3],
+            "the same builds",
+        );
+        let (fine4, other4, dark4) = (fine3.clone(), other3.clone(), dark3.clone());
+        let job = ThreeDJob::new(
+            &camera,
+            &draws(&back, &front, &fine4, &other4, &dark4),
+            tiling,
+        )
+        .expect("job");
+        frame(
+            &job,
+            false,
+            true,
+            &[&fine4, &other4, &dark4],
+            "their clones",
+        );
+        let rebuilt = unhashed(&other);
+        let job = ThreeDJob::new(
+            &camera,
+            &draws(&back, &front, &fine4, &rebuilt, &dark4),
+            tiling,
+        )
+        .expect("job");
+        let again = frame(
+            &job,
+            false,
+            false,
+            &[&fine4, &rebuilt, &dark4],
+            "a rebuild of equal texels",
+        );
+        assert_eq!(again, changed, "the rebuild's frame");
     }
 
     #[test]

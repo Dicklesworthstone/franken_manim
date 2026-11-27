@@ -15,6 +15,7 @@ use fmn_codec::png::ColorIntent;
 use fmn_codec::{JpegError, JpegLimits, PngError, PngLimits, decode_jpeg, decode_png};
 use fmn_core::color::LinearRgba;
 use fmn_hash::{Digest, Schema, Sha256, sha256};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Texture-source identity document.
 const TEXTURE_SCHEMA: Schema = Schema::new(*b"FMNT", 1, 1, 0);
@@ -305,6 +306,66 @@ fn texel_identity(width: u32, height: u32, texels: &[[f32; 4]]) -> Result<Digest
     Ok(document.finalize())
 }
 
+/// The identity of premultiplied linear texels built without hashing them
+/// ([`Texture::from_premultiplied_linear_unhashed`]): the texture schema's
+/// header, the dimensions, transfer tag 4 (premultiplied linear `f32`,
+/// unhashed) and the build's number in this process, sealed by its own
+/// checksum as [`texel_identity`] seals its texels. No two builds in a
+/// process share one, and none equals a content address, whose transfer tag
+/// differs.
+fn build_identity(width: u32, height: u32) -> Digest {
+    static BUILDS: AtomicU64 = AtomicU64::new(0);
+    let build = BUILDS.fetch_add(1, Ordering::Relaxed);
+    let payload_len = 4u64 + 4 + 4 + 8;
+
+    let mut document = Sha256::new();
+    document.update(&TEXTURE_SCHEMA.magic);
+    document.update(&TEXTURE_SCHEMA.id.to_le_bytes());
+    document.update(&TEXTURE_SCHEMA.major.to_le_bytes());
+    document.update(&TEXTURE_SCHEMA.minor.to_le_bytes());
+    document.update(&0u16.to_le_bytes()); // flags
+    document.update(&0u16.to_le_bytes()); // reserved
+    document.update(&payload_len.to_le_bytes());
+    document.update(&width.to_le_bytes());
+    document.update(&height.to_le_bytes());
+    document.update(&4u32.to_le_bytes());
+    document.update(&build.to_le_bytes());
+
+    let checksum = document.clone().finalize();
+    document.update(checksum.as_bytes());
+    document.finalize()
+}
+
+/// The checks [`Texture::from_premultiplied_linear`] and
+/// [`Texture::from_premultiplied_linear_unhashed`] make of their texels.
+fn check_premultiplied_texels(
+    width: u32,
+    height: u32,
+    texels: &[[f32; 4]],
+) -> Result<(), TextureError> {
+    let expected = u64::from(width)
+        .checked_mul(u64::from(height))
+        .filter(|&count| count > 0)
+        .and_then(|count| usize::try_from(count).ok())
+        .ok_or(TextureError::InvalidDimensions)?;
+    if texels.len() != expected {
+        return Err(TextureError::TexelCount {
+            expected,
+            got: texels.len(),
+        });
+    }
+    if let Some(index) = texels.iter().position(|&[r, g, b, a]| {
+        ![r, g, b, a].iter().all(|component| component.is_finite())
+            || r < 0.0
+            || g < 0.0
+            || b < 0.0
+            || !(0.0..=1.0).contains(&a)
+    }) {
+        return Err(TextureError::InvalidTexel { index });
+    }
+    Ok(())
+}
+
 fn checked_rgba_layout(width: u32, height: u32, rgba_len: usize) -> Result<usize, TextureError> {
     let pixels = u64::from(width)
         .checked_mul(u64::from(height))
@@ -435,26 +496,7 @@ impl Texture {
         height: u32,
         texels: Vec<[f32; 4]>,
     ) -> Result<Self, TextureError> {
-        let expected = u64::from(width)
-            .checked_mul(u64::from(height))
-            .filter(|&count| count > 0)
-            .and_then(|count| usize::try_from(count).ok())
-            .ok_or(TextureError::InvalidDimensions)?;
-        if texels.len() != expected {
-            return Err(TextureError::TexelCount {
-                expected,
-                got: texels.len(),
-            });
-        }
-        if let Some(index) = texels.iter().position(|&[r, g, b, a]| {
-            ![r, g, b, a].iter().all(|component| component.is_finite())
-                || r < 0.0
-                || g < 0.0
-                || b < 0.0
-                || !(0.0..=1.0).contains(&a)
-        }) {
-            return Err(TextureError::InvalidTexel { index });
-        }
+        check_premultiplied_texels(width, height, &texels)?;
         let digest = texel_identity(width, height, &texels)?;
         Ok(Self {
             width,
@@ -462,6 +504,37 @@ impl Texture {
             texels,
             source: TextureSource::PremultipliedLinear,
             digest,
+        })
+    }
+
+    /// [`Texture::from_premultiplied_linear`] without hashing the texels,
+    /// for a texture rebuilt at run time, such as a simulation's field
+    /// coloured afresh every step, where hashing every texel can cost more
+    /// than computing them.
+    ///
+    /// The texture is that constructor's in every texel, size and
+    /// [`Texture::source`]. Only its [`Texture::digest`] differs: it is unique
+    /// to this build rather than a content address. A clone shares it, and no
+    /// other texture has it, even one built from equal texels, so this
+    /// texture compares unequal to every other build. The Metal 3D route
+    /// therefore keeps this texture's texels on the device while the next
+    /// frame samples it or a clone of it, as it does for a content address.
+    /// A texture rebuilt from equal texels is uploaded again.
+    ///
+    /// # Errors
+    /// As [`Texture::from_premultiplied_linear`], for the same texels.
+    pub fn from_premultiplied_linear_unhashed(
+        width: u32,
+        height: u32,
+        texels: Vec<[f32; 4]>,
+    ) -> Result<Self, TextureError> {
+        check_premultiplied_texels(width, height, &texels)?;
+        Ok(Self {
+            width,
+            height,
+            texels,
+            source: TextureSource::PremultipliedLinear,
+            digest: build_identity(width, height),
         })
     }
 
@@ -512,7 +585,10 @@ impl Texture {
         self.source
     }
 
-    /// Content address of the encoded input plus dimensions/transfer metadata.
+    /// Content address of the encoded input plus dimensions/transfer metadata;
+    /// for a texture from [`Texture::from_premultiplied_linear_unhashed`], an
+    /// identity unique to its build. Either way, textures with equal digests
+    /// have equal texels.
     #[must_use]
     pub const fn digest(&self) -> Digest {
         self.digest
@@ -770,6 +846,89 @@ mod tests {
         let mut bits = texels;
         bits[0][0] = f32::from_bits(bits[0][0].to_bits() + 1);
         assert_ne!(base, digest(30, 20, bits), "every bit counts");
+    }
+
+    #[test]
+    fn unhashed_premultiplied_texels_are_the_hashed_texture_but_for_its_digest() {
+        // FrankenLife FL-033. The oracle is `from_premultiplied_linear`:
+        // the same texels, size, source, samples and refusals; only the
+        // digest is the build's own.
+        let texels: Vec<[f32; 4]> = (0..600)
+            .map(|index| {
+                let value = index as f32 / 600.0;
+                [value * 0.5, value * 0.25, value * 0.125, 0.5]
+            })
+            .collect();
+        let hashed = Texture::from_premultiplied_linear(30, 20, texels.clone()).expect("valid");
+        let unhashed =
+            Texture::from_premultiplied_linear_unhashed(30, 20, texels.clone()).expect("valid");
+        assert_eq!(unhashed.texels, hashed.texels, "the texels, exactly");
+        assert_eq!(
+            (unhashed.width(), unhashed.height(), unhashed.source()),
+            (hashed.width(), hashed.height(), hashed.source())
+        );
+        for uv in [[0.0, 0.0], [0.37, 0.81], [0.999, 0.5], [-0.25, 1.75]] {
+            let policy = policy(TextureWrap::Repeat);
+            assert_eq!(
+                unhashed.sample(uv, policy),
+                hashed.sample(uv, policy),
+                "{uv:?}"
+            );
+        }
+
+        // The digest is the build's: a clone keeps it, and no other build
+        // has it, even of equal texels; it is never the content address.
+        assert_ne!(
+            unhashed.digest(),
+            hashed.digest(),
+            "not the content address"
+        );
+        assert_eq!(
+            unhashed.clone().digest(),
+            unhashed.digest(),
+            "a clone keeps it"
+        );
+        assert_eq!(unhashed.clone(), unhashed);
+        let again =
+            Texture::from_premultiplied_linear_unhashed(30, 20, texels.clone()).expect("valid");
+        assert_ne!(again.digest(), unhashed.digest(), "each build its own");
+        assert_ne!(again, unhashed, "so builds compare unequal");
+        let digests: std::collections::HashSet<_> = (0..64)
+            .map(|_| {
+                Texture::from_premultiplied_linear_unhashed(30, 20, texels.clone())
+                    .expect("valid")
+                    .digest()
+            })
+            .collect();
+        assert_eq!(digests.len(), 64, "64 builds, 64 digests");
+
+        // Every refusal is the hashed constructor's.
+        let opaque = [0.1, 0.2, 0.3, 1.0];
+        let mut refused = vec![
+            (0, 2, Vec::new()),
+            (2, 0, Vec::new()),
+            (2, 2, vec![opaque; 3]),
+        ];
+        for bad in [
+            [f32::NAN, 0.0, 0.0, 1.0],
+            [0.0, f32::INFINITY, 0.0, 1.0],
+            [0.0, 0.0, -0.001, 1.0],
+            [0.0, 0.0, 0.0, 1.5],
+            [0.0, 0.0, 0.0, -0.5],
+        ] {
+            let mut texels = vec![opaque; 4];
+            texels[2] = bad;
+            refused.push((2, 2, texels));
+        }
+        for (width, height, texels) in refused {
+            let expected = Texture::from_premultiplied_linear(width, height, texels.clone())
+                .expect_err("refused");
+            assert_eq!(
+                Texture::from_premultiplied_linear_unhashed(width, height, texels),
+                Err(expected),
+                "{width} x {height}"
+            );
+        }
     }
 
     fn policy(wrap: TextureWrap) -> SamplerPolicy {

@@ -395,6 +395,8 @@ fn shared_rows_bytes<T>(rows: &ProjectedRows<T>) -> Option<usize> {
 fn projected_storage_bytes(draw: &ProjectedDraw<()>) -> Option<usize> {
     match &draw.primitive {
         ProjectedPrimitive::Triangles { triangles, .. } => shared_rows_bytes(triangles),
+        // A retained projection holds no cloud, so the cache admits none.
+        ProjectedPrimitive::DotCloud { .. } => None,
         ProjectedPrimitive::Vector(slot) => {
             let mut bytes = shared_rows_bytes(&slot.0)?;
             for vector in &slot.0 {
@@ -506,6 +508,8 @@ impl PreparedThreeDProjection {
                         ThreeDDraw::TrueDot(dot) => {
                             compile_dot(camera, &projection, location, dot, &mut budget)?
                         }
+                        // A retained projection holds no cloud (DotCloudDraw).
+                        ThreeDDraw::DotCloud(_) => return Err(ThreeDError::ProjectionMismatch),
                     }
                     .share_rows(&mut budget)?
                     .map_material(|_| ());
