@@ -3,8 +3,11 @@
 Run directly against an installed wheel for the additional production PNG
 comparison. No layout/renderer substitute is used by this suite.
 """
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 import io
+import json
+import subprocess
+import sys
 from pathlib import Path
 import tempfile
 
@@ -81,6 +84,49 @@ def run_rendered_cache_acceptance(m):
         configure_tex_cache(enabled=False)
 
 
+def run_cache_gc_cli(m):
+    from fmn_python.__main__ import _emit_cache_gc
+
+    def collect(*args):
+        stream = io.StringIO()
+        with redirect_stdout(stream):
+            code = _emit_cache_gc(m, list(args) + ["--robot"])
+        return code, json.loads(stream.getvalue())
+
+    with tempfile.TemporaryDirectory(prefix="fmn-typeset-gc-") as directory:
+        cache = Path(directory) / "cache"
+        try:
+            m._fmn_configure_tex_cache(cache, max_bytes=0)
+            points = m.Tex("x^2 + 1").get_all_points().copy()
+            objects = list((cache / "ns/typeset").rglob("objects/*/*"))
+            assert objects and points.size
+            other = cache / "ns" / "journal" / "v1" / "record"
+            other.parent.mkdir(parents=True)
+            other.write_bytes(b"unrelated namespace")
+
+            code, _ = collect("--cache-gc", "scene.py")
+            assert code == 2 and all(path.is_file() for path in objects)
+            code, report = collect("--cache-gc")
+            assert code == 0 and report["kind"] == "cache-gc", report
+            assert report["outcome"] == "completed" and report["max_bytes"] == 0, report
+            assert report["evicted_entries"] == len(objects), report
+            assert report["evicted_bytes"] > 0 and report["retained_bytes"] == 0, report
+            assert not any(path.exists() for path in objects)
+            assert other.read_bytes() == b"unrelated namespace"
+
+            code, report = collect("--cache-gc")
+            assert code == 0 and report["evicted_entries"] == report["evicted_bytes"] == 0, report
+            m._fmn_configure_tex_cache(cache, max_bytes=0)
+            np.testing.assert_array_equal(m.Tex("x^2 + 1").get_all_points(), points)
+            with redirect_stderr(io.StringIO()):
+                m._fmn_configure_tex_cache(directory)
+            code, report = collect("--cache-gc")
+            assert code == 4 and report["outcome"] == "unavailable", report
+            assert other.read_bytes() == b"unrelated namespace"
+        finally:
+            m._fmn_configure_tex_cache(enabled=False)
+
+
 def run_cache_retention_boundaries(m):
     from fmn_python import render_scene
     from fmn_python.typesetting import configure_tex_cache, typesetting_receipt
@@ -119,9 +165,29 @@ def run_cache_retention_boundaries(m):
             configure_tex_cache(enabled=False)
 
 
+def run_installed_cache_gc():
+    """Exercise console dispatch and native configuration discovery in fresh interpreters."""
+    with tempfile.TemporaryDirectory(prefix="fmn-typeset-gc-cli-") as directory:
+        root = Path(directory)
+        config = root / "custom_config.yml"
+        config.write_text("directories:\n  cache: local-cache\ncache:\n  max_bytes: 0\n",
+                          encoding="utf-8")
+        subprocess.run([sys.executable, "-c", "from manimlib import Tex; Tex('x+1')"],
+                       cwd=root, check=True, timeout=60)
+        objects = list((root / "local-cache/ns/typeset").rglob("objects/*/*"))
+        assert objects
+        result = subprocess.run([sys.executable, "-m", "fmn_python", "--robot", "--cache-gc"],
+                                cwd=root, capture_output=True, text=True, check=True, timeout=60)
+        receipt = json.loads(result.stdout)
+        assert receipt["kind"] == "cache-gc" and receipt["evicted_entries"] == len(objects), receipt
+        assert receipt["retained_bytes"] == 0 and not any(path.exists() for path in objects)
+
+
 if __name__ in ("__main__", "<run_path>"):
     import manimlib as m
     run_typeset_cache(m)
     run_rendered_cache_acceptance(m)
+    run_cache_gc_cli(m)
+    run_installed_cache_gc()
     run_cache_retention_boundaries(m)
     print("native typeset cache and cold/warm/disabled PNG acceptance passed")

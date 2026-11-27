@@ -326,7 +326,11 @@ mod tests {
             py.run(source.as_c_str(), Some(globals), Some(globals))
                 .inspect_err(|error| error.print(py))
                 .unwrap();
-            for suite in ["run_typeset_cache", "run_cache_retention_boundaries"] {
+            for suite in [
+                "run_typeset_cache",
+                "run_cache_retention_boundaries",
+                "run_cache_gc_cli",
+            ] {
                 globals
                     .get_item(suite)
                     .unwrap()

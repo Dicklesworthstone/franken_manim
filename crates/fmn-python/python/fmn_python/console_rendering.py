@@ -87,6 +87,8 @@ an exact output file or frames directory, replace that flag with --output.
 file renders refuse them with exit 4, as they refuse --show_animation_progress
 and --leave_progress_bars. -o, --finder, --prerun, --clear-cache and
 --autoreload are native fmn features the portal refuses with exit 4.
+Use fmn-python --cache-gc [--robot] to trim the configured typeset cache to
+cache.max_bytes from custom_config.yml (default 1 GiB). Other namespaces are preserved.
 Unknown options return exit 2.
 """
 
