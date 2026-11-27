@@ -39,6 +39,12 @@ class LiveStreamlineTests(unittest.TestCase):
 
     def test_public_hooks_execute_once_on_the_original_receiver(self):
         calls = []
+        mapped = []
+        def color_map(values):
+            self.assertEqual(calls[-1][1], "style")
+            mapped.append(len(values))
+            return np.tile([.25, .5, .75], (len(values), 1))
+
         class Custom(m.StreamLines):
             def get_sample_coords(self):
                 calls.append((self, "seeds"))
@@ -49,8 +55,9 @@ class LiveStreamlineTests(unittest.TestCase):
             def init_style(self):
                 calls.append((self, "style"))
                 return super().init_style()
-        lines = self.lines(cls=Custom)
+        lines = self.lines(cls=Custom, color_by_magnitude=True, color_map=color_map)
         self.assertEqual(calls, [(lines, "draw"), (lines, "seeds"), (lines, "style")])
+        self.assertEqual(mapped, [line.get_num_points() for line in lines])
         self.assertEqual(len(lines), 2)
         self.assertEqual(lines._stream_rng_draws, 0)
         for line, seed in zip(lines, [[0., 0.], [-1., 1.]]):

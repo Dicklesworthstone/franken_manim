@@ -13,6 +13,7 @@ import math
 import operator
 from types import SimpleNamespace
 
+from fmn_python.invocation import InvocationGuard
 from fmn_python.streamline_authoring import _dimension, _field, _finite, _style_plan
 
 _MAX_POINTS = 65_536
@@ -118,6 +119,7 @@ def install_streamlines(native):
     streamline_authoring._widths = _native_widths
     previous = Lines.__init__
     signature = inspect.signature(previous)
+    drawing_initial_family = InvocationGuard()
 
     @wraps(previous)
     def initialize(self, *args, **kwargs):
@@ -151,7 +153,10 @@ def install_streamlines(native):
         for name, value in controls.items():
             setattr(self, name, value)
         self._stream_virtual_times, self._stream_rng_draws = [], 0
-        self.draw_lines()
+        # The constructor dispatches the authored init_style below. Only later
+        # redraws must paint their candidate before swapping a live family.
+        with drawing_initial_family.hold(self, message="StreamLines construction cannot reenter itself"):
+            self.draw_lines()
         self.init_style()
         g["_apply_vmobject_style_kwargs"](self, dict(extras))
 
@@ -233,10 +238,11 @@ def install_streamlines(native):
                 line.virtual_time = _finite(duration, "StreamLines virtual_time", nonnegative=True)
             # Reuse the live style planner against the private candidate,
             # so a restyling error cannot discard the displayed family.
-            paint_owner = SimpleNamespace(**dict(controls, submobjects=children))
-            for line, _, rgba, widths in _style_plan(g, paint_owner):
-                line.data["stroke_rgba"][:] = rgba
-                line.data["stroke_width"][:, 0] = widths
+            if not drawing_initial_family.busy(self):
+                paint_owner = SimpleNamespace(**dict(controls, submobjects=children))
+                for line, _, rgba, widths in _style_plan(g, paint_owner):
+                    line.data["stroke_rgba"][:] = rgba
+                    line.data["stroke_width"][:, 0] = widths
             scratch._stream_virtual_times = list(virtual_times)
             scratch._stream_rng_draws = draws
             return scratch
