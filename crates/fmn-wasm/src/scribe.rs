@@ -9,6 +9,9 @@ use wasm_bindgen::prelude::{JsError, wasm_bindgen};
 
 use crate::{SurfaceError, render_stage_rgba8, render_stage_rgba8_into, validate_dimensions};
 
+#[path = "scribe_transition.rs"]
+mod transition;
+
 /// Reusable font resources for browser-local text, markup, and mathematics.
 #[wasm_bindgen]
 pub struct FmnScribe {
@@ -85,7 +88,12 @@ impl FmnScribe {
         stage
             .add_to_scene(root)
             .map_err(|e| SurfaceError::new("add typeset object", e))?;
-        Ok(FmnTypeset { stage, root, spans })
+        Ok(FmnTypeset {
+            stage,
+            root,
+            spans,
+            matches_tex: matches!(kind, "math" | "textext"),
+        })
     }
 }
 
@@ -93,6 +101,7 @@ impl FmnScribe {
 #[wasm_bindgen]
 pub struct FmnTypeset {
     stage: Stage,
+    matches_tex: bool,
     root: Mob,
     spans: SpanMapData,
 }

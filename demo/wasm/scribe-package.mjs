@@ -81,7 +81,29 @@ try {
   } finally {
     unicode.free();
   }
+  const from = scribe.typeset("math", "x+y", 72);
+  let to, movie;
+  try {
+    to = scribe.typeset("math", "y+x^2", 72);
+    from.color_range(0, 1, "#2277ff");
+    to.color_range(0, 1, "#ff7722");
+    movie = player.FmnPlayer.from_bundle(from.transition_to(to, 12, 0.5));
+    movie.set_viewport(240, 128);
+    if (movie.frame_count !== 8 || movie.frame_of_label("Start") !== 0 ||
+        movie.frame_of_label("Result") !== 7) throw new Error("Incorrect transition timing");
+    const expectedStart = from.render(240, 128), expectedEnd = to.render(240, 128);
+    const equal = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+    const end = movie.render_frame(7), middle = movie.render_frame(3), start = movie.render_frame(0);
+    if (!equal(end, expectedEnd) || !equal(start, expectedStart) ||
+        equal(middle, start) || equal(middle, end)) {
+      throw new Error("The default player could not reconstruct the styled transition");
+    }
+  } finally {
+    movie?.free();
+    to?.free();
+    from.free();
+  }
 } finally {
   scribe.free();
 }
-console.log("Scribe: native pixels, source selection, and styled FMTL replay passed.");
+console.log("Scribe: native pixels, source selection, styled FMTL replay, and matching transitions passed.");
