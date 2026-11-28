@@ -151,9 +151,9 @@ Output options apply to every selected scene without constructor changes.
 Video remains uncertified. P010 alone is SDR; --hdr-pq selects the explicit
 BT.2020/PQ conversion for opaque video with identity movie gamma/saturation.
 --format svg exports one final-state vector document, including native text
-and math outlines, perspective-projected curves, flat paints, background and
-stroke order. Depth tests, lighting, clipped paths and per-vertex gradients
-require PNG instead.
+and math outlines, perspective curves, camera-depth-clipped vector paths and
+fill-only paths cut by user clip planes. Use PNG for depth tests, lighting,
+per-vertex gradients, or user clip planes on strokes and dots.
 """
 
 

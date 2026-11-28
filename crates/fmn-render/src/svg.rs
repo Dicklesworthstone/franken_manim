@@ -11,6 +11,7 @@ use fmn_mobject::{Mob, RenderPrimitive, Stage, StageError};
 
 use crate::Camera;
 
+mod clipped;
 mod curves;
 mod dots;
 
@@ -39,6 +40,8 @@ pub enum SvgProjectionError {
     GeometryLimit,
     /// A detached record or path operation failed.
     Stage(StageError),
+    /// The camera could not clip a native vector path.
+    Camera(crate::camera::CameraError),
     /// Bounded scratch storage could not be reserved.
     Allocation(TryReserveError),
 }
@@ -50,6 +53,7 @@ impl fmt::Display for SvgProjectionError {
                 write!(f, "SVG export: {detail}; use PNG for raster/3D rendering")
             }
             Self::GeometryLimit => f.write_str("SVG export: vector geometry budget exceeded"),
+            Self::Camera(error) => write!(f, "SVG export: {error}"),
             Self::Stage(error) => write!(f, "SVG export: {error}"),
             Self::Allocation(error) => write!(f, "SVG export: {error}"),
         }
@@ -60,6 +64,7 @@ impl std::error::Error for SvgProjectionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Stage(error) => Some(error),
+            Self::Camera(error) => Some(error),
             Self::Allocation(error) => Some(error),
             Self::Unsupported(_) | Self::GeometryLimit => None,
         }
@@ -134,10 +139,12 @@ impl GeometryBudget {
 ///
 /// Perspective-projected vector paths use bounded quadratic subdivision.
 /// Each resulting curve stays within 0.1 output pixel of the camera projection,
-/// including native point-record rounding. Refuses depth-clipped paths and
-/// dots, other non-vector draws, varying vector paint/width, dot glow, depth
-/// tests, lighting and user clip planes. Every failure leaves the input Stage
-/// unchanged.
+/// including native point-record rounding. Depth crossings use Lumen's camera
+/// clipping. Clipped fills include the new cut boundaries, strokes include
+/// only visible spans of the authored path. World-space clip planes are also
+/// supported on fills. Clipped dot surfaces, clipped stroke surfaces at user
+/// planes, lighting, depth testing, dot glow and varying paint/width require
+/// raster output. Every failure leaves the input Stage unchanged.
 pub fn project_svg_stage(
     stage: &Stage,
     camera: &Camera,
@@ -173,21 +180,25 @@ pub fn project_svg_stage(
             mapped.insert(source, family);
             continue;
         }
-        budget.charge(
-            stage
-                .get(source)
-                .ok_or(StageError::StaleHandle)?
-                .buffer
-                .len(),
-            1,
-        )?;
         let points = stage
             .get_points(source)
             .ok_or_else(|| unsupported("stale point records"))?;
         let uniforms = *stage
             .uniforms(source)
             .ok_or_else(|| unsupported("stale uniforms"))?;
-        let pixels = curves::project(&points, uniforms.is_fixed_in_frame, camera, &mut budget)?;
+        let pixels = if clipped::active_planes(uniforms.clip_planes) {
+            None
+        } else {
+            curves::project(&points, uniforms.is_fixed_in_frame, camera, &mut budget)?
+        };
+        let Some(pixels) = pixels else {
+            let family =
+                clipped::project(stage, source, &points, camera, &mut budget, &mut projected)?;
+            roots.try_reserve(family.roots.len())?;
+            roots.extend_from_slice(&family.roots);
+            mapped.insert(source, family);
+            continue;
+        };
         let target = stage.copy_entry_into(source, &mut projected)?;
         projected.set_points(target, &pixels)?;
         projected.set_z_index(target, 0, false);
@@ -249,15 +260,16 @@ fn admitted_sequence(stage: &Stage, limits: SvgLimits) -> Result<Vec<Mob>, SvgPr
                 ));
             }
             let uniforms = entry.uniforms();
-            if uniforms.depth_test
-                || uniforms.shading != [0.0; 3]
-                || uniforms.clip_planes != [[0.0; 4]; 4]
-            {
-                return Err(unsupported(
-                    "depth, lighting and user clip planes require Lumen",
-                ));
+            if uniforms.depth_test || uniforms.shading != [0.0; 3] {
+                return Err(unsupported("depth tests and lighting require Lumen"));
+            }
+            if !uniforms.clip_planes.iter().flatten().all(|v| v.is_finite()) {
+                return Err(unsupported("non-finite clip planes"));
             }
             if entry.render_primitive() == RenderPrimitive::DotCloud {
+                if clipped::active_planes(uniforms.clip_planes) {
+                    return Err(unsupported("clipped dot surfaces require Lumen"));
+                }
                 dots::validate(entry)?;
             } else {
                 for (name, width) in [("fill_rgba", 4), ("stroke_rgba", 4), ("stroke_width", 1)] {
@@ -475,16 +487,104 @@ mod tests {
     }
 
     #[test]
-    fn svg_projection_refuses_depth_crossing_curves_without_editing_source() {
+    fn depth_crossing_emits_separate_stroke_runs_and_only_fills_the_cut() {
         let camera = camera();
         let mut stage = Stage::new();
         let points = [[-1.0, 0.0, 0.0], [0.0, 1.0, 1000.0], [1.0, 0.0, 0.0]];
         let curve = stage.add(Mobject::vector_from_points(&points));
+        let buffer = &mut stage.get_mut(curve).unwrap().buffer;
+        buffer.write_color_lanes("fill_rgba", Some([1.0, 0.0, 0.0]), Some(0.8));
+        buffer.write_color_lanes("stroke_rgba", Some([0.0, 0.0, 1.0]), Some(0.7));
+        buffer.write_scalar_lanes("stroke_width", 4.0);
         stage.add_to_scene(curve).unwrap();
+        for behind in [false, true] {
+            stage.uniforms_mut(curve).unwrap().stroke_behind = behind;
+            let view = project_svg_stage(&stage, &camera, SvgLimits::default()).unwrap();
+            assert_eq!(view.roots().len(), 2);
+            let fill = view.roots()[usize::from(behind)];
+            let stroke = view.roots()[usize::from(!behind)];
+            let attr = |mob, key| view.get(mob).unwrap().buffer.read(0, key).unwrap();
+            assert_eq!(attr(fill, "fill_rgba"), [1.0, 0.0, 0.0, 0.8]);
+            assert_eq!(attr(fill, "stroke_width"), [0.0]);
+            assert_eq!(attr(stroke, "fill_rgba")[3], 0.0);
+            assert_eq!(attr(stroke, "stroke_width"), [4.0]);
+            let boundary = view.get_points(fill).unwrap();
+            assert_eq!(boundary.first(), boundary.last());
+            let edge = view.get_points(stroke).unwrap();
+            let runs = fmn_geom::QuadPath::from_points(edge).unwrap();
+            let runs = runs.subpaths();
+            assert_eq!(runs.len(), 2, "no stroke across the clipped-out middle");
+            // Every source-span endpoint must come from the camera's clipped
+            // original quadratic. Cut edges appended only to the fill cannot pass.
+            let spans = camera
+                .project_quadratic(points, 0.0, [[0.0; 4]; 4])
+                .unwrap();
+            assert_eq!(spans.len(), runs.len());
+            for (span, run) in spans.iter().zip(runs) {
+                for (world, svg) in [(span.world[0], run[0]), (span.world[2], run[run.len() - 1])] {
+                    let p = camera
+                        .project(world, 0.0)
+                        .pixel(camera.pixel_shape())
+                        .unwrap();
+                    assert!((svg[0] - (p[0] - 80.0)).hypot(svg[1] - (45.0 - p[1])) < 0.001);
+                }
+            }
+        }
         assert!(matches!(
-            project_svg_stage(&stage, &camera, SvgLimits::default()),
-            Err(SvgProjectionError::Unsupported("depth-clipped paths"))
+            project_svg_stage(
+                &stage,
+                &camera,
+                SvgLimits {
+                    max_points: 3,
+                    max_shapes: 1
+                }
+            ),
+            Err(SvgProjectionError::GeometryLimit)
         ));
         assert_eq!(stage.get_points(curve).unwrap(), points);
+    }
+
+    #[test]
+    fn world_clip_planes_trim_fill_regions_and_remove_invisible_objects() {
+        let mut stage = Stage::new();
+        let rect = square(&mut stage);
+        stage.add_to_scene(rect).unwrap();
+        stage.uniforms_mut(rect).unwrap().clip_planes[0] = [1.0, 0.0, 0.0, 0.0];
+        // Native stroke-surface clipping at a user plane is not a butt cap.
+        assert!(matches!(
+            project_svg_stage(&stage, &camera(), SvgLimits::default()),
+            Err(SvgProjectionError::Unsupported(_))
+        ));
+        stage
+            .get_mut(rect)
+            .unwrap()
+            .buffer
+            .write_scalar_lanes("stroke_width", 0.0);
+        stage.uniforms_mut(rect).unwrap().clip_planes[1] = [0.0, 1.0, 0.0, 0.0];
+        let source = stage.get_points(rect).unwrap();
+        let limits = SvgLimits {
+            max_points: 9,
+            max_shapes: 1,
+        };
+        let view = project_svg_stage(&stage, &camera(), limits).unwrap();
+        let p = view.get_points(view.roots()[0]).unwrap();
+        assert_eq!(p.len(), 9);
+        assert_eq!(p.first(), p.last());
+        assert!(p.iter().all(|p| p[0] >= 0.0 && p[1] >= 0.0));
+        for a in [[0.0, 0.0], [11.25, 0.0], [0.0, 11.25], [11.25, 11.25]] {
+            assert!(
+                p.iter()
+                    .step_by(2)
+                    .any(|p| (p[0] - a[0]).hypot(p[1] - a[1]) < 0.001)
+            );
+        }
+        stage.uniforms_mut(rect).unwrap().clip_planes[0][3] = -10.0;
+        assert!(
+            project_svg_stage(&stage, &camera(), limits)
+                .unwrap()
+                .roots()
+                .is_empty()
+        );
+        assert_eq!(stage.get_points(rect).unwrap(), source);
     }
 }

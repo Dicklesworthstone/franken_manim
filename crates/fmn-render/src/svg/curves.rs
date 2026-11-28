@@ -14,22 +14,26 @@ pub(super) fn project(
     attachment: f64,
     camera: &Camera,
     budget: &mut GeometryBudget,
-) -> Result<Vec<Vec3>, SvgProjectionError> {
+) -> Result<Option<Vec<Vec3>>, SvgProjectionError> {
     let projection = camera.projection();
     let mut clips = Vec::new();
     clips.try_reserve_exact(points.len())?;
     for &point in points {
         let clip = projection.project(point, attachment);
         let [_, _, z, w] = clip.clip;
-        if !clip.clip.iter().all(|v| v.is_finite()) || w <= 0.0 || z.abs() > w {
-            return Err(unsupported("depth-clipped paths"));
+        if !clip.clip.iter().all(|v| v.is_finite()) {
+            return Err(unsupported("invalid camera projection"));
+        }
+        if w <= 0.0 || z.abs() > w {
+            return Ok(None);
         }
         clips.push(clip);
     }
+    budget.charge(points.len(), 1)?;
     let mut pixels = Vec::new();
     pixels.try_reserve_exact(points.len())?;
     let Some(first) = clips.first() else {
-        return Ok(pixels);
+        return Ok(Some(pixels));
     };
     let (width, height) = camera.pixel_shape();
     let (half_width, half_height) = (f64::from(width) / 2.0, f64::from(height) / 2.0);
@@ -50,7 +54,7 @@ pub(super) fn project(
             }
             pixels.push(point);
         }
-        return Ok(pixels);
+        return Ok(Some(pixels));
     }
     if points.len().is_multiple_of(2) {
         return Err(unsupported("invalid quadratic point count"));
@@ -77,12 +81,12 @@ pub(super) fn project(
             append(piece, 0, budget, &mut pixels)?;
         }
     }
-    Ok(pixels)
+    Ok(Some(pixels))
 }
 
 /// A straight edge stays straight under perspective, even though its speed
 /// along the edge changes. Keep one SVG quadratic for authored line segments.
-fn straight_controls(
+pub(super) fn straight_controls(
     [start, handle, end]: [Vec3; 3],
     piece: RationalPiece,
     first_record: Vec3,
@@ -114,7 +118,7 @@ fn straight_controls(
 }
 
 #[allow(clippy::cast_possible_truncation)]
-fn record([x, y]: [f64; 2]) -> Result<Vec3, SvgProjectionError> {
+pub(super) fn record([x, y]: [f64; 2]) -> Result<Vec3, SvgProjectionError> {
     let point = [f64::from(x as f32), f64::from(y as f32), 0.0];
     if point.iter().all(|value| value.is_finite()) {
         Ok(point)
@@ -125,7 +129,7 @@ fn record([x, y]: [f64; 2]) -> Result<Vec3, SvgProjectionError> {
     }
 }
 
-fn append(
+pub(super) fn append(
     piece: RationalPiece,
     depth: u32,
     budget: &mut GeometryBudget,

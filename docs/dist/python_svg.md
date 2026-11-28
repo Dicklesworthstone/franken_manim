@@ -62,10 +62,15 @@ quadratic when their projected coordinates fit the same tolerance. Authored
 contour breaks stay separate, including the
 holes in glyph outlines. Subdivision consumes the expanded point budget.
 
+Vector paths crossing the camera's depth range use native clipping before
+projection. Clipped fills close along the cut. Strokes follow the surviving
+parts of the original curves, so the SVG has no artificial stroke across a
+cut. World-space user clip planes also work on fill-only paths.
+
 The route refuses image/texture/surface primitives, radial dot glow (including
-`GlowDot`/`GlowDots`), lighting, depth tests, user clip planes, per-vertex vector
-paint or variable-width strokes. Dot discs and vector paths whose controls
-cross a near, far or horizon plane require the PNG renderer. Curves exceeding
+`GlowDot`/`GlowDots`), lighting, depth tests, per-vertex vector paint and
+variable-width strokes. User clip planes on strokes or dots and depth-clipped
+dot discs require the PNG renderer. Curves exceeding
 the subdivision, point-record precision or geometry limits refuse publication.
 
 Stroke widths follow the existing native SVG export convention (SVG pixel
