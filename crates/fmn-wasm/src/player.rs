@@ -44,6 +44,9 @@ use crate::{render_stage_rgba8, render_stage_rgba8_into, rgba8_output_len};
 #[path = "audio_player.rs"]
 pub mod audio_player;
 
+#[path = "inspect_player.rs"]
+mod inspect_player;
+
 #[path = "camera_player.rs"]
 mod camera_player;
 
@@ -102,6 +105,8 @@ pub enum PlayerError {
         /// Active viewport height.
         height: u32,
     },
+    /// A request for a page of recorded objects was invalid.
+    Inspection(&'static str),
     /// The render path refused.
     Render(String),
 }
@@ -141,6 +146,7 @@ impl std::fmt::Display for PlayerError {
                 f,
                 "render_into destination is {got} bytes; expected {expected} ({width}x{height}x4)"
             ),
+            Self::Inspection(reason) => write!(f, "scene inspector: {reason}"),
             Self::Render(e) => write!(f, "render: {e}"),
         }
     }
