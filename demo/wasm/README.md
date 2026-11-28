@@ -155,7 +155,8 @@ enforced budget (measured + 10% headroom); a host test in the crate
 
 ## Browser-local text and math
 
-The [typesetter](./scribe.html) accepts plain text, markup, and display TeX.
+The [typesetter](./scribe.html) accepts plain text, markup, display TeX, and
+TeX prose with inline math (`textext`).
 Build its optional Wasm module alongside the standard player, serve the demo
 directory as above, and open `scribe.html`.
 
@@ -169,11 +170,31 @@ faces. Keep the returned object to redraw at multiple resolutions with
 `render_into(width, height, rgba)`. Call `to_bundle()` to save the preview as a
 single-frame FMTL file for the standard player. Release the typeset object with `free()` after use.
 
-The optimized Scribe module measures 10,217,155 bytes (4,890,067 bytes with
-`gzip -n -9`). Its size budget, including 10% headroom, is 11,238,871 bytes.
+The dedicated Scribe artifact has an 11,238,871-byte size budget.
 
 After building both web packages, run `node demo/wasm/scribe-package.mjs`
 from the repository root, or open the served demo and run
 `await import("./scribe-package.mjs")` in the browser console. The probe checks
 text, markup, and math against native RGBA digests and replays each exported
 bundle in the default player.
+
+Select source in the typesetter and apply a color to the glyphs, rules, and paths
+that belong to that selection. In JS, `select_range(start, end)` returns their
+native primitive indices and `color_range(start, end, "#2277ff")` paints them
+in place. Both methods take half-open UTF-16 offsets from the authored string,
+matching a textarea's selection boundaries.
+
+### Animated transitions
+
+Open [Author a text or math transition](./player.html#compose), enter the start
+and result, and choose a duration and frame rate. **Build transition** opens the
+recording in the timeline player. Use **Play**, scrub to an intermediate frame,
+or jump to **Start** and **Result**. **Download last transition** saves an FMTL
+recording that also works in the ordinary player without the authoring package.
+
+The JS equivalent is `from.transition_to(to, fps, seconds)`, where both operands
+are live `FmnTypeset` objects. It preserves their current styles, matches native
+TeX parts or text runs, and fades unmatched parts. Two additional frames hold
+the exact operands, one at either end. The authoring worker accepts up to 600
+motion frames and a cumulative 64 MiB of capture data per transition. Cancel a
+build or correct an invalid expression while the previous recording stays available.

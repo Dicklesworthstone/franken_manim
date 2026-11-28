@@ -27,6 +27,15 @@
   #status { color: #9a9ab0; min-height: 1.5em; max-width: 900px; overflow-wrap: anywhere; }
   #status.err { color: #ff7a7a; }
   .hint { color: #9a9ab0; margin: 0; }
+  #compose { width: min(100%, 56rem); }
+  #compose summary { font-weight: 600; cursor: pointer; }
+  #compose form { display: grid; gap: .75rem; margin: .75rem 0; }
+  #compose .operands { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(16rem,100%),1fr)); gap: .75rem; }
+  #compose .operands label { display: grid; gap: .25rem; }
+  #compose textarea, #compose input { font: inherit; padding: .35rem; }
+  #compose input { width: 4.5rem; }
+  #compose .settings { display: flex; gap: .75rem; flex-wrap: wrap; align-items: center; }
+  #compose a { color: #b7c8f9; }
 </style>
 </head>
 <body>
@@ -63,9 +72,34 @@
   </section>
   <div id="status" role="status" aria-live="polite">loading worker…</div>
 
+  <details id="compose">
+    <summary>Author a text or math transition</summary>
+    <form>
+      <label>Content type <select name="kind">
+        <option value="math">Display math</option><option value="text">Plain text</option>
+        <option value="markup">Markup text</option><option value="textext">Prose with inline math</option>
+      </select></label>
+      <div class="operands">
+        <label>Start <textarea name="from" rows="2" spellcheck="false">a^2+b^2=c^2</textarea></label>
+        <label>Result <textarea name="to" rows="2" spellcheck="false">c^2=a^2+b^2</textarea></label>
+      </div>
+      <div class="settings">
+        <label>Duration (s) <input type="number" name="seconds" value="1" min="0.01" step="any" required></label>
+        <label>Frame rate <input type="number" name="fps" value="24" min="1" max="600" required></label>
+        <label>Font size <input type="number" name="fontSize" value="72" min="1" step="any" required></label>
+      </div>
+      <div class="settings">
+        <button type="submit">Build transition</button>
+        <button type="button" data-cancel disabled>Cancel build</button>
+        <a download="transition.fmtl" hidden>Download last transition</a>
+        <span role="status" aria-live="polite"></span>
+      </div>
+    </form>
+  </details>
 <script type="module">
   import {mountTimelinePlayer} from "./player-ui.mjs";
-  mountTimelinePlayer();
+  import {mountTransitionEditor} from "./transition-editor.mjs";
+  mountTransitionEditor(document.querySelector("#compose"), mountTimelinePlayer());
 </script>
 </body>
 </html>
