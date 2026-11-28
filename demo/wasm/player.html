@@ -55,6 +55,12 @@
   </div>
   <div class="controls" id="labels"></div>
   <canvas id="canvas" width="640" height="360"></canvas>
+  <section id="sceneInspector" aria-label="Scene inspector">
+    <button type="button" data-inspect disabled>Inspect frame</button>
+    <span data-caption role="status"></span>
+    <ul></ul>
+    <nav aria-label="Object hierarchy"></nav>
+  </section>
   <div id="status" role="status" aria-live="polite">loading worker…</div>
 
 <script type="module">

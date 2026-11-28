@@ -385,3 +385,20 @@ test('cancelled candidate decoding cannot close retained audio or publish a late
   gate.resolve(candidate.player);await flush();assert.equal(candidate.facts.frees,1);
   assert.equal(f.session.current,prior);assert.equal(f.audio[0].disposed,0);f.session.dispose();
 });
+
+test('inspection follows the recorded frame without moving the picture and recovers from a stale object', async () => {
+  const f = rig(); await f.load();
+  const renderer = f.session.current.renderer;
+  f.natives[0].player.inspect_objects = (frame, slot, generation, offset, limit) => {
+    assert.deepEqual([frame, offset, limit], [3, 0, 32]);
+    if (slot !== undefined) throw new Error('parent is absent from this frame');
+    return Uint32Array.of(1, 7, 8, 1, 12, 3, 0xfffffff9);
+  };
+  const page = await renderer.inspect(3);
+  assert.deepEqual(page, {total: 1, objects: [{slot: 7, generation: 8, kind: 'Vector', points: 12, children: 3, z: -7}]});
+  assert.equal(renderer.frame, 0);
+  await assert.rejects(renderer.inspect(3, {slot: 7, generation: 9}), /parent is absent/);
+  assert.equal(f.errors.length, 0);
+  f.session.render(4); await flush(); assert.equal(renderer.frame, 4);
+  f.session.dispose();
+});

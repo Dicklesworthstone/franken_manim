@@ -91,3 +91,30 @@ export function windowChannels(buffers, start, count, info) {
   audioWindow(start, count, info);
   return channelBuffers(buffers, {...info, sampleFrames: count});
 }
+
+export const INSPECT_PAGE_SIZE = 32;
+const primitiveNames = ['Data', 'Vector', 'Surface grid', 'Camera-sorted grid', 'Triangle mesh', 'Point cloud', 'Image'];
+
+export function inspectionParent(parent) {
+  if (parent === null) return null;
+  return {slot: integer(parent?.slot, 'object slot'), generation: integer(parent?.generation, 'object generation')};
+}
+
+// One total followed by six words per sibling, as emitted by FmnPlayer.
+export function objectPage(words, offset) {
+  if (!(words instanceof Uint32Array) || words.length < 1 || words.length > 1 + 6 * INSPECT_PAGE_SIZE) {
+    throw new Error('Invalid object inspector response.');
+  }
+  const total = words[0];
+  if (offset > total || words.length !== 1 + 6 * Math.min(total - offset, INSPECT_PAGE_SIZE)) {
+    throw new Error('Incorrect object inspector page bounds.');
+  }
+  const objects = [];
+  for (let i = 1; i < words.length; i += 6) {
+    const kind = primitiveNames[words[i + 2]];
+    if (!kind) throw new Error('Unknown recorded primitive.');
+    objects.push({slot: words[i], generation: words[i + 1], kind, points: words[i + 3],
+      children: words[i + 4], z: words[i + 5] | 0});
+  }
+  return {total, objects};
+}

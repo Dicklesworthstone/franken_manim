@@ -76,6 +76,13 @@ sample policy. The output canvas owns the viewport aspect ratio. Engine
 identity mismatches still refuse: rebuild the player and re-export the scene
 from the same source closure rather than bypassing the check.
 
+Use **Inspect frame** to pause on the displayed picture and browse its recorded
+objects. Each row shows the snapshot slot, primitive kind, point count and
+z-index. Select **Open children** to follow a group and **Up one level** to
+return to its parent. Pages contain up to 32 siblings in recorded order. A
+change of frame or recording clears the inspection, since object handles
+belong to the selected snapshot. Inspection runs in the picture worker.
+
 The browser admits at most 256 MiB of input and checks local file size before
 reading it. Loading a replacement renders its first frame before releasing the
 current player. A failed or superseded load keeps the prior movie, and replaced

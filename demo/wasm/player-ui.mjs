@@ -1,3 +1,4 @@
+import {mountSceneInspector} from './scene-inspector.mjs';
 import {FramePlaybackClock} from './playback.mjs';
 import {WorkerTimelineSession} from './worker-session.mjs';
 import {prepareSoundtrack} from './audio-playback.mjs';
@@ -26,6 +27,8 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
   const canvas = $('canvas'), ctx = canvas.getContext('2d');
   const status = $('status'), scrub = $('scrub'), play = $('play'), labels = $('labels'), restartButton = $('restartWorker');
   const resolution = $('resolution'), viewportLabel = $('viewportLabel');
+  const inspectorElement = $('sceneInspector');
+  const inspector = inspectorElement ? mountSceneInspector(document, inspectorElement, stop) : null;
   const lifetime = new AbortController();
   let resizeObserver = null, resizeRaf = 0, densityQuery = null;
   let session = null, clock = null, raf = 0, loading = false, disposed = false;
@@ -36,6 +39,7 @@ export function mountTimelinePlayer({document = globalThis.document, window = gl
   }
   function controls() {
     const available = Boolean(!disposed && !loading && !recovering && session?.current && !session.current.renderer.error);
+    inspector?.update(session?.current?.renderer, Number(scrub.value), available && seeking === null);
     play.disabled = !available || seeking !== null;
     if (resolution) resolution.disabled = disposed;
     scrub.disabled = !available;

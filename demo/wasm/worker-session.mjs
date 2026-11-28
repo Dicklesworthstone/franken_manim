@@ -1,5 +1,5 @@
 import {WORKER_PROTOCOL, MAX_BUNDLE_BYTES, MAX_PCM_BYTES, integer, viewport,
-  metadata, pixels, channelBuffers, audioInfo, recordingSource, sourceIdentity, sameSource, audioWindow, windowChannels} from './worker-protocol.mjs';
+  objectPage, inspectionParent, metadata, pixels, channelBuffers, audioInfo, recordingSource, sourceIdentity, sameSource, audioWindow, windowChannels} from './worker-protocol.mjs';
 
 export {MAX_BUNDLE_BYTES};
 const cancelled = () => new DOMException('Recording load cancelled.', 'AbortError');
@@ -71,6 +71,7 @@ class PictureConnection {
   #active = null;
   #pending = null;
   #pendingAudio = null;
+  #inspection = null;
   #audioMode = 'eager';
   #pixels = null;
   #bufferFrame = 0;
@@ -129,6 +130,18 @@ class PictureConnection {
     try {
       if (!active || value?.protocol !== WORKER_PROTOCOL || value.id !== active.id) throw new Error('Uncorrelated picture worker response.');
       if (value.kind === 'error') throw new Error(String(value.message || 'Native picture rendering failed.').slice(0, 600));
+      if (active.kind === 'inspect') {
+        const request = this.#inspection;
+        if (!request || value.frame !== request.frame || !['objects', 'inspectionError'].includes(value.kind)) {
+          throw new Error('Unexpected inspection response.');
+        }
+        const page = value.kind === 'objects' ? objectPage(value.words, request.offset) : null;
+        clearTimeout(this.#timer); this.#timer = null; this.#active = null; this.#inspection = null;
+        if (page) request.resolve(page);
+        else request.reject(new Error(String(value.message || 'Inspection refused.').slice(0, 600)));
+        this.#drain();
+        return;
+      }
       if (active.kind === 'audio') {
         const request = active.audio;
         if (value.kind !== 'audio' || value.start !== request.start || value.count !== request.count) {
@@ -184,7 +197,7 @@ class PictureConnection {
     if (this.#closed) throw this.error || new Error('Picture worker is closed.');
     integer(frame, 'frame index', 0, this.metadata.frameCount - 1);
     this.#targetFrame = frame;
-    if (this.#active?.frame === frame && this.#active.epoch === this.#epoch) {
+    if (this.#active?.kind !== 'inspect' && this.#active?.frame === frame && this.#active.epoch === this.#epoch) {
       this.#pending = null; return;
     }
     if (this.#presenting && frame === this.frame &&
@@ -202,6 +215,16 @@ class PictureConnection {
     ++this.#epoch; this.#pending = this.#targetFrame;
     this.#drain();
     return true;
+  }
+  inspect(frame, parent = null, offset = 0) {
+    return new Promise((resolve, reject) => {
+      if (this.#closed) throw this.error || new Error('Picture worker is closed.');
+      integer(frame, 'inspection frame', 0, this.metadata.frameCount - 1);
+      integer(offset, 'object page offset');
+      if (this.#inspection) throw new Error('An inspection is already pending.');
+      this.#inspection = {frame, parent: inspectionParent(parent), offset, resolve, reject};
+      this.#drain();
+    });
   }
   readAudio(start, count, signal) {
     return new Promise((resolve, reject) => {
@@ -236,7 +259,13 @@ class PictureConnection {
       this.#send({kind: 'audio', start: request.start, count: request.count}, [], request);
       return;
     }
-    if (this.#pending === null) return;
+    if (this.#pending === null) {
+      if (this.#inspection) {
+        const {frame, parent, offset} = this.#inspection;
+        this.#send({kind: 'inspect', frame, parent, offset}, []);
+      }
+      return;
+    }
     const frame = this.#pending; this.#pending = null;
     const sameViewport = this.#bufferWidth === this.#width && this.#bufferHeight === this.#height;
     if (frame === this.#bufferFrame && this.#pixels && sameViewport) {
@@ -256,6 +285,7 @@ class PictureConnection {
   }
   #close(error) {
     this.#closed = true;
+    this.#inspection?.reject(error); this.#inspection = null;
     clearTimeout(this.#timer); this.#timer = null;
     this.#settleAudio(this.#pendingAudio, error);
     this.#settleAudio(this.#active?.audio, error);

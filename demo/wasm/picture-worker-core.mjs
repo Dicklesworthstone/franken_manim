@@ -1,5 +1,5 @@
 import {WORKER_PROTOCOL, MAX_BUNDLE_BYTES, MAX_PCM_BYTES, COPY_FRAMES,
-  integer, viewport, audioInfo, metadata, pixels, recordingSource, sourceIdentity, sameSource, audioWindow} from './worker-protocol.mjs';
+  INSPECT_PAGE_SIZE, inspectionParent, integer, viewport, audioInfo, metadata, pixels, recordingSource, sourceIdentity, sameSource, audioWindow} from './worker-protocol.mjs';
 
 // Factory injection is for the host-side test seam. The shipping entry point
 // always instantiates the real FmnPlayer from the fixed local Wasm module.
@@ -83,6 +83,19 @@ export class PictureWorkerRuntime {
         this.#post({protocol: WORKER_PROTOCOL, id: message.id, kind: 'ready',
           metadata: info, source, audioMode, audioReused: restoring, frame: firstFrame, width: this.#width, height: this.#height,
           pixels: rgba.buffer, channels}, [rgba.buffer, ...channels]);
+      } else if (message.kind === 'inspect' && this.#player) {
+        const frame = integer(message.frame, 'inspection frame', 0, this.#player.frame_count - 1);
+        const parent = inspectionParent(message.parent);
+        const offset = integer(message.offset, 'object page offset');
+        // A missing handle or an unsupported inspection must leave playback usable.
+        try {
+          const words = this.#player.inspect_objects(frame, parent?.slot, parent?.generation ?? 0,
+            offset, INSPECT_PAGE_SIZE);
+          this.#post({protocol: WORKER_PROTOCOL, id: message.id, kind: 'objects', frame, words}, [words.buffer]);
+        } catch (error) {
+          this.#post({protocol: WORKER_PROTOCOL, id: message.id, kind: 'inspectionError', frame,
+            message: String(error?.message || error).slice(0, 600)}, []);
+        }
       } else if (message.kind === 'audio' && this.#pcm) {
         audioWindow(message.start, message.count, this.#audio);
         const channels = [];
