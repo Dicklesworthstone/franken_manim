@@ -10,6 +10,13 @@ use fmn_render::{EngineIdentity, RetainedFrameRenderer, RetainedFrameRendererCon
 
 use super::{PlayerCore, PlayerError};
 
+pub(super) struct CameraSurface {
+    renderer: RetainedFrameRenderer,
+    // This player owns one immutable bundle; resizing drops the entire surface.
+    // Only a successfully rasterized index can identify the retained pixels.
+    frame: Option<u32>,
+}
+
 /// Called only after the public player has validated viewport, frame index and
 /// destination length, before any snapshot materialization or rasterization.
 pub(super) fn render_into(
@@ -17,22 +24,41 @@ pub(super) fn render_into(
     index: u32,
     dst: &mut [u8],
 ) -> Result<(), PlayerError> {
+    let mut retained = core.camera_surface.borrow_mut();
+    if let Some(surface) = retained.as_ref()
+        && surface.frame == Some(index)
+    {
+        return rgba16f_to_rgba8_slice(surface.renderer.frame(), dst)
+            .map_err(|e| PlayerError::Render(e.to_string()));
+    }
     let (stage, camera) = core
         .bundle
         .stage_at_with_camera(index, (core.width, core.height))?;
     let camera = camera.ok_or(PlayerError::PlanInconsistent("missing camera track"))?;
-    let mut renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
-        frame: crate::frame_config(core.width, core.height),
-        tiling: crate::TILING,
-        engine: EngineIdentity::certified(),
-        threads: crate::RENDER_THREADS,
-    })
-    .map_err(|e| PlayerError::Render(e.to_string()))?;
-    crate::note_rasterized_surface();
-    renderer
-        .render_with_camera(&stage, &camera)
+    if retained.is_none() {
+        let renderer = RetainedFrameRenderer::new(RetainedFrameRendererConfig {
+            frame: crate::frame_config(core.width, core.height),
+            tiling: crate::TILING,
+            engine: EngineIdentity::certified(),
+            threads: crate::RENDER_THREADS,
+        })
         .map_err(|e| PlayerError::Render(e.to_string()))?;
-    rgba16f_to_rgba8_slice(renderer.frame(), dst).map_err(|e| PlayerError::Render(e.to_string()))
+        *retained = Some(Box::new(CameraSurface {
+            renderer,
+            frame: None,
+        }));
+    }
+    let surface = retained.as_mut().expect("initialized camera surface");
+    crate::note_rasterized_surface();
+    if let Err(error) = surface.renderer.render_with_camera(&stage, &camera) {
+        // The renderer may have partially written its raw target. A later
+        // seek, even back to a previously successful frame, must rebuild it.
+        *retained = None;
+        return Err(PlayerError::Render(error.to_string()));
+    }
+    surface.frame = Some(index);
+    rgba16f_to_rgba8_slice(surface.renderer.frame(), dst)
+        .map_err(|e| PlayerError::Render(e.to_string()))
 }
 
 #[cfg(test)]
@@ -173,15 +199,85 @@ mod tests {
         core.set_viewport(WIDTH, HEIGHT).unwrap();
         let mut scratch = vec![0xA5; expected[0].len()];
         let storage = scratch.as_ptr();
+        let mut retained_pixels = None;
         for index in [2, 0, 1, 2, 1, 0] {
             core.seek_frame(index).unwrap();
             assert_eq!(core.render_index(index).unwrap(), expected[index as usize]);
+            let native_surface = core
+                .camera_surface
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .renderer
+                .frame()
+                .as_bytes()
+                .as_ptr();
+            assert_eq!(
+                *retained_pixels.get_or_insert(native_surface),
+                native_surface
+            );
+            let renders = crate::rasterized_surface_count();
             let owned = crate::owned_rgba8_output_allocations();
             core.render_index_into(index, &mut scratch).unwrap();
             assert_eq!(scratch, expected[index as usize]);
+            assert_eq!(crate::rasterized_surface_count(), renders);
             assert_eq!(scratch.as_ptr(), storage);
             assert_eq!(crate::owned_rgba8_output_allocations(), owned);
             assert_eq!(core.cursor, index);
+        }
+        assert_eq!(
+            core.camera_surface
+                .borrow()
+                .as_ref()
+                .unwrap()
+                .renderer
+                .raster_team_stats()
+                .frames_completed,
+            6,
+            "one inline raster team rendered all six distinct consecutive pictures"
+        );
+    }
+
+    #[test]
+    fn retained_camera_surface_tracks_geometry_when_scrubbing_recorded_and_compact_captures() {
+        let build = crate::build_scene("circle_shift", WIDTH, HEIGHT).unwrap();
+        for recorder in [
+            SceneBundleRecorder::new_render_only_with_camera(8, BundleExportLimits::default())
+                .unwrap(),
+            SceneBundleRecorder::new_compact_with_camera(8, Default::default()).unwrap(),
+        ] {
+            let mut scene = Scene::new(
+                RuntimeConfig {
+                    fps: 8,
+                    ..RuntimeConfig::default()
+                },
+                0,
+            )
+            .unwrap();
+            let mut sink = Capture {
+                recorder,
+                camera: Camera::new(CameraConfig {
+                    resolution: (WIDTH, HEIGHT),
+                    fps: 8,
+                    ..CameraConfig::default()
+                })
+                .unwrap(),
+                observed: Vec::new(),
+            };
+            for index in [0, 14, 29] {
+                *scene.stage_mut() = build.packets[index].materialize_stage();
+                scene.show(&mut sink).unwrap();
+            }
+            assert_ne!(sink.observed[0], sink.observed[1]);
+            assert_ne!(sink.observed[1], sink.observed[2]);
+            let mut core = PlayerCore::load(&sink.recorder.finish().unwrap().bytes).unwrap();
+            core.set_viewport(WIDTH, HEIGHT).unwrap();
+            for index in [0, 2, 1, 0, 1, 1] {
+                assert_eq!(
+                    core.render_index(index).unwrap(),
+                    sink.observed[index as usize]
+                );
+            }
         }
     }
 

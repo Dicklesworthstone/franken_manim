@@ -199,6 +199,9 @@ pub(crate) struct PlayerCore {
     width: u32,
     height: u32,
     cursor: u32,
+    // Planar players allocate no camera resources; a camera recording shares
+    // one viewport-bound surface between both public rendering methods.
+    camera_surface: std::cell::RefCell<Option<Box<camera_player::CameraSurface>>>,
 }
 
 impl PlayerCore {
@@ -216,6 +219,7 @@ impl PlayerCore {
             width: 0,
             height: 0,
             cursor: 0,
+            camera_surface: Default::default(),
         })
     }
 
@@ -227,8 +231,11 @@ impl PlayerCore {
         {
             return Err(PlayerError::Viewport("each dimension must be in 1..=4096"));
         }
-        self.width = width;
-        self.height = height;
+        if (self.width, self.height) != (width, height) {
+            *self.camera_surface.get_mut() = None;
+            self.width = width;
+            self.height = height;
+        }
         Ok(())
     }
 

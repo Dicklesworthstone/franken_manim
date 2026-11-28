@@ -14,6 +14,7 @@ impl PlayerCore {
             width: 0,
             height: 0,
             cursor: 0,
+            camera_surface: Default::default(),
         })
     }
 }
