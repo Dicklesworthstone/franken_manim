@@ -14,9 +14,13 @@
 </style>
 <h1>Typesetter</h1>
 <form>
-  <label>Content type <select id="kind"><option value="math">Display math</option><option value="text">Plain text</option><option value="markup">Markup text</option></select></label>
+  <label>Content type <select id="kind"><option value="math">Display math</option><option value="textext">TeX prose with inline math</option><option value="text">Plain text</option><option value="markup">Markup text</option></select></label>
   <label>Source <textarea id="source" rows="3" spellcheck="false">\frac{d}{dx}x^2 = 2x</textarea></label>
-  <div><button disabled>Render</button> <button type="button" id="save" disabled>Save preview as .fmtl</button></div>
+  <div><button type="submit" disabled>Render</button> <button type="button" id="save" disabled>Save preview as .fmtl</button></div>
+  <div><label for="ink">Selection color</label>
+    <input type="color" id="ink" value="#44c9fa">
+    <button type="button" id="paint" disabled>Apply to selected source</button>
+  </div>
 </form>
 <canvas width="864" height="360" aria-label="Typeset preview"></canvas>
 <p role="status" id="status">Loading bundled fonts…</p>
@@ -32,16 +36,30 @@
     await init();
     const scribe = new FmnScribe();
     const save = document.querySelector("#save");
-    let preview;
+    const source = document.querySelector("#source");
+    const kind = document.querySelector("#kind");
+    const paint = document.querySelector("#paint");
+    const ink = document.querySelector("#ink");
+    let preview, renderedSource, renderedKind;
+    function updatePaint() {
+      paint.disabled = !preview || source.value !== renderedSource || kind.value !== renderedKind ||
+        source.selectionStart === source.selectionEnd;
+    }
+    function draw(object) {
+      object.render_into(canvas.width, canvas.height, pixels);
+      ctx.putImageData(frame, 0, 0);
+    }
     function render() {
       let object;
       try {
-        object = scribe.typeset(form.elements.kind.value, form.elements.source.value, 90);
-        object.render_into(canvas.width, canvas.height, pixels);
-        ctx.putImageData(frame, 0, 0);
+        object = scribe.typeset(kind.value, source.value, 90);
+        draw(object);
         preview?.free();
         preview = object;
         object = undefined;
+        renderedSource = source.value;
+        renderedKind = kind.value;
+        updatePaint();
         save.disabled = false;
         status.textContent = "";
       } catch (error) {
@@ -51,6 +69,21 @@
       }
     }
     form.addEventListener("submit", event => { event.preventDefault(); render(); });
+    source.addEventListener("select", updatePaint);
+    source.addEventListener("input", updatePaint);
+    source.addEventListener("selectionchange", updatePaint);
+    kind.addEventListener("change", updatePaint);
+    paint.addEventListener("click", () => {
+      try {
+        const count = preview.color_range(source.selectionStart, source.selectionEnd, ink.value);
+        draw(preview);
+        status.textContent = count
+          ? `Colored ${count} ${count === 1 ? "part" : "parts"}.`
+          : "The selection contains no complete glyph, rule, or path.";
+      } catch (error) {
+        status.textContent = String(error);
+      }
+    });
     save.addEventListener("click", () => {
       try {
         const url = URL.createObjectURL(new Blob([preview.to_bundle()]));
